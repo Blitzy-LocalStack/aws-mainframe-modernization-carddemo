@@ -378,7 +378,7 @@ src/main/resources/
   META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
   META-INF/services/tools.jackson.databind.JacksonModule
 
-src/test/java/com/carddemo/common/           13 packages · 61 *Test + 1 *IT
+src/test/java/com/carddemo/common/           13 packages · 62 *Test + 1 *IT
   package-info.java · CardDemoCommonAutoConfigurationIT.java
   architecture/   package-info.java · LayeringRulesTest.java            ← pinned, §7
                   ApplicationContextWiringContractTest.java
@@ -386,6 +386,7 @@ src/test/java/com/carddemo/common/           13 packages · 61 *Test + 1 *IT
                   DiagnosticRenderingRulesTest.java
                   PackageCharterInventoryTest.java
                   PublishedContractClosureTest.java
+                  ReleasedMigrationImmutabilityTest.java
                   RuntimeConfigurationContractTest.java
                   RuntimeDeletePrivilegeContractTest.java
                   ServiceCatalogInventoryTest.java
@@ -493,23 +494,23 @@ its regeneration command beside it can only ever be out of date, never misleadin
 what it is. Assumptions: a reader who measures a different total has added or removed
 tests, which is expected drift -- §2's commands are the authority that cannot go stale, and
 the last re-measurement of this table found each row exactly as printed and the total at
-1396:
+1422:
 
 | Package | Classes | Executions |
 |---|---|---|
-| `codec` | `CopybookLayoutTest` 150 · `FixedWidthCodecTest` 150 · `CsvAuthCodecTest` 126 · `PackedDecimalCodecTest` 106 · `ZonedDecimalCodecTest` 62 · `InquiryRequestCodecTest` 16 · `AuthorizationDisclosurePolicyTest` 13 | **623** |
+| `codec` | `CopybookLayoutTest` 150 · `FixedWidthCodecTest` 150 · `CsvAuthCodecTest` 126 · `PackedDecimalCodecTest` 106 · `ZonedDecimalCodecTest` 62 · `InquiryRequestCodecTest` 16 · `AuthorizationDisclosurePolicyTest` 13 · `DateInquiryReplyCodecTest` 7 | **630** |
 | `validation` | `DateEditValidatorTest` 93 across 8 `@Nested` groups · `FieldValidationFlagTest` 29 | **122** |
-| `error` | `GlobalExceptionHandlerTest` 64 · `ApiErrorTest` 36 · `AbendDetailTest` 21 · `GlobalExceptionHandlerPathMaskingTest` 20 · `ApiErrorSecurityHandlersTest` 9 · `ProtocolRefusalRenderingTest` 9 · `AbsentAndUnconvertibleValueTest` 8 across 1 `@Nested` group · `RejectedParameterOrderingTest` 5 across 1 `@Nested` group · `ApiErrorWireShapeTest` 4 | **176** |
+| `error` | `GlobalExceptionHandlerTest` 69 · `ApiErrorTest` 36 · `AbendDetailTest` 21 · `GlobalExceptionHandlerPathMaskingTest` 20 · `ApiErrorSecurityHandlersTest` 9 · `ProtocolRefusalRenderingTest` 9 · `AbsentAndUnconvertibleValueTest` 8 across 1 `@Nested` group · `RejectedParameterOrderingTest` 5 across 1 `@Nested` group · `ApiErrorWireShapeTest` 4 | **181** |
 | `security` | `OpaqueIdentifierTest` 30 · `HtmlTextEncoderTest` 24 · `SealedSelectorTest` 18 · `ApprovedOriginPolicyTest` 15 · `CardNumberMaskerTest` 13 · `InternalServiceTokenTest` 12 · `CognitoAccessTokenValidatorTest` 11 · `MaskedCardNumberTest` 9 · `JwtRoleConverterTest` 7 | **139** |
 | `money` | `MoneyTest` 31 · `MoneyModuleTest` 10 | **41** |
-| `web` | `PageResponseTest` 17 · `CursorTokenTest` 16 · `RequestBodySizeFilterTest` 14 · `CorrelationIdFilterTest` 8 | **55** |
+| `web` | `PageResponseTest` 17 · `CursorTokenTest` 16 · `RequestBodySizeFilterTest` 14 · `CorrelationIdFilterTest` 9 | **56** |
 | `messaging` | `MessagingCorrelationIdTest` 16 · `RethrowingDigestErrorHandlerTest` 14 · `MessageExpiryTest` 11 · `QueueDestinationTest` 11 · `QueueClientBudgetTest` 8 · `MessageSinkSuppressionTest` 6 | **66** |
 | `observability` | `FailureSummaryTest` 17 · `MetricsConfigTest` 12 · `ThrowableDigestTest` 11 · `StructuredLoggingDefaultsTest` 7 · `SensitiveLoggingAndJsonStrictnessDefaultsTest` 7 · `LogSafeTextTest` 5 | **59** |
-| `architecture` | `LayeringRulesTest` 10 · `PublishedContractClosureTest` 8 · `SharedKernelInventoryTest` 12 across 1 `@Nested` group · `RuntimeConfigurationContractTest` 5 · `PackageCharterInventoryTest` 4 across 1 `@Nested` group · `ServiceCatalogInventoryTest` 4 across 1 `@Nested` group · `ServiceReadmeInventoryTest` 6 across 1 `@Nested` group · `ApplicationContextWiringContractTest` 3 · `CrossSchemaPrivilegeContractTest` 3 across 1 `@Nested` group · `DiagnosticRenderingRulesTest` 3 · `RuntimeDeletePrivilegeContractTest` 2 | **60** |
+| `architecture` | `LayeringRulesTest` 10 · `PublishedContractClosureTest` 8 · `SharedKernelInventoryTest` 12 across 1 `@Nested` group · `RuntimeConfigurationContractTest` 5 · `PackageCharterInventoryTest` 4 across 1 `@Nested` group · `ServiceCatalogInventoryTest` 4 across 1 `@Nested` group · `ServiceReadmeInventoryTest` 6 across 1 `@Nested` group · `ApplicationContextWiringContractTest` 3 · `CrossSchemaPrivilegeContractTest` 3 across 1 `@Nested` group · `DiagnosticRenderingRulesTest` 3 · `ReleasedMigrationImmutabilityTest` 2 · `RuntimeDeletePrivilegeContractTest` 2 | **62** |
 | `control` | `OnlineWriteGateTest` 16 across 5 `@Nested` groups · `OnlineWriteGateInterceptorTest` 12 across 5 `@Nested` groups | **28** |
 | `time` | `TimestampFormatterTest` 24 | **24** |
 | `profile` | `ProfileConfigurationTest` 14 | **14** |
-| | **module total** | **1396** |
+| | **module total** | **1422** |
 
 Three reconciliation notes, because each looks like a discrepancy until named.
 `DateEditValidatorTest`, both `control` classes, two of the `error` classes and five
@@ -517,8 +518,8 @@ of the `architecture` classes report `Tests run: 0` against their own class name
 report their executions under `@Nested` or `@DisplayName` labels instead, so a reader
 grepping the console output for a class name finds a zero. The table above is
 therefore read from `target/surefire-reports/*.xml`, where each case still carries the
-suite it belongs to, and the console total agrees with it: 1219 executions report
-under a class name and 177 under a display name, summing to 1396.
+suite it belongs to, and the console total agrees with it: 1243 executions report
+under a class name and 179 under a display name, summing to 1422.
 
 **These figures had drifted, and one class was missing from the table entirely.**
 `SensitiveLoggingAndJsonStrictnessDefaultsTest` was absent from the `observability`
@@ -558,8 +559,27 @@ read 1355 -- account for that movement, which is stated rather than smoothed ove
 the reason the paragraph above gives: the table and the total are now read from one source,
 so they can only disagree if that source is not consulted.
 
-The current run measures **1396**, and the movement from 1382 sits in ONE row that did not exist
-before: `profile` arrives at **14**, contributed entirely by `ProfileConfigurationTest`, which holds the
+The current run measures **1422**, and the whole of the movement from the preceding **1417** sits in ONE
+row: `error` arrives at **181**, contributed entirely by `GlobalExceptionHandlerTest` going from 64 to 69.
+Those five cases hold the refusal shape an accumulating edit driver produces -- that a refusal carrying
+per-field entries renders each field's own state and own sentence rather than one sentence against every
+name, that a LABELLED reference sentence carrying a colon survives the message gate, that an over-long or
+identifier-bearing sentence is still replaced entry by entry, that a refusal built through a constructor
+renders exactly as it did before entries existed, and that the entry-carrying factory derives the older
+components and refuses an empty list. Every other row is unchanged from the preceding measurement and was
+re-read from `target/surefire-reports/*.xml` rather than assumed. ⚠️ The measurement before this one moved
+from the published 1396 and had two independent parts that are named separately because they are different kinds
+of change. **Two of the nineteen are new work**: `architecture` arrives at **62**, the two added cases
+belonging to `ReleasedMigrationImmutabilityTest`, which holds every released Flyway migration to the
+bytes it was released with. **The other seventeen were drift the published figures had already
+absorbed**: `codec` was carrying `DateInquiryReplyCodecTest` in the tree and not in this table, which is
+seven, `web`'s `CorrelationIdFilterTest` had gained one, and the stated total was eleven below what its
+own rows summed to. Both halves are stated rather than smoothed into one number, because a total that
+moves by nineteen while two cases were added is the shape a reader should be able to question. It exists because two already-applied
+migrations were later edited -- in both cases to change only a comment -- and Flyway's checksum covers
+the whole file, so every environment that had run the earlier bytes refused to start. Nothing in the
+build could see that change, which is what the two cases now do. The measurement before this one moved
+from 1382 and sat in ONE row that did not exist before: `profile` arrives at **14**, contributed entirely by `ProfileConfigurationTest`, which holds the
 shared dev-profile resolution harness the eight service modules consume through this module's test
 artifact. Every other row is unchanged from the preceding measurement and was re-read from
 `target/surefire-reports/*.xml`. Refactoring Rationale: the harness lives here rather than in one
@@ -579,10 +599,10 @@ the table never gained. A total maintained as "the previous total plus what I be
 reproduces exactly that error, which is why this one is read from the report files -- the same
 argument the paragraph above makes, reached a second time by a second route.
 
-`CardDemoCommonAutoConfigurationIT` contributes **nothing** to the 1396: it is an
+`CardDemoCommonAutoConfigurationIT` contributes **nothing** to the 1422: it is an
 `*IT`, so Failsafe runs it at `verify` and Surefire does not run it at `test`
 (§2.3); it reports its own **13** executions under Failsafe instead, which is why a
-`verify` console shows 1396 and 13 as two separate totals. And a full `mvn -f services/pom.xml clean test` reports
+`verify` console shows 1422 and 13 as two separate totals. And a full `mvn -f services/pom.xml clean test` reports
 `LayeringRulesTest` **nine** times rather than once — once through this module's own
 `default-test` execution, and once in each of the eight service modules through the
 inherited `architecture-rules` execution that scans this module's test artifact. Only
@@ -1734,8 +1754,8 @@ need justifying.
 
 ### 10.1 What each suite must cover
 
-<!-- test-inventory: 61 tests + 1 integration tests -->
-**62** test classes: **61** matching `*Test`, run by Surefire, and **1** matching `*IT`, run by
+<!-- test-inventory: 62 tests + 1 integration tests -->
+**63** test classes: **62** matching `*Test`, run by Surefire, and **1** matching `*IT`, run by
 Failsafe. That census is machine-checked — `ServiceReadmeInventoryTest` in this module parses the
 comment above and re-measures both figures against this module's own test tree, so the count fails
 the build when it drifts rather than ageing quietly in prose.
@@ -1774,6 +1794,7 @@ its unit suites, which is why they are fast enough to run on every build.
 | `MetricsConfigTest` | the common tags — service, environment and version — are applied to every meter |
 | `DiagnosticRenderingRulesTest` | that every production record carrying a protected or unbounded component declares its own `toString()`, that no source applies the card masker to an account or customer identifier, and the two floors plus the non-empty-subject guard that stop either rule passing over an empty tree |
 | `LayeringRulesTest` | the three minimum rules of §7, plus the guards that stop them passing vacuously — that the imported production graph is non-empty, that the ownership contract is exactly the nine roots, that each prohibition list still names a construct that exists, that a security chain renders its refusals, and a negative control proving the money rule rejects a planted `double` |
+| `ReleasedMigrationImmutabilityTest` | that every released Flyway migration in the repository still carries the exact bytes and the exact Flyway checksum it was released with, and that the release record names every migration the tree holds so a new one cannot arrive unrecorded. It guards the UPGRADE path rather than the fresh-install one: editing an applied migration — even to change only a comment — makes every environment that already ran it refuse to start under `validate-on-migrate`, and nothing else in the build can see that change |
 
 ### 10.2 The wire shapes, so no test author re-derives them
 

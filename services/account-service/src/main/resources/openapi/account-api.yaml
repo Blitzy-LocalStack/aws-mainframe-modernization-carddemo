@@ -2505,12 +2505,36 @@ components:
         accountId:
           type: integer
           format: int64
-          description: The account the card belongs to.
+          # WHY : Assumptions: a NUMBER here and a digit STRING on CardXrefResponse below,
+          #       for the two different readers the shapes serve. This shape is read by a
+          #       machine whose own column is BIGINT; that one is read by a browser and
+          #       mirrors a fixed-width screen field.
+          # WHY : ⚠️ Trade-offs: the numeric form carries no leading zero, and on this data
+          #       that is the ordinary case rather than an edge one -- the fifty accounts in
+          #       app/data/ASCII/acctdata.txt are numbered 00000000001 to 00000000050, so
+          #       every one of them is one or two digits here and eleven characters on the
+          #       display shape. A CONSUMER THAT RENDERS THIS VALUE BACK AS CHARACTERS MUST
+          #       ZERO-FILL IT TO ELEVEN. Both consumers now do; one of the two did not, and
+          #       carried a one-character account identifier onward, which is why the
+          #       obligation is stated in the published contract and not left to be inferred
+          #       from the format keyword.
+          description: >-
+            The account the card belongs to, XREF-ACCT-ID PIC 9(11) at L7 of
+            app/cpy/CVACT03Y.cpy, published as a number because this shape is read by a
+            machine whose column is BIGINT. The reference field is an unsigned DISPLAY
+            numeric and so zero-filled to eleven characters; this representation does not
+            carry that fill, so a consumer rendering it back as characters must restore it.
+            CardXrefResponse publishes the same column as an eleven-character digit string
+            for the browser surface.
           example: 12345678901
         customerId:
           type: integer
           format: int64
-          description: The customer the card belongs to.
+          description: >-
+            The customer the card belongs to, XREF-CUST-ID PIC 9(09) at L6 of
+            app/cpy/CVACT03Y.cpy, published as a number for the reason recorded on
+            accountId above, and carrying no leading zero for the same reason. A consumer
+            rendering it back as characters must zero-fill it to nine.
           example: 987654321
 
     # WHY : Refactoring Rationale: this schema exists because the ACCOUNT-keyed lookup
@@ -2546,12 +2570,23 @@ components:
         accountId:
           type: integer
           format: int64
-          description: The account the row is keyed by, from XREF-ACCT-ID PIC 9(11).
+          # WHY : Assumptions: a number for the reason recorded on CardXrefView above, and
+          #       the zero-fill obligation it places on a consumer is recorded there too --
+          #       stated once rather than twice, because the two shapes are the two halves
+          #       of one machine-facing pair.
+          description: >-
+            The account the row is keyed by, from XREF-ACCT-ID PIC 9(11). Published as a
+            number and so carrying no leading zero; a consumer rendering it back as
+            characters must zero-fill it to eleven. See CardXrefView.accountId for why this
+            pair is numeric where CardXrefResponse is a digit string.
           example: 12345678901
         customerId:
           type: integer
           format: int64
-          description: The customer the card belongs to, from XREF-CUST-ID PIC 9(09).
+          description: >-
+            The customer the card belongs to, from XREF-CUST-ID PIC 9(09). Published as a
+            number and so carrying no leading zero; a consumer rendering it back as
+            characters must zero-fill it to nine.
           example: 987654321
         cardNumber:
           type: string
@@ -2763,14 +2798,30 @@ components:
           $ref: '#/components/schemas/Money'
         currentCycleCredit:
           $ref: '#/components/schemas/Money'
+        # WHY : ⚠️ Refactoring Rationale: the example was 'DEFAULT', seven characters, and the
+        #       description said nothing about width -- and the two endpoints that publish
+        #       this shape disagreed. The account view returned the CHAR(10) column's ten
+        #       characters while the update response, projected from the entity a writer had
+        #       just populated, returned the submission's seven. The mapper now pads on the
+        #       write path and asserts the declared width on the read path, so both answer
+        #       ten; the example and the description are corrected to state the form a
+        #       caller actually receives, because a seven-character example is what let the
+        #       shorter answer look correct.
         groupId:
           type: string
+          minLength: 10
           maxLength: 10
           description: >-
             AADDGRPI PIC X(10), from ACCT-GROUP-ID PIC X(10). The disclosure group
             whose rate the interest calculation uses, falling back to the DEFAULT
-            group when the account's own group is not found.
-          example: 'DEFAULT'
+            group when the account's own group is not found. Always exactly ten
+            characters: the column is CHAR(10) and an alphanumeric PIC X(n) field is
+            left-justified and space-filled, so a shorter group is TRAILING-SPACE
+            PADDED to the declared width. Both the view and the update response carry
+            the same padded form, and a caller comparing them to detect a change will
+            not see one that is only padding. An account with no group carries ten
+            spaces, which is the state the DEFAULT fallback is reached from.
+          example: 'DEFAULT   '
         currentCycleDebit:
           $ref: '#/components/schemas/Money'
 
@@ -2899,7 +2950,13 @@ components:
             the reference's own direct move. This is the FIRST of the four
             record-versus-screen width disagreements, and the narrowing is
             reproduced rather than corrected because the reference screen shows
-            five of the ten.
+            five of the ten. A customer stored as '01993-9116' therefore reads
+            '01993' here and '01993-9116' from CustomerResponse.zipCode and
+            CustomerDisplayView.zipCode; the difference between those answers is this
+            declared narrowing and not an inconsistency. Submitting five characters
+            back through AccountUpdateRequest.zipCode replaces only the leading five
+            and PRESERVES the stored tail, so an edit of any other field on the form
+            does not delete the extension.
           example: '12546'
         city:
           type: string
@@ -3071,14 +3128,26 @@ components:
           description: >-
             ACTSSN1I PIC X(3); the first three digits of the national identifier.
             Clear, inbound only, and never returned by any operation.
+
+
+            The three components are PRESERVED, not cleared, when a submission
+            leaves them as they stand: either all three are omitted, or any one of
+            them carries the withheld marker `[REDACTED]` that every read returns
+            in their place. A submission that preserves them is not edited against
+            them, so no component is reported as missing. Supply all three to
+            replace the stored identifier.
         ssnPart2:
           type: string
           maxLength: 2
-          description: ACTSSN2I PIC X(2); the middle two digits.
+          description: >-
+            ACTSSN2I PIC X(2); the middle two digits. Preserved on the same terms
+            as ssnPart1.
         ssnPart3:
           type: string
           maxLength: 4
-          description: ACTSSN3I PIC X(4); the last four digits.
+          description: >-
+            ACTSSN3I PIC X(4); the last four digits. Preserved on the same terms as
+            ssnPart1.
         dateOfBirthYear:
           type: string
           maxLength: 4
@@ -3178,6 +3247,13 @@ components:
             ciphertext rather than clearing it, because the screen shows a masked
             value and a caller that did not retype what it could not read has not
             asked for the identifier to be deleted.
+
+
+            Submitting the withheld marker `[REDACTED]` -- the value every read
+            returns in this component's place -- preserves it on the same terms, so
+            a caller may hand back the record it was shown. Send the single
+            character `*` to remove the stored value, which is the marker the
+            reference itself gives a user for that purpose.
         eftAccountId:
           type: string
           maxLength: 10
@@ -3359,17 +3435,36 @@ components:
             masker so that every context narrows a card number the same way, and the
             length is preserved so the rendering still aligns in a fixed-pitch column.
           example: '************1111'
+        # WHY : Assumptions: both identifiers are digit STRINGS on this shape and JSON
+        #       NUMBERS on CardXrefView and CardXrefByAccountView above, and the difference
+        #       serves the two different readers. This shape is the BROWSER's and mirrors a
+        #       fixed-width screen field, so it carries the reference's display form -- an
+        #       unsigned DISPLAY numeric is right-justified and zero-filled, and the fill is
+        #       significant here because the width is fixed rather than a maximum. The two
+        #       machine-facing shapes mirror BIGINT columns, where a number costs neither
+        #       side a conversion.
+        # WHY : ⚠️ Trade-offs: the string form is the LOSSLESS one of the two. A value read
+        #       here can be compared to a stored row character for character; a value read
+        #       from the numeric shapes cannot, because it has lost its zero fill -- which on
+        #       the fifty accounts shipped in app/data/ASCII/acctdata.txt, numbered
+        #       00000000001 to 00000000050, is ten characters of every one of them. The
+        #       obligation that places on a machine consumer is recorded on CardXrefView.
         customerId:
           type: string
           maxLength: 9
           pattern: '^[0-9]{1,9}$'
-          description: XREF-CUST-ID PIC 9(09), as digits.
+          description: >-
+            XREF-CUST-ID PIC 9(09), as digits. A digit string rather than a number, so the
+            zero fill of the fixed-width display field is preserved.
           example: '987654321'
         accountId:
           type: string
           maxLength: 11
           pattern: '^[0-9]{11}$'
-          description: XREF-ACCT-ID PIC 9(11), as digits.
+          description: >-
+            XREF-ACCT-ID PIC 9(11), as digits, always at the full eleven characters the
+            pattern requires. A digit string rather than a number, so the zero fill of the
+            fixed-width display field is preserved.
           example: '12345678901'
 
     # WHY : Refactoring Rationale: this schema is the narrow counterpart of CustomerResponse
@@ -3477,7 +3572,12 @@ components:
             renders CUST-ADDR-ZIP(1:5) at L775 of COPAUS0C, so narrowing here
             would adopt that display truncation as though it were the layout and
             would discard the four-digit extension for every later reader.
-          example: '100010001'
+            Always ten characters, since the column is CHAR(10): the shipped data
+            carries both forms, a hyphenated ZIP+4 occupying all ten as in the
+            example and a bare five-digit code TRAILING-SPACE padded to ten. The
+            example is a ZIP+4 rather than a padded five because it is the case
+            that shows what narrowing this member would lose.
+          example: '01993-9116'
         phoneNumber1:
           type: string
           maxLength: 15
@@ -3582,8 +3682,15 @@ components:
             CUST-ADDR-ZIP PIC X(10) at L14, carrying all ten characters. The
             screen field ACSZIPCI is PIC X(5) at app/cpy-bms/COACTVW.CPY L186 and
             app/cbl/COACTVWC.cbl L515 moves the wider value into it, so the
-            baseline itself shows five of the ten there.
-          example: '12546'
+            baseline itself shows five of the ten there. This member is always ten
+            characters, since the column is CHAR(10): the shipped data carries a
+            hyphenated ZIP+4 occupying all ten, as in the example, and a bare
+            five-digit code TRAILING-SPACE padded to ten. The account view's own
+            CustomerDetail.zipCode publishes the narrowed five instead, which is the
+            first of the four record-versus-screen width disagreements this document
+            records; the two differ deliberately, and this is the member through
+            which the stored value is readable in full.
+          example: '01993-9116'
         phoneNumber1:
           oneOf:
             - type: string

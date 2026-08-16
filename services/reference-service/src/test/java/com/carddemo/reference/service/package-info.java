@@ -73,9 +73,9 @@
  * subdirectory beneath this one:</p>
  *
  * <ul>
- *   <li>{@code ReferenceWriteBehaviourTest} across 33 cases -- grouped under four headings, the
+ *   <li>{@code ReferenceWriteBehaviourTest} across 35 cases -- grouped under four headings, the
  *       strict replace, the category replace, the maintenance batch and the rate lookup.</li>
- *   <li>{@code TransactionTypeServiceTest} across 47 cases and
+ *   <li>{@code TransactionTypeServiceTest} across 48 cases and
  *       {@code TransactionCategoryServiceTest} across 43 -- the two maintained tables' own
  *       behaviour, including the restrict-on-delete refusal.</li>
  *   <li>{@code ReferenceBatchUpdateServiceTest} across 28 cases, with

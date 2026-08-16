@@ -49,6 +49,11 @@
  *       fixed reply layout is a wire contract rather than a formatting choice.</li>
  *   <li>{@code RestReferenceAddressLookupTest} covers the outbound synchronous adapter that resolves
  *       the three address allow-lists from the reference context.</li>
+ *   <li>{@code InquiryListenerHealthTest} holds the inquiry consumer's health contribution to reporting
+ *       the consumer's ACTUAL state, across the four states it distinguishes -- running, stopped,
+ *       unregistered, and no registry at all. It has no baseline provenance of its own for the reason its
+ *       subject's charter entry records: the reference program ends when a queue open fails, and a
+ *       container-hosted consumer expresses that through a health signal instead.</li>
  *   <li>{@code AddressValidationServiceTest} pins the three address value-domain edits against the
  *       FIVE condition-name allow-lists {@code app/cpy/CSLKPCDY.cpy} declares over three targets --
  *       three telephone-area-code lists at lines 30, 521 and 931, the state list at line 1013, and
@@ -61,7 +66,7 @@
  * <h2>What this directory holds</h2>
  *
  * <pre>
- * this directory: 12 java files = 11 tests + 1 charter
+ * this directory: 13 java files = 12 tests + 1 charter
  * </pre>
  *
  * <p>Refactoring Rationale: that marker line is machine-checked, and it is here because the prose count
@@ -82,10 +87,11 @@
  *
  * <h2>The type boundary of the package under test</h2>
  *
- * <p>Assumptions: the production package {@code com.carddemo.account.service} declares SEVEN types --
+ * <p>Assumptions: the production package {@code com.carddemo.account.service} declares EIGHT types --
  * {@code AccountViewService}, {@code AccountUpdateService}, {@code AddressValidationService},
- * {@code InquiryMessageListener}, {@code RestReferenceAddressLookup}, {@code CustomerIdentifierCipher}
- * and the {@code AccountRevision} token -- and there is deliberately no {@code CustomerService} and no
+ * {@code InquiryMessageListener}, {@code InquiryListenerHealth}, {@code RestReferenceAddressLookup},
+ * {@code CustomerIdentifierCipher} and the {@code AccountRevision} token -- and there is deliberately no
+ * {@code CustomerService} and no
  * {@code CardXrefService} anywhere in the reactor. Neither type exists, so no class here may name,
  * extend or substitute one; a test that mocks a type that does not exist compiles against its own
  * invention and proves nothing about this service. Customer reads and card-cross-reference reads are

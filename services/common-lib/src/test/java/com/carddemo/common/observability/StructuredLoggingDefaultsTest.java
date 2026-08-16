@@ -13,7 +13,12 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.logging.logback.StructuredLogEncoder;
 import org.springframework.boot.test.context.ConfigDataApplicationContextInitializer;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.context.ApplicationContextInitializer;
+import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.core.env.Environment;
+import org.springframework.core.env.MutablePropertySources;
+import org.springframework.core.env.StandardEnvironment;
+import org.springframework.core.env.SystemEnvironmentPropertySource;
 import org.springframework.mock.env.MockEnvironment;
 
 /**
@@ -70,25 +75,107 @@ class StructuredLoggingDefaultsTest {
     /** The version label a deployment supplies through {@code CARDDEMO_VERSION}. */
     private static final String VERSION_LABEL = "1.0.0";
 
+    /** The literal the shipped file falls back to when a deployment supplies neither label. */
+    private static final String UNSPECIFIED_LABEL = "unspecified";
+
     /** A correlation identity of the shape the shared filter mints, used as a mapped-context value. */
     private static final String CORRELATION_VALUE = "CD4F1C0E423A554D219B7E";
 
     /**
+     * The two deployment values the shipped file reads from the process environment.
+     *
+     * <p>Assumptions: these are held as ENVIRONMENT VARIABLE names rather than as canonical property
+     * names because that is the layer a task definition supplies them on, and because the relaxed
+     * binding that turns {@code CARDDEMO_ENVIRONMENT} into {@code carddemo.environment} is itself part
+     * of what this class asserts.
+     */
+    private static final Map<String, Object> DEPLOYMENT_VARIABLES = Map.of(
+            "CARDDEMO_ENVIRONMENT", ENVIRONMENT_LABEL,
+            "CARDDEMO_VERSION", VERSION_LABEL);
+
+    /**
+     * Replaces the process environment this context resolves against with the two values above.
+     *
+     * <p>Purpose: make the environment-variable layer this class depends on a value the test supplies,
+     * so that the assertions describe the shipped file rather than the machine the build runs on.
+     *
+     * <p>⚠️ Refactoring Rationale: the previous form supplied the two values through
+     * {@code withPropertyValues} on the claim that a property and an environment variable "resolve
+     * through the same relaxed binding either way". That claim is false in one direction, and the
+     * direction it fails in is the one the documented runtime uses. {@code withPropertyValues} adds a
+     * plain map source keyed by the LITERAL name {@code CARDDEMO_ENVIRONMENT}, which a request for
+     * {@code carddemo.environment} does not match, because only {@link SystemEnvironmentPropertySource}
+     * relaxes names. The real system-environment source does relax, and it sits AHEAD of the imported
+     * file that {@link ConfigDataApplicationContextInitializer} appends at the end of the list. So on a
+     * machine where {@code CARDDEMO_ENVIRONMENT} is genuinely set -- which is every deployed task, and
+     * which is what {@code /opt/carddemo-tools/svc-aws.env} and {@code svc-common.env} do for the
+     * documented local runtime -- the ambient value won and the assertion compared the shipped file
+     * against the operator's machine. Observed directly: the build was green with the variable unset
+     * and reported {@code expected: "prod" but was: "local"} with it set. Both env-backed values were
+     * exposed, not just one: {@code svc-common.env} supplies {@code CARDDEMO_VERSION=1.0.0-local}, so
+     * the version assertion passed only because that particular file had not been sourced.
+     *
+     * <p>Alternatives Considered: asserting the canonical {@code carddemo.environment} property
+     * directly instead. Rejected because the placeholder indirection and the relaxed-name mapping ARE
+     * the mechanism under test -- injecting the resolved value would leave a file that named the wrong
+     * variable, or named none, still passing.
+     *
+     * <p>Alternatives Considered: clearing the variables for the test process. Rejected because a Java
+     * process cannot portably mutate its own environment, and a launcher-level exclusion would move the
+     * requirement into build configuration where a developer running the class from an IDE would not
+     * inherit it.
+     *
+     * @param variables the environment variables this context may see, which may be empty
+     * @return an initializer substituting a controlled system-environment source
+     */
+    private static ApplicationContextInitializer<ConfigurableApplicationContext> controlledEnvironment(
+            Map<String, Object> variables) {
+        return context -> {
+            MutablePropertySources sources = context.getEnvironment().getPropertySources();
+            // WHY : Assumptions: a StandardEnvironment always carries a source under this name, so
+            //       REPLACE is used rather than addFirst. Replacing is what makes the test hermetic --
+            //       adding ahead of the real source would leave the machine's other variables visible,
+            //       and a future value collision would resurface exactly this defect.
+            sources.replace(
+                    StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
+                    new SystemEnvironmentPropertySource(
+                            StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
+                            variables));
+        };
+    }
+
+    /**
      * A context runner that imports the shipped defaults and supplies the three deployment values.
      *
-     * <p>Assumptions: the three values are supplied as PROPERTIES rather than as environment
-     * variables, because the placeholders in the shipped file resolve through the same relaxed
-     * binding either way and a test cannot set an environment variable for its own process. What is
-     * being asserted is that the file's placeholders resolve at all and resolve to the values the
-     * meter filter reads, not the operating system's variable mechanism.
+     * <p>Assumptions: the service name is supplied as a property because that is how a service's own
+     * {@code application.yml} sets it, while the environment and version arrive as environment
+     * variables through {@link #controlledEnvironment()} because that is how a task definition sets
+     * them. The controlled-environment initializer is registered FIRST so that the substitution is in
+     * place before the config-data import resolves any placeholder against it.
      */
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
+            .withInitializer(controlledEnvironment(DEPLOYMENT_VARIABLES))
             .withInitializer(new ConfigDataApplicationContextInitializer())
             .withPropertyValues(
                     "spring.config.import=" + SHARED_DEFAULTS,
-                    "spring.application.name=" + SERVICE_NAME,
-                    "CARDDEMO_ENVIRONMENT=" + ENVIRONMENT_LABEL,
-                    "CARDDEMO_VERSION=" + VERSION_LABEL);
+                    "spring.application.name=" + SERVICE_NAME);
+
+    /**
+     * The same runner with a process environment that supplies NEITHER deployment value.
+     *
+     * <p>Purpose: reach the branch of the shipped file that only it can satisfy. Because
+     * {@link SystemEnvironmentPropertySource} relaxes names, a set {@code CARDDEMO_ENVIRONMENT}
+     * supplies {@code carddemo.environment} on its own, ahead of the imported file -- so an assertion
+     * made with the variable present cannot distinguish the file's mapping from the variable's own
+     * relaxed binding. With the variable absent, the ONLY thing that can produce a value is the
+     * file's own declaration and its default.
+     */
+    private final ApplicationContextRunner runnerWithoutDeploymentVariables = new ApplicationContextRunner()
+            .withInitializer(controlledEnvironment(Map.of()))
+            .withInitializer(new ConfigDataApplicationContextInitializer())
+            .withPropertyValues(
+                    "spring.config.import=" + SHARED_DEFAULTS,
+                    "spring.application.name=" + SERVICE_NAME);
 
     /**
      * The shipped defaults select the structured format for every service that imports them.
@@ -127,6 +214,44 @@ class StructuredLoggingDefaultsTest {
             //       while the three above silently described a different environment.
             assertThat(environment.getProperty("carddemo.environment")).isEqualTo(ENVIRONMENT_LABEL);
             assertThat(environment.getProperty("carddemo.version")).isEqualTo(VERSION_LABEL);
+        });
+    }
+
+    /**
+     * With neither variable supplied, the shipped file still resolves both tags to its own fallback.
+     *
+     * <p>Purpose: assert the half of the mapping that the case above cannot. A deployment that forgets
+     * the two variables must still produce a log record and a metric series with a readable tag rather
+     * than an unresolved placeholder, which is a startup failure, or an empty string, which silently
+     * groups every such deployment together.
+     *
+     * <p>⚠️ Refactoring Rationale: this case was added because making the class hermetic revealed that
+     * its existing assertions could not see the file's declaration at all. Replacing
+     * {@code carddemo.environment} in the shipped file with the literal {@code hardcoded-wrong} left the
+     * whole class green, because the controlled variable supplied that property through relaxed binding
+     * before the file was consulted. With the variables absent there is no such shadow, so this case
+     * fails on exactly that mutation. Verified both ways: green as shipped, and red for the literal.
+     *
+     * <p>Assumptions: the fallback is asserted as the file's literal rather than as "any non-empty
+     * value" because the value reaches an operator's filter expression -- a silent change from
+     * {@code unspecified} to something else would split one deployment's records across two tag values.
+     */
+    @Test
+    @DisplayName("with neither deployment variable set the tags fall back to the shipped literal")
+    void absentDeploymentVariablesFallBackToTheShippedLiteral() {
+        this.runnerWithoutDeploymentVariables.run(context -> {
+            Environment environment = context.getEnvironment();
+            assertThat(environment.getProperty("carddemo.environment")).isEqualTo(UNSPECIFIED_LABEL);
+            assertThat(environment.getProperty("carddemo.version")).isEqualTo(UNSPECIFIED_LABEL);
+
+            // WHY : Trade-offs: the two structured members are asserted here as well as in the case
+            //       above. There they prove the members exist; here they prove they follow the SAME
+            //       fallback, so a deployment missing the variables cannot end up with a metric tag
+            //       reading "unspecified" while its log records read something else.
+            assertThat(environment.getProperty("logging.structured.ecs.service.environment"))
+                    .isEqualTo(UNSPECIFIED_LABEL);
+            assertThat(environment.getProperty("logging.structured.ecs.service.version"))
+                    .isEqualTo(UNSPECIFIED_LABEL);
         });
     }
 

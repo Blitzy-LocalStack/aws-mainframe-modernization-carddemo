@@ -8,6 +8,8 @@ import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.validation.FieldValidationFlag;
 import com.carddemo.common.web.CorrelationIdFilter;
 import com.carddemo.common.web.CursorToken;
+import com.carddemo.reference.service.TransactionCategoryService;
+import com.carddemo.reference.service.TransactionTypeService;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -290,10 +292,18 @@ class ReferenceApiContractTest {
         Map<String, Object> examples = mapping(
                 mapping(mapping(response("Conflict"), "content"), "application/json"), "examples");
         assertThat(examples).containsOnlyKeys(
-                "childRecordsExist", "recordChangedByAnotherCaller", "couldNotLockRowForUpdate");
+                "childRecordsExist", "insertRefusedByTheTable", "recordChangedByAnotherCaller",
+                "couldNotLockRowForUpdate");
 
+        // WHY : Assumptions: the insert refusal's expected text is COMPOSED by the same method the advice
+        //       composes it with, rather than retyped here, and the table it is composed around is the
+        //       service's own constant. A retyped expectation would let the document and the emitted body
+        //       agree with this file while disagreeing with each other -- which is exactly how the
+        //       previous generation of these examples came to quote wording no response returned.
         Map<String, String> expectedMessage = Map.of(
                 "childRecordsExist", GlobalExceptionHandler.MESSAGE_REFERENCED_ROW,
+                "insertRefusedByTheTable", GlobalExceptionHandler.insertRefusalMessage(
+                        TransactionTypeService.BASELINE_TABLE_NAME),
                 "recordChangedByAnotherCaller", GlobalExceptionHandler.MESSAGE_RECORD_CHANGED,
                 "couldNotLockRowForUpdate", GlobalExceptionHandler.MESSAGE_LOCK_UNAVAILABLE);
 
@@ -306,6 +316,32 @@ class ReferenceApiContractTest {
                     .containsEntry("status", 409)
                     .containsEntry("message", expected.getValue())
                     .containsEntry("subsystem", ApiError.Subsystem.RELATIONAL.name());
+        }
+
+        // WHY : Assumptions: the composed insert sentence is measured against the width the document
+        //       declares for the member that carries it, for BOTH tables this context maintains. The other
+        //       three sentences are constants and are bounded once when they are written; this one is
+        //       assembled from two halves and a table name, so its width is a property of the table rather
+        //       than of the text, and a longer table name would produce a body that violates the schema
+        //       describing it. The type form measures 61 characters and the category form 70, against a
+        //       declared bound of 75.
+        // WHY : Assumptions: the bound is READ from the document rather than taken from the kernel
+        //       constant, because what is being asserted is that the composed body satisfies the schema
+        //       that describes it. Taking the constant would assert the composition against the code's own
+        //       opinion of the width and would still pass if the document declared a narrower one.
+        int declaredWidth = (Integer) mapping(mapping(mapping(mapping(mapping(this.contract,
+                "components"), "schemas"), "ApiError"), "properties"), "message").get("maxLength");
+        assertThat(declaredWidth)
+                .as("the document's own bound on the member the sentence travels in")
+                .isEqualTo(ApiError.MESSAGE_RENDERING_WIDTH);
+        for (String table : List.of(TransactionTypeService.BASELINE_TABLE_NAME,
+                TransactionCategoryService.BASELINE_TABLE_NAME)) {
+            assertThat(GlobalExceptionHandler.insertRefusalMessage(table))
+                    .as("the composed insert refusal for %s must fit the declared message width", table)
+                    .hasSizeLessThanOrEqualTo(declaredWidth)
+                    .startsWith(GlobalExceptionHandler.MESSAGE_INSERT_REFUSED_PREFIX)
+                    .endsWith(GlobalExceptionHandler.MESSAGE_INSERT_REFUSED_SUFFIX)
+                    .contains(table);
         }
 
         @SuppressWarnings("unchecked")
@@ -709,5 +745,85 @@ class ReferenceApiContractTest {
         assertThat(mapping(mapping(declared, "MethodNotAllowed"), "headers"))
                 .as("a 405 names the methods the route does publish, which is what a client acts on")
                 .containsKey("Allow");
+    }
+
+    /**
+     * Returns one published operation, located by its operation identifier.
+     *
+     * @param operationId the identifier to find
+     * @return that operation as a mapping; never {@code null}
+     * @throws IllegalStateException if no operation carries that identifier, because a test naming an
+     *     absent operation would otherwise assert nothing and pass
+     */
+    private Map<String, Object> operationById(String operationId) {
+        Map<String, Object> paths = mapping(this.contract, "paths");
+        for (String path : paths.keySet()) {
+            Map<String, Object> methods = mapping(paths, path);
+            for (String method : methods.keySet()) {
+                if (!(methods.get(method) instanceof Map)) {
+                    continue;
+                }
+                Map<String, Object> operation = mapping(methods, method);
+                if (operationId.equals(operation.get("operationId"))) {
+                    return operation;
+                }
+            }
+        }
+        throw new IllegalStateException("no operation carries operationId \"" + operationId + "\"");
+    }
+
+    /**
+     * Confirms each list operation publishes the answer it actually gives for a filter matching nothing.
+     *
+     * <p>Assumptions: this asserts on the published PROSE, which is unusual here and is the point. The
+     * defect this covers was not a wrong value in a schema -- every schema was right -- it was a
+     * description that told a caller the opposite of what the route does, and no test read it. A caller
+     * integrates against the description as much as against the shapes, so the description is held to
+     * the runtime constant it quotes.
+     *
+     * <p>Assumptions: the withdrawn wordings are asserted ABSENT as well as the corrected ones present.
+     * Presence alone would pass over a description that carried both, which is the state a partial
+     * edit leaves behind.
+     *
+     * <p>Alternatives Considered: asserting only that the two operations differ, without reading the
+     * text. Rejected because the divergence between the siblings is deliberate, so a test that merely
+     * observed a difference would pass equally well if the difference were undocumented -- and being
+     * undocumented was the finding.
+     */
+    @Test
+    @DisplayName("each list operation publishes the empty-filter answer it actually gives")
+    void theEmptyFilterAnswerIsPublishedPerCollection() {
+        String types = (String) operationById("listTransactionTypes").get("description");
+        String categories = (String) operationById("listTransactionCategories").get("description");
+
+        assertThat(types)
+                .as("the type list refuses a filter that matches nothing, so its description must say"
+                        + " so, quote the sentence it returns and name the field state it sets")
+                .contains("400")
+                .contains(TransactionTypeService.MESSAGE_NO_RECORDS_FOR_FILTER)
+                .contains(FieldValidationFlag.NOT_OK.name());
+        assertThat(types)
+                .as("the withdrawn reading said the page is simply empty for that condition; a"
+                        + " description carrying both readings is worse than one carrying either")
+                .doesNotContain("filters exclude every row the page is empty");
+
+        assertThat(mapping(mapping(schema("ReferenceMessageCatalogue"), "properties"),
+                "noRecordsFoundForFilters").get("const"))
+                .as("the sentence the description quotes is the one the service raises, so the two"
+                        + " cannot drift apart")
+                .isEqualTo(TransactionTypeService.MESSAGE_NO_RECORDS_FOR_FILTER);
+
+        assertThat(categories)
+                .as("the category list answers the SAME condition with an empty page, and that"
+                        + " difference between two sibling collections must be published rather than"
+                        + " discovered, with the register entry that argues it")
+                .contains("DIFFERS")
+                .contains("D-REFDATA-EMPTY-FILTER");
+
+        assertThat((String) mapping(mapping(operationById("listTransactionTypes"), "responses"),
+                "200").get("description"))
+                .as("the 200 response covered the filtered case too and must no longer claim the"
+                        + " baseline treats it as anything other than a failure")
+                .doesNotContain("the baseline reports the same condition on its own list screen");
     }
 }

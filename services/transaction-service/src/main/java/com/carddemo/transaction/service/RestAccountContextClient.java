@@ -5,8 +5,11 @@ import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.security.InternalServiceToken;
 import java.net.http.HttpClient;
 import java.time.Duration;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
@@ -161,6 +164,23 @@ public class RestAccountContextClient implements AccountContextClient {
      * @throws IllegalStateException if the configured address is absent, is not an absolute HTTPS origin
      *     free of user information, path, query and fragment, or is not the approved origin
      */
+    // WHY : ⚠️ Assumptions: the annotation is REQUIRED as soon as this class declares a second
+    //       constructor, and its absence would stop this context from starting at all. Spring's implicit
+    //       constructor injection applies only to a class with exactly ONE constructor; with two
+    //       candidates and neither marked, the container stops looking for an injectable constructor and
+    //       falls back to a no-argument one, which this class does not declare -- so bean creation fails
+    //       with "No default constructor found" and the whole transaction context fails to refresh rather
+    //       than degrading. The identical defect and the identical remedy are recorded on
+    //       authorization-service's RestAccountContextClient and on account-service's
+    //       RestReferenceAddressLookup; this is the same fix applied to the third occurrence rather than a
+    //       new judgement. common-lib's ApplicationContextWiringContractTest asserts the rule across every
+    //       module, and it is what reported this one.
+    // WHY : Alternatives Considered: not adding the test seam, so one constructor would remain implicit.
+    //       Rejected because the absence of any test of this class is exactly how its identifier rendering
+    //       came to drop a leading zero for every shipped account, and the public constructor installs its
+    //       own request factory -- which replaces whatever transport a test had bound, sending the test to
+    //       the network. Marking the injection point keeps the seam and the timeouts both.
+    @Autowired
     public RestAccountContextClient(RestClient.Builder builder,
             InternalServiceToken machineIdentity,
             @Value("${carddemo.account-context.base-url}") String baseUrl,
@@ -173,15 +193,7 @@ public class RestAccountContextClient implements AccountContextClient {
         //       deployment fails to start rather than starting and sending a token somewhere. The clauses
         //       name what is at risk on THIS seam: the card-keyed lookup carries a primary account number
         //       in its request body, and every request carries a minted internal credential.
-        ApprovedOriginPolicy.require(ACCOUNT_CONTEXT_PROPERTY_PREFIX, baseUrl, approvedOrigin,
-                new ApprovedOriginPolicy.Sensitivity(
-                        "the cross-reference lookup this client makes carries a primary account number and"
-                                + " every request carries a minted internal credential, so there is no safe"
-                                + " default address to fall back to",
-                        "the lookup body carries a primary account number and every request carries a"
-                                + " minted internal credential",
-                        "an unapproved destination receives a live internal credential, and a card-keyed"
-                                + " lookup hands it a primary account number in the same request"));
+        requireApprovedOrigin(baseUrl, approvedOrigin);
 
         // WHY : Assumptions: the request factory is built over the platform HTTP client so that the
         //       connect timeout is applied by the client and the read timeout by the factory. Setting
@@ -196,6 +208,79 @@ public class RestAccountContextClient implements AccountContextClient {
                 .requestFactory(factory)
                 .requestInterceptor(bearerTokenInterceptor(machineIdentity))
                 .build();
+    }
+
+    /**
+     * Builds the client over a builder whose transport the caller has already configured.
+     *
+     * <p>⚠️ Purpose: this seam exists so the status-code, body-shape and identifier-rendering behaviour of
+     * this class can be exercised at all. The public constructor installs its own request factory in order
+     * to apply the two timeouts, and installing one REPLACES a mock transport bound to the builder -- so a
+     * test that constructed the public form would issue real network calls. Until this seam existed there
+     * was no test of this class anywhere, which is precisely how the identifier rendering corrected in
+     * {@link #renderAccountId(long)} came to publish a one-character account number for every one of the
+     * fifty shipped accounts while the seam's own interface documented eleven.</p>
+     *
+     * <p>Assumptions: the base-address validation is the SAME call the public constructor makes, so this
+     * seam cannot be used to point the client at an unapproved origin. What it omits is the request factory
+     * and therefore the two timeouts, which are a property of the transport rather than of this class's
+     * contract; asserting on them would require a request that actually stalled.</p>
+     *
+     * <p>Assumptions: the credential interceptor IS installed here, unlike the request factory, because
+     * only the factory conflicts with a bound mock transport. Leaving the interceptor out would make every
+     * test exercise a client presenting no credential -- the one state the account context refuses on every
+     * one of these addresses.</p>
+     *
+     * <p>Alternatives Considered: extracting the factory construction into a configuration class and
+     * injecting a {@code ClientHttpRequestFactory}. That is the better long-term shape and is deliberately
+     * not done here: it would move two configuration properties and a bean into another file for a reason
+     * unrelated to the finding this class is being corrected for, and the sibling seam in
+     * {@code authorization-service} already resolved the identical trade-off the same way.</p>
+     *
+     * @param builder the builder, with its request factory already configured by the caller; must not be
+     *     {@code null}
+     * @param machineIdentity the minter of the credential presented on every request; must not be
+     *     {@code null}
+     * @param baseUrl the account context's base address; must not be {@code null}
+     * @param approvedOrigin the exact origin the base address is required to equal; must not be
+     *     {@code null}
+     * @throws IllegalStateException if the base address fails any check the public constructor applies
+     * @throws NullPointerException if {@code builder} or {@code machineIdentity} is {@code null}
+     */
+    RestAccountContextClient(RestClient.Builder builder, InternalServiceToken machineIdentity,
+            String baseUrl, String approvedOrigin) {
+
+        Objects.requireNonNull(builder, "builder must not be null");
+        Objects.requireNonNull(machineIdentity, "machineIdentity must not be null");
+        requireApprovedOrigin(baseUrl, approvedOrigin);
+        this.client = builder.baseUrl(baseUrl)
+                .requestInterceptor(bearerTokenInterceptor(machineIdentity))
+                .build();
+    }
+
+    /**
+     * Applies this seam's base-address policy, so both constructors enforce one rule.
+     *
+     * <p>Assumptions: the sensitivity clauses are declared once here rather than at each constructor,
+     * because they describe what is at risk on this SEAM and not what is different about a caller. The
+     * clauses name the two things that actually travel: the card-keyed lookup carries a primary account
+     * number in its request body, and every request carries a minted internal credential.</p>
+     *
+     * @param baseUrl the configured base address; may be {@code null} or blank, which the policy refuses
+     * @param approvedOrigin the origin the base address is required to equal; may be {@code null}
+     * @throws IllegalStateException if the address is absent, is not an absolute HTTPS origin free of user
+     *     information, path, query and fragment, or is not the approved origin
+     */
+    private static void requireApprovedOrigin(String baseUrl, String approvedOrigin) {
+        ApprovedOriginPolicy.require(ACCOUNT_CONTEXT_PROPERTY_PREFIX, baseUrl, approvedOrigin,
+                new ApprovedOriginPolicy.Sensitivity(
+                        "the cross-reference lookup this client makes carries a primary account number and"
+                                + " every request carries a minted internal credential, so there is no safe"
+                                + " default address to fall back to",
+                        "the lookup body carries a primary account number and every request carries a"
+                                + " minted internal credential",
+                        "an unapproved destination receives a live internal credential, and a card-keyed"
+                                + " lookup hands it a primary account number in the same request"));
     }
 
     /**
@@ -332,6 +417,43 @@ public class RestAccountContextClient implements AccountContextClient {
     }
 
     /**
+     * Renders a numeric account identifier as the eleven digit characters this side's contract declares.
+     *
+     * <p>Purpose: the account context publishes {@code accountId} on both cross-reference reads as a JSON
+     * NUMBER, because its column is {@code BIGINT}; every shape on this side declares it as eleven digit
+     * CHARACTERS, because {@code XREF-ACCT-ID} is {@code PIC 9(11)} at line 7 of
+     * {@code app/cpy/CVACT03Y.cpy} and an unsigned display numeric is right-justified and ZERO-filled. This
+     * method is the one place the two representations meet.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: both conversions used {@code String.valueOf}, and the comment beside one
+     * of them claimed the rendering was done "so a leading zero survives" -- which is the opposite of what
+     * {@code String.valueOf} does. It renders {@code 1L} as {@code "1"}. That is not a theoretical loss on
+     * this data: EVERY one of the fifty shipped accounts is numbered {@code 00000000001} through
+     * {@code 00000000050} in {@code app/data/ASCII/acctdata.txt}, so the seam carried a one-character
+     * identifier for all fifty of them where its own interface -- {@link AccountContextClient.CardXref},
+     * whose Javadoc requires digit characters "so a leading zero survives" -- declares eleven. The
+     * identifier then travelled onward into a transaction-add preview and into the ledger key path at a
+     * width no other shape in this system uses. Zero-filling here is what makes the stated contract true.</p>
+     *
+     * <p>Assumptions: the width is taken from {@link TransactionAddService#ACCOUNT_ID_WIDTH} rather than
+     * declared again here, so this rendering and the inbound validation that admits an eleven-character
+     * submission cannot disagree about how wide the field is. The sibling consumer in
+     * {@code authorization-service} renders the same value the same way for the same reason, which is why
+     * the two contexts' onward calls agree.</p>
+     *
+     * <p>Assumptions: {@link java.util.Locale#ROOT} is passed explicitly, because a format specifier for a
+     * decimal integer is locale-sensitive -- a default locale with non-Latin digits or a grouping separator
+     * would render an identifier this system cannot parse back.</p>
+     *
+     * @param accountId the identifier as the account context published it, a {@code long}
+     * @return the identifier as exactly {@link TransactionAddService#ACCOUNT_ID_WIDTH} digit characters,
+     *     never {@code null}
+     */
+    private static String renderAccountId(long accountId) {
+        return String.format(Locale.ROOT, "%0" + TransactionAddService.ACCOUNT_ID_WIDTH + "d", accountId);
+    }
+
+    /**
      * The account context's card-keyed cross-reference answer, declared in full.
      *
      * <p>Refactoring Rationale: EVERY published member is declared, including {@code customerId}, which
@@ -367,7 +489,7 @@ public class RestAccountContextClient implements AccountContextClient {
             //       a number, because the seam record declares it as characters so a leading zero survives.
             //       The account context publishes it as a JSON number because its column is BIGINT; the
             //       screen contract on this side is an eleven-character field.
-            return new CardXref(String.valueOf(this.accountId), requestedCardNumber);
+            return new CardXref(renderAccountId(this.accountId), requestedCardNumber);
         }
     
         /**
@@ -415,7 +537,7 @@ public class RestAccountContextClient implements AccountContextClient {
          *     published, never {@code null}
          */
         private CardXref toCardXref() {
-            return new CardXref(String.valueOf(this.accountId), this.cardNumber);
+            return new CardXref(renderAccountId(this.accountId), this.cardNumber);
         }
 
         /**

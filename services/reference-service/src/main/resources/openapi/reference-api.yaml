@@ -388,9 +388,37 @@ paths:
         Paging is by key and never by ordinal. Send no cursor to obtain the
         opening page; thereafter copy lastKey from the page in hand and send
         direction next to advance, or copy firstKey and send direction previous
-        to retreat. When the filters exclude every row the page is empty and
-        both cursors are null, which the baseline reports with the message text
-        recorded on the TransactionTypePage schema.
+        to retreat.
+
+
+        An empty result is NOT one condition here, and which condition it is
+        decides the status. A filter that matches nothing is refused with 400; a
+        walk that runs out of rows succeeds with an empty page. The baseline draws
+        exactly that line, in two different paragraphs of the same program. Its
+        cross-edit paragraph at
+        app/app-transaction-type-db2/cbl/COTRTLIC.cbl lines 1239 to 1266 runs
+        BEFORE the cursor is opened and only when at least one filter is valid --
+        that is its own opening condition at lines 1241 to 1246 -- and when the
+        filter count is zero it sets INPUT-ERROR at line 1252, flags each supplied
+        filter NOT-OK at lines 1253 to 1259, protects the selection column, and
+        moves 'No Records found for these filter conditions' at line 1264. Its
+        fetch loop reaches SQLCODE +100 at line 1696 and sets no error and no
+        field flag at all: it records only that no further page exists, reporting
+        'No more pages for these search conditions' at line 1679 when the caller
+        had paged forward, or 'No records found for this search condition.' at
+        line 1704 when the first screen rendered no row. A refused filter is
+        therefore a field-level input error and an exhausted walk is a successful
+        empty screen.
+
+
+        This operation answers 400 when a supplied filter matches no row, carrying
+        that sentence and both submitted filter fields in fieldErrors at the
+        NOT_OK state, and answers 200 with an empty page when a walk is exhausted
+        or the collection holds no row at all. All three sentences are published
+        on the ReferenceMessageCatalogue schema as noRecordsFoundForFilters,
+        noMorePagesForSearch and noRecordsFoundForSearch, differing from one
+        another in capitalisation and terminal punctuation exactly as the baseline
+        declares them.
       parameters:
         - $ref: '#/components/parameters/CorrelationIdHeader'
         - $ref: '#/components/parameters/Cursor'
@@ -403,8 +431,22 @@ paths:
             One page of transaction types, together with the two cursor
             positions and the forward availability flag needed to walk the set.
             An empty page is a success rather than a 404: a collection with no
-            matching row exists and is empty, and the baseline reports the same
-            condition on its own list screen rather than as a failure.
+            row to return exists and is empty, and the baseline's fetch loop
+            reports that on a successfully rendered screen rather than as a
+            failure.
+
+
+            Refactoring Rationale: this description previously added that the
+            baseline reports "the same condition" on its list screen rather than
+            as a failure, and that was wrong for the case a caller meets most
+            often. A SUPPLIED FILTER matching nothing IS a failure in the
+            baseline -- its cross-edit paragraph sets INPUT-ERROR and flags the
+            filter fields before the cursor is ever opened -- so that case is
+            answered with 400 and never with this response. The two conditions
+            this response covers are a walk that has run out of rows and a
+            collection with no rows at all, neither of which the baseline treats
+            as an input error. The operation description sets out the line and
+            cites both paragraphs.
           headers:
             X-Correlation-Id:
               $ref: '#/components/headers/XCorrelationId'
@@ -462,12 +504,26 @@ paths:
         records and in the concatenated category key, not a surrogate. Creating
         a code that already exists is refused with 409 rather than silently
         replacing the existing row: the primary key declared by
-        db/migration/V1__reference.sql raises SQLSTATE 23505, which the shared
-        advice reaches through the same integrity branch as a restricted delete
-        and therefore answers with the referential sentence the Conflict response
-        gives. The divergence that follows from sharing one branch is registered
-        as D-REFERENCE-INTEGRITY-SENTENCE in
+        db/migration/V1__reference.sql raises SQLSTATE 23505, and the refusal
+        carries the sentence the baseline composes for a refused INSERT --
+        'Error inserting record into: TRANSACTION_TYPE Table. SQLCODE:', built
+        at lines 1607 to 1618 of
+        app/app-transaction-type-db2/cbl/COTRTUPC.cbl. It is NOT the referential
+        sentence a restricted delete carries: that one is composed in a
+        different paragraph of the same program, at line 1641, under the code
+        that only a DELETE raises, and its remedy -- remove the dependent rows --
+        cannot apply to a create that wrote nothing. Which paragraph the
+        baseline composes a sentence in is the discriminator, and the
+        consequence is registered as D-REFERENCE-INTEGRITY-SENTENCE in
         docs/architecture/cobol-to-service-traceability.md.
+
+
+        A repeated key is not told apart from any other integrity refusal of the
+        same insert in the sentence a caller receives, because the baseline's
+        insert paragraph has one failing arm for the whole statement and this
+        contract publishes only text the baseline declares. The two are
+        separated in the operational record instead, where the SQLSTATE and its
+        classification are written.
       parameters:
         - $ref: '#/components/parameters/CorrelationIdHeader'
       requestBody:
@@ -712,6 +768,41 @@ paths:
         Paging follows the identical keyset discipline as the transaction-type
         list, over the composite key rather than a single column, so a cursor
         from one collection is not interchangeable with a cursor from the other.
+
+
+        This collection DIFFERS from the transaction-type list in one respect,
+        deliberately, and the difference is stated here rather than left to be
+        discovered. Both declare the same two filters. But a filter matching no
+        row is refused there with 400 and succeeds here with an empty page.
+
+
+        Assumptions: the refusal on the type list is a transcription of one
+        specific baseline paragraph -- the cross-edit at
+        app/app-transaction-type-db2/cbl/COTRTLIC.cbl lines 1239 to 1266, which
+        sets INPUT-ERROR and flags the filter fields before its cursor opens --
+        and that paragraph belongs to the transaction-TYPE list screen. There is
+        no baseline list screen for categories to transcribe. The extension tree
+        holds two maps, COTRTLI.bms for the type list and COTRTUP.bms for the type
+        update, and no program in it browses CARDDEMO.TRANSACTION_TYPE_CATEGORY as
+        a list at all: both of COTRTLIC's declared cursors, at lines 339 and 355,
+        read CARDDEMO.TRANSACTION_TYPE.
+
+
+        Alternatives Considered: giving this collection the same refusal so the two
+        siblings agree. Rejected because it would INVENT a refusal the baseline
+        never performs, on a screen the baseline never had -- a behavioural change
+        with no reference to justify it, which transformation rule T9 forbids
+        without a documented divergence. Alternatives Considered: dropping the
+        refusal from the type list so the two agree the other way. Rejected because
+        that paragraph is real, is reached on every filtered browse, and its
+        sentence is one a user of that screen saw; removing it would discard
+        verbatim behaviour to buy symmetry. Trade-offs: two sibling collections
+        therefore answer one condition two ways, which is a genuine cost to a
+        caller writing one client for both. It is accepted and published rather
+        than smoothed over, because both halves are faithful to what the baseline
+        does and does not contain, and the register records the decision as
+        D-REFDATA-EMPTY-FILTER in
+        docs/architecture/cobol-to-service-traceability.md.
       parameters:
         - $ref: '#/components/parameters/CorrelationIdHeader'
         - $ref: '#/components/parameters/Cursor'
@@ -722,7 +813,10 @@ paths:
         '200':
           description: >-
             One page of transaction categories with the two cursor positions and
-            the forward availability flag.
+            the forward availability flag. An empty page is returned when a walk is
+            exhausted, when the collection holds no row, AND when a supplied filter
+            matches no row -- the last of which the transaction-type list refuses
+            with 400 instead, for the reason recorded on this operation.
           headers:
             X-Correlation-Id:
               $ref: '#/components/headers/XCorrelationId'
@@ -755,11 +849,28 @@ paths:
         db/migration/V1__reference.sql refers to reference.transaction_types, so
         a category naming an absent type is refused with 409 rather than stored
         as an orphan. This is the same rule that refuses the parent's delete,
-        seen from the other side, and it reaches this status through the same
-        integrity branch, so it carries the same referential sentence -- as does a
-        duplicate pair of codes, for the reason registered as
+        seen from the other side -- and the two sides carry DIFFERENT sentences,
+        because the baseline composes one per statement rather than one per
+        constraint. A refused insert here carries
+        'Error inserting record into: TRANSACTION_TYPE_CATEGORY Table. SQLCODE:',
+        which is the composition at lines 1607 to 1618 of
+        app/app-transaction-type-db2/cbl/COTRTUPC.cbl applied to the table this
+        insert names; the parent's refused delete carries the referential
+        sentence composed at line 1641 of the same program. A duplicate pair of
+        codes carries the same insert sentence as an absent parent, because that
+        insert paragraph has one failing arm for every non-zero outcome of the
+        statement. Both points are registered as
         D-REFERENCE-INTEGRITY-SENTENCE in
         docs/architecture/cobol-to-service-traceability.md.
+
+
+        The table named in the sentence is the BASELINE's name for it, taken
+        from line 1 of app/app-transaction-type-db2/ddl/TRNTYCAT.ddl, and not
+        the migrated reference.transaction_categories. The baseline has no
+        screen that inserts a category at all -- every INSERT statement in that
+        tree names CARDDEMO.TRANSACTION_TYPE -- so what is carried across
+        verbatim is the composition, with the table token it is built around
+        supplied by the statement that was refused.
       parameters:
         - $ref: '#/components/parameters/CorrelationIdHeader'
       requestBody:
@@ -1587,6 +1698,18 @@ paths:
         the aggregate the baseline leaves behind.
 
 
+        A submission refused before any action runs answers 400, and each entry in
+        that body's fieldErrors array names the offending member by its position in
+        the submitted array rather than by member name alone -- `actions[0].typeCd`,
+        `actions[1].description` and so on. This is stated because the array accepts
+        up to 500 actions, so an entry naming `description` with no position would
+        leave a caller to find the faulty action by bisection. The two conditions a
+        caller meets most often are an action whose token is not one of the three
+        names, and an INSERT or UPDATE supplying no description: the second carries
+        the reference tree's own blank-field sentence, published on the
+        ReferenceMessageCatalogue schema as noInputReceived, with the BLANK state.
+
+
         A record naming an action the program will not accept is reported by the
         baseline at line 124 with its own sentence. That sentence cannot be an
         outcome here, because the action enumeration refuses an unrecognised value
@@ -2207,20 +2330,38 @@ components:
     #       of two strings the baseline distinguishes.
     Conflict:
       description: >-
-        The request conflicts with the state already stored. Three conditions reach
+        The request conflicts with the state already stored. FOUR conditions reach
         this status and are never merged: a row that changed after the caller read
-        it, a row that could not be taken for update, and a delete refused while
-        rows in another table still reference the target. A caller acts differently
-        on each -- re-read and resubmit, retry unchanged, or remove the dependents
-        first -- and the sentence is what discriminates them, because the shared
-        advice composes one sentence per condition and no subordinate identifier.
-        All three therefore carry code CARDDEMO-0409, severity WARNING, subsystem
-        RELATIONAL and an EMPTY secondaryCode. Only the concurrency conflict reports
-        a version, and it reports it as a fieldErrors entry keyed "version" whose
-        message is the version the row now holds, so a caller can re-read, compare
-        and resubmit against that value rather than guessing; the other two carry an
-        empty fieldErrors array, because neither contends on a version. The body is
-        the shared error shape with no additional member.
+        it, a row that could not be taken for update, a delete refused while rows
+        in another table still reference the target, and an insert refused by the
+        integrity rules of the table it named. A caller acts differently on each --
+        re-read and resubmit, retry unchanged, remove the dependents first, or
+        change the key it supplied -- and the sentence is what discriminates them,
+        because the shared advice composes one sentence per condition and no
+        subordinate identifier. All four therefore carry code CARDDEMO-0409,
+        severity WARNING, subsystem RELATIONAL and an EMPTY secondaryCode. Only the
+        concurrency conflict reports a version, and it reports it as a fieldErrors
+        entry keyed "version" whose message is the version the row now holds, so a
+        caller can re-read, compare and resubmit against that value rather than
+        guessing; the other three carry an empty fieldErrors array, because none of
+        them contends on a version -- a refused insert wrote nothing, so there is no
+        revision for a caller to compare against. The body is the shared error
+        shape with no additional member.
+
+
+        The last two are separated because the BASELINE separates them, and it
+        separates them by the statement rather than by the constraint. One
+        foreign key bites in two directions: a delete of a transaction type that
+        categories still reference, and an insert of a category naming a type
+        that does not exist. Both arrive as SQLSTATE 23503, and
+        app/app-transaction-type-db2/cbl/COTRTUPC.cbl answers them in two
+        different paragraphs -- the child-records sentence at line 1641, reached
+        only from the code a restricted DELETE raises, and the table-naming
+        sentence at lines 1607 to 1618, reached from every non-zero outcome of an
+        INSERT. Answering both with the first told a caller that named an absent
+        parent, or reused a key, to delete dependent rows it had not created. The
+        change is registered as D-REFERENCE-INTEGRITY-SENTENCE in
+        docs/architecture/cobol-to-service-traceability.md.
       headers:
         X-Correlation-Id:
           $ref: '#/components/headers/XCorrelationId'
@@ -2252,6 +2393,40 @@ components:
                 correlationId: 4F1C0E423A554D219B7E6C0F
                 path: /api/v1/reference/transaction-types/01
                 timestamp: '2026-08-06 09:16:44.902355'
+                fieldErrors: []
+                abend: null
+            insertRefusedByTheTable:
+              summary: The insert was refused by the table it named
+              description: >-
+                The insert refusal, raised either by the primary key of the table
+                being written or by the foreign key it points at, and surfaced by
+                the shared advice. Every character outside the table name is
+                reproduced from the two literals the baseline composes at lines
+                1610 and 1611 of
+                app/app-transaction-type-db2/cbl/COTRTUPC.cbl, retaining the
+                capitalised 'Table' that arm writes and the closing colon with
+                nothing appended after it -- the baseline follows that colon with
+                the database's own code and diagnostic, and carrying those into a
+                body would name the constraint and quote the key that violated it
+                back to whoever holds the response. The table named is the
+                baseline's own unqualified name, so no response discloses the
+                schema or table this migration created. The example below is the
+                type table; a refused category insert carries
+                TRANSACTION_TYPE_CATEGORY in the same position, from line 1 of
+                app/app-transaction-type-db2/ddl/TRNTYCAT.ddl. The fieldErrors
+                array is empty because nothing was written, so there is no
+                revision to report, and the key the caller supplied is already in
+                the request it sent.
+              value:
+                code: CARDDEMO-0409
+                secondaryCode: ''
+                message: 'Error inserting record into: TRANSACTION_TYPE Table. SQLCODE:'
+                severity: WARNING
+                subsystem: RELATIONAL
+                status: 409
+                correlationId: 8B5D2A160E7F4C33A1D94E60
+                path: /api/v1/reference/transaction-types
+                timestamp: '2026-08-06 09:16:51.318204'
                 fieldErrors: []
                 abend: null
             recordChangedByAnotherCaller:
@@ -3278,10 +3453,20 @@ components:
       type: object
       description: >-
         One page of transaction types together with everything needed to walk the
-        ordered set by key in either direction. When the filters match no row the
-        page is empty and both cursors are null; the baseline reports that
-        condition with two different sentences depending on which of its screens a
-        user was on, both published on the ReferenceMessageCatalogue schema.
+        ordered set by key in either direction. When there is no row to return the
+        page is empty and both cursors are null.
+
+
+        Refactoring Rationale: this description previously said an empty page is
+        what a caller receives when "the filters match no row". It is not: a
+        supplied filter matching no row is refused with 400 before any row is
+        read, for the reason set out on the list operation. An empty page means a
+        walk that has run out of rows, or a collection holding none, and the
+        baseline reports those on a rendered screen with noMorePagesForSearch or
+        noRecordsFoundForSearch. This shape carries no message member, so a client
+        renders the appropriate sentence from the ReferenceMessageCatalogue
+        schema, choosing between those two on whether it was paging forward or
+        opening the collection.
       required:
         - items
         - firstKey
@@ -4855,6 +5040,32 @@ components:
             app/app-transaction-type-db2/cbl/COTRTLIC.cbl line 1919 and
             COTRTUPC.cbl line 1641; the closing colon is retained because the
             baseline prefixes a database diagnostic with it.
+        insertRefusedPrefix:
+          type: string
+          const: 'Error inserting record into:'
+          description: >-
+            The opening half of the sentence a refused INSERT carries as its 409
+            message, from the first literal of the STRING in 9700-INSERT-RECORD at
+            app/app-transaction-type-db2/cbl/COTRTUPC.cbl line 1610. It is published
+            in two halves because the baseline writes a table name between them:
+            line 1611 declares ' TRANSACTION_TYPE Table. SQLCODE:' as one literal,
+            whose leading space and trailing text are insertRefusedSuffix below. The
+            baseline hardcodes the token because that screen maintains one table;
+            this context owns two, so the token is supplied by the statement that
+            was refused and every character around it is the baseline's.
+        insertRefusedSuffix:
+          type: string
+          const: ' Table. SQLCODE:'
+          description: >-
+            The closing half of that same sentence, being the tail of
+            app/app-transaction-type-db2/cbl/COTRTUPC.cbl line 1611 after the table
+            name, including its leading space. The capitalised 'Table' is that arm's
+            own and is not normalised against the lower-case 'table' the read arm
+            writes at line 1500 -- each is carried as written. The closing colon is
+            retained because the baseline prefixes the database's code and
+            diagnostic with it, and nothing is appended after it here: those details
+            name the constraint and quote the offending key, so they go to the
+            operational record instead of the response.
         deleteFailed:
           type: string
           const: 'Delete failed with message:'

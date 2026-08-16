@@ -25,11 +25,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataAccessException;
 import org.springframework.messaging.Message;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
+import software.amazon.awssdk.awscore.exception.AwsServiceException;
+import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.MessageAttributeValue;
 import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
@@ -433,6 +436,24 @@ public class InquiryMessageListener {
      */
     private static final String DIAGNOSTIC_READ_FAILED = "ERROR WHILE READING ACCTFILE";
 
+    /**
+     * The verbatim return message the baseline reports when the reply itself cannot be put.
+     *
+     * <p>⚠️ Purpose: this literal did not exist here, and its absence is what made every diagnostic this
+     * class published say the account file could not be read. The baseline keeps the two conditions apart:
+     * {@code 4100-PUT-REPLY} moves this literal into the return-message field at physical line 496 with
+     * the REPLY queue's name beside it at physical line 495, while the read arm at physical lines 442 and
+     * 443 moves {@link #DIAGNOSTIC_READ_FAILED} with the INPUT queue's name at physical line 441. An
+     * operator reading the sink therefore learns from the baseline which subsystem to look at, and learned
+     * the wrong one from the target -- a reply the queue service refused was reported as a database read
+     * failure, sending the reader to the account table over a queue outage.</p>
+     *
+     * <p>Assumptions: nine characters, so no truncation applies. The field is {@code PIC X(25)} and this
+     * value is carried at its declared spelling rather than expanded to something more descriptive,
+     * because the value IS the contract: a reader of that sink matches on it.</p>
+     */
+    private static final String DIAGNOSTIC_PUBLISH_FAILED = "MQPUT ERR";
+
     // WHY : Assumptions: the six widths below are the declared widths of the diagnostic group at physical
     //   lines 58 to 67, whose nine members are a 25-character paragraph name, a gap, a 25-character return
     //   message, a gap, a 2-digit condition code, a gap, a 5-digit reason code, a gap and a 48-character
@@ -463,6 +484,58 @@ public class InquiryMessageListener {
             + DIAGNOSTIC_CONDITION_CODE_WIDTH + DIAGNOSTIC_GAP_WIDTH
             + DIAGNOSTIC_REASON_CODE_WIDTH + DIAGNOSTIC_GAP_WIDTH
             + DIAGNOSTIC_QUEUE_NAME_WIDTH;
+
+    /**
+     * The label the classified fault condition is published under.
+     *
+     * <p>⚠️ Refactoring Rationale: the diagnostic's free-text tail used to carry the failure's own chain of
+     * TYPES and stack frames, produced by {@link ThrowableDigest}, and that is what this label and the
+     * three conditions below replace. Withholding the exception MESSAGE was correct and is kept -- a
+     * driver's message is the one part of a failure a request value can be interpolated into -- but the
+     * type chain was not a safe remainder: it published this service's own package names, its class names
+     * and the queue client's internal exception hierarchy onto a queue, and it named the line a failure
+     * was raised at. None of that is actionable by the operator reading the sink, all of it is a map of
+     * the implementation for anyone else reading it, and every one of those names changes when the code is
+     * refactored -- so a reader who had come to match on one would be broken by a rename that changed no
+     * behaviour. The full digest is still emitted, at error level, in this service's own log, where the
+     * correlation identifier ties it to this exact exchange.</p>
+     */
+    private static final String CONDITION_LABEL = "condition=";
+
+    /**
+     * The classified condition for a failure raised by the queue client.
+     *
+     * <p>Assumptions: this is the condition an operator can act on directly -- a missing queue, a refused
+     * credential, an unreachable endpoint -- and it is the one the baseline's own {@code MQPUT} and
+     * {@code MQGET} arms report through their completion and reason codes.</p>
+     */
+    private static final String CONDITION_QUEUE_UNAVAILABLE = "queue-unavailable";
+
+    /**
+     * The classified condition for a failure raised by the data-access layer.
+     */
+    private static final String CONDITION_DATASTORE_UNAVAILABLE = "datastore-unavailable";
+
+    /**
+     * The classified condition for anything else.
+     *
+     * <p>Assumptions: the set is CLOSED at three and this is the catch-all, so a failure type nobody
+     * anticipated still produces a diagnostic rather than an empty tail. Enumerating more conditions was
+     * rejected: each additional one is a further internal distinction published onto a queue, and the
+     * operator's next step for all of them is the same -- read this service's log at this correlation
+     * identifier, where the full digest is.</p>
+     */
+    private static final String CONDITION_INTERNAL = "internal";
+
+    /**
+     * The label the queue service's own HTTP status is published under, where the failure carries one.
+     *
+     * <p>Assumptions: an HTTP status is a value of the queue service's PUBLIC contract rather than of this
+     * implementation, so it survives any refactoring here and tells an operator whether the queue service
+     * refused the request or failed to serve it. A failure that carries none -- a connection that never
+     * reached a server, or a data-access failure -- publishes no status rather than a fabricated zero.</p>
+     */
+    private static final String STATUS_LABEL = " status=";
 
     /**
      * The account master rows this consumer reads.
@@ -505,15 +578,33 @@ public class InquiryMessageListener {
     private final String errorQueueUrl;
 
     /**
-     * The name of the error queue, as the diagnostic block declares it.
+     * The name of the REQUEST queue, as the diagnostic block declares it.
      *
-     * <p>Assumptions: derived from {@link #errorQueueUrl} at construction rather than configured separately,
-     * so the name a diagnostic reports and the queue it is published to cannot name two different queues. The
-     * baseline's diagnostic field is a queue NAME -- {@code app/app-vsam-mq/cbl/COACCT01.cbl} has no addresses
-     * to put there -- and it is a declared forty-eight-character field, so an address would be both the wrong
-     * kind of value and long enough to be truncated mid-host.</p>
+     * <p>⚠️ Refactoring Rationale: this field replaces one holding the ERROR queue's name, which every
+     * diagnostic this class published named regardless of what had failed. That is not what the baseline
+     * puts in the field. {@code app/app-vsam-mq/cbl/COACCT01.cbl} names the ERROR queue only when the
+     * failure is ABOUT the error queue -- its open at physical line 318, its put at 532, its close at 615
+     * -- and names the INPUT queue for a failure that is about no queue at all, which is exactly what its
+     * account-file read arm does at physical line 441. The queue name is a diagnostic's SUBJECT, not the
+     * address it was published to, and reporting the sink's own name told a reader nothing they did not
+     * already know from having read it there.</p>
+     *
+     * <p>Assumptions: derived from the configured request destination at construction, so the name a
+     * diagnostic reports and the queue this consumer is bound to cannot name two different queues. The
+     * baseline's field is a queue NAME -- that program has no addresses to put there -- and it is a
+     * declared forty-eight-character field, so an address would be both the wrong kind of value and long
+     * enough to be truncated mid-host.</p>
      */
-    private final String errorQueueName;
+    private final String requestQueueName;
+
+    /**
+     * The name of the REPLY queue, as the diagnostic block declares it.
+     *
+     * <p>Assumptions: derived from {@link #replyQueueUrl} for the same reason, and it is the subject of one
+     * condition only -- a reply this consumer could not put -- which the baseline reports at physical lines
+     * 495 and 496.</p>
+     */
+    private final String replyQueueName;
 
     /**
      * The clock the expiry comparison reads the current instant from.
@@ -555,6 +646,9 @@ public class InquiryMessageListener {
      * @param accounts the account master repository; must not be {@code null}
      * @param replies the reply renderer; must not be {@code null}
      * @param sqs the queue client; must not be {@code null}
+     * @param requestQueueUrl the configured request destination, as the {@code @SqsListener} annotation
+     *     below reads it -- either a fully-qualified queue address or a bare queue name; must not be
+     *     {@code null} or blank
      * @param replyQueueUrl the configured reply destination as a fully-qualified queue address; must
      *     not be {@code null} or blank
      * @param errorQueueUrl the configured error destination as a fully-qualified queue address; must
@@ -571,6 +665,7 @@ public class InquiryMessageListener {
     public InquiryMessageListener(AccountRepository accounts,
             AccountInquiryReplyMapper replies,
             SqsClient sqs,
+            @Value("${carddemo.account.inquiry.request-queue-url}") String requestQueueUrl,
             @Value("${carddemo.account.inquiry.reply-queue-url}") String replyQueueUrl,
             @Value("${carddemo.account.inquiry.error-queue-url}") String errorQueueUrl,
             InquiryReplyLedger ledger,
@@ -601,7 +696,18 @@ public class InquiryMessageListener {
                 "carddemo.account.inquiry.reply-queue-url");
         this.errorQueueUrl = QueueDestination.requireQueueUrl(errorQueueUrl,
                 "carddemo.account.inquiry.error-queue-url");
-        this.errorQueueName = QueueDestination.queueNameOf(this.errorQueueUrl);
+        this.replyQueueName = QueueDestination.queueNameOf(this.replyQueueUrl);
+
+        // WHY : Assumptions: the request destination is NOT put through the address validation the other
+        //   two are, and the asymmetry is deliberate. This value is consumed by the @SqsListener
+        //   annotation, and the pinned spring-cloud-aws-sqs 4.1.0 accepts EITHER form there:
+        //   QueueAttributesResolver.isValidQueueUrl uses an http or https value verbatim and issues a
+        //   GetQueueUrl lookup for a bare name. Requiring an address here would therefore refuse a
+        //   configuration the framework runs perfectly well, and it would refuse it at construction --
+        //   stopping a service over a value used only to LABEL a diagnostic. The other two destinations are
+        //   published to by this class, which has no lookup, so for them an address is the contract.
+        this.requestQueueName = queueNameFrom(requestQueueUrl,
+                "carddemo.account.inquiry.request-queue-url");
         this.ledger = Objects.requireNonNull(ledger, "ledger must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
         Objects.requireNonNull(transactionManager, "transactionManager must not be null");
@@ -631,7 +737,52 @@ public class InquiryMessageListener {
      *   a second, weaker validator beside the real one is an invitation to use it: the next destination added
      *   to this class would have had two helpers to choose between, one of which admits a value the reply
      *   path cannot address.
+     * WHY : ⚠️ Assumptions: queueNameFrom below is NOT that helper returning under another name, and the
+     *   distinction is the one the paragraph above turns on. It yields a NAME for the diagnostic's
+     *   forty-eight-character queue-name field and nothing else; it never yields a value anything is
+     *   published to, because the only two destinations this class publishes to are the fields
+     *   QueueDestination.requireQueueUrl produced. So there is no pair of validators to choose between: a
+     *   destination added to this class still has exactly one way to be accepted.
      */
+
+    /**
+     * Derives the queue name a diagnostic reports from a configured destination in either accepted form.
+     *
+     * <p>Purpose: the baseline's diagnostic field is a queue NAME, so a value configured as an address has
+     * to be reduced to one. The request destination is the only one this class accepts in two forms, for
+     * the reason recorded at the constructor: the listener annotation that consumes it accepts both.</p>
+     *
+     * <p>Assumptions: a value carrying a path separator is reduced through the shared
+     * {@link QueueDestination#queueNameOf(String)} so an address and a name cannot be reduced two
+     * different ways, and a value carrying none is already a name and is used as it stands.</p>
+     *
+     * <p>Assumptions: blankness is refused, and that is a check on the diagnostic's own field rather than
+     * on a destination. A blank here would publish diagnostics whose queue-name field was forty-eight
+     * spaces, which reads as a missing value rather than as a misconfiguration -- and the same property
+     * must resolve for the listener annotation in any case, so nothing that could otherwise run is stopped
+     * by refusing it.</p>
+     *
+     * @param value the configured destination, as an address or as a bare queue name; must not be
+     *     {@code null} or blank
+     * @param property the property name the value came from, so a refusal names what an operator must set;
+     *     must not be {@code null}
+     * @return the queue name, never {@code null} or empty
+     * @throws NullPointerException if {@code value} or {@code property} is {@code null}
+     * @throws IllegalArgumentException if the value is blank, or carries a path separator but names no
+     *     queue after it
+     */
+    private static String queueNameFrom(String value, String property) {
+        Objects.requireNonNull(property, "property must not be null");
+        Objects.requireNonNull(value, property + " must not be null");
+
+        String candidate = value.trim();
+        if (candidate.isEmpty()) {
+            throw new IllegalArgumentException(property
+                    + " must name the request queue: a diagnostic reporting a blank queue name cannot tell"
+                    + " an operator which exchange failed");
+        }
+        return candidate.indexOf('/') < 0 ? candidate : QueueDestination.queueNameOf(candidate);
+    }
 
     /**
      * Answers one account-inquiry request.
@@ -745,7 +896,18 @@ public class InquiryMessageListener {
     //   whose scheme is http or https and uses it verbatim, issuing a GetQueueUrl lookup only for a bare
     //   name. Passing the URL therefore removes a start-up round trip as well as matching what the
     //   deployment supplies for the other two destinations.
-    @SqsListener(queueNames = "${carddemo.account.inquiry.request-queue-url}")
+    // WHY : ⚠️ Assumptions: the container is given an EXPLICIT id, and it had none. Without one the
+    //   framework generates a positional identifier, which nothing can then resolve the container by --
+    //   so the container's running state was unreachable and this service reported itself healthy while
+    //   consuming nothing. The id is referenced from InquiryListenerHealth rather than repeated as a
+    //   literal, so the indicator and the container cannot come to name two different things; a mismatch
+    //   would not fail at start-up, it would simply make the health signal always report the consumer
+    //   missing. That agreement is asserted from this annotation by InquiryMessageListenerTest.
+    // WHY : Assumptions: the id is a stable NAME rather than a value derived from the queue, because the
+    //   queue address differs per environment while the health signal's identity must not: an operator
+    //   comparing two environments' health output has to be reading the same component in both.
+    @SqsListener(id = InquiryListenerHealth.REQUEST_CONTAINER_ID,
+            queueNames = "${carddemo.account.inquiry.request-queue-url}")
     public void onRequest(Message<String> message) {
         Objects.requireNonNull(message, "message must not be null");
 
@@ -769,6 +931,17 @@ public class InquiryMessageListener {
         //   not be able to carry a delimiter or a line terminator, and a reply must carry the requester's own
         //   bytes so it can match the answer to its request.
         MDC.put(MDC_CORRELATION_ID, MessagingCorrelationId.logSafe(correlationId));
+
+        // WHY : ⚠️ Refactoring Rationale: the step this exchange has reached is tracked so that a failure
+        //   can be reported against the right one, and it was not tracked at all: ONE catch arm below served
+        //   the whole method and reported every failure with the baseline's account-file literal. The
+        //   baseline keeps two arms apart -- the read's at physical lines 441 to 443 and the reply put's at
+        //   495 and 496 -- so a reply the queue service refused was published to the error sink as a
+        //   database read failure, which sends an operator to the account table over a queue outage. A
+        //   tracked step is used rather than nested try blocks because the answer step's two failures, the
+        //   ledger write and the send, are interleaved inside one collaborating method and no try block
+        //   placed here could separate them; the separation is made below, from the failure itself.
+        FailingStep step = FailingStep.ACCOUNT_READ;
         try {
             String rawExpiry = attribute(message, MessageExpiry.HEADER_EXPIRES_AT);
             if (MessageExpiry.isMalformed(rawExpiry)) {
@@ -799,14 +972,56 @@ public class InquiryMessageListener {
                     this.readTransaction.execute(status -> replyFor(request)),
                     "the read transaction returned no reply, which its callback cannot do");
 
+            // WHY : Assumptions: the step advances HERE, after the reply exists and before anything is
+            //   recorded or published, because everything from this point on is the baseline's
+            //   4100-PUT-REPLY and the durable claim this target adds around it. The destination is
+            //   resolved inside the call's argument list rather than before the advance because that
+            //   resolution cannot raise -- it compares the requested value against a configured one --
+            //   so there is no failure to attribute to either step.
+            step = FailingStep.REPLY_ANSWER;
+
             answerOnce(reply, resolveReplyDestination(requestedReplyTo), brokerMessageId, messageId,
                     correlationId);
         } catch (RuntimeException failure) {
-            reportFailure(failure, messageId, correlationId);
+            reportFailure(failure, step, messageId, correlationId);
             throw failure;
         } finally {
             MDC.remove(MDC_CORRELATION_ID);
         }
+    }
+
+    /**
+     * Which step of the exchange a failure was raised in.
+     *
+     * <p>Purpose: selects which of the baseline's two failure arms a diagnostic reports -- its literal and
+     * the queue it names -- so the sink says what actually failed. The baseline reaches those arms from two
+     * different paragraphs and therefore never has to decide; a single handler method does.</p>
+     *
+     * <p>Assumptions: TWO members and not three, even though the answer step has two distinguishable
+     * failures of its own. The ledger write and the send are separated by
+     * {@link #isPublishFailure(FailingStep, RuntimeException)} from the failure's own type rather than by a
+     * third member here, because a member would have to be advanced from inside
+     * {@link #answerOnce(String, String, String, String, String)} -- and that method has four paths through
+     * it, three of which send, so the advance would have to be repeated at each and would be silently wrong
+     * the first time a fifth path was added.</p>
+     */
+    private enum FailingStep {
+
+        /**
+         * Everything up to and including composing the reply: the expiry check, the decode and the keyed
+         * read.
+         *
+         * <p>Assumptions: the decode is inside this step rather than in one of its own, and that follows
+         * the baseline's paragraph boundary rather than a preference: {@code 4000-PROCESS-REQUEST-REPLY}
+         * reads the function code and the key out of the request and performs the read, and its single
+         * {@code WHEN OTHER} arm covers the whole of that work.</p>
+         */
+        ACCOUNT_READ,
+
+        /**
+         * Recording the answer durably and putting it on the reply queue.
+         */
+        REPLY_ANSWER
     }
 
     /**
@@ -1020,6 +1235,13 @@ public class InquiryMessageListener {
      * have retired the claim already, in which case this delivery's send was the duplicate and the count is
      * simply reported; the request is still acknowledged, because the requester has its answer.</p>
      *
+     * <p>Assumptions: every delivery that reaches the send step is COUNTED on the ledger row -- the first
+     * by the claim's own inserted value, each redelivery that re-sends by an explicit count taken before
+     * its send. That count is the operational signal for this exchange: a row whose {@code attempts} has
+     * climbed to the request queue's receive limit is a reply that could not be delivered at all, which is
+     * a fact neither {@code status} nor {@code sent_at} can express. A redelivery that finds a RETIRED
+     * claim is deliberately not counted, because it attempts no send.</p>
+     *
      * @param reply the framed reply this delivery composed; must not be {@code null}
      * @param destination the resolved reply destination; must not be {@code null}
      * @param brokerMessageId the queue service's own identifier for this delivery, or {@code null} when the
@@ -1078,6 +1300,20 @@ public class InquiryMessageListener {
             LOG.info("event=account.inquiry.duplicate-suppressed");
             return;
         }
+
+        // WHY : Assumptions: this delivery is counted BEFORE its re-send and in its own committed unit of
+        //   work, which is the only order that makes the count useful. The condition an operator reads
+        //   this column for is a reply whose send keeps failing, and on that path everything after this
+        //   line raises -- so a count taken afterwards would be the one count never recorded. The claim
+        //   itself counted the FIRST delivery for the same reason, and the two together make the column
+        //   equal to the number of deliveries that reached the send step.
+        // WHY : Assumptions: the outcome is not consulted. A false answer means the row was removed
+        //   between the conflict and this call, and the very next line reads the recorded reply this
+        //   delivery is about to re-send -- which was read before the removal could have happened -- so
+        //   there is nothing this delivery would do differently. The `orElseThrow` above is where a
+        //   vanished row is refused; repeating that decision here would refuse a re-send whose bytes are
+        //   already in hand.
+        this.ledgerTransaction.execute(status -> this.ledger.countSendAttempt(requestKey));
 
         LOG.warn("event=account.inquiry.reply-resent reason=claim-outstanding");
         publishReply(recorded.payload(), recorded.destination(), recorded.messageId(),
@@ -1249,9 +1485,15 @@ public class InquiryMessageListener {
      */
     private void reportProtocolFault(String attributeName, int length) {
         try {
+            // WHY : ⚠️ Refactoring Rationale: the queue named here is the REQUEST queue, and it was the
+            //   error queue. This condition is about a request that arrived on the request queue carrying an
+            //   unusable identity, so that is its subject; the error queue is merely where the report goes,
+            //   which the reader already knows from having read it there. The baseline names the input queue
+            //   for exactly this kind of condition -- a fault that is about a message rather than about a
+            //   queue -- at physical line 441.
             send(this.errorQueueUrl,
                     this.replies.frame(errorDiagnostic(PARAGRAPH_PROCESS_REQUEST_REPLY, null,
-                            this.errorQueueName,
+                            this.requestQueueName,
                             "identity-refused attribute=" + attributeName + " length=" + length)),
                     replyAttributes(null, null));
         } catch (RuntimeException reportingFailure) {
@@ -1323,7 +1565,23 @@ public class InquiryMessageListener {
      * be interpolated, and this buffer is published onto a queue, so the type chain answers what failed
      * without opening that channel.</p>
      *
+     * <p>⚠️ Refactoring Rationale: the failure is now rendered onto the queue as a CLASSIFIED condition
+     * from the closed set of three declared on this class, and it used to be rendered as the failure's own
+     * chain of types and stack frames. Withholding the exception message was right and is unchanged, but
+     * the type chain was not a safe remainder: it published this service's package and class names, the
+     * queue client's internal exception hierarchy and the line a failure was raised at, none of which the
+     * reader of that sink can act on and all of which changes under a refactoring that changes no
+     * behaviour. The digest is still emitted here, at error level, in this service's own log, where the
+     * correlation identifier in the logging context ties it to this exact exchange -- so nothing is lost to
+     * whoever is entitled to see it.</p>
+     *
+     * <p>⚠️ Assumptions: which arm is reported is decided from the STEP and, within the answer step, from
+     * the failure's own type. One arm served every failure before, so a reply the queue refused was
+     * published as an account-file read failure against the error queue's own name.</p>
+     *
      * @param failure the failure to report; must not be {@code null}
+     * @param step which step of the exchange raised it, which selects the baseline arm reported; must not
+     *     be {@code null}
      * @param messageId the request's message identifier to echo, or {@code null} to attach none
      * @param correlationId the request's correlation identifier to echo, possibly empty when none was
      *     supplied
@@ -1332,21 +1590,113 @@ public class InquiryMessageListener {
      *     attached to {@code failure} and suppressed deliberately, so a null argument is the only way this
      *     method can throw, and it means the caller had no failure to report
      */
-    private void reportFailure(RuntimeException failure, String messageId, String correlationId) {
+    private void reportFailure(RuntimeException failure, FailingStep step, String messageId,
+            String correlationId) {
+
         String digest = ThrowableDigest.of(failure);
-        LOG.error("event=account.inquiry.error-sink paragraph={} failure={}",
-                PARAGRAPH_PROCESS_REQUEST_REPLY, digest);
+        boolean publishFailed = isPublishFailure(step, failure);
+        String returnMessage = returnMessageFor(step, publishFailed);
+        String queueName = publishFailed ? this.replyQueueName : this.requestQueueName;
+
+        // WHY : Assumptions: the log line carries BOTH the step and the full digest, and it is the only
+        //   place the digest now appears. An operator reading the sink learns which arm failed and under
+        //   what condition; an operator entitled to this service's log learns the exact types and frames,
+        //   correlated by the identifier the logging context carries.
+        LOG.error("event=account.inquiry.error-sink paragraph={} step={} failure={}",
+                PARAGRAPH_PROCESS_REQUEST_REPLY, step, digest);
 
         try {
             send(this.errorQueueUrl,
                     this.replies.frame(errorDiagnostic(PARAGRAPH_PROCESS_REQUEST_REPLY,
-                            DIAGNOSTIC_READ_FAILED, this.errorQueueName, digest)),
+                            returnMessage, queueName, failureCondition(failure))),
                     replyAttributes(messageId, correlationId));
         } catch (RuntimeException reportingFailure) {
             if (reportingFailure != failure) {
                 failure.addSuppressed(reportingFailure);
             }
         }
+    }
+
+    /**
+     * Reports whether a failure in the answer step came from the queue client rather than from the ledger.
+     *
+     * <p>Assumptions: the queue client is identified by {@link SdkException}, which is the root of every
+     * failure the send can raise, and it is the only collaborator in the answer step that raises one. The
+     * ledger raises {@link org.springframework.dao.DataAccessException} and the vanished-row guard raises
+     * {@link IllegalStateException}, so neither can be mistaken for a send.</p>
+     *
+     * <p>Assumptions: the step is part of the test rather than the type alone. A failure raised by the
+     * queue client during the READ step is not reachable -- the read step publishes nothing -- but making
+     * the step a condition means a later change that did publish there would report the read arm rather
+     * than silently claiming the reply queue was the subject.</p>
+     *
+     * @param step which step raised the failure; must not be {@code null}
+     * @param failure the failure; must not be {@code null}
+     * @return {@code true} when the reply put is what failed
+     */
+    private static boolean isPublishFailure(FailingStep step, RuntimeException failure) {
+        return step == FailingStep.REPLY_ANSWER && failure instanceof SdkException;
+    }
+
+    /**
+     * Chooses the baseline return message one diagnostic reports.
+     *
+     * <p>Assumptions: a failure recording the answer durably reports NO return message, and the blank is
+     * deliberate rather than an omission. The durable claim has no counterpart in
+     * {@code app/app-vsam-mq/cbl/COACCT01.cbl} -- it exists because a queue acknowledgement is not a
+     * syncpoint -- so there is no literal to carry across, and inventing one would put a string into a
+     * wire field that a reader matching against the baseline's own set would not recognise. The condition
+     * is still named, in the diagnostic's free-text tail, which is where this class already reports the
+     * one other condition the baseline has no literal for.</p>
+     *
+     * @param step which step raised the failure; must not be {@code null}
+     * @param publishFailed whether the reply put is what failed, as decided by
+     *     {@link #isPublishFailure(FailingStep, RuntimeException)}
+     * @return the verbatim baseline literal, or {@code null} where the baseline declares none
+     */
+    private static String returnMessageFor(FailingStep step, boolean publishFailed) {
+        if (step == FailingStep.ACCOUNT_READ) {
+            return DIAGNOSTIC_READ_FAILED;
+        }
+        return publishFailed ? DIAGNOSTIC_PUBLISH_FAILED : null;
+    }
+
+    /**
+     * Classifies one failure into the closed set of conditions this class publishes.
+     *
+     * <p>Purpose: gives the reader of the error sink the one fact they can act on -- which subsystem
+     * refused the work -- without publishing anything about how this service is built.</p>
+     *
+     * <p>Assumptions: the queue service's own HTTP status is appended where the failure carries one, and it
+     * is appended rather than substituted because the status alone does not say which subsystem answered
+     * it. A status belongs to the queue service's PUBLIC contract, so it survives any refactoring here, and
+     * it separates a refusal an operator can correct -- a queue that does not exist, a credential that is
+     * not permitted -- from a service that failed to answer at all.</p>
+     *
+     * <p>Assumptions: a client-side failure carries no status and none is fabricated. A connection that
+     * never reached a server has no answer to report, and a zero in that field would read as one.</p>
+     *
+     * @param failure the failure to classify; must not be {@code null}
+     * @return the condition text, never {@code null}, containing no type name, no frame and no message
+     * @throws NullPointerException if {@code failure} is {@code null}
+     */
+    private static String failureCondition(RuntimeException failure) {
+        Objects.requireNonNull(failure, "failure must not be null");
+
+        String condition;
+        if (failure instanceof SdkException) {
+            condition = CONDITION_QUEUE_UNAVAILABLE;
+        } else if (failure instanceof DataAccessException) {
+            condition = CONDITION_DATASTORE_UNAVAILABLE;
+        } else {
+            condition = CONDITION_INTERNAL;
+        }
+
+        String reported = CONDITION_LABEL + condition;
+        if (failure instanceof AwsServiceException answered && answered.statusCode() > 0) {
+            reported = reported + STATUS_LABEL + answered.statusCode();
+        }
+        return reported;
     }
 
     /**

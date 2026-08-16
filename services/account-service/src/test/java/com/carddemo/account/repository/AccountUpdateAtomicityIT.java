@@ -176,24 +176,50 @@ class AccountUpdateAtomicityIT {
     private static final String ACCEPTED_BALANCE = "2000.00";
 
     /**
-     * The balance the rollback case submits: eleven integer digits against a column admitting ten.
+     * The balance the rollback case submits, which every Java edit accepts and the engine then refuses.
      *
-     * <p>Assumptions: the value passes every Java edit -- the scale is two, every character is a digit and
-     * no width rule applies to an amount's integer part -- and is refused by {@code NUMERIC(12,2)}. That
-     * asymmetry is the injection point, and it is the reason this case exercises the engine rather than a
-     * substitute.</p>
+     * <p>⚠️ Refactoring Rationale: this was previously {@code "99999999999.99"} -- eleven integer digits
+     * against a {@code NUMERIC(12,2)} column admitting ten -- on the stated assumption that "no width rule
+     * applies to an amount's integer part". That assumption no longer holds, and the change that ended it
+     * was a correction: every money field is now bounded by its copybook picture during the edit phase, so
+     * {@code CURR-BAL PIC S9(10)V99} refuses an eleven-digit amount as a field error. That is the required
+     * behaviour -- an over-wide amount is a client mistake answered with 400 and a named field, not a
+     * database failure answered with 500 -- and it removed this case's injection point, because the edit
+     * bound and the column precision are now deliberately the SAME bound.
+     *
+     * <p>Alternatives Considered: relaxing the money edit so this case could keep reaching the engine.
+     * Rejected outright -- it would reintroduce the defect the edit was added to fix, and it would let a
+     * test dictate production behaviour.
+     *
+     * <p>Alternatives Considered: finding some other client-supplied value that still fails at the engine.
+     * Rejected because there is no longer meant to be one: with the edits complete, no submission should be
+     * able to reach the account statement and break it. Searching for a survivor would be searching for a
+     * defect, and would leave this case resting on it.
+     *
+     * <p>Assumptions: the failure is therefore injected at the DATABASE rather than through the submission,
+     * by a constraint this case adds and removes around itself (see
+     * {@link #forbidTheSentinelBalance()}). What the case exists to prove is unchanged and is now stated
+     * more directly: when the account statement fails for ANY reason after the customer statement has been
+     * issued, neither row survives. Decoupling it from a validation gap also means no future edit can
+     * silently retire it.
      */
-    private static final String OVERFLOWING_BALANCE = "99999999999.99";
+    private static final String SENTINEL_BALANCE = "4242.42";
 
     /**
-     * The engine's own wording for the refusal the over-wide balance provokes.
+     * The check constraint this case installs so the account statement is refused by the engine.
+     */
+    private static final String SENTINEL_CONSTRAINT = "ck_accounts_atomicity_probe";
+
+    /**
+     * The engine's own wording for the refusal the sentinel balance provokes.
      *
      * <p>Assumptions: the refusal text is asserted and not merely the exception type, because the type alone
      * would be satisfied by a constraint failure anywhere in the unit of work -- including one on the
-     * CUSTOMER statement, which would invert what this case proves. Pinning the engine's wording keeps the
-     * case honest about what failed.</p>
+     * CUSTOMER statement, which would invert what this case proves. The constraint NAME is what is pinned,
+     * and it names a constraint that exists only on the account table, so the wording cannot be satisfied by
+     * a failure on any other statement.</p>
      */
-    private static final String REFUSED_STATEMENT_MARKER = "numeric field overflow";
+    private static final String REFUSED_STATEMENT_MARKER = SENTINEL_CONSTRAINT;
 
     /**
      * The table the refused statement must name, proving the failure landed on the SECOND flush.
@@ -410,9 +436,10 @@ class AccountUpdateAtomicityIT {
      * both rows are byte-for-byte what they were.</p>
      *
      * <p>Assumptions: the refusal is asserted as a {@code DataAccessException} rather than as a validation
-     * refusal, because the whole point is that no Java edit caught this value. Were the mapper to gain an
-     * integer-width rule later, this assertion would fail and say so, rather than quietly stopping short of
-     * the database and continuing to report a rollback it no longer exercised.</p>
+     * refusal, because the whole point is that no Java edit caught this value. The mapper HAS since gained
+     * exactly the rule that Javadoc anticipated -- every money field is now bounded by its copybook picture
+     * during the edit phase -- and this assertion did fail and say so, which is why the failure is now
+     * injected by a constraint rather than by an over-wide submission. See {@link #SENTINEL_BALANCE}.</p>
      *
      * <p>Assumptions: the version columns are asserted alongside the values. A row can be restored to its
      * original values while still carrying an incremented version, which would mean the write committed and
@@ -425,15 +452,25 @@ class AccountUpdateAtomicityIT {
         long accountVersionBefore = storedVersion("accounts", "account_id", ACCOUNT_ID);
         String revision = currentRevision();
 
-        assertThatThrownBy(() -> this.service.update(ACCOUNT_ID,
-                submission(SUBMITTED_LAST_NAME, OVERFLOWING_BALANCE), revision))
-                .as("the engine must refuse the account statement, not a Java edit ahead of it")
-                .isInstanceOf(DataIntegrityViolationException.class)
-                .hasMessageContaining(REFUSED_STATEMENT_MARKER)
-                .satisfies(raised -> assertThat(String.valueOf(raised.getMessage())
-                        .toLowerCase(Locale.ROOT))
-                        .as("the refused statement must be the one updating the account master")
-                        .contains(ACCOUNT_TABLE_MARKER));
+        forbidTheSentinelBalance();
+        try {
+            assertThatThrownBy(() -> this.service.update(ACCOUNT_ID,
+                    submission(SUBMITTED_LAST_NAME, SENTINEL_BALANCE), revision))
+                    .as("the engine must refuse the account statement, not a Java edit ahead of it")
+                    .isInstanceOf(DataIntegrityViolationException.class)
+                    .hasMessageContaining(REFUSED_STATEMENT_MARKER)
+                    .satisfies(raised -> assertThat(String.valueOf(raised.getMessage())
+                            .toLowerCase(Locale.ROOT))
+                            .as("the refused statement must be the one updating the account master")
+                            .contains(ACCOUNT_TABLE_MARKER));
+        } finally {
+            // WHY : Trade-offs: the constraint is dropped in a finally rather than in an @AfterEach so
+            //       that it exists for the shortest possible window and cannot leak into a sibling case
+            //       even if this one fails its assertions. The class runs against a container shared by
+            //       every case in it, so a leaked constraint would fail the committing case next to this
+            //       one and the cause would be reported far from here.
+            permitTheSentinelBalance();
+        }
 
         assertThat(storedLastName())
                 .as("the customer statement was issued before the failure and must not survive it")
@@ -447,6 +484,39 @@ class AccountUpdateAtomicityIT {
         assertThat(storedVersion("accounts", "account_id", ACCOUNT_ID))
                 .as("the account row must carry the version it was seeded with")
                 .isEqualTo(accountVersionBefore);
+    }
+
+    /**
+     * Installs a constraint that refuses the sentinel balance on the account table only.
+     *
+     * <p>Purpose: give the rollback case a failure that originates in the ENGINE, on the account statement,
+     * and that no Java edit can intercept -- which is precisely the situation the guarantee under test
+     * protects against.
+     *
+     * <p>Assumptions: the constraint is added before the unit of work begins and in its own transaction, so
+     * the statement the service issues is refused rather than the constraint creation itself. It names a
+     * single value rather than a range so that every other case in this class, and the seeded row it starts
+     * from, remain valid while it exists -- adding a constraint validates the rows already present.
+     *
+     * <p>Alternatives Considered: revoking the update privilege on the table instead. Rejected because a
+     * privilege refusal translates to a different exception family, so the case would no longer be asserting
+     * that a DATA failure rolls the unit of work back, which is the failure mode a posting or an edit
+     * actually produces.
+     */
+    private void forbidTheSentinelBalance() {
+        this.jdbc.execute("ALTER TABLE account.accounts ADD CONSTRAINT " + SENTINEL_CONSTRAINT
+                + " CHECK (curr_bal <> " + SENTINEL_BALANCE + ")");
+    }
+
+    /**
+     * Removes the constraint installed by {@link #forbidTheSentinelBalance()}.
+     *
+     * <p>Assumptions: {@code IF EXISTS} is used so that this is safe to call even when the constraint was
+     * never installed, which keeps the {@code finally} that calls it unable to mask an earlier failure with
+     * a second one.
+     */
+    private void permitTheSentinelBalance() {
+        this.jdbc.execute("ALTER TABLE account.accounts DROP CONSTRAINT IF EXISTS " + SENTINEL_CONSTRAINT);
     }
 
     /**

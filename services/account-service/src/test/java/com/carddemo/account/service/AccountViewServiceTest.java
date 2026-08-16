@@ -297,7 +297,11 @@ class AccountViewServiceTest {
         this.account = new Account(this.crossReference.getAccountId(), "Y",
                 new BigDecimal("-193.00"), new BigDecimal("1500.00"), new BigDecimal("250.00"),
                 LocalDate.of(2020, 1, 15), LocalDate.of(2027, 1, 31), LocalDate.of(2024, 1, 31),
-                new BigDecimal("2065.00"), new BigDecimal("0.00"), "1000101234", "DEFAULT");
+                // WHY : Assumptions: the group is ten characters because accounts.group_id is CHAR(10),
+                //   so every value the datastore returns is padded to ten. A seven-character fixture
+                //   described a row this schema cannot produce, and the assertion built on it recorded
+                //   the shorter published form as correct.
+                new BigDecimal("2065.00"), new BigDecimal("0.00"), "1000101234", "DEFAULT   ");
 
         this.customer = new Customer(this.crossReference.getCustomerId(), "ADA", "M", "LOVELACE",
                 "1 SYNTHETIC WAY", "SUITE 100", "TESTVILLE", "NY", "USA", "1000101234",
@@ -377,7 +381,10 @@ class AccountViewServiceTest {
         AccountViewResponse.AccountDetail detail = view.account();
         assertThat(detail).isNotNull();
         assertThat(detail.activeStatus()).isEqualTo("Y");
-        assertThat(detail.groupId()).isEqualTo("DEFAULT");
+        assertThat(detail.groupId())
+                .as("the group is published at the ten characters its CHAR(10) column declares")
+                .isEqualTo("DEFAULT   ")
+                .hasSize(10);
         assertThat(detail.currentBalance()).isEqualTo(Money.of(new BigDecimal("-193.00")));
         assertThat(detail.creditLimit()).isEqualTo(Money.of(new BigDecimal("1500.00")));
         assertThat(detail.cashCreditLimit()).isEqualTo(Money.of(new BigDecimal("250.00")));

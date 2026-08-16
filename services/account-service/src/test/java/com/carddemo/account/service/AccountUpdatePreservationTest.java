@@ -193,6 +193,74 @@ class AccountUpdatePreservationTest {
     }
 
     /**
+     * The marker a read RETURNS for a withheld identifier is resolved as PRESERVE, not stored.
+     *
+     * <p>Refactoring Rationale: this is the most destructive of the three preservation defects this class
+     * holds closed, and it was the one with no test. Every read withholds both protected identifiers behind
+     * {@code [REDACTED]}, so a client that reads an account, changes an address line and submits the record
+     * it holds sends that marker in the identifier components. The government-issued identifier has NO
+     * content edit -- the reference performs none on it -- so the eleven literal characters reached the
+     * mapper, were enciphered and were STORED as the customer's identifier reference. The real value was
+     * gone, the response reported success, and the column holds only ciphertext of whatever was last
+     * written, so nothing could recover it.</p>
+     *
+     * <p>Assumptions: the national identifier is asserted in the mixed arrangements too, because the rule
+     * admits ANY marked component. A rule written for ALL of them would resolve a submission carrying the
+     * marker in one component and digits in another as a REPLACEMENT, and the value it would then store is
+     * the marker's own characters interleaved with the caller's digits.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the withheld marker is resolved as PRESERVE on both protected identifiers")
+    void theWithheldMarkerIsResolvedAsPreserve() {
+        String withheld = CustomerMapper.IDENTIFIER_REDACTED;
+
+        assertThat(governmentIntentFor(withheld))
+                .as("storing the marker's characters would destroy the real identifier")
+                .hasToString("ProtectedValueUpdate[preserve]");
+
+        assertThat(nationalIntentFor(withheld, withheld, withheld))
+                .hasToString("ProtectedValueUpdate[preserve]");
+        assertThat(nationalIntentFor(withheld, "45", "6789"))
+                .as("any marked component means the identifier was not edited")
+                .hasToString("ProtectedValueUpdate[preserve]");
+        assertThat(nationalIntentFor("123", "45", withheld))
+                .hasToString("ProtectedValueUpdate[preserve]");
+    }
+
+    /**
+     * The two predicates the driver and the mapper share answer the same question the same way.
+     *
+     * <p>Assumptions: both are asserted here rather than only through their effects, because the edit
+     * driver calls them directly to decide whether to edit the identifier at all. If the two sides could
+     * disagree, the driver would accept a submission the mapper then treats as a replacement, or refuse one
+     * the mapper would have preserved -- and neither failure is visible from either side alone.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the shared unedited-identifier predicates admit exactly the intended values")
+    void theSharedUneditedIdentifierPredicatesAgree() {
+        String withheld = CustomerMapper.IDENTIFIER_REDACTED;
+
+        assertThat(CustomerMapper.isWithheldEcho(withheld)).isTrue();
+        assertThat(CustomerMapper.isWithheldEcho("REDACTED")).isFalse();
+        assertThat(CustomerMapper.isWithheldEcho(null)).isFalse();
+        assertThat(CustomerMapper.isWithheldEcho("*"))
+                .as("the removal marker is a different intent and must not be folded in")
+                .isFalse();
+
+        assertThat(CustomerMapper.nationalIdentifierUnedited(null, null, null)).isTrue();
+        assertThat(CustomerMapper.nationalIdentifierUnedited("   ", "  ", "    ")).isTrue();
+        assertThat(CustomerMapper.nationalIdentifierUnedited(withheld, null, null)).isTrue();
+        assertThat(CustomerMapper.nationalIdentifierUnedited("123", "45", "6789")).isFalse();
+        assertThat(CustomerMapper.nationalIdentifierUnedited("123", null, null))
+                .as("a partially supplied identifier IS an edit and must reach the edits")
+                .isFalse();
+    }
+
+    /**
      * Captures the government-identifier intent the mapper hands the entity for a submitted value.
      *
      * @param submitted the submitted value, the removal marker, or {@code null} for an omitted field

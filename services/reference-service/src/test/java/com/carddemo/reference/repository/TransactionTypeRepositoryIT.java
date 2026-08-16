@@ -75,6 +75,9 @@ import static org.assertj.core.api.Assertions.catchThrowableOfType;
 
 import com.carddemo.reference.domain.TransactionCategory;
 import com.carddemo.reference.domain.TransactionType;
+import com.carddemo.reference.dto.TransactionTypeResponse;
+import com.carddemo.reference.dto.TransactionTypeUpdateRequest;
+import com.carddemo.reference.service.TransactionTypeService;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -399,6 +402,58 @@ class TransactionTypeRepositoryIT extends ReferencePersistenceBase {
                 () -> this.types.saveAndFlush(duplicate)))
                 .as("a save reaches merge, so the duplicate does not arrive as an integrity violation")
                 .isNull();
+    }
+
+    /**
+     * Confirms a replace publishes the revision the row now holds, which only a flushed write can do.
+     *
+     * <p>Purpose: the sibling category route published the revision the CALLER had sent instead, so a
+     * client following the published instruction -- read the revision with a record and send it back --
+     * was refused on its next write with the data-changed conflict although nothing else had touched the
+     * row. This route was already correct; the property is asserted here so that it stays correct and so
+     * that the two routes are held to one contract rather than one of them being the only route with a
+     * case for it.</p>
+     *
+     * <p>Assumptions: the case is engine-backed and {@code @Transactional} because the failure it guards
+     * against exists only in that combination. The provider increments the counter when it ISSUES the
+     * update, so with a transaction open a non-flushing save defers the statement, and the increment,
+     * past the point where the reply is composed. Outside a transaction each repository call commits on
+     * its own and the reply looks correct, so a case without the ambient transaction would pass either
+     * way.</p>
+     *
+     * <p>Assumptions: the service is built here over the injected repositories rather than injected,
+     * which is the arrangement this package's charter already blesses -- the property is observable only
+     * against a real engine, this package is where the engine is, and the alternative starts a second
+     * engine in another package to gain a directory. The category repository is already injected for the
+     * cross-table seed audit, so nothing new is added to satisfy the constructor.</p>
+     *
+     * <p>Trade-offs: the write is rolled back with the ambient transaction, so the seeded description is
+     * left as the migration wrote it and the committed-state case below still holds.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @Transactional
+    @DisplayName("a replace publishes the incremented revision, and the next replace accepts it")
+    void aReplacePublishesTheIncrementedRevision() {
+        TransactionTypeService service = new TransactionTypeService(this.types, this.categories);
+        TransactionType seeded = this.types.findByTypeCd("01").orElseThrow();
+        long opening = seeded.getVersion();
+
+        TransactionTypeResponse first = service.replace("01",
+                new TransactionTypeUpdateRequest("Purchase replaced", opening));
+
+        assertThat(first.version())
+                .as("the reply must carry the revision the row now holds, not the one the caller sent")
+                .isEqualTo(opening + 1);
+
+        TransactionTypeResponse second = service.replace("01",
+                new TransactionTypeUpdateRequest("Purchase replaced again", first.version()));
+
+        assertThat(second.version())
+                .as("a caller resubmitting with the revision the previous reply handed it must be"
+                        + " accepted, which is the read-modify-write loop the contract documents")
+                .isEqualTo(opening + 2);
     }
 
     /**

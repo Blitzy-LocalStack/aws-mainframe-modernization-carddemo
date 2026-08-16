@@ -697,14 +697,32 @@ tables, and nothing else.
 
 ### 5.1 `batch.batch_run` — the step ledger
 
-`batch_run(run_id, step_name, status, started_at, finished_at, return_code)` over
-a surrogate key, **unique on `(run_id, step_name)`**, so an orchestrator redrive
-of an already-completed step is a no-op rather than a duplicate row. The natural
-key is not the identity because both of its parts are externally supplied
-strings.
+`batch_run(run_id, step_name, status, started_at, finished_at, return_code, attempt)`
+over a surrogate key `id`, **unique on `(run_id, step_name)`**, so an orchestrator
+redrive of an already-completed step is a no-op rather than a duplicate row. The
+natural key is not the identity because both of its parts are externally supplied
+strings. That is **eight columns** and **seven named constraints** —
+`pk_batch_run`, `uq_batch_run_run_step`, `ck_batch_run_status`,
+`ck_batch_run_return_code`, `ck_batch_run_lifecycle`,
+`ck_batch_run_finished_after_started` and `ck_batch_run_attempt` — and
+`BatchRunRepositoryIT` asserts both figures against the live catalog.
 
-Three check constraints keep the ledger from recording an impossible run, and
-each earns its place:
+> ⚠️ **`V1__batch.sql`'s own header states the pre-`attempt` shape (seven columns,
+> five constraints), and it is deliberately left saying so.** That file has been
+> applied in real environments, and Flyway's checksum covers the whole file,
+> comments included — so correcting the header in place makes every environment
+> that already ran it refuse to start with a checksum mismatch. That is not
+> hypothetical: it is exactly what a comment-only edit to this file and to
+> `reference-service`'s `V1__reference.sql` did, and
+> `ReleasedMigrationImmutabilityTest` in `common-lib` now fails the build for any
+> such edit. The accurate post-state therefore lives **here**, where it can be
+> maintained, and the migration keeps the bytes it was released with. Alternatives
+> Considered: a no-op `V3` whose only content is a corrected comment. Rejected
+> because a migration that changes nothing is a poor carrier for documentation and
+> would still leave the stale text in place beside it.
+
+The check constraints keep the ledger from recording an impossible run, and each
+earns its place:
 
 - `status` is one of `STARTED`, `COMPLETED`, `FAILED`, stored by name rather than
   by ordinal so that reordering the Java constants cannot redefine stored rows.
@@ -716,6 +734,9 @@ each earns its place:
   all**. Assumptions: only `FAILED` admits a null code, because a killed container
   reaches a terminal state without ever publishing one, and a row must not be able
   to claim it completed and hard-failed at once.
+- `ck_batch_run_finished_after_started` orders the two timestamps, and
+  `ck_batch_run_attempt` floors the redrive counter at one, so a row can neither
+  finish before it started nor claim a zeroth attempt.
 
 The Spring Batch `JobRepository` tables — job instance, job execution, execution
 parameters, step execution, and the two execution-context tables, with their

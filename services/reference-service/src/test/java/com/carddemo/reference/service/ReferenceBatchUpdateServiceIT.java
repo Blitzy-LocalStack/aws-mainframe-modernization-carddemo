@@ -172,6 +172,15 @@ class ReferenceBatchUpdateServiceIT {
         assertThat(reply.outcomes().get(0).outcome())
                 .as("a modifying statement executed outside a transaction is refused, not applied")
                 .isEqualTo(ReferenceBatchUpdateService.OUTCOME_APPLIED);
+        // WHY : Assumptions: the SENTENCE is asserted against the baseline literal, not against the
+        //       service's own constant. This path published an authored 'Record applied...' for every
+        //       action kind while the three verbatim literals sat wired to the record-stream path, and
+        //       every assertion that touched them named a constant and so agreed with whatever it said.
+        //       Comparing against the characters at COBTUPDT.cbl line 153 is what makes a reversion fail
+        //       here against a real engine rather than in a reviewer's reading.
+        assertThat(reply.outcomes().get(0).message())
+                .as("10031-INSERT-DB zero arm, COBTUPDT.cbl line 153, verbatim")
+                .isEqualTo("RECORD INSERTED SUCCESSFULLY");
         assertThat(reply.returnCode()).isEqualTo(ReferenceBatchUpdateService.RETURN_CODE_CLEAN);
 
         assertThat(this.types.findByTypeCd(UNSEEDED_TYPE_CD))
@@ -236,6 +245,19 @@ class ReferenceBatchUpdateServiceIT {
         assertThat(reply.outcomes().get(0).applied())
                 .as("a code the seed already carries is refused by the primary key")
                 .isFalse();
+        // WHY : ⚠️ Assumptions: the refusal carries the baseline's SQL-access composition and not an
+        //       authored 'Record already exists...'. 10031-INSERT-DB has no arm for a duplicate key at
+        //       all -- a search of that program for the Db2 code returns nothing -- so a repeated key
+        //       reaches its negative arm at line 154 and is answered with the two literals of lines 156
+        //       and 157. This is asserted against a real engine because the state that selects it is
+        //       raised by the database rather than by a reading, so a mocked case cannot reach it.
+        assertThat(reply.outcomes().get(0).message())
+                .as("COBTUPDT.cbl lines 156 and 157, composed with no separator and ending at the colon")
+                .isEqualTo("Error accessing: TRANSACTION_TYPE table. SQLCODE:");
+        assertThat(reply.outcomes().get(0).message())
+                .as("no database state, constraint name or driver text may travel to a caller")
+                .doesNotContain("23505")
+                .doesNotContain("pk_transaction_types");
         assertThat(reply.outcomes().get(1).applied())
                 .as("the run continues past a refusal, which is the baseline's own behaviour")
                 .isTrue();
@@ -273,6 +295,21 @@ class ReferenceBatchUpdateServiceIT {
         assertThat(reply.outcomes().get(0).applied())
                 .as("a type a category still references cannot be removed")
                 .isFalse();
+        // WHY : Assumptions: the STATUS and the sentence are both asserted, because the module README
+        //       claimed this operation answered 409 for this condition and neither the runtime nor the
+        //       published contract does. COBTUPDT has no SQLCODE -532 arm at all, so its generic negative
+        //       arm answers a restricted delete like any other refused statement, and 9999-ABEND grades
+        //       the run at 4 and reads the next record. That is a 200 carrying one FAILED action, not a
+        //       refusal of the request, and the two are told apart here rather than in prose.
+        assertThat(reply.outcomes().get(0).message())
+                .as("the generic negative arm of 10033-DELETE-DB, lines 218 and 219")
+                .isEqualTo("Error accessing: TRANSACTION_TYPE table. SQLCODE:");
+        assertThat(reply.outcomes().get(0).message())
+                .as("the item route's referential sentence belongs to a route that refuses one operation")
+                .isNotEqualTo("Please delete associated child records first:");
+        assertThat(reply.returnCode())
+                .as("one refused action grades the run at the warn tier, exactly as 9999-ABEND does")
+                .isEqualTo(ReferenceBatchUpdateService.RETURN_CODE_SOFT_WARN);
         assertThat(this.types.findByTypeCd(REFERENCED_TYPE_CD))
                 .as("a refused removal must leave the row exactly where it was")
                 .isPresent();

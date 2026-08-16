@@ -54,6 +54,7 @@ package com.carddemo.reference.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -665,19 +666,22 @@ class TransactionTypeServiceTest {
         }
 
         /**
-         * A repeated primary key is classified rather than left to be reported as a child-row problem.
+         * A repeated primary key is refused with the sentence the baseline's insert arm composes.
          *
-         * <p>Refactoring Rationale: the baseline cannot classify this at all and the migration does.
-         * {@code 9700-INSERT-RECORD} carries a zero arm at physical line 1605 and a {@code WHEN OTHER} at
-         * physical line 1607 and nothing else -- a search of the whole program for the duplicate-key
-         * SQLCODE returns no occurrence -- so a reused code is reported with the same 'Error inserting
-         * record into:' sentence as a tablespace failure. Reading the state and raising the kind that
-         * matches is what makes the two reportable apart, and it matters because the shared advice
-         * recognises an integrity violation by class alone and would otherwise tell a caller who reused a
-         * code to go and delete child records.
+         * <p>Refactoring Rationale: the kind asserted is the insert refusal, where this case asserted the
+         * referential one. {@code 9700-INSERT-RECORD} carries a zero arm at physical line 1605 and a
+         * {@code WHEN OTHER} at physical line 1607 and nothing else -- a search of the whole program for
+         * the duplicate-key SQLCODE returns no occurrence -- so a reused code is reported there with the
+         * 'Error inserting record into:' sentence that names the table, and that is the sentence carried
+         * across. The referential sentence is composed in a DIFFERENT paragraph,
+         * {@code 9800-DELETE-PROCESSING} at physical line 1641, under the SQLCODE a restricted delete
+         * raises; an insert cannot reach it, and answering with it told a caller who reused a code to go
+         * and delete child records that do not exist.
          *
          * <p>Assumptions: the state is the migrated form of that SQLCODE and is named through the
-         * service's own constant rather than as a literal here, so the two cannot drift.
+         * service's own constant rather than as a literal here, so the two cannot drift. The table the
+         * refusal names is asserted as well, because the sentence a caller reads is composed around it and
+         * a kind-only assertion would pass against a refusal naming the sibling table.
          *
          * <p>It takes no parameter and returns no value.
          */
@@ -693,7 +697,51 @@ class TransactionTypeServiceTest {
                     .isInstanceOf(RecordConflictException.class)
                     .extracting(failure -> ((RecordConflictException) failure).kind())
                     .as("a duplicate reaching the constraint is refused, not propagated unclassified")
-                    .isEqualTo(RecordConflictException.Kind.REFERENCED_ROW);
+                    .isEqualTo(RecordConflictException.Kind.INSERT_REFUSED);
+
+            assertThatThrownBy(
+                    () -> service.create(new TransactionTypeCreateRequest("08", "Late fee")))
+                    .extracting(failure -> ((RecordConflictException) failure).targetTable())
+                    .as("the sentence names the table the baseline writes into it, unqualified")
+                    .isEqualTo("TRANSACTION_TYPE");
+        }
+
+        /**
+         * The pre-read duplicate and the constraint-raised duplicate are the SAME refusal.
+         *
+         * <p>Assumptions: the create has two ways of discovering that a code is taken -- the keyed read
+         * before the insert, and the unique constraint that refuses the insert when two callers race that
+         * read -- and a caller must not be able to tell which one refused it. Asserting the pair together
+         * is what pins that: a case asserting either route alone would pass against a service that
+         * answered the raced route differently, which would make the response depend on timing.
+         *
+         * <p>It takes no parameter and returns no value.
+         */
+        @Test
+        @DisplayName("the read-detected and constraint-detected duplicates answer identically")
+        void bothDuplicateRoutesAnswerIdentically() {
+            when(types.findByTypeCd("08"))
+                    .thenReturn(Optional.of(new TransactionType("08", "Late fee")));
+
+            RecordConflictException byRead = catchThrowableOfType(RecordConflictException.class,
+                    () -> service.create(new TransactionTypeCreateRequest("08", "Late fee")));
+
+            when(types.findByTypeCd("08")).thenReturn(Optional.empty());
+            when(types.insertType(eq("08"), anyString()))
+                    .thenThrow(integrityViolation(TransactionTypeService.SQLSTATE_UNIQUE_VIOLATION));
+
+            RecordConflictException byConstraint = catchThrowableOfType(
+                    RecordConflictException.class,
+                    () -> service.create(new TransactionTypeCreateRequest("08", "Late fee")));
+
+            assertThat(byRead.kind()).isEqualTo(byConstraint.kind());
+            assertThat(byRead.targetTable()).isEqualTo(byConstraint.targetTable());
+            // WHY : Assumptions: the version is asserted absent on both, because an insert that was
+            //       refused wrote nothing and there is no revision for a caller to compare against. A
+            //       refusal that reported one would put a version entry into a body whose contract says
+            //       only the concurrency condition carries one.
+            assertThat(byRead.currentVersion()).isNull();
+            assertThat(byConstraint.currentVersion()).isNull();
         }
 
         /**

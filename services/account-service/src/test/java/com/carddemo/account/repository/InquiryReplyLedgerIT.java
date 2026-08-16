@@ -233,9 +233,14 @@ class InquiryReplyLedgerIT {
      * second retirement reporting success would leave a concurrent delivery unable to tell that another one
      * had already answered.</p>
      *
-     * <p>Assumptions: the send count is asserted to advance exactly once per retirement, so the column
-     * answers one question -- how many times this reply reached the queue -- rather than accumulating
-     * unrelated events, which the sibling outbox's second migration records the consequences of.</p>
+     * <p>⚠️ Assumptions: the delivery count is asserted to be ONE after a claim and two retirements, and
+     * both halves of that are the fix rather than the old behaviour. The claim now records the delivery it
+     * admits, and the retirement records none -- where the retirement was previously the only statement
+     * that counted anything. Counting at the retirement counted SUCCESSES, so the column never moved for
+     * the one condition an operator reads it for, a reply whose send keeps failing, and it stayed at zero
+     * across every redelivery of such a request. It still must not accumulate unrelated events, which the
+     * sibling outbox's second migration records the consequences of; what it now accumulates is deliveries
+     * that reached the send step, and nothing else.</p>
      */
     @Test
     @DisplayName("a claim is retired once, and a second retirement reports that it was already retired")
@@ -255,8 +260,64 @@ class InquiryReplyLedgerIT {
         assertThat(this.jdbc.queryForObject(
                 "SELECT attempts FROM account.inquiry_reply_ledger WHERE request_key = ?",
                 Integer.class, REQUEST_KEY))
-                .as("the send count advances once per retirement and never twice")
+                .as("the claim counted this one delivery and neither retirement counted again")
                 .isEqualTo(1);
+    }
+
+    /**
+     * The delivery count follows deliveries: the claim counts one, each re-send counts another, and the
+     * retirement counts none.
+     *
+     * <p>⚠️ Purpose: this column carried nothing an operator could use. It was zero for every outstanding
+     * claim and one for every retired one -- which is exactly what {@code status} already says -- so a
+     * reply whose send failed on every one of its deliveries read zero, and the redelivery pressure that
+     * eventually dead-letters the request was invisible. The three assertions below are the three halves of
+     * the rule that replaces it, asserted against the real engine because the counting lives entirely in
+     * SQL and a substituted repository would assert the stub rather than the statements.</p>
+     *
+     * <p>Assumptions: the second claim is asserted to be REFUSED as well as counted-around, so this case
+     * cannot pass by a redelivery having quietly overwritten the row instead of counting on it.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the delivery count follows deliveries, not successes")
+    @Transactional
+    void theDeliveryCountFollowsDeliveries() {
+        claim(REQUEST_KEY, REPLY_BODY, DESTINATION);
+        assertThat(attempts())
+                .as("the claim records the delivery it admits, so a failed first send still reads one")
+                .isEqualTo(1);
+
+        assertThat(claim(REQUEST_KEY, REPLY_BODY, DESTINATION))
+                .as("a redelivery must still be refused the claim")
+                .isFalse();
+        assertThat(this.ledger.countSendAttempt(REQUEST_KEY))
+                .as("a redelivery that re-sends counts itself on the row it found")
+                .isTrue();
+        assertThat(attempts())
+                .as("two deliveries reached the send step")
+                .isEqualTo(2);
+
+        assertThat(this.ledger.markSent(REQUEST_KEY, CLAIMED_AT.plusSeconds(1))).isTrue();
+        assertThat(attempts())
+                .as("the retirement records WHEN the answer went out, not how many deliveries it took")
+                .isEqualTo(2);
+
+        assertThat(this.ledger.countSendAttempt("no-delivery-claimed-this"))
+                .as("counting a key no row holds reports that it counted nothing")
+                .isFalse();
+    }
+
+    /**
+     * Reads the delivery count recorded for this class's fixed request key.
+     *
+     * @return the count, never {@code null} because the column is declared {@code NOT NULL}
+     */
+    private Integer attempts() {
+        return this.jdbc.queryForObject(
+                "SELECT attempts FROM account.inquiry_reply_ledger WHERE request_key = ?",
+                Integer.class, REQUEST_KEY);
     }
 
     /**

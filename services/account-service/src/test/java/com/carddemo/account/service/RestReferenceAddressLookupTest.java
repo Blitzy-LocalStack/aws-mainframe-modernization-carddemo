@@ -20,11 +20,15 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
+import tools.jackson.databind.DeserializationFeature;
+import tools.jackson.databind.exc.UnrecognizedPropertyException;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Verifies the reference-context adapter that resolves the three address allow-lists.
@@ -69,12 +73,48 @@ class RestReferenceAddressLookupTest {
     }
 
     /**
+     * Builds a reader configured exactly as the running service configures its own.
+     *
+     * <p>Refactoring Rationale: this exists because its absence is what let a real defect ship green.
+     * {@code MockRestServiceServer.bindTo(RestClient.builder())} leaves the builder's default
+     * converters in place, and those are built over a mapper that IGNORES unknown members. The running
+     * service does the opposite: {@code application.yml} sets
+     * {@code spring.jackson.deserialization.fail-on-unknown-properties} to true. So the adapter's
+     * area-code shape could omit a member the reference context publishes, fail on every real answer,
+     * and still satisfy every test here -- which is what happened. Reading through the strict setting
+     * makes a payload that the service cannot bind a payload these tests cannot bind either.</p>
+     *
+     * <p>Assumptions: enabling the feature explicitly is required rather than merely tidy. The
+     * deserialiser this release ships defaults it OFF, which is why the setting appears in
+     * {@code application.yml} at all, and a builder that simply omits the line would reproduce the
+     * lenient behaviour this method exists to eliminate.</p>
+     *
+     * @return the mapper, strict about unknown members, never {@code null}
+     */
+    private static JsonMapper strictReader() {
+        return JsonMapper.builder()
+                .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+                .build();
+    }
+
+    /**
      * Builds an adapter over a mock transport using the package-visible seam.
+     *
+     * <p>Assumptions: the strict converter REPLACES the builder's JSON converter rather than being
+     * appended to the list, which is what {@code withJsonConverter} does and why it is used in place of
+     * the list-mutating form -- appending would leave the lenient default ahead of it in the list and
+     * change nothing. The list-mutating form is additionally deprecated in this release.</p>
+     *
+     * <p>Assumptions: the converter is installed BEFORE the mock transport is bound, because binding
+     * replaces the request factory and not the converters. Installing it afterwards would work equally,
+     * and the order is stated so that a later edit does not read it as significant.</p>
      *
      * @return the harness, never {@code null}
      */
     private static Harness harness() {
-        RestClient.Builder builder = RestClient.builder();
+        RestClient.Builder builder = RestClient.builder()
+                .configureMessageConverters(converters -> converters.withJsonConverter(
+                        new JacksonJsonHttpMessageConverter(strictReader())));
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
         return new Harness(new RestReferenceAddressLookup(builder, ORIGIN, ORIGIN), server);
     }
@@ -91,12 +131,88 @@ class RestReferenceAddressLookupTest {
         Harness harness = harness();
         harness.server()
                 .expect(requestTo(ORIGIN + "/api/v1/reference/us-phone-area-codes/703"))
-                .andRespond(withSuccess("{\"areaCode\":\"703\",\"codeClass\":\"G\"}",
+                .andRespond(withSuccess("{\"areaCd\":\"703\",\"codeClass\":\"G\"}",
                         MediaType.APPLICATION_JSON));
 
         assertThat(harness.lookup().findAreaCodeClass("703"))
                 .contains(AreaCodeClass.GENERAL_PURPOSE);
         harness.server().verify();
+    }
+
+    /**
+     * Confirms the two payloads the published contract itself carries as examples both bind.
+     *
+     * <p>Refactoring Rationale: this is the test whose absence let the defect reach a running service.
+     * Every case in this class fabricated its own payload, and the fabrication was wrong -- it named the
+     * area-code member {@code areaCode} where the contract publishes {@code areaCd} -- so the adapter's
+     * shape was reconciled against the test's invention rather than against the producer. The two
+     * payloads asserted here are transcribed from the {@code examples} block of the
+     * {@code UsPhoneAreaCode} schema at lines 3207 to 3211 of
+     * {@code services/reference-service/src/main/resources/openapi/reference-api.yaml}, which is the
+     * document that governs what the producer sends, so a member renamed on either side fails here.</p>
+     *
+     * <p>Assumptions: transcribing the examples is the strongest form available from this module. The
+     * producer's own type lives in a bounded context this one may not import -- the layering rules
+     * published by {@code common-lib} refuse a cross-context type import in both directions and the two
+     * modules are separate deployables -- so the contract document, not the producing class, is the
+     * shared authority. The transcription is pinned to a line range for exactly that reason.</p>
+     *
+     * <p>Assumptions: both examples are asserted rather than one, because they exercise the two halves
+     * of the classification partition. Binding only the general-purpose example would leave the
+     * easily-recognisable letter unproven against the real member name.</p>
+     */
+    @Test
+    @DisplayName("both published contract examples bind under the strictness the service configures")
+    void thePublishedContractExamplesBind() {
+        Harness generalPurpose = harness();
+        generalPurpose.server()
+                .expect(requestTo(ORIGIN + "/api/v1/reference/us-phone-area-codes/201"))
+                .andRespond(withSuccess("{\"areaCd\":\"201\",\"codeClass\":\"G\"}",
+                        MediaType.APPLICATION_JSON));
+        assertThat(generalPurpose.lookup().findAreaCodeClass("201"))
+                .as("the contract's own general-purpose example must bind, or no real answer will")
+                .contains(AreaCodeClass.GENERAL_PURPOSE);
+
+        Harness easilyRecognisable = harness();
+        easilyRecognisable.server()
+                .expect(requestTo(ORIGIN + "/api/v1/reference/us-phone-area-codes/800"))
+                .andRespond(withSuccess("{\"areaCd\":\"800\",\"codeClass\":\"E\"}",
+                        MediaType.APPLICATION_JSON));
+        assertThat(easilyRecognisable.lookup().findAreaCodeClass("800"))
+                .as("the contract's own easily-recognisable example must bind too")
+                .contains(AreaCodeClass.EASILY_RECOGNISABLE);
+    }
+
+    /**
+     * Confirms the harness really is strict, so the case above is not vacuous.
+     *
+     * <p>Refactoring Rationale: the two cases that matter most in this class now assert that a payload
+     * BINDS, and a lenient reader would let them pass whatever the adapter's shape declared -- which is
+     * precisely how the defect survived. This case pins the property those two depend on by reading an
+     * undeclared member into a shape that does not admit one, and requiring the read to fail. Without
+     * it, someone restoring the builder's default converters would turn this whole class green again
+     * while the service went back to answering 500.</p>
+     *
+     * <p>Assumptions: a probe shape declared here is used rather than the adapter's own, because the
+     * adapter's shape is what the other cases exercise and a probe states the property being pinned --
+     * that THIS reader refuses an unknown member -- without depending on the adapter at all.</p>
+     */
+    @Test
+    @DisplayName("the reader these tests use refuses an unknown member, as the running service does")
+    void theHarnessReaderIsStrict() {
+        assertThatThrownBy(() -> strictReader()
+                .readValue("{\"declared\":\"x\",\"addedByTheProducer\":\"y\"}", StrictnessProbe.class))
+                .as("a lenient reader here would let every binding assertion in this class pass "
+                        + "against a shape the running service cannot bind")
+                .isInstanceOf(UnrecognizedPropertyException.class);
+    }
+
+    /**
+     * A shape admitting exactly one member, used only to prove the harness reader's strictness.
+     *
+     * @param declared the one member this shape admits
+     */
+    private record StrictnessProbe(String declared) {
     }
 
     /**
@@ -112,7 +228,8 @@ class RestReferenceAddressLookupTest {
         Harness harness = harness();
         harness.server()
                 .expect(requestTo(ORIGIN + "/api/v1/reference/us-phone-area-codes/800"))
-                .andRespond(withSuccess("{\"codeClass\":\"E\"}", MediaType.APPLICATION_JSON));
+                .andRespond(withSuccess("{\"areaCd\":\"800\",\"codeClass\":\"E\"}",
+                        MediaType.APPLICATION_JSON));
 
         assertThat(harness.lookup().findAreaCodeClass("800"))
                 .as("folding E into G would accept an area code the reference refuses")
@@ -161,7 +278,8 @@ class RestReferenceAddressLookupTest {
         Harness harness = harness();
         harness.server()
                 .expect(requestTo(ORIGIN + "/api/v1/reference/us-phone-area-codes/703"))
-                .andRespond(withSuccess("{\"codeClass\":\"Z\"}", MediaType.APPLICATION_JSON));
+                .andRespond(withSuccess("{\"areaCd\":\"703\",\"codeClass\":\"Z\"}",
+                        MediaType.APPLICATION_JSON));
 
         assertThatThrownBy(() -> harness.lookup().findAreaCodeClass("703"))
                 .isInstanceOf(ReferenceContextUnavailableException.class);
@@ -175,7 +293,7 @@ class RestReferenceAddressLookupTest {
     void stateCodePresenceFollowsTheStatus() {
         Harness present = harness();
         present.server().expect(requestTo(ORIGIN + "/api/v1/reference/us-states/VA"))
-                .andRespond(withSuccess("{\"stateCode\":\"VA\"}", MediaType.APPLICATION_JSON));
+                .andRespond(withSuccess("{\"stateCd\":\"VA\"}", MediaType.APPLICATION_JSON));
         assertThat(present.lookup().stateCodeExists("VA")).isTrue();
 
         Harness absent = harness();
@@ -192,13 +310,95 @@ class RestReferenceAddressLookupTest {
     void stateZipPrefixPresenceFollowsTheStatus() {
         Harness present = harness();
         present.server().expect(requestTo(ORIGIN + "/api/v1/reference/us-state-zip-prefixes/VA22"))
-                .andRespond(withSuccess("{\"stateZipCode\":\"VA22\"}", MediaType.APPLICATION_JSON));
+                .andRespond(withSuccess("{\"stateZipCd\":\"VA22\"}", MediaType.APPLICATION_JSON));
         assertThat(present.lookup().stateZipPrefixExists("VA22")).isTrue();
 
         Harness absent = harness();
         absent.server().expect(requestTo(ORIGIN + "/api/v1/reference/us-state-zip-prefixes/VA99"))
                 .andRespond(withStatus(HttpStatus.NOT_FOUND));
         assertThat(absent.lookup().stateZipPrefixExists("VA99")).isFalse();
+    }
+
+    /**
+     * Confirms a value the reference context refuses on SHAPE is reported as absent, not as a failure.
+     *
+     * <p>Refactoring Rationale: this is the second half of the defect this class answers. Only 404 used
+     * to be read as absence, and the reference context answers 400 -- not 404 -- for a value that cannot
+     * be a key at all, because each of its item routes constrains the path value to the shape every
+     * seeded key has. A lower-case state code, a two-digit area code and a malformed state-and-postal
+     * pairing therefore all produced a 500 naming the reference context as unavailable, in place of the
+     * field error the baseline composes. All three routes are asserted, because the mapping lives in one
+     * shared predicate and a change that fixed one route while missing another would otherwise pass.</p>
+     *
+     * <p>Assumptions: a shape refusal and an unseeded key are the same answer to the question the port
+     * asks. {@code app/cbl/COACTUPC.cbl} decides state validity by testing a condition name over the
+     * literals at line 1013 of {@code app/cpy/CSLKPCDY.cpy}, and that test has one negative outcome
+     * however the value fails it -- {@code nc} is no more one of those literals than {@code ZZ} is.
+     */
+    @Test
+    @DisplayName("a value the reference context refuses on shape is absent, on all three routes")
+    void aShapeRefusalIsReportedAsAbsence() {
+        Harness areaCode = harness();
+        areaCode.server().expect(requestTo(ORIGIN + "/api/v1/reference/us-phone-area-codes/12"))
+                .andRespond(withStatus(HttpStatus.BAD_REQUEST));
+        assertThat(areaCode.lookup().findAreaCodeClass("12"))
+                .as("reporting this as unavailable hid a correctable input behind a 500")
+                .isEmpty();
+
+        Harness stateCode = harness();
+        stateCode.server().expect(requestTo(ORIGIN + "/api/v1/reference/us-states/nc"))
+                .andRespond(withStatus(HttpStatus.BAD_REQUEST));
+        assertThat(stateCode.lookup().stateCodeExists("nc"))
+                .as("the baseline answers this with 'State: is not a valid state code'")
+                .isFalse();
+
+        Harness pairing = harness();
+        pairing.server().expect(requestTo(ORIGIN + "/api/v1/reference/us-state-zip-prefixes/nc12"))
+                .andRespond(withStatus(HttpStatus.BAD_REQUEST));
+        assertThat(pairing.lookup().stateZipPrefixExists("nc12")).isFalse();
+    }
+
+    /**
+     * Confirms a refused credential relay is NEVER reported as the value being absent.
+     *
+     * <p>Refactoring Rationale: this is the boundary of the change above, and it is the reason the
+     * mapping admits two named statuses instead of the whole 4xx range. The reference context answers
+     * 401 when the relayed token is missing or expired and 403 when it lacks the scope -- facts about
+     * the caller and about this seam's configuration, and nothing about the address. Folding them into
+     * absence would turn a broken relay into "your state code is invalid" for every user at once, which
+     * is the one outcome the port's contract forbids and the hardest to diagnose from a field error.</p>
+     *
+     * <p>Assumptions: the remaining client-error statuses are asserted alongside, because each reports
+     * something about the request or the service rather than about the value: a wrong method, an
+     * unacceptable representation, a contended write, an unsupported media type and a throttle.</p>
+     */
+    @Test
+    @DisplayName("a refused relay or any other client error stays a failure, never an absent value")
+    void aRefusedRelayIsNeverReportedAsAbsence() {
+        for (HttpStatus saysNothingAboutTheValue : new HttpStatus[] {
+            HttpStatus.UNAUTHORIZED,
+            HttpStatus.FORBIDDEN,
+            HttpStatus.METHOD_NOT_ALLOWED,
+            HttpStatus.NOT_ACCEPTABLE,
+            HttpStatus.CONFLICT,
+            HttpStatus.UNSUPPORTED_MEDIA_TYPE,
+            HttpStatus.TOO_MANY_REQUESTS}) {
+
+            Harness areaCode = harness();
+            areaCode.server().expect(requestTo(ORIGIN + "/api/v1/reference/us-phone-area-codes/703"))
+                    .andRespond(withStatus(saysNothingAboutTheValue));
+            assertThatThrownBy(() -> areaCode.lookup().findAreaCodeClass("703"))
+                    .as("status %s must not be read as '703 is not in the list'",
+                            saysNothingAboutTheValue)
+                    .isInstanceOf(ReferenceContextUnavailableException.class);
+
+            Harness stateCode = harness();
+            stateCode.server().expect(requestTo(ORIGIN + "/api/v1/reference/us-states/VA"))
+                    .andRespond(withStatus(saysNothingAboutTheValue));
+            assertThatThrownBy(() -> stateCode.lookup().stateCodeExists("VA"))
+                    .as("status %s must not be read as 'VA is not a state'", saysNothingAboutTheValue)
+                    .isInstanceOf(ReferenceContextUnavailableException.class);
+        }
     }
 
     /**

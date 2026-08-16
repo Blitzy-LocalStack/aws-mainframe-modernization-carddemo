@@ -421,7 +421,16 @@ public class AccountMapper {
                 storedDateText(row.getReissueDate()),
                 publishedAmount(row.getCurrentBalance(), "currentBalance"),
                 publishedAmount(row.getCurrentCycleCredit(), "currentCycleCredit"),
-                row.getGroupId(),
+                // WHY : ⚠️ Assumptions: the group is published at its DECLARED width rather than at
+                //   whatever width the entity happens to hold, which is the read half of the rule the
+                //   write half applies in applyUpdate. This shape is produced from BOTH a row the
+                //   datastore loaded and a row a writer has just populated, and the two used to differ:
+                //   the loaded row carries the CHAR(10) column's ten characters and the just-written one
+                //   carried the submission's seven, so the account view and the update response published
+                //   different values for one column. Asserting the width here means the published form is
+                //   the declared form whichever of the two produced the entity, so a future writer that
+                //   forgets to pad cannot reintroduce the disagreement through this shape.
+                publishedAtWidth(row.getGroupId(), GROUP_ID_WIDTH, "group_id"),
                 publishedAmount(row.getCurrentCycleDebit(), "currentCycleDebit"));
     }
 
@@ -625,11 +634,27 @@ public class AccountMapper {
 
         row.setActiveStatus(
                 requiredExactWidth(request.activeStatus(), ACTIVE_STATUS_WIDTH, "activeStatus"));
-        row.setCreditLimit(storedAmount(request.creditLimit(), "creditLimit"));
-        row.setCashCreditLimit(storedAmount(request.cashCreditLimit(), "cashCreditLimit"));
-        row.setCurrentBalance(storedAmount(request.currentBalance(), "currentBalance"));
-        row.setCurrentCycleCredit(storedAmount(request.currentCycleCredit(), "currentCycleCredit"));
-        row.setCurrentCycleDebit(storedAmount(request.currentCycleDebit(), "currentCycleDebit"));
+        // WHY : Refactoring Rationale: the five amounts are assigned through the PICTURE-BOUNDED
+        //       conversion, not the unbounded one. That bounded conversion existed and was called from
+        //       nowhere, so an amount of eleven integer digits was written into NUMERIC(12,2) with the
+        //       unbounded conversion, overflowed the column, and reached the caller as HTTP 500 from the
+        //       persistence provider's integrity violation. The service layer now refuses such a value in
+        //       its edit phase, so this conversion should never see one -- and it is used here anyway,
+        //       because a value that never met the edits must not be the one that reaches the column. The
+        //       edits are where a caller's mistake is NAMED; this is where the column's own limit is
+        //       ENFORCED, and the two are deliberately not the same line of defence.
+        // WHY : Trade-offs: if this conversion ever does refuse a value, its own sentence is longer than
+        //       the reference's message line, so the shared advice renders the fixed sentence against the
+        //       right component rather than that text. Accepted: the refusal is unreachable from the update
+        //       path, and a reachable-but-generic answer on an unreachable path is a better trade than a
+        //       second catalogue sentence for a case a caller cannot provoke.
+        row.setCreditLimit(editedMoney(request.creditLimit(), "creditLimit").amount());
+        row.setCashCreditLimit(editedMoney(request.cashCreditLimit(), "cashCreditLimit").amount());
+        row.setCurrentBalance(editedMoney(request.currentBalance(), "currentBalance").amount());
+        row.setCurrentCycleCredit(
+                editedMoney(request.currentCycleCredit(), "currentCycleCredit").amount());
+        row.setCurrentCycleDebit(
+                editedMoney(request.currentCycleDebit(), "currentCycleDebit").amount());
 
         // WHY : Refactoring Rationale: each date is COMPOSED from three separate screen components rather
         //       than read from one, because the update map genuinely carries three: a four-character year,
@@ -669,9 +694,18 @@ public class AccountMapper {
         //       interest calculation's DEFAULT disclosure-group fallback is the live behaviour that a blank
         //       group reaches. Storing a literal 'DEFAULT' here instead would record a group the submission
         //       did not name and would bypass the fallback rather than trigger it.
+        //
+        // WHY : ⚠️ Refactoring Rationale: the supplied branch PADS to the declared width now, where it used
+        //       to store the value at whatever width it arrived with. Both branches therefore produce ten
+        //       characters, which is what the column holds. Before this, the absent branch padded and the
+        //       supplied branch did not -- so a submission of 'DEFAULT' left this entity holding seven
+        //       characters while the CHAR(10) column held ten, and because the update response is projected
+        //       from this same entity it published 'DEFAULT' where a later read of the identical row
+        //       published 'DEFAULT   '. Two endpoints disagreeing about one column is the defect; the
+        //       asymmetry between these two branches was its cause.
         row.setGroupId(FieldValidationFlag.isNeverSupplied(request.groupId())
                 ? " ".repeat(GROUP_ID_WIDTH)
-                : atMostWidth(request.groupId(), GROUP_ID_WIDTH, "groupId"));
+                : storedAtWidth(request.groupId(), GROUP_ID_WIDTH, "groupId"));
     }
 
     /**
@@ -809,6 +843,61 @@ public class AccountMapper {
             return false;
         }
         return normalisedAmount(trimmed) != null;
+    }
+
+    /**
+     * Answers whether an accepted screen amount is small enough for the field that stores it.
+     *
+     * <p>Purpose: to make the MAGNITUDE of an amount an edit-phase question, so that a value the stored
+     * field cannot hold is refused against the component it arrived on. {@link #isEditedAmount} answers a
+     * different question -- whether the value has the SHAPE the fifteen-character mask emits -- and
+     * fifteen characters is wide enough to spell a sign, eleven integer digits, a decimal point and two
+     * fraction digits. So a shape-valid amount can still be an order of magnitude too large for
+     * {@code NUMERIC(12,2)}.</p>
+     *
+     * <p>Refactoring Rationale: this exists because that gap produced HTTP 500. An amount of eleven
+     * integer digits passed every edit, reached the row builder, was written with the unbounded
+     * conversion and overflowed the column, so the persistence provider raised an integrity violation and
+     * the caller was told the service had failed. The value was a caller's typing mistake and belonged in
+     * the per-field channel with the other four amounts.</p>
+     *
+     * <p>Assumptions: the digits are counted after the mask's decoration is removed, so grouping
+     * separators, a leading or trailing sign and an absent fraction do not change the count, and a value
+     * whose integer part is written with leading zeros is measured by what it MEANS rather than by how
+     * many characters were typed -- {@code 00000000001.00} is one integer digit, not eleven. Counting
+     * characters instead would refuse an amount the stored field holds comfortably.</p>
+     *
+     * <p>Alternatives Considered: reproducing what the reference does, which is to accept the value and
+     * let the subsequent {@code MOVE} into {@code PIC S9(10)V99} truncate the high-order digits silently
+     * -- {@code app/cbl/COACTUPC.cbl} paragraph {@code 1250-EDIT-SIGNED-9V2} at lines 2180 to 2218 tests
+     * only for a blank and for {@code TEST-NUMVAL-C}, and bounds nothing. Rejected deliberately, and this
+     * is a documented divergence rather than an oversight: truncation would store a credit limit of
+     * 1,234,567,890.12 for a caller who typed 91,234,567,890.12 and report success. Silently altering a
+     * monetary magnitude is the one class of behaviour a migration of a financial system must not carry
+     * forward, and refusing the value tells the caller exactly what the reference's own field width
+     * already implied.</p>
+     *
+     * @param screenValue the value as the screen carries it, which may be {@code null}
+     * @return {@code true} when the value is an accepted shape whose integer part holds no more than
+     *     {@link #AMOUNT_PICTURE_INTEGER_DIGITS} digits; {@code false} when it is not an accepted shape at
+     *     all or holds more
+     */
+    public static boolean isAmountWithinPicture(String screenValue) {
+        if (FieldValidationFlag.isNeverSupplied(screenValue)) {
+            return false;
+        }
+        String plain = normalisedAmount(screenValue.trim());
+        if (plain == null) {
+            return false;
+        }
+
+        // WHY : Assumptions: the exact decimal type is asked for the count rather than the string being
+        //       measured, because precision minus scale IS the integer-digit count and the type computes
+        //       it after stripping the sign and any insignificant leading zeros. Measuring the string
+        //       would have to strip both by hand, and a value like 0000000000123.45 would then be
+        //       reported as thirteen integer digits when it is three.
+        BigDecimal exact = new BigDecimal(plain);
+        return exact.precision() - exact.scale() <= AMOUNT_PICTURE_INTEGER_DIGITS;
     }
 
     /**
@@ -1402,8 +1491,84 @@ public class AccountMapper {
             throw new ClientInputException(ApiError.CODE_VALIDATION, field, FieldValidationFlag.BLANK,
                     "no value was supplied for " + field + ", which the reference requires");
         }
+        return storedAtWidth(value, width, field);
+    }
+
+    /**
+     * Returns a submitted value at exactly the width its column declares, without requiring it.
+     *
+     * <p>Purpose: this is the SECOND half of the rule {@link #requiredExactWidth} states, separated from it
+     * so that a field the reference accepts as absent can still be stored at its declared width. The
+     * required form differs from this one in one respect only -- it refuses a never-supplied value first --
+     * and it now delegates here rather than repeating the padding, so one rule governs both.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the group identifier used to be stored through {@link #atMostWidth},
+     * which BOUNDS a value without padding it, and the difference was observable. A submission of
+     * {@code DEFAULT} was stored on the entity as seven characters while the {@code CHAR(10)} column held
+     * ten, so the update response -- which is projected from that entity -- published {@code "DEFAULT"}
+     * while a later read of the very same row published {@code "DEFAULT   "}. Two endpoints answered
+     * differently about one column, and a caller comparing the two to detect a change saw one that was only
+     * padding. The invariant {@link #requiredExactWidth} already states in its own trade-off -- that the row
+     * this mapper produces and the row a later read returns carry the same characters -- is exactly the
+     * invariant that was broken, which is why the fix is to bring the optional field under the same rule
+     * rather than to add a second one.</p>
+     *
+     * <p>Assumptions: padding is on the RIGHT with spaces, because these are alphanumeric {@code PIC X(n)}
+     * fields and an alphanumeric display field is left-justified and space-filled. The reasoning is set out
+     * in full on {@link #requiredExactWidth}, and it is not repeated per call site.</p>
+     *
+     * @param value the submitted value, a {@code String}; must not be {@code null}
+     * @param width the declared width as an {@code int}
+     * @param field the component name of type {@code String} used in a failure; must not be {@code null}
+     * @return the value as a {@code String} at exactly the declared width, never {@code null}
+     * @throws ClientInputException if the value exceeds the declared width
+     * @throws IllegalArgumentException as the parent of the above, since {@link ClientInputException}
+     *     extends it
+     */
+    private static String storedAtWidth(String value, int width, String field) {
         String bounded = atMostWidth(value, width, field);
         return bounded + " ".repeat(width - bounded.length());
+    }
+
+    /**
+     * Returns a stored value at exactly the width its column declares, for publication.
+     *
+     * <p>Purpose: this is the READ-side half of the same rule, and it exists as a separate method from
+     * {@link #storedAtWidth} for one reason that matters -- the failure it raises is a different KIND of
+     * failure. A submission wider than its field is the caller's fault and is refused as
+     * {@link ClientInputException}, which becomes a 400 naming the field. A stored row wider than its own
+     * column is nobody's submission: it is a data or schema fault, and reporting it as a caller error would
+     * tell a caller to correct something it did not send. {@link CustomerMapper} draws this same line for
+     * {@code addr_state_cd}, {@code addr_country_cd} and {@code addr_zip}, so this is the sibling's
+     * established rule applied to the one {@code CHAR} column of the account row rather than a new one.</p>
+     *
+     * <p>⚠️ Assumptions: a value SHORTER than the declared width is PADDED rather than refused, and that
+     * asymmetry is deliberate. The column is {@code CHAR(10) NOT NULL}, so every value the datastore
+     * returns is already ten characters and the short case is unreachable from a loaded row; it is
+     * reachable only from an entity a writer has just populated in memory, which is precisely the state
+     * that produced the two disagreeing endpoints. Padding here makes the published width the declared
+     * width no matter which of the two produced the entity, so the read cannot publish a short value even
+     * if a future writer forgets to pad. Refusing instead would convert a rendering inconsistency into a
+     * failed read of a row that is perfectly good in the datastore, which is a strictly worse outcome for
+     * the caller.</p>
+     *
+     * @param value the stored value, a {@code String}; the column is declared {@code NOT NULL}
+     * @param width the declared width as an {@code int}
+     * @param field the column name of type {@code String} used in a failure; must not be {@code null}
+     * @return the value as a {@code String} at exactly the declared width, never {@code null}
+     * @throws IllegalStateException if the column is absent, or holds more characters than it declares
+     */
+    private static String publishedAtWidth(String value, int width, String field) {
+        if (value == null) {
+            throw new IllegalStateException(field + " is null, but it is declared NOT NULL in the"
+                    + " schema and nullable = false on the entity");
+        }
+        if (value.length() > width) {
+            throw new IllegalStateException("the stored value of " + field + " occupies "
+                    + value.length() + " characters but the reference field declares " + width
+                    + "; truncating it would publish a value the record does not hold");
+        }
+        return value + " ".repeat(width - value.length());
     }
 
     /**

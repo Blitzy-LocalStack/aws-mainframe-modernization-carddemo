@@ -1176,7 +1176,18 @@ target acknowledgement boundary rather than of either exchange's payload:
 | Exchange | Table | Migration | Repository |
 |---|---|---|---|
 | Account inquiry (`COACCT01`) | `account.inquiry_reply_ledger` | [`V2__account_inquiry_reply_ledger.sql`](../../services/account-service/src/main/resources/db/migration/V2__account_inquiry_reply_ledger.sql) | `com.carddemo.account.repository.InquiryReplyLedger` |
-| Date inquiry (`CODATE01`) | `reference.inquiry_reply_ledger` | [`V3__reference_inquiry_reply_ledger.sql`](../../services/reference-service/src/main/resources/db/migration/V3__reference_inquiry_reply_ledger.sql) | `com.carddemo.reference.repository.InquiryReplyLedger` |
+| Date inquiry (`CODATE01`) | `account.inquiry_reply_ledger` — the same table, because the same listener answers both | (as above) | `com.carddemo.account.repository.InquiryReplyLedger` |
+
+⚠️ Refactoring Rationale: the date row named a `reference.inquiry_reply_ledger` with a
+repository of its own in `reference-service`. Both are withdrawn, and the guarantee is
+not. The shared inquiry request queue has exactly ONE consumer by design —
+`account-service`'s `InquiryMessageListener`, which dispatches on the four-character
+function code and answers `DATE` itself — so the reply for either exchange is composed
+in that service and recorded in that service's ledger before it is sent.
+`reference-service` declares no messaging starter and no `@SqsListener`, so the table it
+created could never be written to, and a table nothing inserts into supplies no
+idempotency. `V4__drop_reference_inquiry_reply_ledger.sql` withdraws it; `V3` is
+retained because a released migration can be reversed but not deleted.
 
 Refactoring Rationale: this section named the account ledger alone, and the date
 exchange was left with delete-on-success only on the ground that "the answer is the
@@ -1201,10 +1212,17 @@ byte-identical whenever the account has not moved; the date exchange's never is.
   payload is stored verbatim instead of recomposed from an account that may have
   moved or a clock that has advanced. Closing it entirely would need the queue send
   and the database mark to commit together across two resource managers, which is the
-  two-phase commit this migration records as eliminated. Assumptions: `attempts` on
-  each ledger row counts sends, so a value above one is the operational signal that
-  this window was actually entered — the only residual divergence either exchange
-  admits.
+  two-phase commit this migration records as eliminated. ⚠ Assumptions: `attempts` on
+  each ledger row counts **deliveries that reached the send step** — one recorded by the
+  claim itself, one by each redelivery that re-sends, and none by the retirement — so a
+  value above one is the operational signal that this window was actually entered, and a
+  value at the source queue's `maxReceiveCount` says the reply never got out at all. It
+  counted completed SENDS, which made it `0` for every outstanding claim and `1` for
+  every retired one — exactly what `status` already says — and left it silent for the one
+  condition worth reading it for. Both ledgers carry the corrected rule; each migration's
+  own column comment still states the narrower one, because both migrations are applied
+  and a frozen migration is corrected in prose beside it rather than edited. This is the
+  only residual divergence either exchange admits.
 - Refactoring Rationale: the claim was keyed on the **producer-supplied** message
   attribute, falling back to the correlation identifier, and that inverted the
   guarantee for a whole class of requester. Neither value is authenticated or

@@ -351,6 +351,34 @@ public class AccountUpdateService {
     public static final String SUFFIX_IS_NOT_VALID = " is not valid";
 
     /**
+     * The opening of the suffix an over-wide value's verdict appends to its field label.
+     *
+     * <p>Assumptions: this is the ONE sentence in this class that is not carried across from
+     * {@code app/cbl/COACTUPC.cbl}, and it is new because the reference has no equivalent to carry. A 3270
+     * field cannot receive more characters than it declares -- the terminal enforces the width before the
+     * program is ever entered -- so no paragraph in that program composes a sentence for a value that is
+     * too long. An HTTP request carries whatever a client sends, so the case exists here and needs an
+     * answer.</p>
+     *
+     * <p>Assumptions: the declared width is interpolated rather than a per-field sentence being declared
+     * for each of the sixteen fields this guards, so one sentence serves every width and no two of them can
+     * drift apart. The composed result stays inside the reference's seventy-five-character message line at
+     * every label and width this class uses, which is what keeps the shared advice from replacing it with
+     * the fixed fallback.</p>
+     */
+    public static final String SUFFIX_WIDTH_PREFIX = " must not be longer than ";
+
+    /**
+     * The closing of that suffix for a field declaring exactly one character.
+     */
+    public static final String SUFFIX_WIDTH_UNIT_SINGULAR = " character.";
+
+    /**
+     * The closing of that suffix for a field declaring more than one character.
+     */
+    public static final String SUFFIX_WIDTH_UNIT_PLURAL = " characters.";
+
+    /**
      * The suffix the credit-score range verdict appends to its field label.
      *
      * <p>Assumptions: byte-exact from {@code app/cbl/COACTUPC.cbl} L2523, which begins with a COLON
@@ -433,6 +461,37 @@ public class AccountUpdateService {
 
     /** The label set at {@code app/cbl/COACTUPC.cbl} L1584 for the first address line. */
     public static final String LABEL_ADDRESS_LINE_1 = "Address Line 1";
+
+    /**
+     * The label the second address line's verdict is prefixed with.
+     *
+     * <p>Assumptions: the reference composes no sentence for this field, so there is no label to carry
+     * across and one is chosen. It follows the first line's spelling exactly, because the two are one
+     * address on the screen -- {@code app/bms/COACTUP.bms} line 355 labels the block {@code 'Address:'} and
+     * leaves the continuation lines unlabelled -- and a caller reading two sentences about one address needs
+     * to know which line each is about.</p>
+     */
+    public static final String LABEL_ADDRESS_LINE_2 = "Address Line 2";
+
+    /**
+     * The label the account group code's verdict is prefixed with.
+     *
+     * <p>Assumptions: the reference composes no sentence for this field either, so the label is taken from
+     * the SCREEN rather than invented: {@code app/bms/COACTUP.bms} line 228 renders it as
+     * {@code 'Account Group:'}, and the colon belongs to the screen's own decoration rather than to the
+     * label, so it is dropped here the way every other label in this class drops it.</p>
+     */
+    public static final String LABEL_ACCOUNT_GROUP = "Account Group";
+
+    /**
+     * The label the government-issued identifier reference's verdict is prefixed with.
+     *
+     * <p>Assumptions: taken from the screen on the same terms, {@code 'Government Issued Id Ref    : '} at
+     * {@code app/bms/COACTUP.bms} line 432, with the trailing padding and the colon dropped. The result is
+     * twenty-four characters, which is inside the twenty-five the label field declares, so it survives the
+     * label narrowing that composes every sentence.</p>
+     */
+    public static final String LABEL_GOVERNMENT_ISSUED_ID = "Government Issued Id Ref";
 
     /** The label set at {@code app/cbl/COACTUPC.cbl} L1592 for the state code. */
     public static final String LABEL_STATE = "State";
@@ -536,6 +595,32 @@ public class AccountUpdateService {
 
     /** The length the driver examines the funds-transfer account at, moved at L1651. */
     public static final int EFT_ACCOUNT_ID_EDIT_WIDTH = 10;
+
+    /**
+     * The width of a one-character two-state marker, the account status and the primary-card-holder flag.
+     *
+     * <p>Assumptions: one, from {@code ACCT-ACTIVE-STATUS PIC X(01)} at {@code app/cpy/CVACT01Y.cpy} line 5
+     * and {@code CUST-PRI-CARD-HOLDER-IND PIC X(01)} at {@code app/cpy/CVCUS01Y.cpy} line 22. The value was
+     * previously spelled as a literal inside the two-state edit; naming it lets that edit report the width
+     * it enforces rather than a number a reader has to trace.</p>
+     */
+    public static final int MARKER_WIDTH = 1;
+
+    /**
+     * The width of the account group code.
+     *
+     * <p>Assumptions: ten, from {@code ACCT-GROUP-ID PIC X(10)} at {@code app/cpy/CVACT01Y.cpy} line 15,
+     * and the same ten the account mapper pads the stored value to.</p>
+     */
+    public static final int GROUP_ID_EDIT_WIDTH = 10;
+
+    /**
+     * The width of the government-issued identifier reference.
+     *
+     * <p>Assumptions: twenty, from {@code CUST-GOVT-ISSUED-ID PIC X(20)} at {@code app/cpy/CVCUS01Y.cpy}
+     * line 20, and the same twenty the customer mapper bounds the stored value by.</p>
+     */
+    public static final int GOVERNMENT_IDENTIFIER_EDIT_WIDTH = 20;
 
     /** The length the identifier edit examines its first part at, moved at L2441. */
     public static final int NATIONAL_IDENTIFIER_PART_1_WIDTH = 3;
@@ -1147,6 +1232,24 @@ public class AccountUpdateService {
                 editMandatory(LABEL_ADDRESS_LINE_1, request.addressLine1(),
                         ADDRESS_LINE_EDIT_WIDTH));
 
+        // WHY : Refactoring Rationale: these three components had NO edit at all. The reference performs
+        //       none on them -- its screen fields are the only constraint they have, and a 3270 field
+        //       cannot overflow -- so the migration inherited nothing to run, and an over-wide value
+        //       travelled all the way to the mapper, which refused it with a sentence too long for a
+        //       message line. The result was that the dry-run operation reported the submission acceptable
+        //       and the committing operation refused it with the fixed fallback sentence. A width verdict
+        //       is the whole of what they need: none of the three has a content rule in the reference, so
+        //       adding one here would invent a rule rather than migrate one.
+        // WHY : Assumptions: the group code is checked against the width the ACCOUNT master declares and
+        //       the identifier reference against the width the CUSTOMER master declares, so each names its
+        //       own field's limit rather than a shared one.
+        latch.record("groupId", editWidth(LABEL_ACCOUNT_GROUP, request.groupId(),
+                GROUP_ID_EDIT_WIDTH));
+        latch.record("addressLine2", editWidth(LABEL_ADDRESS_LINE_2, request.addressLine2(),
+                ADDRESS_LINE_EDIT_WIDTH));
+        latch.record("governmentIssuedId", editWidth(LABEL_GOVERNMENT_ISSUED_ID,
+                request.governmentIssuedId(), GOVERNMENT_IDENTIFIER_EDIT_WIDTH));
+
         // WHY : Assumptions: the allow-list edit is GUARDED on the letters-only edit having passed,
         //       which is the test at app/cbl/COACTUPC.cbl L1599. The collaborator's state edit is total
         //       -- it pads a blank to width and looks it up -- so an omitted state would otherwise be
@@ -1172,6 +1275,27 @@ public class AccountUpdateService {
                 editAlphaRequired(LABEL_CITY, request.city(), ADDRESS_LINE_EDIT_WIDTH));
         latch.record("countryCode",
                 editAlphaRequired(LABEL_COUNTRY, request.countryCode(), COUNTRY_CODE_EDIT_WIDTH));
+
+        // WHY : Refactoring Rationale: each telephone PART is checked against its own width before the
+        //       three are assembled, and the reason is that assembly itself hid the fault. The collaborator
+        //       reads the area code, the prefix and the line number from FIXED POSITIONS of the assembled
+        //       fifteen-character form, so every part has to be exactly its declared width for those
+        //       positions to be right -- which is why the assembly narrows each one. Narrowing a
+        //       five-character prefix to three made the value acceptable to every subsequent test, so a
+        //       caller that sent "55555" was told its number was fine and a different number was stored.
+        //       Leaving the part unnarrowed instead would shift the two positions after it and report
+        //       failures against parts the caller sent correctly, so the fault has to be caught before
+        //       assembly rather than during it.
+        // WHY : Assumptions: the sentences are the collaborator's OWN, verbatim -- a part longer than its
+        //       width is exactly the condition its not-a-3-digit-number and not-a-4-digit-number sentences
+        //       describe, composed at app/cbl/COACTUPC.cbl lines 2264, 2330 and 2396. Transformation rule
+        //       T8 carries those across unchanged, so no new wording is introduced for a case the reference
+        //       already words, and the entries are keyed on the same three component names the collaborator
+        //       keys its own refusals on, so a client marks one control rather than two.
+        recordTelephonePartWidths(latch, FIELD_PHONE_1, LABEL_PHONE_NUMBER_1,
+                request.phone1AreaCode(), request.phone1Prefix(), request.phone1LineNumber());
+        recordTelephonePartWidths(latch, FIELD_PHONE_2, LABEL_PHONE_NUMBER_2,
+                request.phone2AreaCode(), request.phone2Prefix(), request.phone2LineNumber());
 
         latch.merge(this.addressValidation.validateUsPhoneNumber(
                 assembledTelephoneNumber(request.phone1AreaCode(), request.phone1Prefix(),
@@ -1380,6 +1504,15 @@ public class AccountUpdateService {
         if (FieldValidationFlag.isNeverSupplied(examined)) {
             return EditOutcome.blank(composed(label, SUFFIX_MUST_BE_SUPPLIED));
         }
+
+        // WHY : Assumptions: the width verdict is taken AFTER the absence test and BEFORE the content
+        //       tests, for the reason recorded on editWidth: a field filled only with padding is empty
+        //       rather than too long, and a content test run on the truncated copy could never see the
+        //       excess at all.
+        EditOutcome width = editWidth(label, value, length);
+        if (!width.state().isValid()) {
+            return width;
+        }
         return EditOutcome.acceptable();
     }
 
@@ -1413,9 +1546,19 @@ public class AccountUpdateService {
     public EditOutcome editYesNo(String label, String value) {
         Objects.requireNonNull(label, "label must not be null");
 
-        String examined = atWidth(value, 1);
+        String examined = atWidth(value, MARKER_WIDTH);
         if (FieldValidationFlag.isNeverSupplied(examined) || "0".equals(examined)) {
             return EditOutcome.blank(composed(label, SUFFIX_MUST_BE_SUPPLIED));
+        }
+
+        // WHY : Assumptions: the width verdict is taken here for the same reason the other generic edits
+        //       take it -- so a submission the mapper would refuse is refused by the driver both endpoints
+        //       run. It matters more on this edit than on the others: a two-character value such as "YN"
+        //       was truncated to "Y" and reported ACCEPTABLE, so a caller was told a marker it did not
+        //       send had been accepted.
+        EditOutcome width = editWidth(label, value, MARKER_WIDTH);
+        if (!width.state().isValid()) {
+            return width;
         }
 
         if (!"Y".equals(examined) && !"N".equals(examined)) {
@@ -1454,6 +1597,15 @@ public class AccountUpdateService {
         if (FieldValidationFlag.isNeverSupplied(examined)) {
             return EditOutcome.blank(composed(label, SUFFIX_MUST_BE_SUPPLIED));
         }
+
+        // WHY : Assumptions: the width verdict is taken AFTER the absence test and BEFORE the content
+        //       tests, for the reason recorded on editWidth: a field filled only with padding is empty
+        //       rather than too long, and a content test run on the truncated copy could never see the
+        //       excess at all.
+        EditOutcome width = editWidth(label, value, length);
+        if (!width.state().isValid()) {
+            return width;
+        }
         if (!isLettersAndSpacesOnly(examined)) {
             return EditOutcome.notAcceptable(composed(label, SUFFIX_ALPHABETS_ONLY));
         }
@@ -1487,6 +1639,15 @@ public class AccountUpdateService {
         if (FieldValidationFlag.isNeverSupplied(examined)) {
             return EditOutcome.blank(composed(label, SUFFIX_MUST_BE_SUPPLIED));
         }
+
+        // WHY : Assumptions: the width verdict is taken AFTER the absence test and BEFORE the content
+        //       tests, for the reason recorded on editWidth: a field filled only with padding is empty
+        //       rather than too long, and a content test run on the truncated copy could never see the
+        //       excess at all.
+        EditOutcome width = editWidth(label, value, length);
+        if (!width.state().isValid()) {
+            return width;
+        }
         if (!isLettersDigitsAndSpacesOnly(examined)) {
             return EditOutcome.notAcceptable(composed(label, SUFFIX_NUMBERS_OR_ALPHABETS_ONLY));
         }
@@ -1513,6 +1674,15 @@ public class AccountUpdateService {
         String examined = examinedValue(label, value, length);
         if (FieldValidationFlag.isNeverSupplied(examined)) {
             return EditOutcome.acceptable();
+        }
+
+        // WHY : Assumptions: the width verdict is taken AFTER the absence test and BEFORE the content
+        //       tests, for the reason recorded on editWidth: a field filled only with padding is empty
+        //       rather than too long, and a content test run on the truncated copy could never see the
+        //       excess at all.
+        EditOutcome width = editWidth(label, value, length);
+        if (!width.state().isValid()) {
+            return width;
         }
         if (!isLettersAndSpacesOnly(examined)) {
             return EditOutcome.notAcceptable(composed(label, SUFFIX_ALPHABETS_ONLY));
@@ -1543,6 +1713,15 @@ public class AccountUpdateService {
         String examined = examinedValue(label, value, length);
         if (FieldValidationFlag.isNeverSupplied(examined)) {
             return EditOutcome.acceptable();
+        }
+
+        // WHY : Assumptions: the width verdict is taken AFTER the absence test and BEFORE the content
+        //       tests, for the reason recorded on editWidth: a field filled only with padding is empty
+        //       rather than too long, and a content test run on the truncated copy could never see the
+        //       excess at all.
+        EditOutcome width = editWidth(label, value, length);
+        if (!width.state().isValid()) {
+            return width;
         }
         if (!isLettersDigitsAndSpacesOnly(examined)) {
             return EditOutcome.notAcceptable(composed(label, SUFFIX_NUMBERS_OR_ALPHABETS_ONLY));
@@ -1581,6 +1760,15 @@ public class AccountUpdateService {
         String examined = examinedValue(label, value, length);
         if (FieldValidationFlag.isNeverSupplied(examined)) {
             return EditOutcome.blank(composed(label, SUFFIX_MUST_BE_SUPPLIED));
+        }
+
+        // WHY : Assumptions: the width verdict is taken AFTER the absence test and BEFORE the content
+        //       tests, for the reason recorded on editWidth: a field filled only with padding is empty
+        //       rather than too long, and a content test run on the truncated copy could never see the
+        //       excess at all.
+        EditOutcome width = editWidth(label, value, length);
+        if (!width.state().isValid()) {
+            return width;
         }
         if (!isAllDigits(examined)) {
             return EditOutcome.notAcceptable(composed(label, SUFFIX_ALL_NUMERIC));
@@ -1623,6 +1811,31 @@ public class AccountUpdateService {
         if (!AccountMapper.isEditedAmount(value)) {
             return EditOutcome.notAcceptable(composed(label, SUFFIX_IS_NOT_VALID));
         }
+
+        // WHY : Refactoring Rationale: the MAGNITUDE is tested here, in the edit phase, and this is the
+        //       whole of the fix for an amount that reached the column and overflowed it. The shape test
+        //       above admits any value the fifteen-character mask can spell, and fifteen characters hold a
+        //       sign, ELEVEN integer digits, a point and two fraction digits -- one digit more than
+        //       NUMERIC(12,2) can store. Such a value used to pass every edit, reach the row builder and
+        //       raise an integrity violation, which the caller received as HTTP 500 saying the service had
+        //       failed. Testing it here answers it as what it is, a value for this field the field cannot
+        //       hold, and answers it on BOTH the committing operation and the dry-run beside it, which is
+        //       the parity the two publish.
+        // WHY : Assumptions: the sentence is the reference's OWN ' is not valid', the one it composes at
+        //       app/cbl/COACTUPC.cbl lines 2206 to 2212 for a monetary value its edit refuses, rather than
+        //       a new sentence naming a digit limit. The reference has exactly one refusal for an
+        //       unacceptable amount and transformation rule T8 carries its wording across unchanged; a
+        //       value too large for the field is not a valid value for the field, so no second sentence is
+        //       needed and inventing one would put text on a migrated screen that the migration did not
+        //       take from anywhere.
+        // WHY : Alternatives Considered: reproducing the reference exactly, which accepts the value and
+        //       lets the following MOVE truncate its high-order digits. Rejected as a documented
+        //       divergence, for the reason recorded on AccountMapper.isAmountWithinPicture: truncation
+        //       reports success while storing a different amount, and that is the one behaviour a
+        //       migration of a financial system must not carry forward.
+        if (!AccountMapper.isAmountWithinPicture(value)) {
+            return EditOutcome.notAcceptable(composed(label, SUFFIX_IS_NOT_VALID));
+        }
         return EditOutcome.acceptable();
     }
 
@@ -1654,6 +1867,24 @@ public class AccountUpdateService {
      */
     public NationalIdentifierVerdict editNationalIdentifier(String firstPart, String middlePart,
             String lastPart) {
+
+        // WHY : Refactoring Rationale: a submission that does not EDIT the identifier is not edited against,
+        //       and this guard is what makes a read-then-write cycle possible at all. Every read withholds
+        //       the identifier behind a marker, so a client that reads an account, changes one address line
+        //       and submits the record it holds sends either three absent components or three marked ones.
+        //       Both used to reach the three required-numeric edits below and draw three refusals naming
+        //       fields the client had never filled in -- and because those three refusals fired on every
+        //       such submission, the no-change comparison further up could never be reached either, so the
+        //       reference's own "no changes detected" answer was unreachable in practice.
+        // WHY : Assumptions: the condition is the sibling mapper's, called rather than restated, because
+        //       that class owns the withholding convention and decides the same question when it chooses
+        //       between preserving and replacing the stored value. Two spellings of one rule are two rules
+        //       that can disagree, and disagreeing here means the driver accepts a submission the mapper
+        //       then treats as a replacement, or the reverse.
+        if (CustomerMapper.nationalIdentifierUnedited(firstPart, middlePart, lastPart)) {
+            return new NationalIdentifierVerdict(EditOutcome.acceptable(),
+                    EditOutcome.acceptable(), EditOutcome.acceptable());
+        }
 
         EditOutcome first = editNumericRequired(LABEL_NATIONAL_IDENTIFIER_PART_1, firstPart,
                 NATIONAL_IDENTIFIER_PART_1_WIDTH);
@@ -2048,14 +2279,31 @@ public class AccountUpdateService {
     /**
      * Refuses the submission when any edit reported a failure.
      *
-     * <p>Assumptions: the refusal carries the FIRST failure's state and sentence alongside every
-     * offending property, because that pairing is what the baseline shows -- one sentence on its
-     * seventy-five-character line and a marker on each failing field. The shared refusal type carries
-     * exactly that shape, so nothing here is invented.</p>
+     * <p>Assumptions: the refusal carries the FIRST failure's sentence as the aggregate -- the one the
+     * baseline writes to its seventy-five-character message line, latched first-wins at
+     * {@code app/cbl/COACTUPC.cbl} L480 and L1912 -- and it carries the driver's accumulated entries
+     * beside it, so each failing field also keeps the state and the sentence its OWN edit produced.</p>
+     *
+     * <p>Refactoring Rationale: this used to pass the field NAMES with a single state and a single
+     * sentence, and the shared advice then wrote that one sentence against every name. The baseline does
+     * not do that: it composes one sentence per failing edit and marks each field with the state that
+     * edit set -- the templated highlight at {@code app/cpy/CSSETATY.cpy} lines 17 to 27 draws an
+     * asterisk for a field left blank and the colour attribute alone for a value an edit rejected, which
+     * is two states this could express only one of. The measured consequence was that a submission with
+     * a too-long first name, a blank last name and an out-of-list city was answered with three identical
+     * entries, so a client corrected one field, resubmitted, and learned the next one a round trip at a
+     * time. The dry-run endpoint beside this one returns {@code verdict.fieldErrors()} directly and has
+     * always been right; passing the same entries here is what makes the two agree.</p>
+     *
+     * <p>Alternatives Considered: composing the per-field body in this service, by catching nothing and
+     * returning a 400 from the controller instead of raising. Rejected because the refusal shape is a
+     * cross-service contract owned by the shared advice -- the status, the code, the correlation
+     * identifier, the timestamp and the field-error array are the same on all eight services -- and a
+     * service assembling its own would be the second place that shape is decided.</p>
      *
      * @param verdict the driver's outcome; must not be {@code null}
      * @throws ClientInputException if the verdict reports any failure, which the shared advice renders
-     *     as HTTP 400 with one entry per property
+     *     as HTTP 400 with one entry per property, each carrying its own state and sentence
      * @throws IllegalArgumentException as the parent of the above, since {@link ClientInputException}
      *     extends it
      */
@@ -2063,8 +2311,8 @@ public class AccountUpdateService {
         if (!verdict.inputError()) {
             return;
         }
-        throw new ClientInputException(ApiError.CODE_VALIDATION, verdict.fieldNames(),
-                verdict.fieldErrors().get(0).state(), verdict.message());
+        throw ClientInputException.ofFieldErrors(ApiError.CODE_VALIDATION, verdict.fieldErrors(),
+                verdict.message());
     }
 
     /**
@@ -2173,6 +2421,75 @@ public class AccountUpdateService {
     }
 
     /**
+     * Records a width verdict for each of one telephone number's three submitted parts.
+     *
+     * <p>Purpose: to refuse an over-wide part BEFORE {@link #assembledTelephoneNumber} narrows it, keyed on
+     * the same component name and carrying the same sentence the collaborator would use for a part of the
+     * wrong shape.</p>
+     *
+     * <p>Assumptions: a part that FITS is recorded as acceptable rather than not recorded at all, because
+     * the accumulator treats an acceptable verdict as a no-op and recording all three keeps the three calls
+     * uniform -- a reader does not have to work out which of them was conditional.</p>
+     *
+     * <p>Assumptions: only the width is decided here. Whether the part is digits, whether it is zero and
+     * whether the area code is in the allow-list all remain the collaborator's, which is what keeps one
+     * telephone rule in one place; this method exists solely because that collaborator cannot see a part
+     * that assembly has already narrowed.</p>
+     *
+     * @param latch the accumulator to record into; must not be {@code null}
+     * @param fieldStem the component name the number's parts are keyed under, {@link #FIELD_PHONE_1} or
+     *     {@link #FIELD_PHONE_2}; must not be {@code null}
+     * @param label the field label each sentence is prefixed with; must not be {@code null}
+     * @param areaCode the submitted area code, which may be blank or {@code null}
+     * @param phonePrefix the submitted prefix, which may be blank or {@code null}
+     * @param lineNumber the submitted line number, which may be blank or {@code null}
+     * @throws NullPointerException if {@code latch}, {@code fieldStem} or {@code label} is {@code null}
+     */
+    private static void recordTelephonePartWidths(EditLatch latch, String fieldStem, String label,
+            String areaCode, String phonePrefix, String lineNumber) {
+
+        Objects.requireNonNull(latch, "latch must not be null");
+        Objects.requireNonNull(fieldStem, "fieldStem must not be null");
+        Objects.requireNonNull(label, "label must not be null");
+
+        latch.record(fieldStem + AddressValidationService.FIELD_SUFFIX_AREA_CODE,
+                telephonePartWidth(label, areaCode, AddressValidationService.AREA_CODE_WIDTH,
+                        AddressValidationService.MSG_AREA_CODE_NOT_THREE_DIGITS));
+        latch.record(fieldStem + AddressValidationService.FIELD_SUFFIX_PHONE_PREFIX,
+                telephonePartWidth(label, phonePrefix, AddressValidationService.PHONE_PREFIX_WIDTH,
+                        AddressValidationService.MSG_PREFIX_NOT_THREE_DIGITS));
+        latch.record(fieldStem + AddressValidationService.FIELD_SUFFIX_PHONE_LINE_NUMBER,
+                telephonePartWidth(label, lineNumber,
+                        AddressValidationService.PHONE_LINE_NUMBER_WIDTH,
+                        AddressValidationService.MSG_LINE_NUMBER_NOT_FOUR_DIGITS));
+    }
+
+    /**
+     * Reaches a width verdict on one telephone part, wording it the way the collaborator words it.
+     *
+     * <p>Assumptions: the sentence is prefixed with the label and NOT joined by
+     * {@code prefixedMessage}'s separator logic, because each of the collaborator's telephone sentences
+     * already opens with the colon -- {@code ": Area code must be A 3 digit number."} -- so the label is
+     * concatenated directly, exactly as that collaborator concatenates it. Inserting a separator would
+     * produce "Phone Number 1 : Area code ..." where the reference produces "Phone Number 1: Area code
+     * ...".</p>
+     *
+     * @param label the field label the sentence is prefixed with; must not be {@code null}
+     * @param value the submitted part exactly as it arrived, which may be blank or {@code null}
+     * @param width the number of characters the part declares
+     * @param wording the collaborator's own sentence for a part of this shape; must not be {@code null}
+     * @return an acceptable verdict when the part is absent or fits, a not-acceptable one otherwise; never
+     *     {@code null}
+     */
+    private static EditOutcome telephonePartWidth(String label, String value, int width,
+            String wording) {
+        if (value == null || value.length() <= width) {
+            return EditOutcome.acceptable();
+        }
+        return EditOutcome.notAcceptable(label + wording);
+    }
+
+    /**
      * Assembles three submitted parts into the fifteen-character stored telephone form.
      *
      * <p>Assumptions: the layout is the one the baseline declares at {@code app/cbl/COACTUPC.cbl} L82 to
@@ -2213,6 +2530,66 @@ public class AccountUpdateService {
                     "length must be positive, but was " + length + " for label " + label);
         }
         return atWidth(value, length);
+    }
+
+    /**
+     * Reaches a verdict on the WIDTH of a submitted value, before any edit examines its content.
+     *
+     * <p>Purpose: to make an over-wide value a refusal of the field it arrived on, reported by the same
+     * driver that reports every other refusal, on BOTH the committing operation and the dry-run beside
+     * it.</p>
+     *
+     * <p>Refactoring Rationale: this exists because the two halves of one screen contract disagreed about
+     * a value neither of them should accept. {@link #examinedValue} TRUNCATES to the field's width, so a
+     * twenty-six-character first name reached the letters-only test as twenty-five characters, passed it,
+     * and the dry-run operation answered that the submission was acceptable. The committing operation then
+     * refused the same submission -- but from inside the mapper, whose own width guards raise a sentence
+     * far longer than a message line can carry, so the caller received the fixed fallback sentence with no
+     * indication that a width was the problem. A caller therefore learned three different things about one
+     * value depending on which endpoint it used: acceptable, unspecified, and nothing. Deciding the width
+     * here puts one answer in the driver, which both endpoints run.</p>
+     *
+     * <p>Assumptions: this is checked AFTER a blank test rather than before it, and the ordering is
+     * deliberate. A value of twenty-six spaces submitted for a twenty-five-character field is an EMPTY
+     * field with one space too many, and the reference -- whose terminal cannot deliver more characters
+     * than a field declares -- would see it as blank. Reporting it as too long would ask a caller to
+     * shorten something it did not fill in.</p>
+     *
+     * <p>Assumptions: the width is measured on the value AS SUBMITTED rather than on the padded copy the
+     * content tests examine, because the padded copy is exactly the width by construction and could never
+     * fail this test.</p>
+     *
+     * <p>Alternatives Considered: reporting the reference's own {@code ' is not valid'} rather than naming
+     * the limit, which would introduce no new wording at all. Rejected because the reference has no
+     * wording for this case and cannot have -- a 3270 field physically cannot receive more characters than
+     * it declares, so transformation rule T8 has nothing to carry across here -- and a caller told that a
+     * twenty-six-character name "is not valid" has no way to learn that the limit is twenty-five. The
+     * mappers' existing guards show the same intent: each of them already names the width, and the only
+     * thing wrong with their sentences is that they are too long to reach a client.</p>
+     *
+     * <p>Trade-offs: the sentence is composed so it stays inside the reference's seventy-five-character
+     * message line -- the longest it can produce is a twenty-five-character label plus thirty-eight
+     * characters -- because a sentence wider than that line is one the shared advice will replace with the
+     * fixed fallback, which is the defect this method exists to remove.</p>
+     *
+     * @param label the field label the sentence is prefixed with; must not be {@code null}
+     * @param value the submitted value exactly as it arrived, which may be blank or {@code null}
+     * @param width the number of characters the field declares; must be positive
+     * @return an acceptable verdict when the value is absent or fits, or a not-acceptable one naming the
+     *     declared width; never {@code null}
+     * @throws NullPointerException if {@code label} is {@code null}
+     */
+    private static EditOutcome editWidth(String label, String value, int width) {
+        Objects.requireNonNull(label, "label must not be null");
+        if (value == null || value.length() <= width) {
+            return EditOutcome.acceptable();
+        }
+        // WHY : Assumptions: the noun agrees with the number, so a one-character field reads "1
+        //       character" rather than "1 characters". Two of the fields this guards -- the account status
+        //       marker and the primary-card-holder marker -- declare exactly one character, so the
+        //       ungrammatical form would be the one a caller actually saw.
+        String noun = width == 1 ? SUFFIX_WIDTH_UNIT_SINGULAR : SUFFIX_WIDTH_UNIT_PLURAL;
+        return EditOutcome.notAcceptable(composed(label, SUFFIX_WIDTH_PREFIX + width + noun));
     }
 
     /**
@@ -2475,10 +2852,20 @@ public class AccountUpdateService {
                         request.phone1LineNumber(), customer.getPhoneNumber1())
                 && sameTelephoneNumber(request.phone2AreaCode(), request.phone2Prefix(),
                         request.phone2LineNumber(), customer.getPhoneNumber2())
-                && FieldValidationFlag.isNeverSupplied(request.ssnPart1())
-                && FieldValidationFlag.isNeverSupplied(request.ssnPart2())
-                && FieldValidationFlag.isNeverSupplied(request.ssnPart3())
-                && FieldValidationFlag.isNeverSupplied(request.governmentIssuedId())
+                // WHY : Refactoring Rationale: the two protected identifiers count as UNCHANGED when the
+                //       submission leaves them as they stand, which now includes a submission carrying the
+                //       marker a read returned in their place -- not only one that omits them. The
+                //       comparison could previously be satisfied only by an omission, so a client that read
+                //       an account and submitted the record it held was always judged to have changed
+                //       something, and the reference's own no-change answer could not be reached from the
+                //       one client behaviour that most naturally produces it. Neither identifier can be
+                //       compared directly, because the stored form is ciphertext and the entity publishes
+                //       no accessor for the clear value, so "unedited" is the only available reading of
+                //       "unchanged" for them.
+                && CustomerMapper.nationalIdentifierUnedited(request.ssnPart1(),
+                        request.ssnPart2(), request.ssnPart3())
+                && (FieldValidationFlag.isNeverSupplied(request.governmentIssuedId())
+                        || CustomerMapper.isWithheldEcho(request.governmentIssuedId()))
                 && sameDate(request.dateOfBirthYear(), request.dateOfBirthMonth(),
                         request.dateOfBirthDay(), customer.getDateOfBirth())
                 && sameText(request.eftAccountId(), customer.getEftAccountId())

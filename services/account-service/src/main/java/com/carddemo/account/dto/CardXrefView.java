@@ -17,6 +17,35 @@ package com.carddemo.account.dto;
  * incomplete body as a dependency failure precisely because it can tell the difference. Primitives would
  * silently default a missing identifier to zero, which is a valid-looking account number.</p>
  *
+ * <h2>Why these identifiers are numbers here and digit strings on the screen shape</h2>
+ *
+ * <p>⚠️ Assumptions: this shape and {@link CardXrefByAccountView} publish both identifiers as JSON NUMBERS
+ * while {@link CardXrefResponse} publishes the same two columns as digit STRINGS, and a reader meeting the
+ * two side by side is entitled to know that the difference is a decision. It is. These two shapes are read
+ * by MACHINES -- {@code transaction-service} and {@code authorization-service} bind them, and the columns
+ * they mirror are {@code BIGINT}, so a number is the representation that costs neither side a conversion.
+ * {@link CardXrefResponse} is read by a BROWSER and mirrors a fixed-width screen field, so it carries the
+ * display form: {@code XREF-ACCT-ID} is {@code PIC 9(11)} at line 7 of {@code app/cpy/CVACT03Y.cpy} and
+ * {@code XREF-CUST-ID} is {@code PIC 9(09)} at line 6, and an unsigned display numeric is right-justified
+ * and ZERO-filled.</p>
+ *
+ * <p>⚠️ Trade-offs: the numeric form does not carry the zero fill, and on this data that is not a hypothetical
+ * loss -- {@code app/data/ASCII/acctdata.txt} numbers its fifty accounts {@code 00000000001} through
+ * {@code 00000000050}, so the numeric form of every shipped account is one or two digits where the display
+ * form is eleven. THE OBLIGATION THIS PLACES ON A CONSUMER IS EXPLICIT: a consumer that renders this value
+ * back as characters must zero-fill it to the declared width. Both consumers now do --
+ * {@code authorization-service}'s and {@code transaction-service}'s clients each format it to eleven digits
+ * -- and the second of the two did not, which is why the obligation is recorded here rather than left to be
+ * inferred from the column type.</p>
+ *
+ * <p>Alternatives Considered: publishing digit strings on these two shapes as well, so that one
+ * representation crossed every address. Rejected, and not on taste: both members would then have to be
+ * declared and validated as strings on two consumers whose seams are being changed by other work in this
+ * same programme, and a published wire type is the one thing a consumer cannot absorb silently -- a strict
+ * deserialiser answers a changed type with a failure, so the change would take both consumers down until
+ * they were redeployed together. The representation difference is bounded, it is stated here and in the
+ * published contract, and the obligation it creates is one line of formatting on each consumer.</p>
+ *
  * <p>Assumptions: neither identifier is masked. Neither is cardholder data on its own: an account number in
  * this system is an eleven-digit internal key and a customer identifier a nine-digit one, and the migration
  * masks the primary account NUMBER rather than every numeric identity. Masking them would additionally make

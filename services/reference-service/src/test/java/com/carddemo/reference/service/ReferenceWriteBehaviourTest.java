@@ -245,16 +245,28 @@ class ReferenceWriteBehaviourTest {
                             TYPE_CD, "Duplicate")))
                     .isInstanceOf(RecordConflictException.class)
                     // WHY : Refactoring Rationale: the KIND is asserted where this case previously
-                    //       asserted only the type. It used to be raised as STALE_VERSION, which the
-                    //       shared advice renders with the before-image data-changed sentence -- so a
-                    //       caller creating a code that already existed was told somebody else had
-                    //       edited a row it was trying to create. The published contract says which
-                    //       sentence this answer carries: the referential one, reached "through the same
-                    //       integrity branch as a restricted delete", with the consequence registered as
-                    //       D-REFERENCE-INTEGRITY-SENTENCE. A type-only assertion passed against either
-                    //       kind, which is why it did not catch the contradiction.
+                    //       asserted only the type, and the kind asserted is now the insert refusal. It
+                    //       was raised as STALE_VERSION first -- telling a caller somebody else had
+                    //       edited a row it was trying to create -- and then as REFERENCED_ROW, which
+                    //       renders 'Please delete associated child records first:'. That sentence is
+                    //       composed in the baseline's DELETE paragraph at physical line 1641 of
+                    //       COTRTUPC.cbl and cannot be reached by an insert, and its remedy is wrong for
+                    //       this condition: a caller that reused a code has no dependents to remove. The
+                    //       baseline composes its insert refusal in 9700-INSERT-RECORD at physical lines
+                    //       1607 to 1618, naming the table the insert was aimed at, and that is what the
+                    //       kind now selects. A type-only assertion passed against every one of the
+                    //       three, which is why it caught neither contradiction.
                     .extracting(failure -> ((RecordConflictException) failure).kind())
-                    .isEqualTo(RecordConflictException.Kind.REFERENCED_ROW);
+                    .isEqualTo(RecordConflictException.Kind.INSERT_REFUSED);
+
+            // WHY : Assumptions: the TABLE is asserted as well as the kind, because the sentence a caller
+            //       reads is composed around it. A refusal carrying the sibling service's table would
+            //       satisfy the assertion above and name the wrong table in the message band.
+            assertThatThrownBy(() -> service.create(
+                    new com.carddemo.reference.dto.TransactionTypeCreateRequest(
+                            TYPE_CD, "Duplicate")))
+                    .extracting(failure -> ((RecordConflictException) failure).targetTable())
+                    .isEqualTo("TRANSACTION_TYPE");
 
             verify(types, never()).save(any());
             verify(types, never()).saveAndFlush(any());
@@ -439,7 +451,15 @@ class ReferenceWriteBehaviourTest {
                     new TransactionCategoryId(TYPE_CD, CAT_CD), "Superseded");
             when(categories.findByIdIs(new TransactionCategoryId(TYPE_CD, CAT_CD)))
                     .thenReturn(Optional.of(stored));
-            when(categories.save(any(TransactionCategory.class)))
+            // WHY : Refactoring Rationale: the flushing member is stubbed and verified, where this case
+            //       stubbed and verified the plain save. The route was changed to flush because the
+            //       provider increments the optimistic-lock counter when it issues the UPDATE, so a
+            //       non-flushing save inside a transaction left the increment to the commit and the reply
+            //       carried the revision the caller had sent. The revision itself cannot be asserted from
+            //       a mock -- nothing here increments anything -- so what this case pins is the member
+            //       called; the incremented value reaching the reply is asserted against a real engine in
+            //       TransactionCategoryRepositoryIT.
+            when(categories.saveAndFlush(any(TransactionCategory.class)))
                     .thenAnswer(call -> call.getArgument(0));
             TransactionCategoryService service = new TransactionCategoryService(categories);
 
@@ -455,7 +475,48 @@ class ReferenceWriteBehaviourTest {
             assertThat(published.catCd()).isEqualTo(CAT_CD);
             assertThat(stored.getTypeCd()).isEqualTo(TYPE_CD);
             assertThat(stored.getCatCd()).isEqualTo(CAT_CD);
-            verify(categories).save(stored);
+            verify(categories).saveAndFlush(stored);
+            verify(categories, never()).save(any());
+        }
+
+        /**
+         * The replace publishes the revision of the instance the FLUSHED write handed back.
+         *
+         * <p>Purpose: the reply's revision is the token a client sends on its next write, so where it
+         * comes from is the whole contract. This case pins the source: the response is composed from
+         * whatever the flushing write returns, not from the request and not from the instance as it stood
+         * before the write.</p>
+         *
+         * <p>Assumptions: the property is stated by having the stub return a DIFFERENT instance from the
+         * one handed in, carrying a description this case can recognise. A stub that returned its own
+         * argument -- which is what the case above does, deliberately, because it is asserting the
+         * argument -- cannot tell the two sources apart, and that indistinguishability is exactly how a
+         * reply composed from the pre-write instance passed every case in this class.</p>
+         *
+         * <p>Assumptions: the revision value itself is not asserted here, because no mock increments one.
+         * What a mock CAN observe is which instance the reply was built from, and the incremented value
+         * arriving in the reply is asserted against a real engine in
+         * {@code TransactionCategoryRepositoryIT}.</p>
+         */
+        @Test
+        @DisplayName("publish the instance the flushed write returned, not the one read before it")
+        void publishTheInstanceTheFlushedWriteReturned() {
+            TransactionCategory stored = new TransactionCategory(
+                    new TransactionCategoryId(TYPE_CD, CAT_CD), "Superseded");
+            TransactionCategory flushed = new TransactionCategory(
+                    new TransactionCategoryId(TYPE_CD, CAT_CD), "As the store now holds it");
+            when(categories.findByIdIs(new TransactionCategoryId(TYPE_CD, CAT_CD)))
+                    .thenReturn(Optional.of(stored));
+            when(categories.saveAndFlush(any(TransactionCategory.class))).thenReturn(flushed);
+            TransactionCategoryService service = new TransactionCategoryService(categories);
+
+            TransactionCategoryResponse published = service.replace(TYPE_CD, CAT_CD,
+                    new TransactionCategoryUpdateRequest(TRIMMED_DESCRIPTION, 0L));
+
+            assertThat(published.description())
+                    .as("the reply is composed from the flushed instance, which is the only one whose"
+                            + " revision the provider has already advanced")
+                    .isEqualTo("As the store now holds it");
         }
     }
 
@@ -519,6 +580,93 @@ class ReferenceWriteBehaviourTest {
 
             assertThat(reply.returnCode())
                     .isEqualTo(ReferenceBatchUpdateService.RETURN_CODE_SOFT_WARN);
+        }
+
+        /**
+         * Every per-action sentence is a literal COBTUPDT declares, and each action gets its OWN.
+         *
+         * <p>⚠️ Refactoring Rationale: no case in this module read the per-action MESSAGE at all -- the
+         * cases around this one assert the outcome code, the applied flag and the aggregate return code
+         * -- so the published path spent its life reporting FOUR sentences that exist nowhere under app/:
+         * 'Record applied...', 'Record NOT found...', 'Record already exists...' and
+         * 'Description is required...'. A search of the reference tree returns no file for any of them.
+         * The verbatim literals were already declared on the service and were wired only to the
+         * record-stream path, which no HTTP caller can reach.
+         *
+         * <p>Assumptions: the expected text is written out in full here rather than taken from the
+         * service's own constants. Comparing a constant against itself is what let the defect survive:
+         * every assertion that touched these sentences referred to them by NAME and so agreed with
+         * whatever they happened to say. The citations are COBTUPDT.cbl lines 153, 179, 209 and the pair
+         * 181 and 211, plus the composition of 156 and 157.
+         *
+         * <p>Assumptions: the three success sentences are asserted to be three DISTINCT strings, because
+         * the defect being prevented is a single 'applied' message standing in for all three -- which is
+         * exactly what was there. A case asserting only that each is non-blank would pass against it.
+         */
+        @Test
+        @DisplayName("report each action with the baseline's own sentence for that action")
+        void reportEachActionWithTheBaselineSentence() {
+            when(types.findByTypeCd("41")).thenReturn(Optional.empty());
+            when(types.findByTypeCd("42"))
+                    .thenReturn(Optional.of(new TransactionType("42", "Purchase")));
+            when(types.saveAndFlush(any(TransactionType.class)))
+                    .thenAnswer(call -> call.getArgument(0));
+            when(types.findByTypeCd("43"))
+                    .thenReturn(Optional.of(new TransactionType("43", "Refund")));
+            when(types.findByTypeCd("44")).thenReturn(Optional.empty());
+            when(types.findByTypeCd("45")).thenReturn(Optional.empty());
+            when(types.findByTypeCd("46"))
+                    .thenReturn(Optional.of(new TransactionType("46", "Existing")));
+            ReferenceBatchUpdateService service = new ReferenceBatchUpdateService(types, mock(PlatformTransactionManager.class));
+
+            MaintenanceActionBatchResponse reply = service.apply(
+                    new MaintenanceActionBatchRequest(List.of(
+                            new MaintenanceActionRequest("INSERT", "41", "Added"),
+                            new MaintenanceActionRequest("UPDATE", "42", "Changed"),
+                            new MaintenanceActionRequest("DELETE", "43", null),
+                            new MaintenanceActionRequest("UPDATE", "44", "Absent"),
+                            new MaintenanceActionRequest("DELETE", "45", null),
+                            new MaintenanceActionRequest("INSERT", "46", "Repeated"))));
+
+            assertThat(reply.outcomes()).hasSize(6);
+            assertThat(reply.outcomes().get(0).message())
+                    .as("10031-INSERT-DB zero arm, COBTUPDT.cbl line 153")
+                    .isEqualTo("RECORD INSERTED SUCCESSFULLY");
+            assertThat(reply.outcomes().get(1).message())
+                    .as("10032-UPDATE-DB zero arm, line 179")
+                    .isEqualTo("RECORD UPDATED SUCCESSFULLY");
+            assertThat(reply.outcomes().get(2).message())
+                    .as("10033-DELETE-DB zero arm, line 209")
+                    .isEqualTo("RECORD DELETED SUCCESSFULLY");
+            assertThat(reply.outcomes().get(3).message())
+                    .as("10032-UPDATE-DB SQLCODE +100 arm, line 181, terminating period included")
+                    .isEqualTo("No records found.");
+            assertThat(reply.outcomes().get(4).message())
+                    .as("10033-DELETE-DB SQLCODE +100 arm, line 211, the identical literal")
+                    .isEqualTo("No records found.");
+            assertThat(reply.outcomes().get(5).message())
+                    .as("no duplicate-key arm exists, so a repeated key takes the negative arm of 154"
+                            + " and is answered with the composition of lines 156 and 157")
+                    .isEqualTo("Error accessing: TRANSACTION_TYPE table. SQLCODE:");
+
+            // WHY : Assumptions: the three success sentences are compared to EACH OTHER as well as to
+            //       their literals, because the condition being prevented is one message standing in for
+            //       three. Asserting the literals alone would catch a reversion to a single authored
+            //       sentence; asserting distinctness states the property that made three constants
+            //       necessary in the first place.
+            assertThat(List.of(reply.outcomes().get(0).message(), reply.outcomes().get(1).message(),
+                            reply.outcomes().get(2).message()))
+                    .doesNotHaveDuplicates();
+
+            // WHY : Assumptions: not one of the four withdrawn sentences may reappear anywhere in the
+            //       reply, which is asserted directly rather than inferred from the equalities above. A
+            //       fifth condition added later and given an authored sentence would satisfy every
+            //       assertion above and would reintroduce exactly the defect this case exists for.
+            assertThat(reply.outcomes()).allSatisfy(row -> assertThat(row.message())
+                    .doesNotContain("Record applied")
+                    .doesNotContain("Record NOT found")
+                    .doesNotContain("Record already exists")
+                    .doesNotContain("Description is required"));
         }
 
         /** A run in which every action applied reports the clean condition code. */

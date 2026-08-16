@@ -1,0 +1,70 @@
+-- =====================================================================
+-- services/reference-service/src/main/resources/db/migration/
+--   V4__drop_reference_inquiry_reply_ledger.sql
+--
+-- Purpose: withdraw reference.inquiry_reply_ledger, which this service
+--          creates but never writes to, so that the reference schema holds
+--          only the six reference tables this context owns.
+--
+-- WHY : Refactoring Rationale: the table was added to close a real defect
+--       -- a redelivered date-conversion request must be answered with the
+--       FIRST reply rather than a later one, because the reply body is read
+--       from the clock, so two answers to one request carry two different
+--       timestamps. That reasoning is sound and is NOT withdrawn here. What
+--       is withdrawn is this service's SECOND copy of the remedy. The
+--       asynchronous exchange has exactly one consumer, and it is not in
+--       this module: account-service's InquiryMessageListener reads the
+--       shared inquiry request queue and answers the DATE function itself,
+--       at its FUNCTION_DATE_INQUIRY constant, recording each composed
+--       reply in account.inquiry_reply_ledger before sending it. The
+--       guarantee therefore exists and is exercised; it simply lives with
+--       the consumer that produces the reply.
+-- WHY : Assumptions: this module has no way to write the table it created.
+--       It declares no SqsConfig and no @SqsListener anywhere, so no
+--       message ever reaches it, and no production class references the
+--       repository type that issued the table's three native statements --
+--       only a test did. A table that no code path can insert into cannot
+--       provide an idempotency guarantee, so keeping it did not make the
+--       exchange safer; it made two schemas appear to share a
+--       responsibility that one of them discharges alone.
+-- WHY : Alternatives Considered: deleting V3 from the module instead of
+--       adding this script. Rejected because it does not work. Flyway
+--       validates the applied history against the scripts it can resolve,
+--       this module sets no ignoreMigrationPatterns, and validate-on-migrate
+--       defaults to true -- so an environment that already applied V3 would
+--       fail at startup with a missing-migration error the moment the file
+--       disappeared. A released migration is immutable in both directions:
+--       its bytes may not change and it may not be removed. Withdrawing an
+--       object is therefore a forward-only operation, which is what this
+--       script is, and it is the remedy the migration-immutability guard in
+--       MigrationHistoryIT names for exactly this case.
+-- WHY : Alternatives Considered: moving the reference rows into
+--       account.inquiry_reply_ledger before dropping the table, as a data
+--       migration would. Rejected because there is nothing to move: the
+--       table is empty in every environment, necessarily so, since no code
+--       path inserts into it. A copy step would therefore transfer no rows
+--       while adding a cross-schema write to a schema this service must not
+--       write to.
+-- WHY : Assumptions: the primary key, the two CHECK constraints and the
+--       claimed-at index that V3 created are dropped WITH the table rather
+--       than named individually. Each is owned by the table, so DROP TABLE
+--       removes all four; naming them first would be four statements that
+--       must be kept in step with V3 by hand, and a name that drifted would
+--       fail the script for no gain. The table's COMMENT goes the same way.
+-- WHY : Assumptions: no GRANT is revoked here. V3 issued none -- the
+--       schema-wide default privileges established by
+--       data-migration/sql/V0__schemas_and_roles.sql are what gave the
+--       runtime role its access -- so the privilege on this table is an
+--       artifact of the table existing and disappears with it. Revoking
+--       explicitly would either be a no-op or, if it named the schema
+--       instead, would withdraw access to the six tables that remain.
+-- WHY : Trade-offs: IF EXISTS makes the script tolerate an environment that
+--       never applied V3, which is any environment first migrated after
+--       this script shipped. Flyway would run V3 then V4 in order on such a
+--       database, so the guard is not strictly required there; it is kept
+--       because it also makes the script safe to re-run by hand during an
+--       incident, and because a drop that fails on absence is a worse
+--       failure mode than one that succeeds silently.
+-- =====================================================================
+
+DROP TABLE IF EXISTS reference.inquiry_reply_ledger;

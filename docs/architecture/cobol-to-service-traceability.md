@@ -1766,6 +1766,49 @@ has no rollback statement to extend. Implemented by
 `services/account-service/src/main/java/com/carddemo/account/service/AccountUpdateService.java`,
 which carries the same citations at its update method.
 
+**The migrated seed data does not satisfy the online edits the same code enforces, and
+it is faithful for doing so.** This is the one entry in this section that is about DATA
+rather than about code, and it is here because a reader who meets it from the database
+side reads it as a migration defect. It is not. Two properties of
+[`app/data/ASCII/custdata.txt`](../../app/data/ASCII/custdata.txt) — a 500-byte,
+fifty-row file whose layout is [`app/cpy/CVCUS01Y.cpy`](../../app/cpy/CVCUS01Y.cpy) —
+were measured from the file itself rather than from the loaded rows:
+
+- `CUST-FICO-CREDIT-SCORE` (`PIC 9(03)`, at zero-based byte offset **329**) holds a
+  value outside the 300–850 domain the update path enforces in **21 of the 50** shipped
+  rows, ranging from **1** to **793**.
+- The state and leading two ZIP digits together — `CUST-ADDR-STATE-CD` at offset
+  **234** and `CUST-ADDR-ZIP` at offset **239** — form a four-character prefix that is
+  absent from the state-ZIP allow-list in
+  [`app/cpy/CSLKPCDY.cpy`](../../app/cpy/CSLKPCDY.cpy) in **48 of the 50** shipped rows.
+  The allow-list itself holds **240** prefixes. `NC12`, the prefix of the very first
+  shipped customer, is one of the absent ones: `NC` admits only `NC27` and `NC28`.
+
+Assumptions: the baseline's own program would refuse these rows too.
+[`app/cbl/COACTUPC.cbl`](../../app/cbl/COACTUPC.cbl) performs the credit-score range
+edit and the state-ZIP combination edit at its update boundary, and its edits are what
+`AddressValidationService` and the update path carry across. The rows were never
+submitted through that boundary — they arrive through `IDCAMS REPRO`, which validates
+nothing — so the file has always held values the online screen would decline. The
+migration reproduces that exactly: `ETL` loads the bytes and the schema declines to
+constrain them, for the reason recorded on `customers.addr_state_cd` in
+[`V1__account.sql`](../../services/account-service/src/main/resources/db/migration/V1__account.sql),
+which is that a constraint narrower than the seeded lookup table would refuse rows the
+baseline holds.
+
+Trade-offs: three alternatives were weighed and all three rejected. **Correcting the
+data** would edit `app/**`, which is reference-only, and would make the golden masters
+compare against values the baseline never held. **Constraining the columns** would fail
+the load outright for 48 of 50 customers, so the migrated system would hold less data
+than the one it replaces. **Relaxing the edits** to admit what the data carries would
+change the observable behaviour of the update screen, which is the one thing parity
+forbids. What is delivered instead is the honest combination: the data is loaded
+faithfully, the edits refuse what the reference refuses, and a caller editing any other
+field of one of those 48 customers is told its state-ZIP pair is invalid — a refusal
+that is correct, is the baseline's own, and is recorded here so it is not diagnosed as a
+seeding fault. Owned in detail by
+[`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md).
+
 ### 7.4 Divergences claimed by shipped code
 
 Every entry below is claimed as registered by a comment or docstring in shipped
@@ -3865,64 +3908,127 @@ a register of this size stays true.
 * **Files.**
   `services/authorization-service/src/main/java/com/carddemo/authorization/service/FraudMarkingService.java`.
 
-#### D-REFERENCE-INTEGRITY-SENTENCE — one integrity branch answers three integrity conditions
+#### D-REFERENCE-INTEGRITY-SENTENCE — the refused STATEMENT selects the sentence, not the constraint
 
-* **Baseline behaviour.** The reference programs separate exactly one integrity
-  condition from the rest and answer the remainder generically. A restricted delete is
-  distinguished on its own database code and answered with an instruction to the user —
+* **Baseline behaviour.** The reference programs compose their integrity sentences **per
+  paragraph**, so the statement that was refused is what decides the wording. The delete
+  paragraph distinguishes the restricted case on its own database code and answers it with
+  an instruction to the user —
   [`COTRTLIC.cbl`](../../app/app-transaction-type-db2/cbl/COTRTLIC.cbl) branches at
   **L1914**, sets its delete-requested state at **L1915**, moves
   `'Please delete associated child records first:'` at **L1919** and leaves through the
   normal exit at **L1925**, and
   [`COTRTUPC.cbl`](../../app/app-transaction-type-db2/cbl/COTRTUPC.cbl) takes the same
-  branch at **L1638** with the same literal at **L1641**. Every other integrity failure
-  falls to a catch-all: the insert paragraph at `COTRTUPC.cbl` **L1596** has only a zero
-  arm at **L1605** and a `WHEN OTHER` at **L1607** that sets `TABLE-UPDATE-FAILED`
-  (`'Update of record failed'`) and strings the SQLCODE and `SQLERRM` into the message,
-  and the batch maintenance program
+  branch at **L1638** with the same literal at **L1641**. The insert paragraph of that same
+  program, `9700-INSERT-RECORD` at **L1596**, has a zero arm at **L1605** and a single
+  `WHEN OTHER` at **L1607**: it sets `TABLE-UPDATE-FAILED` and then STRINGS
+  `'Error inserting record into:'` (**L1610**) and `' TRANSACTION_TYPE Table. SQLCODE:'`
+  (**L1611**) together with the SQLCODE and `SQLERRM` into `WS-RETURN-MSG`. Because that
+  composition writes the field **after** the condition flag has already moved its own text
+  (`'Update of record failed'`) there, and because **L1264** moves `WS-RETURN-MSG` into the
+  screen's error field, the composed insert sentence is the one a user actually sees. The
+  batch maintenance program
   [`COBTUPDT.cbl`](../../app/app-transaction-type-db2/cbl/COBTUPDT.cbl) does the same at
-  its insert **L137** with a zero arm at **L152** and a negative arm at **L154**. A
-  duplicate key on create and an absent parent on create therefore have **no
-  distinguished outcome and no sentence of their own** anywhere in the baseline.
-* **Target behaviour.** The reference contract answers a duplicate key on create, an
-  absent parent on create and a restricted delete all with HTTP 409 carrying the
-  restricted-delete sentence. All three arrive as one provider exception family —
-  PostgreSQL raises SQLSTATE 23505 for the first and 23503 for the other two, and Spring
-  surfaces every one of them as `DataIntegrityViolationException` — which
-  `GlobalExceptionHandler` maps in a single branch to `MESSAGE_REFERENCED_ROW`.
-  reference-service declares no advice of its own, so this is the only 409 body its
-  create paths can return.
-* **Category.** Documented divergence — a condition the baseline reports as a failed
-  write is reported as a contention, and three conditions share one sentence.
-* **Why the difference is accepted.** Alternatives Considered: composing a fourth
-  sentence for the duplicate-key condition and selecting it from a
-  `DuplicateKeyException` test placed ahead of the generic integrity test. Rejected on
-  the text, not on the mechanism: the baseline declares no entity-agnostic
-  already-exists literal to carry across. The three it does declare are
-  `'Tran ID already exist...'` at [`COTRN02C.cbl`](../../app/cbl/COTRN02C.cbl) **L738**,
+  its insert **L137** with a zero arm at **L152** and a negative arm at **L154**. The
+  baseline therefore has **two** integrity sentences on the reference tables, one per
+  statement, and **no** sentence that separates a duplicate key from an absent parent
+  within either of them.
+* **Target behaviour.** The reference service selects its 409 sentence from the statement
+  that was refused, matching the baseline's own arrangement:
+  * a **refused insert** — a duplicate primary key on either table, or a category naming a
+    transaction type that does not exist — carries the composed insert sentence, ending at
+    the baseline's colon with nothing appended:
+    `Error inserting record into: TRANSACTION_TYPE Table. SQLCODE:` (61 characters) for the
+    type table, and `Error inserting record into: TRANSACTION_TYPE_CATEGORY Table. SQLCODE:`
+    (70 characters) for the category table;
+  * a **refused delete** — a transaction type whose categories still reference it — carries
+    `Please delete associated child records first:` (45 characters), unchanged.
+
+  Both arrive as one provider exception family: PostgreSQL raises SQLSTATE 23505 for a
+  duplicate key and 23503 for either direction of the one foreign key, and Spring surfaces
+  every one of them as `DataIntegrityViolationException`. reference-service declares no
+  advice of its own, so the discrimination is made in the service — `TransactionTypeService`
+  classifies the insert path through `classifyInsertRefusal` and the replace and delete
+  paths through `classifyIntegrityViolation`, and `TransactionCategoryService`'s classifier
+  serves the insert path only — and each raises `RecordConflictException` with the kind that
+  selects the right wording. `Kind.INSERT_REFUSED` carries the table name, because the
+  sentence is composed around it and one renderer serves two tables.
+* **Category.** Documented divergence — a condition the baseline reports as a failed write
+  is reported as a contention; the insert sentence is applied to a second table the baseline
+  has no screen for; and two conditions share the insert sentence, exactly as the baseline
+  shares it.
+* **Why the difference is accepted.** ⚠️ **Refactoring Rationale: this entry previously
+  recorded the opposite target behaviour** — that all three conditions carried the
+  restricted-delete sentence — and justified it on the ground that "the baseline declares no
+  entity-agnostic already-exists literal to carry across". That premise was **wrong by
+  omission**: it enumerated only the three `'... already exist...'` literals
+  (`'Tran ID already exist...'` at [`COTRN02C.cbl`](../../app/cbl/COTRN02C.cbl) **L738**,
   the same string at [`COBIL00C.cbl`](../../app/cbl/COBIL00C.cbl) **L536**, and
-  `'User ID already exist...'` at [`COUSR01C.cbl`](../../app/cbl/COUSR01C.cbl) **L263**,
-  each naming its own entity — so a shared, entity-agnostic advice could only invent one,
-  and transformation rule T8 makes every user-visible string baseline text rather than
-  authored text. Alternatives Considered: reporting a duplicate key as HTTP 500 with the
-  abend block, which is the closest literal reading of the baseline, since
-  `'Update of record failed'` is published for exactly the case where a write failed for
-  neither reason a client can act on. Rejected because a duplicate key IS a
-  client-correctable condition — the caller chooses another code and succeeds — and
-  answering it as a server fault would tell every client to retry unchanged and give up.
-  Trade-offs: what is given up is that a caller reading only the sentence cannot tell a
-  duplicate key from a restricted delete; what it buys is that the sentence is baseline
-  text in all three cases and that the status is the one a client can act on. The
-  compensating control is the request itself: the three conditions arise on different
-  operations and, on the one operation where two of them can both arise, the addressed
-  key is in the path, so a caller that reads its own request knows which it hit.
-* **Where it is verified.** `GlobalExceptionHandlerTest` asserts that the referential
-  branch emits the baseline literal character for character, both as a constant and as
-  the message of the composed 409 body, so the sentence these three conditions share
-  cannot drift. The contract states the sharing on each create operation and on the
-  shared `Conflict` response.
+  `'User ID already exist...'` at [`COUSR01C.cbl`](../../app/cbl/COUSR01C.cbl) **L263**) and
+  overlooked the composed sentence the insert paragraph of the reference program itself
+  builds at **L1610** to **L1611**. That sentence names no entity beyond the table it wrote
+  to, so it is exactly the entity-agnostic insert wording the earlier reading concluded did
+  not exist, and it reaches the screen. Once it is in view the delete sentence is
+  indefensible on a create: it is composed in a different paragraph under a code only a
+  DELETE raises, and its remedy — remove the dependent rows — is an action a caller whose
+  insert wrote nothing cannot take, so the response gave wrong remediation advice verbatim
+  in the message band.
+* **What is still shared, and why.** A duplicate key and an absent parent on the same insert
+  carry the **same** sentence. Alternatives Considered: composing a further sentence to
+  separate them. Rejected on the text rather than the mechanism — the classifier already
+  reads the SQLSTATE and could select on it — because the baseline's insert paragraph has one
+  failing arm for the whole statement, so a second caller-facing sentence would be text this
+  migration authored, and transformation rule T8 admits only text the baseline declares.
+  Trade-offs: a caller reading only the sentence cannot tell a duplicate key from an absent
+  parent. The compensating controls are the request and the log: the addressed key is in the
+  body the caller sent, and the service logs the SQLSTATE and its classification apart, so an
+  operator diagnosing the refusal has the distinction even though the wording does not carry
+  it.
+* **What is composed rather than transcribed.** The category table's sentence. The baseline
+  has no screen that inserts a category — every `INSERT INTO` in that tree names
+  `CARDDEMO.TRANSACTION_TYPE` — so there is no literal to copy. What is carried across is the
+  **composition**, whose every character outside the table token comes from **L1610** and
+  **L1611**, applied to the table this insert names. The token used is the baseline's own
+  unqualified name from
+  [`TRNTYCAT.ddl`](../../app/app-transaction-type-db2/ddl/TRNTYCAT.ddl) **L1**, matching the
+  unqualified form the baseline writes into the sentence at **L1611** even though the
+  statement above it names the table qualified. Alternatives Considered: answering a refused
+  category insert with the sentence naming the TYPE table, which requires no composition.
+  Rejected because it names the wrong table to a caller. Also considered: leaving the category
+  create on the delete sentence, which is what it did. Rejected for the same reason the type
+  create no longer carries it.
+* **What is deliberately withheld.** The sentence ends at the baseline's colon. The baseline
+  follows that colon with the SQLCODE and `SQLERRM`; carrying those into a body would name the
+  constraint and, because the driver quotes the values that violated it, echo the caller's own
+  key back to whoever holds the response. The table named is the baseline's, not
+  `reference.transaction_types` or `reference.transaction_categories`, so no response body
+  discloses a schema or table this migration created. Both details go to the operational record
+  under the same correlation identity the response carries.
+* **What the unique-violation arm of the replace-and-delete classifier became.**
+  It is **removed**, not left unreachable. On the two statements that classifier still serves,
+  a repeated key cannot arise — the replace sets only the description and the version, the
+  delete sets nothing, and
+  [`V1__reference.sql`](../../services/reference-service/src/main/resources/db/migration/V1__reference.sql)
+  declares no unique object on either table beyond its primary key — so an arm for it would
+  document a condition the schema forbids.
+* **Where it is verified.** `GlobalExceptionHandlerTest` asserts that the referential branch
+  and the insert branch each emit their baseline text character for character, both as
+  constants and as the message of the composed 409 body. `TransactionTypeServiceTest` pins the
+  kind and the table for a constraint-detected duplicate and asserts that the read-detected and
+  constraint-detected routes answer identically, so the answer cannot come to depend on timing;
+  `ReferenceWriteBehaviourTest` pins the same for the read-detected route.
+  `TransactionCategoryServiceTest` pins that the two insert conditions are distinct types
+  carrying one kind and one table. `TransactionTypeControllerTest` and
+  `TransactionCategoryCreationDispatcherTest` assert the rendered 409 body for the type and
+  category creates respectively — including that it is NOT the delete sentence and that neither
+  the SQLSTATE nor the migrated table name travels. `ReferenceApiContractTest` compares the
+  contract's four conflict examples against the sentences the shared advice composes, so the
+  document and the body cannot drift.
 * **Files.**
+  `services/common-lib/src/main/java/com/carddemo/common/error/RecordConflictException.java`,
   `services/common-lib/src/main/java/com/carddemo/common/error/GlobalExceptionHandler.java`,
+  `services/reference-service/src/main/java/com/carddemo/reference/service/TransactionTypeService.java`,
+  `services/reference-service/src/main/java/com/carddemo/reference/service/TransactionCategoryService.java`,
   `services/reference-service/src/main/resources/openapi/reference-api.yaml`.
 
 #### D-REFERENCE-ACTION-DOMAIN — an unrecognised maintenance action refuses the request, not the record
@@ -4155,6 +4261,62 @@ a register of this size stays true.
 * **Files.**
   `services/reference-service/src/main/resources/openapi/reference-api.yaml`,
   `services/reference-service/src/test/resources/fixtures/disclosure_group/default_fallback/discgrp.txt`.
+
+
+#### D-REFDATA-EMPTY-FILTER — a filter matching nothing is refused, an exhausted walk succeeds, and the two sibling collections differ
+
+* **Baseline behaviour.** [`COTRTLIC.cbl`](../../app/app-transaction-type-db2/cbl/COTRTLIC.cbl) treats
+  "no rows" as **two unrelated conditions**, in two paragraphs, with different consequences.
+  Its cross-edit paragraph `1290-CROSS-EDITS` at **L1239-L1266** runs **before** either cursor is
+  opened and only when at least one filter is valid — that is its own opening condition at
+  **L1241-L1246**, which exits immediately otherwise. When the filter count is zero it sets
+  `INPUT-ERROR` at **L1252**, sets `FLG-TYPEFILTER-NOT-OK` and `FLG-DESCFILTER-NOT-OK` for each
+  filter that was supplied at **L1253-L1259**, sets `FLG-PROTECT-SELECT-ROWS-YES`, and moves
+  `'No Records found for these filter conditions'` at **L1264**. Its fetch loop, by contrast,
+  reaches `SQLCODE = +100` at **L1696** and sets **no** error and **no** field flag: it records that
+  no further page exists, reporting `'No more pages for these search conditions'` at **L1679** when
+  the caller had pressed PF08, or `'No records found for this search condition.'` at **L1704** when
+  the first screen rendered no row. Counted mechanically, the cross-edit paragraph carries three
+  `INPUT-ERROR`/`NOT-OK` statements and the `+100` arm carries zero.
+* **Target behaviour.** `listTransactionTypes` answers **400** with
+  `'No Records found for these filter conditions'` and both submitted filter fields in `fieldErrors`
+  at the `NOT_OK` state when a supplied filter matches no row, and **200** with an empty page and
+  null cursors when a walk is exhausted or the collection holds no row. The guard is entered only
+  when a filter is present — `if (filtered)` in `TransactionTypeService`, which is the same gate as
+  the paragraph's own — so an unfiltered browse can never be refused. The three sentences are
+  published on the `ReferenceMessageCatalogue` schema as `noRecordsFoundForFilters`,
+  `noMorePagesForSearch` and `noRecordsFoundForSearch`, preserving the baseline's own differences in
+  capitalisation and terminal punctuation.
+* **⚠️ What this entry corrects.** The published contract previously described this the other way
+  round: the list operation said "when the filters exclude every row the page is empty", the `200`
+  response said "the baseline reports the same condition on its own list screen rather than as a
+  failure", and the `TransactionTypePage` schema said an empty page is what a caller receives "when
+  the filters match no row". All three were wrong about the filtered case, and the running code was
+  right. So this is a **documentation correction, not a behavioural change** — the code was already a
+  faithful transcription and is untouched. **Alternatives Considered:** relaxing the code to 200 so
+  it matched the text as written. Rejected because that would discard a paragraph the baseline
+  reaches on every filtered browse, along with a sentence and a pair of field highlights a user of
+  that screen saw.
+* **The sibling collections deliberately differ.** `listTransactionCategories` declares the same two
+  filters and answers **200** with an empty page for the same condition. That is intentional. The
+  refusal transcribes one paragraph of the transaction-**type** list screen, and there is no baseline
+  list screen for categories to transcribe: the extension tree holds exactly two maps,
+  `COTRTLI.bms` (type list) and `COTRTUP.bms` (type update); no program in it browses
+  `CARDDEMO.TRANSACTION_TYPE_CATEGORY` as a list; and both of `COTRTLIC`'s declared cursors, at
+  **L339** and **L355**, read `CARDDEMO.TRANSACTION_TYPE`. **Alternatives Considered:** giving
+  categories the same refusal for symmetry — rejected because it would invent a refusal the baseline
+  never performs on a screen it never had, which rule T9 forbids absent a documented divergence.
+  **Trade-offs:** one condition therefore has two answers across two sibling collections, which
+  costs a caller writing one client for both. Accepted and **published on both operations** rather
+  than smoothed over, because each half is faithful to what the baseline does and does not contain,
+  and a silent divergence between siblings is the larger risk.
+* **Where it is verified.** `TransactionTypeBrowseTest` covers the guard and its gate;
+  `ReferenceApiContractTest` holds the published sentences against the runtime constants; and the
+  runtime distinction was exercised directly — a types filter matching nothing answers 400 with both
+  filter fields flagged, the identical condition on categories answers 200 with an empty page, and
+  walking past the last page of types answers 200 with an empty page.
+* **Files.** `services/reference-service/src/main/resources/openapi/reference-api.yaml`,
+  `services/reference-service/src/main/java/com/carddemo/reference/service/TransactionTypeService.java`.
 
 
 #### D-REFDATA-BATCH-CAP — the maintenance-action batch is capped at five hundred actions
@@ -4557,6 +4719,63 @@ a register of this size stays true.
   the divergence and cites the baseline lines; the `completionTier` member documents the
   two tiers the baseline reaches.
 * **Files.** `services/reference-service/src/main/resources/openapi/reference-api.yaml`.
+
+#### D-DATE-INQUIRY-LEDGER-OWNER — the reply ledger lives with the one consumer that composes the reply
+
+* **Baseline behaviour.** The baseline runs the date inquiry as a queue-driven exchange in
+  its own program. [`CODATE01.cbl`](../../app/app-vsam-mq/cbl/CODATE01.cbl) brackets its
+  get, its reply put and its error put in ONE unit of work — syncpoint at **L275**, get
+  options at **L296**, reply put options at **L379**, error put options at **L416** — so no
+  window exists in which work is committed and the reply is lost. It reads no field of its
+  request: `WS-FUNC` and `WS-KEY` are declared at **L110** and **L111** and never read, and
+  a search for `CSUTLDTC` across all 524 lines returns zero occurrences, so it answers any
+  message with the system date, asking the clock at **L343-L345** and formatting at
+  **L347-L353**. The account inquiry, [`COACCT01.cbl`](../../app/app-vsam-mq/cbl/COACCT01.cbl),
+  reads its request from the SAME request destination the baseline defines for both.
+* **Target behaviour.** One consumer serves both exchanges:
+  `account-service`'s `InquiryMessageListener` reads the shared inquiry request queue,
+  dispatches on the four-character function code, and answers the `DATE` function itself
+  rather than forwarding it. It records each composed reply in
+  `account.inquiry_reply_ledger`, commits, sends, and only then marks the row sent, so a
+  redelivery re-sends the recorded bytes. `reference-service` owns the date **evaluation**
+  of `CSUTLDTC` over REST and declares no messaging starter, no `SqsConfig` and no
+  `@SqsListener` at all.
+* **Why the ledger is not duplicated.** The remedy has to sit with whichever component
+  composes the reply, because the property it protects is that a redelivery must not
+  RECOMPOSE the answer. On this flow the reply body is the clock, so a recomposed answer is
+  a *different* answer — a requester pairing on one correlation identifier would hold two
+  replies that disagree about the time with nothing on the wire to say which was the
+  answer. Only the composing component can consult a ledger before composing, so a ledger
+  in a module that never composes protects nothing.
+* **⚠️ What this entry withdraws.** `reference-service` previously shipped
+  `V3__reference_inquiry_reply_ledger.sql` creating `reference.inquiry_reply_ledger`, plus a
+  `com.carddemo.reference.repository.InquiryReplyLedger` class issuing three native
+  statements over it. Both are withdrawn. No production class in that module referenced the
+  class — only a test did — and with no listener there, no delivery could reach it, so the
+  table was empty in every environment by construction. A table nothing inserts into
+  supplies no idempotency, so keeping it documented a discipline the schema did not
+  enforce. **Alternatives Considered:** retaining it against a future listener in that
+  module. Rejected because the exchange has one consumer by design — two consumers on one
+  queue would race for each delivery, and an earlier revision that bound a second
+  `@SqsListener` here is recorded as withdrawn on `com.carddemo.reference.package-info`.
+* **Assumptions: the withdrawal is forward-only.** `V3` is retained, because Flyway
+  validates applied history against resolvable scripts and this module sets no
+  `ignoreMigrationPatterns`, so deleting a released migration makes every already-migrated
+  database refuse to start. `V4__drop_reference_inquiry_reply_ledger.sql` drops the table
+  instead. On every database it is therefore created and then removed, and the `reference`
+  schema settles at the six copybook-derived reference tables.
+* **Where it is verified.** `MigrationHistoryIT` pins each shipped script's stored checksum
+  and the applied version set, and asserts the end state against a real engine — the
+  withdrawn table absent, the six reference tables present — so a drop that failed to run,
+  or one that reached too far, fails the build. `DateConversionFlowContractTest` asserts no
+  withdrawn consumer has returned to this module, and `account-service`'s
+  `InquiryReplyLedgerIT` and `InquiryMessageListenerTest` cover the surviving ledger and the
+  date dispatch against it.
+* **Files.** `services/reference-service/src/main/resources/db/migration/V4__drop_reference_inquiry_reply_ledger.sql`,
+  `services/reference-service/src/main/java/com/carddemo/reference/repository/package-info.java`,
+  `services/account-service/src/main/java/com/carddemo/account/service/InquiryMessageListener.java`,
+  `services/account-service/src/main/java/com/carddemo/account/repository/InquiryReplyLedger.java`.
+
 
 #### D-CARD-SELECTOR — a card is addressed by an opaque selector, and the list no longer narrows by card number
 

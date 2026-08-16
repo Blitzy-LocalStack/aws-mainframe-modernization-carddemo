@@ -532,6 +532,109 @@ path the load-balancer target group polls, which is the point: container-level a
 load-balancer-level health cannot disagree about one instance, because there is
 only one answer to disagree about.
 
+### Exercising the address edits locally: the one hop that cannot be plain HTTP
+
+> ⚠️ **`SERVER_SSL_ENABLED=false` is enough to bring this service up, and it is
+> NOT enough to run an account update.** Every address edit reads
+> `reference-service` over `carddemo.reference-context.base-url`, and
+> `common-lib`'s `ApprovedOriginPolicy` refuses that address unless it is an
+> absolute **https** origin — because this hop relays *the calling user's own
+> bearer token*, so a plain-HTTP address would put a live credential on the wire
+> in clear text. A local run that disables TLS everywhere therefore reaches
+> `carddemo.reference-context.base-url must use the https scheme` while refreshing
+> the context, and the update path is unreachable. The policy is deliberately not
+> relaxed for loopback: a credential relay has no safe cleartext case, and an
+> exemption written for a developer machine is an exemption a deployment can
+> inherit.
+
+The remedy is to give the **reference** listener real TLS material and to let this
+service trust it. The material is throwaway and lives outside the repository:
+
+```bash
+# WHAT: mint a 30-day self-signed listener certificate for reference-service and a
+#       truststore holding it, then run reference-service with TLS ENABLED.
+# WHY : the alias and the store type are the ones application.yml already defaults
+#       to (`carddemo-listener`, PKCS12), so only the password has to be supplied;
+#       and the SAN carries BOTH localhost and 127.0.0.1 because the base URL is
+#       written with a host name while the listener is bound to the loopback
+#       address, and a certificate naming only one of the two fails verification
+#       for the other.
+# WHY : Trade-offs: a self-signed certificate means the CALLER needs a truststore,
+#       which a public certificate authority would avoid. Accepted because the
+#       alternative on a developer machine is either a real certificate for a name
+#       nobody owns or turning verification off — and turning verification off is
+#       the same mistake as plain HTTP, one layer down.
+export TLS=/tmp/carddemo-tls-local
+mkdir -p "$TLS" && export TLS_PW="$(openssl rand -hex 16)"
+keytool -genkeypair -alias carddemo-listener -keyalg RSA -keysize 2048 -validity 30 \
+  -dname 'CN=localhost,OU=CardDemo local,O=CardDemo' \
+  -ext 'SAN=dns:localhost,ip:127.0.0.1' \
+  -keystore "$TLS/listener.p12" -storetype PKCS12 \
+  -storepass "$TLS_PW" -keypass "$TLS_PW"
+keytool -exportcert -alias carddemo-listener -keystore "$TLS/listener.p12" \
+  -storepass "$TLS_PW" -rfc -file "$TLS/listener.crt"
+keytool -importcert -noprompt -alias carddemo-listener -file "$TLS/listener.crt" \
+  -keystore "$TLS/truststore.p12" -storetype PKCS12 -storepass "$TLS_PW"
+
+# reference-service, TLS on, loopback only
+SERVER_PORT=8085 SERVER_ADDRESS=127.0.0.1 SERVER_SSL_ENABLED=true \
+CARDDEMO_SERVER_TLS_KEYSTORE="file:$TLS/listener.p12" \
+CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD="$TLS_PW" \
+CARDDEMO_SERVER_TLS_KEY_ALIAS=carddemo-listener \
+java -jar services/reference-service/target/reference-service-*.jar
+
+# this service, pointed at that origin and trusting that certificate
+export CARDDEMO_REFERENCE_CONTEXT_BASE_URL=https://localhost:8085
+export JAVA_TOOL_OPTIONS="-Djavax.net.ssl.trustStore=$TLS/truststore.p12 \
+-Djavax.net.ssl.trustStorePassword=$TLS_PW -Djavax.net.ssl.trustStoreType=PKCS12"
+java -jar services/account-service/target/account-service.jar
+```
+
+Assumptions: `carddemo.reference-context.approved-origin` defaults to the base URL,
+so nothing further is needed once the two agree. Verify the hop before submitting an
+update. Either of the two statuses below proves the call completed and the credential
+was accepted; a connection error, a `401` or a `403` does not, and those are the
+statuses this service reports as the reference context being unavailable:
+
+```bash
+# a seeded general-purpose code answers 200 with {"areaCd":"908","codeClass":"G"}
+curl -s --cacert "$TLS/listener.crt" -w ' [%{http_code}]\n' \
+  -H "Authorization: Bearer $TOKEN" \
+  https://localhost:8085/api/v1/reference/us-phone-area-codes/908
+
+# an unseeded code answers 404 with no body, which this service reads as
+# "in none of the lists" rather than as a failure
+curl -s --cacert "$TLS/listener.crt" -o /dev/null -w '%{http_code}\n' \
+  -H "Authorization: Bearer $TOKEN" \
+  https://localhost:8085/api/v1/reference/us-phone-area-codes/002
+```
+
+### What each answer from that hop means here
+
+Assumptions: the reference context returns THREE distinct kinds of answer to a
+lookup, and this service collapses them into the two outcomes its own edits have —
+the value is in the list, or it is not. The mapping is recorded here because getting
+it wrong is invisible from either side on its own.
+
+| Answer from the reference context | Read here as | What the caller sees |
+|---|---|---|
+| `200` with the item body | in the list | the edit proceeds on the classification |
+| `404` — the key is not seeded | NOT in the list | the verbatim baseline field error, `400` |
+| `400` — the value fails the route's own shape rule (`^[0-9]{3}$`, `^[A-Z]{2}$`, `^[A-Z]{2}[0-9]{2}$`) | NOT in the list | the verbatim baseline field error, `400` |
+| `401` or `403` — the relayed credential was refused | nothing about the value | `500`, generic message, correlation id |
+| any other `4xx`, any `5xx`, a timeout, a connection failure | nothing about the value | `500`, generic message, correlation id |
+
+Refactoring Rationale: the two middle rows used to differ. Only `404` was read as
+absence, so a lower-case `stateCode` — which the state route refuses on shape with a
+`400`, not a `404` — produced a `500` naming the reference context as unavailable in
+place of `State: is not a valid state code`. That answer is wrong twice over: it hides
+a correctable input behind an infrastructure fault, and it loses wording the baseline
+composes at `app/cbl/COACTUPC.cbl` lines 2502 and 2503. The two bottom rows are
+deliberately NOT folded in with them: a refused relay is a fact about this seam's
+configuration, and reporting it as "your state code is invalid" would refuse valid
+addresses for every user at once, which is the hardest failure of the set to diagnose
+from a field error.
+
 
 ## Configuration and Environment Variables
 
@@ -611,6 +714,69 @@ the two things that poll it — the load-balancer target group and the container
 `HEALTHCHECK` — cannot present a token. Both read that same endpoint, which is
 why container-level and load-balancer-level health are always the same verdict.
 
+⚠ **The inquiry consumer contributes to that verdict, and it did not.** Health
+aggregated the datasource, the disk and the application's readiness state and nothing
+at all about the listener container, so a request queue that did not exist, a refused
+queue-attribute lookup and a container that stopped after start-up all produced the
+same answer as a working service: `UP`. Requests then accumulated on the queue
+unanswered, every requester waited for a reply that would never arrive, and the
+orchestrator kept the task in service because the task said it was fine.
+`InquiryListenerHealth` closes that: it resolves the container by the identifier the
+listener's own `@SqsListener(id = …)` declares and reports `DOWN` — which makes the
+endpoint answer `503` and the target unhealthy — in four distinguishable states, each
+with its own `reason` detail:
+
+| Observed state | `reason` | What it means |
+|---|---|---|
+| Container registered and running, request queue resolved | *(none; reports `UP`)* | The consumer is polling a destination that exists |
+| Container registered, not running | `listener-not-running` | Intake closed after start-up, or a profile disabled auto-startup |
+| No container under that identifier | `listener-container-absent` | The annotation's `id` and the indicator's constant disagree |
+| No listener registry in the context | `listener-registry-unavailable` | The queue auto-configuration that builds the container is absent, so there is no consumer |
+| Container running, request queue unresolvable | `request-queue-unreachable` | The destination this consumer is bound to does not exist, or the queue service cannot be reached from this task |
+
+⚠ **Refactoring Rationale: the fourth row is here because the first three were not
+enough, and that was proved by running it rather than reasoned about.** An earlier
+revision of this indicator read the container's own running flag alone and nothing
+else. Pointed at a request queue that did not exist, the container **started,
+registered, reported `isRunning() == true`, and then failed every single receive** —
+so the endpoint answered `200 UP` on a consumer that had never consumed anything, the
+exact condition this indicator was added to catch. The running flag reports whether
+intake was *asked to start*, not whether it *works*. Requiring the request queue to
+resolve is what distinguishes the two, and with it the same probe answers `503`.
+
+Assumptions: the reachability verdict **latches on success**, so a healthy task makes
+exactly one queue call in its whole life and never another. That is what keeps this
+signal from coupling the synchronous account API's health to the queue service's
+availability: a probe that resolved the queue on every call would deregister *every*
+task of this service during a messaging outage and take the account view and update
+paths — which need no queue at all — down with a fault they do not depend on. While
+the verdict is failing it is retried on each probe, so a queue created after start-up
+recovers the signal with no restart. The cost is bounded by `SqsConfig`'s own client
+budget, a ten-second whole-call and five-second per-attempt timeout, so a probe cannot
+hang on an unreachable endpoint.
+
+Assumptions: only the **request** queue is verified, and the omission of the reply and
+error queues is an IAM constraint rather than an oversight.
+`infra/modules/ecs-service` grants `sqs:GetQueueAttributes` on the *receive* list
+alone — its send statement carries `sqs:SendMessage` and nothing else — so resolving a
+send-only queue's attributes would be denied in a deployed task and would report a
+healthy service as down. The request queue's permission is guaranteed because the
+listener framework itself resolves that queue's attributes at container start. A reply
+queue that does not exist is reported by the error sink's own `MQPUT ERR` arm and
+reaches the dead-letter queue at the fifth receive, which is where that condition is
+visible.
+
+Trade-offs: a container that is running, whose request queue resolved once, and which
+is then making no progress — polling successfully while every handler invocation fails,
+or polling a queue deleted after that one call — still reports `UP` here. That is left
+to the dead-letter queue and to the error sink below, because a handler failure is a
+per-message outcome and a task answering some requests and failing others must not be
+taken out of service for it. What this catches is the whole-consumer failure, which
+nothing else caught — and note that
+[`docs/architecture/observability.md`](../../docs/architecture/observability.md)'s
+stale-work alarm records the complementary gap from the other side: a stopped consumer
+leaves the dead-letter queue empty and its alarm OK.
+
 Both probes speak **TLS**, and that is a constraint rather than a preference:
 `infra/modules/ecs-service` constrains the target protocol to the single value
 `HTTPS`, and that one setting fixes the protocol of both the target group and its
@@ -689,6 +855,59 @@ alternate index — `lookup-by-account`, `search-by-account` and the end-user
 `card-cross-references/search` walk. See [The alternate index is a real access
 path](#the-alternate-index-is-a-real-access-path) for why that path has to exist
 at all.
+
+### How a value is rendered, and why two endpoints may render one column differently
+
+Three of this service's columns are published in more than one shape, and a reader
+meeting two of those shapes side by side needs to know which differences are
+decisions. All three are. The rules are stated here once, and each is machine-checked
+where it can be.
+
+**A fixed-width `CHAR` column is published at its declared width, on every path.**
+`accounts.group_id` is `CHAR(10)`, so `groupId` is always ten characters and a
+shorter group carries trailing spaces — an alphanumeric `PIC X(n)` field is
+left-justified and space-filled. ⚠ This did not hold. The account view returned the
+column's ten characters while the update response, which is projected from the entity
+a writer had just populated, returned the submission's seven: `"DEFAULT   "` from one
+endpoint and `"DEFAULT"` from the other, for one column of one row. A caller comparing
+the two answers to detect a change saw a change that was only padding. `AccountMapper`
+now pads on the write path *and* asserts the declared width on the read path, so the
+published form is the declared form whichever kind of row produced it, and a future
+writer that forgets to pad cannot reintroduce the disagreement through the projection.
+Both halves are asserted by `AccountMapperTest`, including from a deliberately short
+in-memory row, because either half alone would have let the defect stand.
+
+**A record-width column and a screen-width projection of it are different members,
+not one member rendered inconsistently.** `customers.addr_zip` is `CHAR(10)` and the
+shipped data uses all of it: a hyphenated ZIP+4 such as `01993-9116` occupies ten,
+while a bare five-digit code is padded to ten. The account view's `CustomerDetail`
+publishes the **five** the reference screen shows — `COACTVWC.cbl` L515 moves
+`CUST-ADDR-ZIP PIC X(10)` straight into `ACSZIPCI PIC X(5)` at `COACTVW.CPY` L186,
+keeping the leftmost five — while `/customers/display` and `/customers/record`
+publish all **ten**, so the stored extension is readable somewhere. A customer stored
+as `01993-9116` therefore reads `01993` from the view and `01993-9116` from the other
+two, and that is the declared narrowing rather than an inconsistency. Submitting five
+characters back replaces only the leading five and **preserves** the stored tail, so
+editing any other field on the form does not delete the extension. This is the first
+of four record-versus-screen width disagreements the published contract records; the
+other three are the two telephone numbers and their composed form.
+
+**An identifier is a number on the machine-facing shapes and a digit string on the
+browser-facing one.** `CardXrefView` and `CardXrefByAccountView` publish `accountId`
+and `customerId` as JSON numbers, matching their `BIGINT` columns, because machines
+read them and a number costs neither side a conversion. `CardXrefResponse` publishes
+the same two columns as digit strings, because a browser reads it and it mirrors a
+fixed-width screen field where the zero fill is significant. ⚠ The numeric form does
+not carry that fill, and on this data that is the ordinary case: the fifty accounts in
+[`acctdata.txt`](../../app/data/ASCII/acctdata.txt) are numbered `00000000001` to
+`00000000050`, so the numeric form of every shipped account is one or two digits where
+the display form is eleven. **A consumer that renders the numeric value back as
+characters must zero-fill it.** Both consumers now do; `transaction-service` did not,
+and carried a one-character account identifier onward for all fifty accounts — which
+is why the obligation is now stated on the DTO, in the published contract and here,
+rather than left to be inferred from a `format: int64`. Changing the wire type instead
+was considered and rejected: a strict deserialiser answers a changed type with a
+failure, so it would take both consumers down until they were redeployed together.
 
 `POST /api/v1/customers/display` is the one whose scope is a decision rather than
 the obvious choice, so it is worth a paragraph. It answers with exactly nine
@@ -881,7 +1100,37 @@ of composing a new one.
 | `correlation_id`, `message_id` | `VARCHAR(128)` nullable | The two identities the request supplied, echoed back unchanged; null where it supplied none, or where the consumer refused one |
 | `claimed_at` | `TIMESTAMP(6) NOT NULL` | When the answer was recorded — the column pruning is expressed over |
 | `sent_at` | `TIMESTAMP(6)` nullable | When it reached the queue; tied to `status` by `ck_inquiry_reply_ledger_sent_instant` |
-| `attempts` | `INTEGER NOT NULL DEFAULT 0` | Sends of this answer, and nothing else |
+| `attempts` | `INTEGER NOT NULL DEFAULT 0` | **Deliveries of this request that reached the send step** — the claim records the delivery it admits, each redelivery that re-sends records itself, and the retirement records none |
+
+⚠ Refactoring Rationale: `attempts` counted **completed sends**, and the column's own
+comment in `V2__account_inquiry_reply_ledger.sql` still says so. Under that rule the
+column carried nothing an operator could use — it was `0` for every outstanding claim
+and `1` for every retired one, which is exactly what `status` already says — and it
+was silent for the one condition it is worth reading: a reply whose send keeps
+failing never reached the retirement, so it stayed at `0` across every one of its
+redeliveries, right up to the dead-letter queue. Counting deliveries instead makes the
+value equal the number of times the send of this one reply was attempted, so a row
+whose `attempts` has reached the request queue's `maxReceiveCount` of **5** is a reply
+that could not be delivered at all. The DDL is unchanged — `INTEGER NOT NULL` admits
+the new values without alteration — so only the write pattern moved, in
+`InquiryReplyLedger`, whose four statements each carry the reasoning at the point of
+use.
+
+Assumptions: that migration's comment is deliberately left stating the narrower rule,
+for the reason [§5 of the batch service's own README](../batch-service/README.md)
+records for its `batch_run` table: a migration Flyway has applied is frozen, its
+checksum is recorded in every environment's history, and editing it — even to correct
+a comment — is what produces the `Migration checksum mismatch` that stops a service
+from starting. A no-op `V3` carrying only a corrected comment was considered and
+rejected: it would leave two migrations describing one column, and a reader would have
+to know to read the later one. The correction lives here and in the repository class,
+which are the two places a reader of that column actually looks.
+
+Assumptions: the identically shaped ledger in `reference-service` carries the same
+rule, changed in the same edit. The two are copies by design — schema-per-service
+means neither can import the other's table — so the counting discipline is kept in
+step deliberately; two sibling ledgers counting two different things is how one of
+them later gets read as the other.
 
 One index exists, and like the cross-reference index above it is not an optimisation
 of a read this module performs:
@@ -1111,7 +1360,8 @@ cross-service error as the outbox question below.
 ### Listener posture
 
 The listener is a `@Service` carrying
-`@SqsListener(queueNames = "${carddemo.account.inquiry.request-queue-url}")`, and its
+`@SqsListener(id = InquiryListenerHealth.REQUEST_CONTAINER_ID, queueNames = "${carddemo.account.inquiry.request-queue-url}")`,
+and its
 acknowledgement model is **delete-on-success under the queue's own visibility
 period**. Nothing is acknowledged for a request that was not answered; a failed
 handling returns without acknowledging, the message reappears after the
@@ -1119,6 +1369,39 @@ visibility period, and the redrive policy parks it at five receives. The
 visibility period itself is provisioned by `infra/modules/sqs` — its
 `visibility_timeout_seconds` defaults to 60 — and is supplied to the container as
 a property, so the client's own bounds can be sized against it.
+
+⚠ **A failure is reported to the error sink against the arm that actually failed.**
+Every diagnostic this consumer published named the baseline's account-file literal and
+the error queue's own name, whatever had gone wrong — so a reply the queue service
+refused was reported as a database read failure, sending whoever read it to the account
+table over a queue outage. [`COACCT01`](../../app/app-vsam-mq/cbl/COACCT01.cbl) keeps
+the arms apart, and so does this consumer now:
+
+| What failed | Return-message field | Queue-name field | Baseline evidence |
+|---|---|---|---|
+| The keyed account read, or anything before the reply exists | `ERROR WHILE READING ACCTFILE`, truncated to its leading 25 characters by the field's own `PIC X(25)` | the **request** queue | `COACCT01` lines 441–443 |
+| Recording the answer in `inquiry_reply_ledger` | *blank* | the **request** queue | none — the durable claim has no counterpart in the baseline, so there is no literal to carry |
+| Putting the reply on the reply queue | `MQPUT ERR` | the **reply** queue | `COACCT01` lines 495–496 |
+
+Assumptions: the queue name is the diagnostic's **subject**, not the address it was
+published to. The baseline names the error queue only when the failure is *about* the
+error queue — its open at line 318, its put at 532, its close at 615 — and names the
+input queue for a failure about no queue at all, which is exactly what its account-read
+arm does. Reporting the sink's own name told a reader nothing they did not already know
+from having read it there.
+
+⚠ **The diagnostic's free text names a classified condition, not an exception type.**
+It carried the failure's chain of types and the frame it was raised at, produced by
+`ThrowableDigest`. Withholding the exception *message* was right and is unchanged — a
+driver's message is the one part of a failure a request value can be interpolated into
+— but the type chain published this service's package and class names, the queue
+client's internal exception hierarchy and a line number onto a queue, none of it
+actionable by the reader and all of it changing under a refactoring that changes no
+behaviour. The tail now carries `condition=` and one of exactly three values —
+`queue-unavailable`, `datastore-unavailable`, `internal` — plus ` status=` and the queue
+service's own HTTP status where the failure carries one, that status belonging to the
+queue service's *public* contract. The full digest is still emitted at error level in
+this service's log, correlated by the same correlation identifier.
 
 `PROGRAM-ID. COACCT01 IS INITIAL.` on line 2 is worth one line of its own.
 `IS INITIAL` resets `WORKING-STORAGE` to its declared state on **every**
@@ -1623,8 +1906,8 @@ preserved too, for the same reason as the double space.
 
 ## Testing
 
-<!-- test-inventory: 36 tests + 8 integration tests -->
-**44** test classes: **36** unit and web-layer tests matching `*Test`, run by
+<!-- test-inventory: 37 tests + 8 integration tests -->
+**45** test classes: **37** unit and web-layer tests matching `*Test`, run by
 Surefire, and **8** integration tests matching `*IT`, run by Failsafe. Every one of
 the seven test packages also carries a `package-info.java`, because the
 documentation gate audits test sources too.
@@ -1681,6 +1964,16 @@ additions are recorded against one re-measurement rather than two, because they 
 in the same package against the same marker; incrementing once per class is what
 produces a figure of 33 that matches neither the tree nor either author's intent, so
 the command is re-run instead of the number being adjusted.
+
+Refactoring Rationale: the unit figure then read 36 while the tree held 37, and the
+figure is re-measured rather than incremented for the reason every paragraph above
+gives: `InquiryListenerHealthTest` was added to the `service` package to hold the
+inquiry consumer's health contribution, which this service did not have — the health
+endpoint aggregated the datasource, the disk and the readiness state and nothing at
+all about the listener container, so a consumer that had stopped consuming reported
+`UP`. `find src/test -name '*Test.java' | wc -l` gives 37 and `-name '*IT.java'` gives
+eight, and the `service` row below names the new class so the row and the figure can
+still be compared by reading.
 
 Refactoring Rationale: `AddressValidationServiceTest` is not a duplicate of
 `AccountAddressValidationTest`, which is why both are named. The two ask different
@@ -1747,7 +2040,7 @@ deliberately behaves differently from the reference.
 | Package | Classes | What they cover |
 |---|---|---|
 | `api` | `AccountControllerTest`, `AccountDispatcherTest`, `AccountContextContractTest`, `CustomerReadRouteTest`, `CardXrefControllerTest`, `CustomerControllerTest` | Web-layer binding, routing, status selection and the published contract, including the cross-reference and customer read routes |
-| `service` | `AccountViewServiceTest`, `AccountUpdateServiceTest`, `AccountUpdatePreservationTest`, `AccountViewRevisionTest`, `CustomerMasterReadTest`, `CardXrefByAccountReadTest`, `AccountAddressValidationTest`, `AddressValidationServiceTest`, `InquiryMessageListenerTest`, `RestReferenceAddressLookupTest`, `CustomerIdentifierCipherTest` | The transcribed rules — the three-hop view composition with the verbatim sentence each of its four outcomes carries and the filter edit's four sentinels, all seventeen edit routines of the update path with the two validation-marker regimes and both concurrency signal sites, the update path including the 409-on-version-conflict branch, the view and the concurrency revision beside it, the read composition, the by-account cross-reference read, that the update path runs the address edits, what each address edit decides against the five copybook allow-lists, the inquiry consumer, and identifier protection |
+| `service` | `AccountViewServiceTest`, `AccountUpdateServiceTest`, `AccountUpdatePreservationTest`, `AccountViewRevisionTest`, `CustomerMasterReadTest`, `CardXrefByAccountReadTest`, `AccountAddressValidationTest`, `AddressValidationServiceTest`, `InquiryMessageListenerTest`, `InquiryListenerHealthTest`, `RestReferenceAddressLookupTest`, `CustomerIdentifierCipherTest` | The transcribed rules — the three-hop view composition with the verbatim sentence each of its four outcomes carries and the filter edit's four sentinels, all seventeen edit routines of the update path with the two validation-marker regimes and both concurrency signal sites, the update path including the 409-on-version-conflict branch, the view and the concurrency revision beside it, the read composition, the by-account cross-reference read, that the update path runs the address edits, what each address edit decides against the five copybook allow-lists, the inquiry consumer, whether that consumer's health contribution can tell a dead consumer from a live one, and identifier protection |
 | `config` | `SecurityConfigTest`, `InternalApiSecurityConfigTest`, `SecurityChainDispatchTest`, `SqsConfigTest`, `OpenApiDocumentTest`, `AccountApiContractGateTest`, `AccountConfigPackageTest`, `CustomerIdentifierProtectionConfigTest`, `CustomerIdentifierProtectionWiringTest`, `AwsIntegrationStartupTest`, `AwsStarterRuntimeIT`, `DevProfileContractTest` | Filter chain and authority mapping, the internal-token chain, how BOTH chains decide a container ERROR dispatch, listener wiring, the served OpenAPI document, the committed contract's agreement with the runtime it describes, and startup |
 | `mapper` | `AccountMapperTest`, `CardXrefMapperTest`, `AccountInquiryReplyMapperTest` | The anti-corruption layer — masking at the shared contract width, the misspelling correction, `FILLER` removal, the fixed-width reply |
 | `repository` | `AccountRepositoryIT`, `AccountScreenProjectionIT`, `AccountUpdateAtomicityIT`, `CardXrefRepositoryIT`, `CustomerMasterRepositoryIT`, `CustomerRepositoryIT`, `InquiryReplyLedgerIT` | Testcontainers-backed PostgreSQL — the account master's column contract, exact-decimal scale, date narrowing, version conflict and keyed windows; the joined screen projection and its outer-join arms; the two-write commit boundary of the update path; the cross-reference table's own contract together with the query plan the engine chooses for the by-account read that replaces `CXACAIX`; the customer master's column widths and schema ownership; the customer record's own contract — its layout, fixture bytes, keyed read, version column and keyed windows; and the inquiry reply ledger's second-delivery conflict |

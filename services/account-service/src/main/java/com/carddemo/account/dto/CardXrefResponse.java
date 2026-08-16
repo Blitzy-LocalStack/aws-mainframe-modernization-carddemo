@@ -139,6 +139,19 @@ package com.carddemo.account.dto;
  *     {@code XREF-CARD-NUM} at {@code app/cpy/CVACT03Y.cpy} L5, declared {@code PIC X(16)} and so sixteen
  *     characters wide in the reference record; this is the row's key, and the value is never the whole
  *     primary account number
+ * <h2>Why these identifiers are strings here and numbers on the machine-facing shapes</h2>
+ *
+ * <p>⚠️ Assumptions: this shape publishes both identifiers as digit STRINGS while {@code CardXrefView} and
+ * {@code CardXrefByAccountView} publish the same two columns as JSON NUMBERS, and the difference is a
+ * decision rather than drift. This shape is read by a BROWSER and mirrors a fixed-width screen field, so it
+ * carries the reference's own display form -- {@code PIC 9(11)} and {@code PIC 9(09)} are unsigned display
+ * numerics, right-justified and ZERO-filled, and the fill is significant here because the width is fixed
+ * rather than a maximum. The other two shapes are read by machines whose columns are {@code BIGINT}, where a
+ * number costs neither side a conversion. The full reasoning, and the zero-fill obligation the numeric form
+ * places on a consumer, are recorded on {@code CardXrefView}; what matters at THIS shape is that the string
+ * form is the lossless one, so a value read here can be compared to a stored row character for character
+ * while a value read there cannot.</p>
+ *
  * @param customerId the customer the card is registered to, digits only, from {@code XREF-CUST-ID} at
  *     {@code app/cpy/CVACT03Y.cpy} L6, declared {@code PIC 9(09)} and so nine digits wide, with any leading
  *     zero significant because the width is fixed rather than a maximum

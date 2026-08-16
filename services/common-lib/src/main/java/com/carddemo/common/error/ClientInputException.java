@@ -1,9 +1,11 @@
 package com.carddemo.common.error;
 
 import com.carddemo.common.validation.FieldValidationFlag;
+import java.util.LinkedHashSet;
 import java.util.List;
 
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Signals that a value SUPPLIED BY A CALLER was refused, and that the refusal is the caller's to fix.
@@ -114,6 +116,31 @@ public class ClientInputException extends IllegalArgumentException {
      * refusal silently changed the marker a form draws.</p>
      */
     private final FieldValidationFlag state;
+
+    /**
+     * One entry per refused field, each carrying its OWN state and its OWN sentence; empty by default.
+     *
+     * <p>Refactoring Rationale: this exists because the three components above can express a refusal in
+     * which several fields fail for ONE reason, and cannot express one in which several fields fail for
+     * DIFFERENT reasons. The account update is the case that forced it. Its edit driver runs every edit
+     * and accumulates one entry per failing field -- the first name too long, the third blank, the fifth
+     * outside its allow-list -- and the refusal could carry only the field NAMES plus a single state and
+     * a single sentence, so whatever rendered it wrote that one sentence against every name. A client
+     * shown "the first name is too long" against its city control corrects the wrong field, and the two
+     * halves of the same screen contract then disagree: the dry-run operation beside it returns the
+     * accumulated entries directly and shows each field its own sentence.</p>
+     *
+     * <p>Assumptions: the list is empty for every refusal raised through a constructor, so no existing
+     * raise site changed meaning and the advice keeps rendering those exactly as it did. A refusal
+     * carrying entries is built through {@link #ofFieldErrors(String, List, String)}, which is the only
+     * way to populate this component.</p>
+     *
+     * <p>Assumptions: every carried sentence bears the SAME obligation this class states for
+     * {@link #getMessage()} -- it is composed from this repository's own message catalogue and never from
+     * text a caller supplied or a library composed. That obligation is what lets the advice render a
+     * carried sentence to a client and write it to a log.</p>
+     */
+    private final List<ApiError.FieldError> fieldErrors;
 
     /**
      * Creates a refusal attributed to the request as a whole.
@@ -248,6 +275,87 @@ public class ClientInputException extends IllegalArgumentException {
      */
     public ClientInputException(String code, List<String> fields, FieldValidationFlag state,
             String message) {
+        this(code, fields, state, message, List.of());
+    }
+
+    /**
+     * Creates a refusal in which each field carries its own state and its own sentence.
+     *
+     * <p>Purpose: to express the refusal an accumulating edit driver produces, where several fields have
+     * failed for DIFFERENT reasons and each one's reason is the thing its own control has to display.</p>
+     *
+     * <p>Refactoring Rationale: this is a static factory rather than a sixth constructor, and the reason
+     * is a language rule rather than a preference. A constructor taking {@code List<ApiError.FieldError>}
+     * would erase to the same signature as the one taking {@code List<String>}, so the two could not
+     * coexist. Naming the operation also states at every call site which shape is being built, which a
+     * fifth overload of the same arity would not.</p>
+     *
+     * <p>Assumptions: the three older components are DERIVED from the entries rather than left absent, so
+     * that {@link #fields()}, {@link #field()} and {@link #state()} answer sensibly on a refusal built
+     * this way and nothing reading them has to know which shape it holds. The names are the entries' own
+     * fields with duplicates collapsed and order preserved, because a client draws its markers in the
+     * order supplied and one control cannot be marked twice; the state is the FIRST entry's, matching the
+     * accessor's documented meaning that it answers for the field a client should be positioned on.</p>
+     *
+     * <p>Trade-offs: a refusal built this way carries the same information twice -- once as entries and
+     * once as the derived name list. The duplication is accepted because the alternative is a second
+     * exception type, which would oblige the shared advice to grow a second handler producing the same
+     * status and the same body shape, and two handlers for one shape are two places it can drift.</p>
+     *
+     * @param code the stable token this refusal is matched on in operational tooling; must not be
+     *     {@code null} or blank
+     * @param fieldErrors one entry per refused field, in rendering order, each naming its field, the
+     *     state that field's control is in and the sentence that control should display; must not be
+     *     {@code null}, must not be empty, and must contain no {@code null} element
+     * @param message the aggregate sentence -- the one a single message line shows -- which the baseline
+     *     latches to the FIRST failure; redacted on the same terms as every other signature and must not
+     *     be {@code null}
+     * @return the refusal, never {@code null}
+     * @throws NullPointerException if {@code code}, {@code fieldErrors} or {@code message} is
+     *     {@code null}, or if any element of {@code fieldErrors} is {@code null}
+     * @throws IllegalArgumentException if {@code code} is blank or {@code fieldErrors} is empty
+     */
+    public static ClientInputException ofFieldErrors(String code,
+            List<ApiError.FieldError> fieldErrors, String message) {
+
+        List<ApiError.FieldError> entries =
+                List.copyOf(Objects.requireNonNull(fieldErrors, "fieldErrors must not be null"));
+        if (entries.isEmpty()) {
+            // WHY : Assumptions: an empty list is refused rather than accepted and treated as "no field
+            //       named", because this factory exists ONLY to carry entries -- a caller with none
+            //       wants one of the constructors, and silently behaving like one of them would leave a
+            //       raise site that meant to name fields shipping a refusal that names none.
+            throw new IllegalArgumentException("fieldErrors must not be empty");
+        }
+
+        // WHY : Assumptions: the names are collapsed while the ENTRIES are not. Two entries against one
+        //       control is a defect at the raise site rather than something to reject here, and the
+        //       advice renders the entries; but the derived name list is what a caller reading fields()
+        //       positions on, and a repeated name there would ask it to position twice.
+        Set<String> distinct = new LinkedHashSet<>();
+        for (ApiError.FieldError entry : entries) {
+            distinct.add(entry.field());
+        }
+
+        return new ClientInputException(code, List.copyOf(distinct), entries.get(0).state(), message,
+                entries);
+    }
+
+    /**
+     * Stores every component, and is the one place any of them is assigned.
+     *
+     * @param code the stable token this refusal is matched on; must not be {@code null} or blank
+     * @param fields the field names in rendering order; must not be {@code null} and must hold no
+     *     {@code null}
+     * @param state the state the first named field's control is in; must not be {@code null}
+     * @param message the redacted aggregate diagnostic; must not be {@code null}
+     * @param fieldErrors the per-field entries, empty when the refusal carries none; must not be
+     *     {@code null} and must hold no {@code null}
+     * @throws NullPointerException if any argument is {@code null}, or if any element of either list is
+     * @throws IllegalArgumentException if {@code code} is blank
+     */
+    private ClientInputException(String code, List<String> fields, FieldValidationFlag state,
+            String message, List<ApiError.FieldError> fieldErrors) {
 
         super(Objects.requireNonNull(message, "message must not be null"));
         Objects.requireNonNull(code, "code must not be null");
@@ -265,6 +373,8 @@ public class ClientInputException extends IllegalArgumentException {
         //       what the advice will render after the throw.
         this.fields = List.copyOf(Objects.requireNonNull(fields, "fields must not be null"));
         this.state = Objects.requireNonNull(state, "state must not be null");
+        this.fieldErrors =
+                List.copyOf(Objects.requireNonNull(fieldErrors, "fieldErrors must not be null"));
 
     }
 
@@ -311,5 +421,20 @@ public class ClientInputException extends IllegalArgumentException {
      */
     public FieldValidationFlag state() {
         return this.state;
+    }
+
+    /**
+     * Returns the per-field entries this refusal carries, each with its own state and sentence.
+     *
+     * <p>Assumptions: an EMPTY list means this refusal carries no per-field detail, which is the case for
+     * every refusal built through a constructor. Whatever renders it then falls back to writing the
+     * aggregate sentence against each name in {@link #fields()}, which is what it did before this
+     * component existed -- so an empty list is the "as before" signal rather than an error.</p>
+     *
+     * @return an unmodifiable list of entries in rendering order, empty when the refusal carries none;
+     *     never {@code null}
+     */
+    public List<ApiError.FieldError> fieldErrors() {
+        return this.fieldErrors;
     }
 }

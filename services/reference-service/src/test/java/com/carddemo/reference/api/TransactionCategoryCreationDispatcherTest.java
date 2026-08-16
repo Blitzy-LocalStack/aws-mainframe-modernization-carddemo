@@ -56,11 +56,18 @@ import tools.jackson.databind.json.JsonMapper;
  * names, so the two are comparable by construction.
  *
  * <p>Measured: withdrawing the header -- returning the body alone under a method-level created status, which
- * is what the handler did before -- fails ALL THREE cases, each reporting
+ * is what the handler did before -- fails EVERY ONE of the creation cases below, each reporting
  * {@code Response header 'Location' expected:<...> but was:<null>}. Every member the second case asserts
  * about the BODY continues to hold under that reversion, and so does the status; the header is therefore
- * asserted in all three cases rather than only the first, because a case that checked the body alone would
+ * asserted in all of them rather than only the first, because a case that checked the body alone would
  * have passed against the defect. That is how the defect survived until now.
+ *
+ * <p>Refactoring Rationale: this class also carries the two REFUSAL cases of the same route, which is a
+ * second reason it exists rather than an unrelated addition. The refusal sentence is composed by the shared
+ * advice from the outcome the service raises, so it is only observable where an advice is installed over a
+ * dispatcher -- which this class already does -- and no other test in this module drove a category refusal
+ * that far. The consequence was that the sentence a caller reads for a duplicate pair of codes was asserted
+ * nowhere, and it was the sentence the baseline composes for a refused DELETE.
  *
  * <p>A test class accepts no parameter, yields no value and raises nothing, so this block carries no
  * parameter, return or exception tag.</p>
@@ -195,6 +202,86 @@ class TransactionCategoryCreationDispatcherTest {
                 .andExpect(status().isCreated())
                 .andExpect(header().string("Location",
                         TransactionCategoryController.BASE_PATH + "/" + TYPE_CD + "/" + storedCatCd));
+    }
+
+    /**
+     * A duplicate pair of codes answers 409 with the insert refusal naming the category table.
+     *
+     * <p>Refactoring Rationale: no test in this module drove a category refusal through a dispatcher at
+     * all, so the SENTENCE a caller receives for this condition was asserted nowhere -- the service-level
+     * cases could only reach the outcome type, and the type is what selects the sentence rather than what
+     * carries it. The refusal answered with 'Please delete associated child records first:', which the
+     * baseline composes at physical line 1641 of {@code COTRTUPC.cbl} in its DELETE paragraph and which no
+     * insert can reach, and it told a caller that reused a pair of codes to remove dependents a category
+     * cannot have. The sentence is now the one the baseline composes in its insert paragraph at physical
+     * lines 1607 to 1618, and it names the table this insert was aimed at.
+     *
+     * <p>Assumptions: the sentence expected is the composition the shared advice performs, asserted BOTH
+     * against the literal characters and against the composer, so a change to either half of the two
+     * baseline literals fails here rather than silently changing what a message band displays.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("a duplicate pair of codes answers 409 naming the category table")
+    void aDuplicatePairAnswersTheInsertRefusalNamingTheCategoryTable() throws Exception {
+        when(this.categories.create(any(TransactionCategoryCreateRequest.class)))
+                .thenThrow(new TransactionCategoryService.DuplicateTransactionCategoryException());
+
+        this.mockMvc.perform(post(TransactionCategoryController.BASE_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(submittedBody()))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.message").value(
+                        "Error inserting record into: TRANSACTION_TYPE_CATEGORY Table. SQLCODE:"))
+                .andExpect(jsonPath("$.message").value(GlobalExceptionHandler
+                        .insertRefusalMessage("TRANSACTION_TYPE_CATEGORY")))
+                .andExpect(jsonPath("$.subsystem").value("RELATIONAL"))
+                .andExpect(jsonPath("$.fieldErrors").isEmpty())
+                .andExpect(header().doesNotExist("Location"));
+    }
+
+    /**
+     * A category naming a parent that does not exist answers the SAME refusal as a duplicate.
+     *
+     * <p>Assumptions: the two conditions share one sentence because the baseline's insert paragraph shares
+     * one failing arm across every non-zero outcome of the statement, so telling them apart in the text
+     * would mean inventing a sentence the baseline does not declare. What must not be shared is the DELETE
+     * paragraph's sentence, which is what this case asserts the absence of: a caller that mistyped a parent
+     * code was previously told to delete dependent rows, which is the one action that cannot help because
+     * nothing was written.
+     *
+     * <p>Assumptions: the operator channel still separates the two -- the service logs the SQLSTATE and its
+     * classification apart -- so the merge is confined to the text a caller reads, where the baseline
+     * itself merges them.
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("an absent parent answers 409 with the same insert refusal and never the delete one")
+    void anAbsentParentAnswersTheSameInsertRefusal() throws Exception {
+        when(this.categories.create(any(TransactionCategoryCreateRequest.class)))
+                .thenThrow(new TransactionCategoryService.UnknownParentTransactionTypeException());
+
+        String body = this.mockMvc.perform(post(TransactionCategoryController.BASE_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(submittedBody()))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.message").value(GlobalExceptionHandler
+                        .insertRefusalMessage("TRANSACTION_TYPE_CATEGORY")))
+                .andExpect(header().doesNotExist("Location"))
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+
+        assertThat(body)
+                .as("the delete paragraph's remedy must not reach a caller whose insert wrote nothing")
+                .doesNotContain(GlobalExceptionHandler.MESSAGE_REFERENCED_ROW)
+                .doesNotContain("child records");
+        assertThat(body)
+                .as("neither the state nor the migrated table name may travel in a caller's body")
+                .doesNotContain("23503")
+                .doesNotContain("transaction_categories");
     }
 
     /**

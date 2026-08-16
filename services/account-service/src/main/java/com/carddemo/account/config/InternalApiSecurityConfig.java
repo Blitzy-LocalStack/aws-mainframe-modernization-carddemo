@@ -766,7 +766,17 @@ public class InternalApiSecurityConfig {
                 //   own row does not grant. Both were declared and left unwired, which is invisible until
                 //   a token that should be refused is answered.
                 subjectMatchesSigningKey(),
-                scopePermittedForSubject());
+                scopePermittedForSubject(),
+                // WHY : ⚠️ Refactoring Rationale: the declared LIFETIME is validated, and nothing validated
+                //   it before. InternalServiceToken.MAX_LIFETIME bounds a minted token to five minutes, but
+                //   that bound was applied only in the minting constructor -- so it constrained a caller
+                //   that chose to honour it and constrained nothing at all about a token arriving here. A
+                //   token declaring thirty minutes, or eight hours, signed with a real key and naming a real
+                //   caller and an admitted scope, was accepted for exactly as long as it said. That is the
+                //   whole mitigation for what this credential is: a bearer token reaching account and
+                //   customer reads with no user in the loop, whose capture window IS its lifetime. Applying
+                //   the bound here is what makes it a bound rather than a convention.
+                lifetimeWithinMaximum());
         decoder.setJwtValidator(issuerAudienceAndSubject);
         return decoder;
     }
@@ -849,6 +859,41 @@ public class InternalApiSecurityConfig {
             return OAuth2TokenValidatorResult.failure(new OAuth2Error(
                     OAuth2ErrorCodes.INSUFFICIENT_SCOPE,
                     "the internal token carries a scope its caller is not permitted to hold",
+                    null));
+        };
+    }
+
+    /**
+     * Builds the validator requiring the presented token's declared lifetime to be within the shared maximum.
+     *
+     * <p>Assumptions: the rule itself lives on the shared minter as
+     * {@link InternalServiceToken#isWithinMaximumLifetime(java.time.Instant, java.time.Instant)}, and this
+     * method only reads the two claims and reports the verdict. That is the same division the scope validator
+     * above draws with {@code InternalServiceToken.permits}: the TABLE and the RULE belong to the shared
+     * module so the minting side and this side cannot come to disagree, while the mapping onto a framework
+     * validator belongs here because it is this context's mechanism.</p>
+     *
+     * <p>Assumptions: the refusal is reported as an INVALID token rather than as insufficient scope, and the
+     * distinction is what an operator reads. A scope failure says the caller asked for something it may not
+     * have; this says the credential itself is not one this context accepts, whatever it asks for. Reporting
+     * it as a scope failure would send a reader looking at the permission table for a fault that is in the
+     * token's own shape.</p>
+     *
+     * <p>Assumptions: the message names the bound but NOT the lifetime the token declared. The declared value
+     * is an attacker-supplied number and this message reaches a caller, so echoing it would let a probe read
+     * back what it sent; the bound is a published constant and discloses nothing.</p>
+     *
+     * @return the validator, never {@code null}
+     */
+    private static OAuth2TokenValidator<Jwt> lifetimeWithinMaximum() {
+        return token -> {
+            if (InternalServiceToken.isWithinMaximumLifetime(token.getIssuedAt(), token.getExpiresAt())) {
+                return OAuth2TokenValidatorResult.success();
+            }
+            return OAuth2TokenValidatorResult.failure(new OAuth2Error(
+                    OAuth2ErrorCodes.INVALID_TOKEN,
+                    "the internal token declares a lifetime longer than "
+                            + InternalServiceToken.MAX_LIFETIME + ", or declares none at all",
                     null));
         };
     }

@@ -537,6 +537,63 @@ public final class InternalServiceToken {
     }
 
     /**
+     * Reports whether a presented token's DECLARED lifetime is within {@link #MAX_LIFETIME}.
+     *
+     * <h2>Why this exists beside the constructor that already checks the same bound</h2>
+     *
+     * <p>⚠️ Refactoring Rationale: {@link #MAX_LIFETIME} was enforced at MINTING only, in this class's
+     * constructor, and a bound enforced solely by the party who chooses to honour it is not a bound. Nothing
+     * on the verifying side read the lifetime at all: a token carrying a thirty-minute or an eight-hour
+     * lifetime, signed with a real key and naming a real caller and an admitted scope, was accepted for as
+     * long as it declared. That matters because of what such a token IS -- a bearer credential that reaches
+     * account and customer reads with no user in the loop, so its capture window is exactly its lifetime, and
+     * the five-minute bound is the whole mitigation. This method is the rule as a rule, so the minting side
+     * and the verifying side apply one definition rather than two that agree today.</p>
+     *
+     * <p>⚠️ Assumptions: what is bounded is {@code exp - iat}, the lifetime the token DECLARES, and not the
+     * time remaining on it. The remaining time is a different question and is already answered elsewhere: the
+     * framework's default validator refuses a token whose expiry has passed. Bounding the remaining time here
+     * instead would accept an eight-hour token for its first five minutes and refuse it afterwards, which is
+     * the opposite of the intent -- the long lifetime is the defect, not the lateness of its use.</p>
+     *
+     * <p>⚠️ Assumptions: an ABSENT issue time or an ABSENT expiry is REFUSED rather than passed over. A token
+     * with no issue time declares no lifetime to bound, so admitting it would be a bypass of exactly the rule
+     * being applied -- and a minter that wanted an unbounded credential need only omit the claim. A token with
+     * no expiry is worse still: the framework's timestamp validator only checks an expiry that is PRESENT, so
+     * an expiry-less token is otherwise refused by nothing at all. {@link #mint(String, String)} always writes
+     * both, so no token this system issues is affected.</p>
+     *
+     * <p>Assumptions: NO clock-skew tolerance is applied, and its absence is deliberate rather than an
+     * omission. Both instants are claims of the SAME token, written by one minter from one clock reading, so
+     * their difference involves no comparison between two parties' clocks and there is no skew for a tolerance
+     * to absorb. Adding one would only widen the bound this method exists to hold.</p>
+     *
+     * <p>Assumptions: the comparison is inclusive, so a token declaring exactly {@link #MAX_LIFETIME} is
+     * accepted. That is the same boundary the constructor applies -- it refuses a lifetime that
+     * {@code compareTo(MAX_LIFETIME) > 0} -- so a token this class would mint is a token this method admits,
+     * which is the agreement the two sides must have.</p>
+     *
+     * @param issuedAt the token's issue time, or {@code null} when the claim is absent
+     * @param expiresAt the token's expiry, or {@code null} when the claim is absent
+     * @return {@code true} only when both instants are present, the expiry is not before the issue time, and
+     *     their difference is at most {@link #MAX_LIFETIME}
+     */
+    public static boolean isWithinMaximumLifetime(Instant issuedAt, Instant expiresAt) {
+        if (issuedAt == null || expiresAt == null) {
+            return false;
+        }
+        // WHY : Assumptions: an expiry BEFORE the issue time is refused here rather than left to the
+        //   framework's expiry check, and the two refusals are not the same. A negative duration is at most
+        //   MAX_LIFETIME by any comparison, so without this clause a token claiming to expire before it was
+        //   issued would satisfy this rule -- and it is a token whose claims are internally contradictory,
+        //   which is a stronger reason to refuse it than lateness.
+        if (expiresAt.isBefore(issuedAt)) {
+            return false;
+        }
+        return Duration.between(issuedAt, expiresAt).compareTo(MAX_LIFETIME) <= 0;
+    }
+
+    /**
      * Reports the scopes one subject is permitted to carry.
      *
      * @param subject the subject to report for, which may be {@code null}

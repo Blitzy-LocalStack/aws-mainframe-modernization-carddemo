@@ -1507,6 +1507,315 @@ class AccountUpdateServiceTest {
     }
 
     /**
+     * Confirms every field with a declared width refuses a value that exceeds it.
+     *
+     * <p>Refactoring Rationale: none of these refusals existed. The generic edits present a value at the
+     * field's width first, which TRUNCATES it, so a twenty-six-character given name was examined as
+     * twenty-five characters, passed its letters-only test and was reported acceptable by this driver --
+     * which is the verdict the dry-run endpoint publishes. The committing endpoint then refused the same
+     * submission from inside its mapper, whose width guards compose a sentence too long for a message line,
+     * so the caller received the fixed fallback with no mention of a width. One submission, three different
+     * answers depending on which endpoint received it.</p>
+     *
+     * <p>Assumptions: all sixteen widths are asserted from one table rather than in separate cases,
+     * because the rule is one rule -- a value longer than its field is refused against that field -- and
+     * sixteen cases asserting one rule would drift apart. Three of the sixteen had NO edit of any kind
+     * before this change: the group code, the second address line and the identifier reference.</p>
+     *
+     * <p>Returns no value. A width that is not enforced, or is enforced against the wrong component, is
+     * reported as a JUnit assertion failure.</p>
+     */
+    @Test
+    @DisplayName("every field with a declared width refuses a value one character over it")
+    void everyDeclaredWidthRefusesAnOverWideValue() {
+        /**
+         * One width rule under test.
+         *
+         * @param field the request component the refusal must be keyed on
+         * @param width the number of characters that component declares
+         * @param submission a submission carrying one character too many in that component
+         */
+        record Case(String field, int width, AccountUpdateRequest submission) {
+        }
+
+        Fixture fixture = new Fixture();
+        String over25 = "A".repeat(26);
+        String over50 = "B".repeat(51);
+        List<Case> cases = List.of(
+                new Case("firstName", AccountUpdateService.NAME_EDIT_WIDTH,
+                        fixture.request().firstName(over25).build()),
+                new Case("lastName", AccountUpdateService.NAME_EDIT_WIDTH,
+                        fixture.request().lastName(over25).build()),
+                new Case("city", AccountUpdateService.ADDRESS_LINE_EDIT_WIDTH,
+                        fixture.request().city(over50).build()),
+                new Case("addressLine2", AccountUpdateService.ADDRESS_LINE_EDIT_WIDTH,
+                        fixture.request().addressLine2(over50).build()),
+                new Case("groupId", AccountUpdateService.GROUP_ID_EDIT_WIDTH,
+                        fixture.request().groupId("GROUPIDTOOLONG").build()),
+                new Case("governmentIssuedId",
+                        AccountUpdateService.GOVERNMENT_IDENTIFIER_EDIT_WIDTH,
+                        fixture.request().governmentIssuedId("G".repeat(21)).build()),
+                new Case("eftAccountId", AccountUpdateService.EFT_ACCOUNT_ID_EDIT_WIDTH,
+                        fixture.request().eftAccountId("00000000011").build()),
+                new Case("activeStatus", AccountUpdateService.MARKER_WIDTH,
+                        fixture.request().activeStatus("YN").build()));
+
+        for (Case each : cases) {
+            AccountUpdateService.EditVerdict verdict = fixture.service
+                    .editMapInputs(each.submission(), fixture.account, fixture.customer);
+
+            String expected = each.field().equals("activeStatus")
+                    ? AccountUpdateService.SUFFIX_WIDTH_PREFIX + each.width()
+                            + AccountUpdateService.SUFFIX_WIDTH_UNIT_SINGULAR
+                    : AccountUpdateService.SUFFIX_WIDTH_PREFIX + each.width()
+                            + AccountUpdateService.SUFFIX_WIDTH_UNIT_PLURAL;
+
+            assertThat(verdict.inputError())
+                    .as("%s must refuse a value wider than %d", each.field(), each.width())
+                    .isTrue();
+            assertThat(verdict.fieldErrors())
+                    .as("%s must be the component the refusal is keyed on", each.field())
+                    .anySatisfy(entry -> {
+                        assertThat(entry.field()).isEqualTo(each.field());
+                        assertThat(entry.state()).isEqualTo(FieldValidationFlag.NOT_OK);
+                        assertThat(entry.message()).endsWith(expected);
+                    });
+        }
+    }
+
+    /**
+     * Confirms a field filled only with padding is BLANK rather than too long.
+     *
+     * <p>Assumptions: this pins the ordering the width verdict depends on. A 3270 field cannot receive
+     * more characters than it declares, so a twenty-six-character run of spaces is an empty field with one
+     * space too many, and the reference would see it as blank. Taking the width verdict first would ask a
+     * caller to shorten something it did not fill in.</p>
+     *
+     * <p>Returns no value. The wrong verdict is reported as a JUnit assertion failure.</p>
+     */
+    @Test
+    @DisplayName("an over-wide run of padding is reported blank, not too long")
+    void anOverWideRunOfPaddingIsBlankNotTooLong() {
+        Fixture fixture = new Fixture();
+
+        AccountUpdateService.EditVerdict verdict = fixture.service.editMapInputs(
+                fixture.request().firstName(" ".repeat(26)).build(),
+                fixture.account, fixture.customer);
+
+        assertThat(verdict.fieldErrors())
+                .anySatisfy(entry -> {
+                    assertThat(entry.field()).isEqualTo("firstName");
+                    assertThat(entry.state()).isEqualTo(FieldValidationFlag.BLANK);
+                    assertThat(entry.message())
+                            .isEqualTo(AccountUpdateService.LABEL_FIRST_NAME
+                                    + AccountUpdateService.SUFFIX_MUST_BE_SUPPLIED);
+                });
+    }
+
+    /**
+     * Confirms an amount too large for the stored field is refused by the EDIT, not by the column.
+     *
+     * <p>Refactoring Rationale: the shape test admits any value the fifteen-character mask can spell, and
+     * fifteen characters hold a sign, ELEVEN integer digits, a point and two fraction digits -- one digit
+     * more than {@code NUMERIC(12,2)} stores. Such a value passed every edit, reached the row builder,
+     * overflowed the column and reached the caller as HTTP 500 from the persistence provider. The boundary
+     * is asserted from both sides, because a bound written with the wrong comparison refuses the largest
+     * storable amount as well.</p>
+     *
+     * <p>Returns no value. A magnitude that is not bounded, or a storable amount that is refused, is
+     * reported as a JUnit assertion failure.</p>
+     */
+    @Test
+    @DisplayName("an eleven-digit amount is refused and the largest storable one is accepted")
+    void amountMagnitudeIsBoundedAtTheStoredPrecision() {
+        Fixture fixture = new Fixture();
+
+        AccountUpdateService.EditVerdict refused = fixture.service.editMapInputs(
+                fixture.request().creditLimit("10000000000.00").build(),
+                fixture.account, fixture.customer);
+
+        assertThat(refused.inputError()).isTrue();
+        assertThat(refused.fieldErrors())
+                .as("the reference's own sentence for an unacceptable amount, carried verbatim")
+                .anySatisfy(entry -> {
+                    assertThat(entry.field()).isEqualTo("creditLimit");
+                    assertThat(entry.state()).isEqualTo(FieldValidationFlag.NOT_OK);
+                    assertThat(entry.message())
+                            .isEqualTo(AccountUpdateService.LABEL_CREDIT_LIMIT
+                                    + AccountUpdateService.SUFFIX_IS_NOT_VALID);
+                });
+
+        AccountUpdateService.EditVerdict accepted = fixture.service.editMapInputs(
+                fixture.request().creditLimit("9999999999.99").build(),
+                fixture.account, fixture.customer);
+
+        assertThat(accepted.fieldErrors())
+                .as("ten integer digits is what the field holds, so it must not be refused")
+                .noneSatisfy(entry -> assertThat(entry.field()).isEqualTo("creditLimit"));
+    }
+
+    /**
+     * Confirms leading zeros are not counted as magnitude.
+     *
+     * <p>Assumptions: the digits are counted after the mask's decoration is removed, so an amount written
+     * with insignificant leading zeros is measured by what it MEANS. Counting characters instead would
+     * refuse a value the stored field holds comfortably, which a caller padding a screen field to its full
+     * width would provoke on every submission.</p>
+     *
+     * <p>Returns no value. A refusal here is reported as a JUnit assertion failure.</p>
+     */
+    @Test
+    @DisplayName("an amount padded with leading zeros is measured by its value, not its length")
+    void leadingZerosAreNotCountedAsMagnitude() {
+        Fixture fixture = new Fixture();
+
+        AccountUpdateService.EditVerdict verdict = fixture.service.editMapInputs(
+                fixture.request().creditLimit("00000000123.45").build(),
+                fixture.account, fixture.customer);
+
+        assertThat(verdict.fieldErrors())
+                .noneSatisfy(entry -> assertThat(entry.field()).isEqualTo("creditLimit"));
+    }
+
+    /**
+     * Confirms an over-long telephone part is refused rather than silently narrowed.
+     *
+     * <p>Refactoring Rationale: the three parts are assembled into a fifteen-character form whose fixed
+     * positions the allow-list collaborator reads, so assembly narrows each part to its declared width. A
+     * five-character exchange prefix therefore became three characters, passed every subsequent test, and a
+     * caller that sent {@code 55555} was told its number was acceptable while a different number was
+     * stored. Leaving the part unnarrowed instead would shift the two positions after it and report
+     * failures against parts the caller sent correctly, so the fault has to be caught before assembly.</p>
+     *
+     * <p>Assumptions: the sentences are the collaborator's own, so a part of the wrong width reads exactly
+     * as a part of the wrong shape does, and no new wording is introduced for a case the reference already
+     * words.</p>
+     *
+     * <p>Returns no value. A narrowed part reported as acceptable is a JUnit assertion failure.</p>
+     */
+    @Test
+    @DisplayName("an over-long telephone part is refused with the collaborator's own sentence")
+    void anOverLongTelephonePartIsRefused() {
+        Fixture fixture = new Fixture();
+
+        /**
+         * One telephone part under test.
+         *
+         * @param component the request component the refusal must be keyed on
+         * @param wording the collaborator's own sentence for a part of the wrong shape
+         * @param submission a submission carrying an over-long value in that part
+         */
+        record Part(String component, String wording, AccountUpdateRequest submission) {
+        }
+
+        List<Part> parts = List.of(
+                new Part(AccountUpdateService.FIELD_PHONE_1
+                        + AddressValidationService.FIELD_SUFFIX_AREA_CODE,
+                        AddressValidationService.MSG_AREA_CODE_NOT_THREE_DIGITS,
+                        fixture.request().phone1("7031", "555", "0101").build()),
+                new Part(AccountUpdateService.FIELD_PHONE_1
+                        + AddressValidationService.FIELD_SUFFIX_PHONE_PREFIX,
+                        AddressValidationService.MSG_PREFIX_NOT_THREE_DIGITS,
+                        fixture.request().phone1("703", "55555", "0101").build()),
+                new Part(AccountUpdateService.FIELD_PHONE_1
+                        + AddressValidationService.FIELD_SUFFIX_PHONE_LINE_NUMBER,
+                        AddressValidationService.MSG_LINE_NUMBER_NOT_FOUR_DIGITS,
+                        fixture.request().phone1("703", "555", "012345").build()));
+
+        for (Part each : parts) {
+            AccountUpdateService.EditVerdict verdict = fixture.service
+                    .editMapInputs(each.submission(), fixture.account, fixture.customer);
+
+            assertThat(verdict.inputError())
+                    .as("%s must refuse a part wider than its field", each.component())
+                    .isTrue();
+            assertThat(verdict.fieldErrors())
+                    .anySatisfy(entry -> {
+                        assertThat(entry.field()).isEqualTo(each.component());
+                        assertThat(entry.message()).isEqualTo(
+                                AccountUpdateService.LABEL_PHONE_NUMBER_1 + each.wording());
+                    });
+        }
+    }
+
+    /**
+     * Confirms a submission that leaves the national identifier as it stands is not edited against it.
+     *
+     * <p>Refactoring Rationale: this is what made a read-then-write cycle impossible. Every read withholds
+     * the identifier behind a marker, so a client that reads an account, changes one field and submits the
+     * record it holds sends either three absent components or three marked ones. Both used to reach the
+     * three required-numeric edits and draw three refusals naming components the client had never filled
+     * in -- and because those refusals fired on every such submission, the no-change comparison could never
+     * be reached either.</p>
+     *
+     * <p>Assumptions: the marked case is asserted in three arrangements -- all three marked, and each of
+     * two mixed with digits -- because the rule admits ANY marked component and a rule written for ALL of
+     * them would pass the first arrangement and fail the other two.</p>
+     *
+     * <p>Returns no value. A refusal against an unedited identifier is a JUnit assertion failure.</p>
+     */
+    @Test
+    @DisplayName("an unedited national identifier draws no refusal, absent or withheld")
+    void anUneditedNationalIdentifierDrawsNoRefusal() {
+        Fixture fixture = new Fixture();
+        String withheld = CustomerMapper.IDENTIFIER_REDACTED;
+
+        List<AccountUpdateRequest> unedited = List.of(
+                fixture.request().nationalIdentifier(null, null, null).build(),
+                fixture.request().nationalIdentifier(withheld, withheld, withheld).build(),
+                fixture.request().nationalIdentifier(withheld, "45", "6789").build(),
+                fixture.request().nationalIdentifier("123", "45", withheld).build());
+
+        for (AccountUpdateRequest submission : unedited) {
+            AccountUpdateService.EditVerdict verdict =
+                    fixture.service.editMapInputs(submission, fixture.account, fixture.customer);
+
+            assertThat(verdict.fieldErrors())
+                    .as("no identifier component may be refused when none was edited")
+                    .noneSatisfy(entry -> assertThat(entry.field()).startsWith("ssnPart"));
+        }
+
+        AccountUpdateService.EditVerdict edited = fixture.service.editMapInputs(
+                fixture.request().nationalIdentifier("12A", "45", "6789").build(),
+                fixture.account, fixture.customer);
+
+        assertThat(edited.fieldErrors())
+                .as("a submission that DOES edit the identifier is still edited against")
+                .anySatisfy(entry -> assertThat(entry.field()).isEqualTo("ssnPart1"));
+    }
+
+    /**
+     * Confirms a submission echoing BOTH withheld identifiers reaches the no-change answer.
+     *
+     * <p>Assumptions: this is the property the two rules above exist for, asserted end to end. A client
+     * that reads an account and submits exactly what it was shown has changed nothing, and the reference's
+     * own no-change answer is what it should receive. Before the withheld marker was recognised, such a
+     * submission was judged to have changed both identifiers -- so this answer was unreachable from the one
+     * client behaviour that most naturally produces it.</p>
+     *
+     * <p>Returns no value. Any refusal, or a change being reported, is a JUnit assertion failure.</p>
+     */
+    @Test
+    @DisplayName("a submission echoing both withheld identifiers is the no-change answer")
+    void echoingBothWithheldIdentifiersIsTheNoChangeAnswer() {
+        Fixture fixture = new Fixture();
+        String withheld = CustomerMapper.IDENTIFIER_REDACTED;
+
+        AccountUpdateService.EditVerdict verdict = fixture.service.editMapInputs(
+                fixture.request()
+                        .nationalIdentifier(withheld, withheld, withheld)
+                        .governmentIssuedId(withheld)
+                        .build(),
+                fixture.account, fixture.customer);
+
+        assertThat(verdict.inputError()).isFalse();
+        assertThat(verdict.fieldErrors()).isEmpty();
+        assertThat(verdict.noChangesFound()).isTrue();
+        assertThat(verdict.message())
+                .isEqualTo(AccountUpdateService.MESSAGE_NO_CHANGES_DETECTED);
+    }
+
+    /**
      * Confirms an accepted submission returns a response populating BOTH channels coherently.
      *
      * <p>Assumptions: the response carries a latched aggregate sentence and a per-field array as two
@@ -1869,6 +2178,24 @@ class AccountUpdateServiceTest {
         /** The submitted government-issued identifier, or {@code null} to omit it. */
         private String governmentIssuedId = "GOVTID0001";
 
+        /** The submitted city, an admitted letters-only value by default. */
+        private String city = "ARLINGTON";
+
+        /** The submitted account group code, inside its declared ten characters by default. */
+        private String groupId = "DEFAULT";
+
+        /** The submitted second address line, absent by default because the field is optional. */
+        private String addressLine2;
+
+        /** The submitted account status marker, an admitted single character by default. */
+        private String activeStatus = "Y";
+
+        /** The submitted funds-transfer account, ten digits by default. */
+        private String eftAccountId = "0000000001";
+
+        /** The submitted first telephone number's three parts, an admitted number by default. */
+        private String[] phone1 = {"703", "555", "0101"};
+
         /** The submitted account open date as three decomposed parts, re-stating the stored value. */
         private String[] openDate = {"2020", "01", "01"};
 
@@ -1911,6 +2238,100 @@ class AccountUpdateServiceTest {
          */
         RequestBuilder firstName(String value) {
             this.firstName = value;
+            return this;
+        }
+
+        /**
+         * Varies the submitted city.
+         *
+         * @param value the city to submit
+         * @return this builder
+         */
+        RequestBuilder city(String value) {
+            this.city = value;
+            return this;
+        }
+
+        /**
+         * Varies the submitted account group code.
+         *
+         * @param value the group code to submit
+         * @return this builder
+         */
+        RequestBuilder groupId(String value) {
+            this.groupId = value;
+            return this;
+        }
+
+        /**
+         * Varies the submitted second address line.
+         *
+         * @param value the second address line to submit
+         * @return this builder
+         */
+        RequestBuilder addressLine2(String value) {
+            this.addressLine2 = value;
+            return this;
+        }
+
+        /**
+         * Varies the submitted account status marker.
+         *
+         * @param value the marker to submit
+         * @return this builder
+         */
+        RequestBuilder activeStatus(String value) {
+            this.activeStatus = value;
+            return this;
+        }
+
+        /**
+         * Varies the submitted funds-transfer account.
+         *
+         * @param value the account to submit
+         * @return this builder
+         */
+        RequestBuilder eftAccountId(String value) {
+            this.eftAccountId = value;
+            return this;
+        }
+
+        /**
+         * Varies the submitted government-issued identifier reference.
+         *
+         * @param value the reference to submit
+         * @return this builder
+         */
+        RequestBuilder governmentIssuedId(String value) {
+            this.governmentIssuedId = value;
+            return this;
+        }
+
+        /**
+         * Varies the three parts of the submitted first telephone number.
+         *
+         * @param areaCode the area code to submit
+         * @param phonePrefix the exchange prefix to submit
+         * @param lineNumber the line number to submit
+         * @return this builder
+         */
+        RequestBuilder phone1(String areaCode, String phonePrefix, String lineNumber) {
+            this.phone1 = new String[] {areaCode, phonePrefix, lineNumber};
+            return this;
+        }
+
+        /**
+         * Varies the three parts of the submitted national identifier.
+         *
+         * @param firstPart the first three characters to submit
+         * @param middlePart the middle two characters to submit
+         * @param lastPart the last four characters to submit
+         * @return this builder
+         */
+        RequestBuilder nationalIdentifier(String firstPart, String middlePart, String lastPart) {
+            this.nationalIdentifierPart1 = firstPart;
+            this.nationalIdentifierPart2 = middlePart;
+            this.nationalIdentifierPart3 = lastPart;
             return this;
         }
 
@@ -2027,20 +2448,22 @@ class AccountUpdateServiceTest {
          */
         AccountUpdateRequest build() {
             return new AccountUpdateRequest(
-                    this.accountId, "Y", this.creditLimit, "500.00", "100.00", "0.00", "0.00",
+                    this.accountId, this.activeStatus, this.creditLimit, "500.00", "100.00",
+                    "0.00", "0.00",
                     this.openDate[0], this.openDate[1], this.openDate[2],
                     this.expirationDate[0], this.expirationDate[1], this.expirationDate[2],
                     this.reissueDate[0], this.reissueDate[1], this.reissueDate[2],
-                    "DEFAULT", "900000001",
+                    this.groupId, "900000001",
                     this.nationalIdentifierPart1, this.nationalIdentifierPart2,
                     this.nationalIdentifierPart3,
                     this.dateOfBirth[0], this.dateOfBirth[1], this.dateOfBirth[2],
                     "800",
                     this.firstName, null, this.lastName,
-                    "1 NAVY YARD", null, "ARLINGTON", this.stateCode, "USA", this.zipCode,
-                    "703", "555", "0101",
+                    "1 NAVY YARD", this.addressLine2, this.city, this.stateCode, "USA",
+                    this.zipCode,
+                    this.phone1[0], this.phone1[1], this.phone1[2],
                     null, null, null,
-                    this.governmentIssuedId, "0000000001", "Y");
+                    this.governmentIssuedId, this.eftAccountId, this.activeStatus);
         }
     }
 }

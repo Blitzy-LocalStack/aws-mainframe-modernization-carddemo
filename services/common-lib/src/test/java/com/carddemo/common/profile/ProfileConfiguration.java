@@ -18,6 +18,7 @@ import org.springframework.core.env.EnumerablePropertySource;
 import org.springframework.core.env.MapPropertySource;
 import org.springframework.core.env.PropertySource;
 import org.springframework.core.env.StandardEnvironment;
+import org.springframework.core.env.SystemEnvironmentPropertySource;
 import org.springframework.core.io.DefaultResourceLoader;
 
 /**
@@ -81,8 +82,15 @@ public final class ProfileConfiguration {
   /** The property the config-data machinery reads a non-default base name from. */
   private static final String CONFIG_NAME_KEY = "spring.config.name";
 
-  /** Name of the synthetic source carrying seeded resolution-time values, used in diagnostics. */
-  private static final String SEED_SOURCE = "carddemo-profile-harness-seed";
+  /**
+   * Name of the synthetic source carrying seeded resolution-time values, used in diagnostics.
+   *
+   * <p>Assumptions: this is public because a consumer needs to distinguish a value it SUPPLIED from a value a
+   * DOCUMENT declares, and {@link #sourceOf(String)} is the only way to tell them apart. Asserting that a
+   * key's winning source is this one is how a case pins that the shipped documents declare the key nowhere --
+   * a distinction {@link #rawValue(String)} cannot draw, because a seeded value is present either way.
+   */
+  public static final String SEED_SOURCE = "carddemo-profile-harness-seed";
 
   /** The resolved environment, carrying every property source boot would have assembled. */
   private final ConfigurableEnvironment environment;
@@ -190,6 +198,7 @@ public final class ProfileConfiguration {
       throw new IllegalArgumentException("at least one profile must be named");
     }
     final StandardEnvironment resolved = new StandardEnvironment();
+    withoutTheAmbientProcessEnvironment(resolved);
     final Map<String, Object> seeded = new LinkedHashMap<>(resolutionTimeValues);
     if (!DEFAULT_CONFIG_NAME.equals(configName)) {
       seeded.put(CONFIG_NAME_KEY, configName);
@@ -207,6 +216,51 @@ public final class ProfileConfiguration {
         resolved, new DefaultResourceLoader(), new DefaultBootstrapContext(), profiles);
 
     return new ProfileConfiguration(resolved, namesOf(resolved));
+  }
+
+  /**
+   * Substitutes an empty operating-system environment for the real one before resolution begins.
+   *
+   * <p>Purpose: make what this harness reports a property of the SHIPPED DOCUMENTS and the values a
+   * caller supplies, and of nothing else. Every consumer of this class asks the same question -- what
+   * do the documents say under this profile -- and an answer that varies with the operator's shell
+   * cannot support that question.
+   *
+   * <p>⚠️ Refactoring Rationale: a {@link StandardEnvironment} inherits the real process environment,
+   * and the config-data machinery reads it. Two consequences were observed, not theorised. First,
+   * {@code SPRING_PROFILES_ACTIVE} contributes to the active set, so with the documented runtime
+   * environment sourced -- {@code /opt/carddemo-tools/svc-common.env} sets {@code
+   * SPRING_PROFILES_ACTIVE=dev} -- this harness reported {@code ["devcheck", "dev"]} for a caller that
+   * asked only for {@code devcheck}, failing two of its own tests. Second and more serious: because
+   * {@link org.springframework.core.env.SystemEnvironmentPropertySource} relaxes names and outranks
+   * every document, ANY ambient {@code SPRING_*} or service variable silently replaced a shipped value.
+   * The documented environment sets around thirty-four of them, including a datasource issuer URI. The
+   * eight per-service dev-profile contract tests all rest on this method, so each was capable of
+   * reading the machine while appearing to assert the documents -- which is the same defect class the
+   * account-service and batch-service contract tests were just corrected for, at its root.
+   *
+   * <p>Alternatives Considered: removing only the profile variable. Rejected because it fixes the
+   * symptom that happened to fail and leaves every other variable able to override a document value,
+   * which is the harder failure to notice -- it produces a green test asserting the wrong source.
+   *
+   * <p>Alternatives Considered: correcting each of the eight consumer tests instead. Rejected because
+   * the contamination enters here; eight copies of a workaround would still leave the ninth consumer
+   * exposed.
+   *
+   * <p>Assumptions: the source is REPLACED rather than removed, keeping its name and type, so that
+   * relaxed-name lookups still behave normally and simply find nothing. System properties are left in
+   * place deliberately: they are the JVM's own, the config-data machinery legitimately reads {@code
+   * spring.config.*} from them, and they are not what an operator's shell supplies.
+   *
+   * @param environment the environment to neutralise, before any resolution has been performed
+   */
+  private static void withoutTheAmbientProcessEnvironment(final StandardEnvironment environment) {
+    environment
+        .getPropertySources()
+        .replace(
+            StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
+            new SystemEnvironmentPropertySource(
+                StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME, Map.of()));
   }
 
   /**

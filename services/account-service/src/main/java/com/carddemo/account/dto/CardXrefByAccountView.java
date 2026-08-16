@@ -71,8 +71,15 @@ import com.carddemo.common.security.CardNumberMasker;
  * -- by a scope granted to one caller, by a masked diagnostic rendering, and by a published contract that
  * carries an unmasked card number on this schema and on no other.</p>
  *
- * @param accountId the account the row is keyed by, {@code XREF-ACCT-ID PIC 9(11)}; never {@code null} in a
- *     response this service produces
+ * <p>⚠️ Assumptions: both identifiers are JSON NUMBERS on this shape and digit STRINGS on
+ * {@link CardXrefResponse}, and the reasoning for that difference -- together with the zero-fill obligation
+ * it places on a consumer that renders either value back as characters -- is recorded once on
+ * {@link CardXrefView} rather than repeated here. It is recorded there because that shape is the other half
+ * of the same machine-facing pair; a reader who arrives at this record first should follow the link, because
+ * the obligation is real and one consumer of this very shape had not met it.</p>
+ *
+ * @param accountId the account the row is keyed by, {@code XREF-ACCT-ID PIC 9(11)}, published as a number so
+ *     carrying no leading zero; never {@code null} in a response this service produces
  * @param customerId the customer the card belongs to, {@code XREF-CUST-ID PIC 9(09)}; never {@code null} in
  *     a response this service produces
  * @param cardNumber the selected card number in full, {@code XREF-CARD-NUM PIC X(16)}; never {@code null} in

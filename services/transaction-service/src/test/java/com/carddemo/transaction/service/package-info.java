@@ -48,16 +48,16 @@
  * gate for it would attribute the obligation to a sentence that does not carry
  * it.
  *
- * <h2>The closed inventory: eight files here, seven of them tests</h2>
+ * <h2>The closed inventory: nine files here, eight of them tests</h2>
  *
- * <p>This directory holds exactly eight Java files and no subdirectory. Seven are
- * test classes and the eighth is this charter. Each line count below was
+ * <p>This directory holds exactly nine Java files and no subdirectory. Eight are
+ * test classes and the ninth is this charter. Each line count below was
  * counted in the file itself rather than carried over from a summary, and
  * each transaction identifier and screen name is quoted from the transaction
  * inventory in the repository root {@code README.md}:
  *
  * <pre>
- * this directory: 8 java files = 7 tests + 1 charter
+ * this directory: 9 java files = 8 tests + 1 charter
  * </pre>
  *
  * <p>Refactoring Rationale: the marker line above was added because "exactly six
@@ -160,6 +160,30 @@
  *       the account relation and the reporting turn does not, which is what keeps one
  *       operator's unconfirmed preview from blocking another operator's payment for
  *       the whole of a request.</li>
+ *   <li>{@code RestAccountContextClientTest} pins the SEAM the two capture screens
+ *       above resolve their account through -- the account context's card
+ *       cross-reference reads -- rather than a reference program of its own.
+ *       ⚠️ Refactoring Rationale: it is the newest member of this directory and it
+ *       exists because there was no test of that client ANYWHERE, and the absence
+ *       had a measured cost. Both of the client's conversions rendered the account
+ *       identifier with {@code String.valueOf}, beside a comment claiming the
+ *       rendering was done so a leading zero survives -- which is the opposite of
+ *       what that method does. Every one of the fifty accounts shipped in
+ *       {@code app/data/ASCII/acctdata.txt} is numbered {@code 00000000001} through
+ *       {@code 00000000050}, so the seam handed a ONE-character identifier onward
+ *       for all fifty while {@code AccountContextClient.CardXref} declares eleven
+ *       digit characters.
+ *       Assumptions: it exercises the client through its package-visible
+ *       constructor, because the public one installs its own request factory to
+ *       apply the two timeouts and installing one replaces a bound mock transport.
+ *       That seam applies the same base-address policy, so the only thing omitted is
+ *       the timeouts -- a property of the transport rather than of the status-code,
+ *       body-shape and identifier-rendering behaviour under test.
+ *       Assumptions: it deliberately does NOT assert that an undeclared response
+ *       member is refused, even though the deployed client is configured strictly,
+ *       because the mock transport installs its own message converters -- so such an
+ *       assertion would report the harness's leniency rather than the deployment's
+ *       strictness. The closed shape is asserted on the producing side instead.</li>
  * </ul>
  *
  * <p>Assumptions: that list is a measurement of the directory as well as the

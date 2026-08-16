@@ -176,7 +176,7 @@
  * <h2>Contents of this package</h2>
  *
  * <pre>
- * this directory: 12 java files = 11 tests + 1 charter
+ * this directory: 13 java files = 12 tests + 1 charter
  * </pre>
  *
  * <ul>
@@ -259,6 +259,20 @@
  *       because a review measured 405 published on 10 operations of 61, 406 on 5, 415 on 5 of the 31 that
  *       accept a body and 413 on none -- while every one of those refusals was already produced centrally
  *       for every route.</li>
+ *   <li>{@code ReleasedMigrationImmutabilityTest} across 2 cases -- holds every released Flyway
+ *       migration in the repository to the exact bytes, and the exact Flyway checksum, it was released
+ *       with, and holds the release record to the migration tree so a new migration cannot arrive
+ *       unrecorded. Assumptions: it guards the UPGRADE path, which no other check in this reactor can
+ *       see. Flyway's checksum covers a whole migration file, comments included, so an edit to an
+ *       already-applied one makes every environment that ran it refuse to start under
+ *       {@code validate-on-migrate} -- while every test that applies migrations from scratch stays
+ *       green, because a fresh database has no recorded checksum to disagree with. ⚠️ Refactoring
+ *       Rationale: it joined this package because that is exactly what happened. Two applied
+ *       migrations were later edited to change only prose, and one of them was measured refusing to
+ *       start with "Migration checksum mismatch for migration version 1: applied 561195120 / resolved
+ *       -1455475555". Assumptions: it reads the repository TREE rather than the executing module's
+ *       classpath, for the reason {@code DiagnosticRenderingRulesTest} states -- the rule covers all
+ *       seven owning modules and only a tree-reading check hosted once can say so truthfully.</li>
  *   <li>{@code ApplicationContextWiringContractTest} across 3 cases -- asserts that each deployable
  *       could actually refresh its context, in the three ways one of them could not: a collaborator a
  *       module injects but never publishes, a component declaring two constructors and marking neither,

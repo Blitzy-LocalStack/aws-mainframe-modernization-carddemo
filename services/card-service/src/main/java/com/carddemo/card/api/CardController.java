@@ -738,20 +738,23 @@ public class CardController {
         ApiError shared = requireSharedBody(this.conflicts.onRecordConflict(failure, request));
 
         // WHY : Assumptions: the switch yields a value and declares no default arm, so the compiler
-        //       requires every constant of the enumeration to be covered -- which is what makes a fifth
-        //       condition impossible to add without this method failing to compile rather than silently
-        //       emitting an empty code for it.
-        // WHY : Trade-offs: two of the four arms answer NO_SECONDARY_CODE, and that is a statement about
-        //       this CONTRACT rather than an omission. A referenced-row breach and a duplicate key are
-        //       conditions of a context that owns dependent rows or a caller-supplied key; this context
-        //       owns neither -- one table, one system-assigned key, no dependents -- so no card path can
-        //       raise them, and card-api.yaml publishes no value for either. Minting a code the document
-        //       does not admit would put a value into a body no schema of this service allows, which is
-        //       the defect being corrected here in the other direction.
+        //       requires every constant of the enumeration to be covered -- which is what makes the next
+        //       condition added to that enumeration impossible to introduce without this method failing to
+        //       compile rather than silently emitting an empty code for it. Refactoring Rationale: this
+        //       note said "a fifth condition", which stopped being true when INSERT_REFUSED became the
+        //       fifth arm below; the property the check gives is about whichever constant comes next, so
+        //       it is stated that way rather than against a number that goes stale on every addition.
+        // WHY : Trade-offs: the arms that answer NO_SECONDARY_CODE are a statement about this CONTRACT
+        //       rather than an omission. A referenced-row breach, a duplicate key and an insert refused by
+        //       a table are conditions of a context that owns dependent rows or a caller-supplied key;
+        //       this context owns neither -- one table, one system-assigned key, no dependents -- so no
+        //       card path can raise any of them, and card-api.yaml publishes no value for any. Minting a
+        //       code the document does not admit would put a value into a body no schema of this service
+        //       allows, which is the defect being corrected here in the other direction.
         String secondaryCode = switch (failure.kind()) {
             case STALE_VERSION -> CONFLICT_CODE_DATA_CHANGED;
             case LOCK_UNAVAILABLE -> CONFLICT_CODE_LOCK_NOT_ACQUIRED;
-            case REFERENCED_ROW, DUPLICATE_KEY -> ApiError.NO_SECONDARY_CODE;
+            case REFERENCED_ROW, DUPLICATE_KEY, INSERT_REFUSED -> ApiError.NO_SECONDARY_CODE;
         };
 
         // WHY : Assumptions: the card is taken from the refusal by a TYPE test, so a condition that

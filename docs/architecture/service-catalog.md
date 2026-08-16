@@ -504,10 +504,10 @@ services, repositories and adapters as non-`package-info.java` main-source Java:
 |---|---:|---|
 | `common-lib` | 46 | none — it owns no schema |
 | `auth-service` | 30 | `V1__auth.sql`, `V2__auth_identity_sync.sql`, `V3__auth_identity_sync_operations.sql`, `V4__auth_folded_user_id.sql`, `V5__auth_folded_user_id_trim.sql`, `V6__auth_canonical_user_id.sql`, `V7__auth_identity_sync_provisioning_guard.sql` |
-| `account-service` | 44 | `V1__account.sql`, `V2__account_inquiry_reply_ledger.sql` |
+| `account-service` | 45 | `V1__account.sql`, `V2__account_inquiry_reply_ledger.sql` |
 | `card-service` | 25 | `V1__card.sql`, `V2__card_num_digit_domain.sql` |
 | `transaction-service` | 40 | `V1__ledger.sql`, `V2__ledger_transaction_id_allocator.sql`, `V3__ledger_bytewise_collation.sql` |
-| `reference-service` | 57 | `V1__reference.sql`, `V2__seed_reference.sql`, `V3__reference_inquiry_reply_ledger.sql` |
+| `reference-service` | 56 | `V1__reference.sql`, `V2__seed_reference.sql`, `V3__reference_inquiry_reply_ledger.sql`, `V4__drop_reference_inquiry_reply_ledger.sql` |
 | `batch-service` | 63 | `V1__batch.sql`, `V2__batch_feed_watermark.sql` |
 | `authorization-service` | 57 | `V1__authorization.sql`, `V2__authorization_outbox_claim_version.sql`, `V3__authorization_outbox_fifo_identities.sql`, `V4__authorization_outbox_send_acceptance.sql` |
 | `reporting-service` | 64 | none by design — it owns no table, only read-only views |
@@ -846,25 +846,33 @@ moves; the queues, their dead-letter queues and their encryption keys belong to
 `infra/modules/sqs`, and the class is property-gated so a task whose selected job has
 nothing to report starts and exits without it.
 
-Refactoring Rationale: `reference-service` reads 60 where it read 59, and its migration
-list gains a third entry. One class was added,
-`com.carddemo.reference.repository.InquiryReplyLedger`, together with
-`V3__reference_inquiry_reply_ledger.sql`, the table it issues its three native statements
-over. It is recorded as an addition and not as a correction: 59 was accurate for the tree
-it was measured against. Assumptions: the pair closes a delivery-boundary defect rather
-than adding a capability — the asynchronous date-conversion consumer sent its reply and
-then returned, and because that reply body is the system date and time read at the moment
-of composition, a redelivery between the send and the acknowledgement answered with a
-LATER timestamp; the ledger records the composed reply, commits, sends, and marks, so a
-redelivery re-sends the recorded bytes instead of asking the clock again. Assumptions: it
-adds no queue resource and no schema, only the one table inside the schema this context
-already owns, and it is the only table in that schema holding no reference DATA — the
-migration header records why it lives beside the context that owns the exchange rather
-than in a schema of its own. Trade-offs: the module's data-access package now holds one
-CLASS among seven derived interfaces, which its own descriptor records as the single
-documented exception, admitted because `INSERT ... ON CONFLICT DO NOTHING` has no JPQL
-form and a read-then-conditional-insert would leave the first-delivery decision to the
-gap between two statements.
+⚠️ Refactoring Rationale: `reference-service` reads **56**, one FEWER than before, and
+its migration list gains a fourth entry that withdraws what the third added.
+`com.carddemo.reference.repository.InquiryReplyLedger` and the table it issued its three
+native statements over are both withdrawn: `V4__drop_reference_inquiry_reply_ledger.sql`
+drops `reference.inquiry_reply_ledger`, and `V3` is retained because a released migration
+can be reversed but not deleted — removing the file would make every already-migrated
+database refuse to start. The data-access package therefore holds seven derived interfaces
+and no class, so the "single documented exception" that descriptor recorded is withdrawn
+with it.
+
+Assumptions: the delivery-boundary defect that pair addressed is real and is NOT
+reopened. The asynchronous consumer sends its reply and then returns, and because the
+reply body is the system date and time read at the moment of composition, a redelivery
+between the send and the acknowledgement answers with a LATER timestamp; a ledger that
+records the composed reply, commits, sends and marks is the remedy. That remedy lives with
+the component that composes the reply, and the shared inquiry request queue has exactly
+one consumer: `account-service`'s `InquiryMessageListener` dispatches on the
+four-character function code and answers `DATE` itself, recording both exchanges' replies
+in `account.inquiry_reply_ledger`. `reference-service` declares no messaging starter and
+no `@SqsListener`, so no delivery ever reached its copy and no code path inserted into it
+— and a table nothing writes supplies no idempotency.
+
+⚠️ Assumptions: the counts in the table above are authoritative and the prose
+rationales below are not. Measured against the current tree, every module's table value
+is exact, whereas the paragraphs beneath quote running totals from the moments they were
+written — the next one says this module "reads 59 where it read 58" — and those were never
+reconciled as the tree moved. A reader wanting a count should read the table.
 
 Refactoring Rationale: `reference-service` reads 59 where it read 58. One class was
 added, `com.carddemo.reference.config.DataSourceConfig`, and this is the one module of

@@ -7,6 +7,7 @@ import java.time.Duration;
 import java.util.Optional;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.security.core.Authentication;
@@ -231,9 +232,12 @@ public class RestReferenceAddressLookup implements AddressValidationService.Refe
      * {@inheritDoc}
      *
      * @param areaCode {@inheritDoc}
-     * @return {@inheritDoc}
-     * @throws ReferenceContextUnavailableException if the reference context could not be reached or
-     *     answered unusably, which is a transport failure and not a validation outcome
+     * @return {@inheritDoc}; the classification is absent when the reference context refuses the
+     *     submitted code as one no seeded row can hold, on the terms
+     *     {@link #isAboutTheSubmittedValue} sets out
+     * @throws ReferenceContextUnavailableException if the reference context could not be reached,
+     *     refused the relayed credential or answered unusably -- each a transport or authorisation
+     *     failure and not a validation outcome
      */
     @Override
     public Optional<AreaCodeClass> findAreaCodeClass(String areaCode) {
@@ -243,12 +247,12 @@ public class RestReferenceAddressLookup implements AddressValidationService.Refe
                     .retrieve()
                     .body(PhoneAreaCodeView.class);
             return Optional.ofNullable(view).map(PhoneAreaCodeView::toAreaCodeClass);
-        } catch (HttpClientErrorException.NotFound absent) {
-            // WHY : Assumptions: 404 is the VALIDATION outcome "this code is in none of the lists",
-            //       which the port models as an empty optional. Every other status is a transport
-            //       failure and is rethrown, because reporting one as "not in the list" would refuse a
-            //       valid address whenever the reference context was merely unreachable.
-            return Optional.empty();
+        } catch (HttpClientErrorException refused) {
+            if (isAboutTheSubmittedValue(refused)) {
+                return Optional.empty();
+            }
+            throw new ReferenceContextUnavailableException(
+                    "the phone area code lookup did not answer", refused);
         } catch (IllegalArgumentException unusable) {
             throw new ReferenceContextUnavailableException(
                     "the reference context answered with an area code classification this service "
@@ -263,9 +267,12 @@ public class RestReferenceAddressLookup implements AddressValidationService.Refe
      * {@inheritDoc}
      *
      * @param stateCode {@inheritDoc}
-     * @return {@inheritDoc}
-     * @throws ReferenceContextUnavailableException if the reference context could not be reached or
-     *     answered unusably, which is a transport failure and not a validation outcome
+     * @return {@inheritDoc}; the answer is {@code false} when the reference context refuses the
+     *     submitted code as one no seeded row can hold, which is what it answers for a code that is
+     *     not upper-case as well as for one that is simply unlisted
+     * @throws ReferenceContextUnavailableException if the reference context could not be reached,
+     *     refused the relayed credential or answered unusably -- each a transport or authorisation
+     *     failure and not a validation outcome
      */
     @Override
     public boolean stateCodeExists(String stateCode) {
@@ -276,9 +283,12 @@ public class RestReferenceAddressLookup implements AddressValidationService.Refe
      * {@inheritDoc}
      *
      * @param stateZipPrefix {@inheritDoc}
-     * @return {@inheritDoc}
-     * @throws ReferenceContextUnavailableException if the reference context could not be reached or
-     *     answered unusably, which is a transport failure and not a validation outcome
+     * @return {@inheritDoc}; the answer is {@code false} when the reference context refuses the
+     *     submitted pairing as one no seeded row can hold, which is what it answers for a pairing whose
+     *     halves are the wrong shape as well as for one that is simply unlisted
+     * @throws ReferenceContextUnavailableException if the reference context could not be reached,
+     *     refused the relayed credential or answered unusably -- each a transport or authorisation
+     *     failure and not a validation outcome
      */
     @Override
     public boolean stateZipPrefixExists(String stateZipPrefix) {
@@ -297,30 +307,113 @@ public class RestReferenceAddressLookup implements AddressValidationService.Refe
      * @param path the templated item route to read; must not be {@code null}
      * @param value the single path value to substitute; must not be {@code null}
      * @param failureDetail the sentence to report if the read fails; must not be {@code null}
-     * @return {@code true} when the route resolved a row, {@code false} when it answered 404
-     * @throws ReferenceContextUnavailableException if the read failed for any reason other than 404
+     * @return {@code true} when the route resolved a row, {@code false} when it refused the value as
+     *     one no seeded row can hold, on the terms {@link #isAboutTheSubmittedValue} sets out
+     * @throws ReferenceContextUnavailableException if the read failed for any reason that says nothing
+     *     about the submitted value
      */
     private boolean resolves(String path, String value, String failureDetail) {
         try {
             this.client.get().uri(path, value).retrieve().toBodilessEntity();
             return true;
-        } catch (HttpClientErrorException.NotFound absent) {
-            return false;
+        } catch (HttpClientErrorException refused) {
+            if (isAboutTheSubmittedValue(refused)) {
+                return false;
+            }
+            throw new ReferenceContextUnavailableException(failureDetail, refused);
         } catch (RestClientException failure) {
             throw new ReferenceContextUnavailableException(failureDetail, failure);
         }
     }
 
     /**
-     * The part of the reference context's area-code response this adapter reads.
+     * Reports whether a client-error answer is ABOUT THE VALUE that was submitted.
      *
-     * <p>Assumptions: only the classification is bound. The response carries more, and binding fields
-     * this adapter does not consult would make an unrelated addition to that contract a compile
-     * concern here.
+     * <p>Purpose: to draw the one distinction the port's contract turns on. A refusal about the value
+     * is the validation outcome "this value is in none of the seeded lists", which the port models as
+     * an absent classification or a false existence answer. Anything else is a transport or
+     * authorisation failure, which must NOT be reported as a validation outcome, because doing so
+     * refuses a VALID address for every caller whenever the owning service or the credential relay is
+     * broken.</p>
      *
+     * <p>Refactoring Rationale: only 404 used to qualify, and every other status -- 400 included --
+     * became a reported failure. The reference context answers 400, not 404, whenever the submitted
+     * value cannot be a key at all: each item route constrains its path value to the shape every
+     * seeded key has, {@code ^[0-9]{3}$} for an area code, {@code ^[A-Z]{2}$} for a state code and
+     * {@code ^[A-Z]{2}[0-9]{2}$} for a state-and-postal pairing, and a value outside that shape is
+     * refused by the constraint before any row is read. So a caller submitting the lower-case
+     * {@code nc} as a state, or a two-digit area code, drew a 500 naming the reference context as
+     * unavailable in place of the field error the baseline produces. That is the wrong answer twice
+     * over: it hides a correctable input behind an infrastructure fault, and it loses the verbatim
+     * wording {@code app/cbl/COACTUPC.cbl} composes at its lines 2502 and 2503.</p>
+     *
+     * <p>Assumptions: a shape refusal and an unseeded key are the same answer to the question this
+     * adapter asks, and the baseline is what settles that. {@code app/cbl/COACTUPC.cbl} decides state
+     * validity by evaluating the condition name {@code VALID-US-STATE-CODE} over the literals listed
+     * at line 1013 of {@code app/cpy/CSLKPCDY.cpy}; that comparison has exactly one negative outcome
+     * however the submitted value fails it, because {@code nc} is no more one of those literals than
+     * {@code ZZ} is. Splitting the two here would invent a distinction the specification does not
+     * draw.</p>
+     *
+     * <p>Alternatives Considered: treating EVERY 4xx as a refusal about the value, which is the
+     * broader reading. Rejected deliberately, because 401 and 403 are the statuses the reference
+     * context answers when the relayed credential is missing, expired or lacks the scope -- facts
+     * about the CALLER and about this seam's configuration, and not about the address. Folding them in
+     * would silently turn a broken relay into "your state code is invalid" for every user at once,
+     * which is precisely the failure the port's contract forbids and the hardest kind to diagnose from
+     * a field error. The same reasoning excludes 405, 406, 409, 415 and 429: each reports something
+     * about the request or the service, and none of them reports anything about the value.</p>
+     *
+     * <p>Trade-offs: the two admitted statuses are named explicitly rather than derived from a range,
+     * so adding a third is a deliberate edit with a reason rather than a side effect of widening a
+     * comparison. The accepted cost is that a future reference-context route answering, say, 422 for a
+     * malformed value would be reported here as a transport failure until this method is told about
+     * it -- which fails safe, because it refuses nothing that was valid.</p>
+     *
+     * @param refused the client-error answer the reference context returned; must not be {@code null}
+     * @return {@code true} when the status says the submitted value is not, and cannot be, a seeded
+     *     key; {@code false} when the status says nothing about the value
+     */
+    private static boolean isAboutTheSubmittedValue(HttpClientErrorException refused) {
+        int status = refused.getStatusCode().value();
+        return status == HttpStatus.NOT_FOUND.value() || status == HttpStatus.BAD_REQUEST.value();
+    }
+
+    /**
+     * The reference context's area-code answer, declared in full.
+     *
+     * <p>Refactoring Rationale: EVERY published member is declared, including {@code areaCd}, which
+     * this adapter does not consult. An earlier revision declared the classification alone and
+     * recorded that "the response carries more, and binding fields this adapter does not consult
+     * would make an unrelated addition to that contract a compile concern here" -- which described a
+     * deserialiser this service does not run. {@code application.yml} sets
+     * {@code spring.jackson.deserialization.fail-on-unknown-properties} to true, deliberately, so a
+     * member the producer publishes and this shape omits is not skipped: it fails the conversion. The
+     * area-code route publishes {@code areaCd} on every answer, so EVERY successful classification
+     * became a binding fault, was caught below as an unusable answer and was reported to the caller as
+     * the reference context being unavailable -- a 500 on every account update that carried a
+     * telephone number, whatever the number was. Declaring the closed shape is what makes the strict
+     * setting safe, and the setting is what makes a later shape change visible.</p>
+     *
+     * <p>Alternatives Considered: annotating this shape {@code @JsonIgnoreProperties(ignoreUnknown =
+     * true)}, which would have made the omission harmless without declaring the member. Rejected on
+     * two grounds. The contract this shape reads declares {@code additionalProperties: false} on
+     * {@code UsPhoneAreaCode} at line 3195 of
+     * {@code services/reference-service/src/main/resources/openapi/reference-api.yaml} with both
+     * members required, so an unknown member is a contract violation rather than a permitted addition
+     * -- tolerating it would mean accepting an answer the producer is not allowed to send. And the
+     * account context is not the first to meet this exact failure: the transaction and authorization
+     * contexts each read the account context's cross-reference through the same strict setting and
+     * each resolved it by declaring the closed shape, recording the same reasoning on
+     * {@code RestAccountContextClient}. Two sibling adapters resolving one problem two ways is how one
+     * of them later gets relaxed, which is the argument that settled it.</p>
+     *
+     * @param areaCd the accepted area code the answer is about, declared so the strict deserialiser
+     *     admits it and not consulted here -- the item route is keyed on the value this adapter
+     *     supplied, so the answer cannot be about a different code
      * @param codeClass the one-character baseline class, {@code G} or {@code E}
      */
-    private record PhoneAreaCodeView(String codeClass) {
+    private record PhoneAreaCodeView(String areaCd, String codeClass) {
 
         /**
          * Translates the transported class letter into the port's classification.

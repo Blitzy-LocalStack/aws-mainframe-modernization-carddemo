@@ -74,6 +74,7 @@ import software.amazon.awssdk.core.exception.SdkClientException;
 import software.amazon.awssdk.services.sqs.SqsAsyncClient;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.GetQueueUrlRequest;
+import software.amazon.awssdk.services.sqs.model.QueueDoesNotExistException;
 import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
 import software.amazon.awssdk.services.sqs.model.SendMessageResponse;
 
@@ -157,6 +158,27 @@ class InquiryMessageListenerTest {
      * never have succeeded against a real deployment.</p>
      */
     private static final String REPLY_URL = "https://sqs.test.invalid/000000000000/account-test-reply";
+
+    /**
+     * The configured request queue URL, which the diagnostic's queue-name field is derived from.
+     *
+     * <p>Assumptions: an address rather than a bare name, matching what the deployment supplies -- both
+     * environment roots set this variable from the queue module's own {@code *_queue_url} output. The
+     * bare-name form the listener annotation also accepts is exercised separately, by the case that asserts
+     * the derivation, so this constant models the deployed shape and that case models the alternative.</p>
+     */
+    private static final String REQUEST_URL =
+            "https://sqs.test.invalid/000000000000/account-test-request";
+
+    /**
+     * The request queue's NAME, as a diagnostic reports it.
+     */
+    private static final String REQUEST_QUEUE_NAME = "account-test-request";
+
+    /**
+     * The reply queue's NAME, as a diagnostic reports it when a reply could not be put.
+     */
+    private static final String REPLY_QUEUE_NAME = "account-test-reply";
 
     /**
      * The configured error queue URL.
@@ -369,8 +391,8 @@ class InquiryMessageListenerTest {
         //   and commits nothing. What the cases below assert is which store is touched and in what order,
         //   not that a database committed, and a read-only lookup has nothing to commit in any case.
         this.listener = new InquiryMessageListener(this.accounts, new AccountInquiryReplyMapper(),
-                this.sqs, REPLY_URL, ERROR_URL, this.ledger, Clock.fixed(NOW, ZoneOffset.UTC),
-                mock(PlatformTransactionManager.class));
+                this.sqs, REQUEST_URL, REPLY_URL, ERROR_URL, this.ledger,
+                Clock.fixed(NOW, ZoneOffset.UTC), mock(PlatformTransactionManager.class));
 
         this.serviceLogger =
                 (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(InquiryMessageListener.class);
@@ -972,8 +994,20 @@ class InquiryMessageListenerTest {
      *
      * <p>Assumptions: the report's body is asserted to carry the reference program's own verbatim return
      * message, truncated into its 25-character field exactly as a move into that picture truncates it, and to
-     * carry NO exception message text -- only the failure's type chain. An exception message is the one part
-     * of a failure into which a request value can be interpolated, and this body is published onto a queue.</p>
+     * carry NO exception message text. An exception message is the one part of a failure into which a request
+     * value can be interpolated, and this body is published onto a queue.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: this case asserted that the body CONTAINED the failure's type name, and
+     * that expectation was the defect written down. The type chain published this service's own class names,
+     * the queue client's exception hierarchy and the frame a failure was raised at onto a queue, where none
+     * of it is actionable and all of it changes under a refactoring that changes no behaviour. The case now
+     * asserts the classified condition instead, and asserts the type name's ABSENCE, so the previous
+     * rendering cannot return without failing here.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the queue NAME is asserted, and it was not. The name reported was the
+     * error queue's own -- the sink the report was published to -- where the baseline names the INPUT queue
+     * for a failure that is about no queue at all, at physical line 441 of
+     * {@code app/app-vsam-mq/cbl/COACCT01.cbl}.</p>
      */
     @Test
     @DisplayName("a database failure is reported to the error sink and then propagates")
@@ -991,8 +1025,142 @@ class InquiryMessageListenerTest {
                 .hasSize(InquiryRequestCodec.MESSAGE_LENGTH)
                 .startsWith("4000-PROCESS-REQUEST-REPL")
                 .contains("ERROR WHILE READING ACCTF")
-                .contains("QueryTimeoutException")
+                .contains(REQUEST_QUEUE_NAME)
+                .contains("condition=datastore-unavailable")
+                .doesNotContain("QueryTimeoutException")
                 .doesNotContain("the read timed out");
+    }
+
+    /**
+     * A reply the queue service refuses is reported as a PUT failure naming the reply queue.
+     *
+     * <p>Purpose: this is the arm the target did not have. {@code app/app-vsam-mq/cbl/COACCT01.cbl} keeps
+     * two failure arms apart -- {@code 4100-PUT-REPLY} moves {@code 'MQPUT ERR'} into the return-message
+     * field at physical line 496 with the reply queue's name beside it at 495, while the account-file read
+     * arm moves {@code 'ERROR WHILE READING ACCTFILE'} at 442 and 443 with the input queue's name at 441 --
+     * and the target reported the read arm for both. An operator reading the sink over a queue outage was
+     * therefore sent to the account table.</p>
+     *
+     * <p>Assumptions: the REPLY send is what fails and the ERROR send succeeds, which is the condition the
+     * two arms are distinguished for. The stub answers the first send with a failure and the second
+     * normally, so the diagnostic itself reaches the sink and can be read.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a refused reply put is reported as MQPUT ERR against the reply queue")
+    void aRefusedReplyPutIsReportedAsAPutFailure() {
+        when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+        when(this.sqs.sendMessage(any(SendMessageRequest.class)))
+                .thenThrow(SdkClientException.create("the reply queue is unreachable"))
+                .thenReturn(SendMessageResponse.builder().messageId("m-error").build());
+
+        assertThatThrownBy(() -> this.listener.onRequest(message(request("INQA", "12345678901"), Map.of())))
+                .isInstanceOf(SdkClientException.class);
+
+        ArgumentCaptor<SendMessageRequest> sends = ArgumentCaptor.forClass(SendMessageRequest.class);
+        verify(this.sqs, times(2)).sendMessage(sends.capture());
+        SendMessageRequest reported = sends.getAllValues().get(1);
+
+        assertThat(reported.queueUrl())
+                .as("the diagnostic still goes to the error sink")
+                .isEqualTo(ERROR_URL);
+        assertThat(reported.messageBody())
+                .hasSize(InquiryRequestCodec.MESSAGE_LENGTH)
+                .startsWith("4000-PROCESS-REQUEST-REPL")
+                .contains("MQPUT ERR")
+                .contains(REPLY_QUEUE_NAME)
+                .contains("condition=queue-unavailable");
+        assertThat(reported.messageBody())
+                .as("the read arm's literal must not be reported for a put failure")
+                .doesNotContain("ERROR WHILE READING");
+    }
+
+    /**
+     * A failure recording the answer durably is reported with no baseline literal and names the request
+     * queue.
+     *
+     * <p>Purpose: the durable claim has no counterpart in {@code app/app-vsam-mq/cbl/COACCT01.cbl}, which
+     * takes its idempotency from a syncpoint bracket rather than from a table, so there is no literal to
+     * carry into the return-message field. Reporting the read arm's literal would send an operator to the
+     * account table for a ledger fault, and reporting the put arm's would send them to the queue -- so the
+     * field is left blank and the condition is named in the diagnostic's free-text tail, which is the
+     * convention this consumer already follows for the one other condition the baseline does not declare.</p>
+     *
+     * <p>Assumptions: the failure is raised by the CLAIM, which happens after the reply has been composed,
+     * so the read has already succeeded and the exchange is unambiguously in its answer step.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a ledger failure is reported with no baseline literal, against the request queue")
+    void aLedgerFailureIsReportedWithoutABaselineLiteral() {
+        when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+        when(this.ledger.claim(anyString(), anyString(), anyString(), any(), any(),
+                any(LocalDateTime.class)))
+                .thenThrow(new org.springframework.dao.CannotAcquireLockException("the row is locked"));
+
+        // WHY : Assumptions: a BROKER identifier is supplied, because a delivery carrying none is answered
+        //   unguarded and never reaches the ledger at all -- so a case built on the plain helper would
+        //   assert nothing about a ledger failure.
+        assertThatThrownBy(() -> this.listener.onRequest(message(request("INQA", "12345678901"),
+                Map.of(InquiryMessageListener.HEADER_BROKER_MESSAGE_ID, BROKER_MESSAGE_ID))))
+                .isInstanceOf(org.springframework.dao.CannotAcquireLockException.class);
+
+        SendMessageRequest reported = captureSend();
+        assertThat(reported.messageBody())
+                .hasSize(InquiryRequestCodec.MESSAGE_LENGTH)
+                .startsWith("4000-PROCESS-REQUEST-REPL")
+                .contains(REQUEST_QUEUE_NAME)
+                .contains("condition=datastore-unavailable");
+        assertThat(reported.messageBody())
+                .as("neither baseline literal describes a ledger write, so neither may be reported")
+                .doesNotContain("ERROR WHILE READING")
+                .doesNotContain("MQPUT ERR");
+        assertThat(reported.messageBody().substring(27, 52).trim())
+                .as("the return-message field is blank where the baseline declares no literal")
+                .isEmpty();
+    }
+
+    /**
+     * A queue-service refusal publishes its HTTP status and still names no internal type.
+     *
+     * <p>Purpose: the status is the one part of a queue failure that belongs to the queue service's PUBLIC
+     * contract, so it survives any refactoring here and tells an operator whether the service refused the
+     * request or failed to answer it. This case asserts it is published and that the implementation type
+     * that carried it is not -- which is the whole of the change: the same information, none of the map of
+     * how this service is built.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a queue-service refusal publishes its status and no exception type")
+    void aQueueServiceRefusalPublishesItsStatusAndNoType() {
+        when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+        when(this.sqs.sendMessage(any(SendMessageRequest.class)))
+                .thenThrow(QueueDoesNotExistException.builder()
+                        .message("the specified queue does not exist")
+                        .statusCode(400)
+                        .build())
+                .thenReturn(SendMessageResponse.builder().messageId("m-error").build());
+
+        assertThatThrownBy(() -> this.listener.onRequest(message(request("INQA", "12345678901"), Map.of())))
+                .isInstanceOf(QueueDoesNotExistException.class);
+
+        ArgumentCaptor<SendMessageRequest> sends = ArgumentCaptor.forClass(SendMessageRequest.class);
+        verify(this.sqs, times(2)).sendMessage(sends.capture());
+        String body = sends.getAllValues().get(1).messageBody();
+
+        assertThat(body)
+                .contains("MQPUT ERR")
+                .contains("condition=queue-unavailable")
+                .contains("status=400");
+        assertThat(body)
+                .as("no implementation type, package or frame may reach the queue")
+                .doesNotContain("QueueDoesNotExistException")
+                .doesNotContain("software.amazon")
+                .doesNotContain("com.carddemo")
+                .doesNotContain("the specified queue does not exist");
     }
 
     /**
@@ -1088,7 +1256,7 @@ class InquiryMessageListenerTest {
         when(replyLedger.markSent(anyString(), any(LocalDateTime.class))).thenReturn(true);
 
         InquiryMessageListener addressed = new InquiryMessageListener(repository,
-                new AccountInquiryReplyMapper(), client, REPLY_URL, ERROR_URL, replyLedger,
+                new AccountInquiryReplyMapper(), client, REQUEST_URL, REPLY_URL, ERROR_URL, replyLedger,
                 Clock.fixed(NOW, ZoneOffset.UTC), mock(PlatformTransactionManager.class));
 
         addressed.onRequest(message(request("INQA", "12345678901"), Map.of()));
@@ -1137,19 +1305,19 @@ class InquiryMessageListenerTest {
         PlatformTransactionManager transactions = mock(PlatformTransactionManager.class);
 
         assertThatThrownBy(() -> new InquiryMessageListener(this.accounts, mapper, this.sqs,
-                " ", ERROR_URL, this.ledger, clock, transactions))
+                REQUEST_URL, " ", ERROR_URL, this.ledger, clock, transactions))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("carddemo.account.inquiry.reply-queue-url");
         assertThatThrownBy(() -> new InquiryMessageListener(this.accounts, mapper, this.sqs,
-                REPLY_URL, "", this.ledger, clock, transactions))
+                REQUEST_URL, REPLY_URL, "", this.ledger, clock, transactions))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("carddemo.account.inquiry.error-queue-url");
         assertThatThrownBy(() -> new InquiryMessageListener(this.accounts, mapper, this.sqs,
-                "account-test-reply", ERROR_URL, this.ledger, clock, transactions))
+                REQUEST_URL, "account-test-reply", ERROR_URL, this.ledger, clock, transactions))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("carddemo.account.inquiry.reply-queue-url");
         assertThatThrownBy(() -> new InquiryMessageListener(this.accounts, mapper, this.sqs,
-                REPLY_URL, "account-test-error", this.ledger, clock, transactions))
+                REQUEST_URL, REPLY_URL, "account-test-error", this.ledger, clock, transactions))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("carddemo.account.inquiry.error-queue-url");
     }
@@ -1740,6 +1908,118 @@ class InquiryMessageListenerTest {
         assertThat(annotation.acknowledgementMode())
                 .as("acknowledgement must stay on successful processing, never before it")
                 .isEmpty();
+    }
+
+    /**
+     * The handler's annotation names the container identifier the health indicator resolves.
+     *
+     * <p>Purpose: the container had no identifier, so the framework generated a positional one and nothing
+     * could resolve the container by it. That is what left the consumer's running state unreachable and let
+     * this service report itself healthy while consuming nothing at all. This case pins the identifier and,
+     * separately, pins that the annotation takes it from the indicator's own constant rather than repeating
+     * its text -- a mismatch between the two would not fail at start-up, it would make the health signal
+     * report the consumer missing on a working task, which costs a task replacement for nothing.</p>
+     *
+     * <p>Assumptions: the constant's VALUE is asserted as well as the reference, because a reference the
+     * two sides share is still wrong if the value it carries is not the one an operator comparing two
+     * services' health output expects. It follows the sibling authorization consumer's own spelling.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     *
+     * @throws NoSuchMethodException if the handler method cannot be found, which would mean the contract
+     *     this case reads has been renamed rather than that the assertion failed
+     */
+    @Test
+    @DisplayName("the handler's annotation names the container the health indicator resolves")
+    void theHandlerDeclaresTheContainerIdentifier() throws NoSuchMethodException {
+        SqsListener annotation = handlerAnnotation();
+
+        assertThat(annotation.id())
+                .as("a registry lookup that misses answers nothing and silently loses the health signal")
+                .isEqualTo(InquiryListenerHealth.REQUEST_CONTAINER_ID);
+        assertThat(InquiryListenerHealth.REQUEST_CONTAINER_ID)
+                .as("the identifier is this consumer's stable name, following the sibling consumer's")
+                .isEqualTo("carddemo-account-inquiry-listener");
+    }
+
+    /**
+     * A redelivery that re-sends counts its delivery on the ledger, before it sends.
+     *
+     * <p>Purpose: {@code attempts} moved only when a send SUCCEEDED, so it never moved for the one
+     * condition an operator reads it for -- a reply whose send keeps failing -- and stayed at its inserted
+     * value across every redelivery. Counting at the point a delivery decides to re-send, and committing
+     * that count before the send, is what makes the column equal the number of deliveries that reached the
+     * send step.</p>
+     *
+     * <p>Assumptions: the ORDER is asserted, not merely the call. A count taken after the send would be
+     * the one count never recorded on the path that matters, because on that path the send raises.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a redelivery that re-sends counts the delivery before sending")
+    void aRedeliveryThatResendsCountsTheDeliveryFirst() {
+        when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+        when(this.ledger.claim(anyString(), anyString(), anyString(), any(), any(),
+                any(LocalDateTime.class))).thenReturn(false);
+        when(this.ledger.find(BROKER_MESSAGE_ID)).thenReturn(Optional.of(
+                new InquiryReplyLedger.RecordedReply(InquiryReplyLedger.STATUS_PENDING,
+                        "RECORDED", RECORDED_URL, RECORDED_CORRELATION_ID, "recorded-msg")));
+
+        this.listener.onRequest(redelivery());
+
+        InOrder sequence = inOrder(this.ledger, this.sqs);
+        sequence.verify(this.ledger).find(BROKER_MESSAGE_ID);
+        sequence.verify(this.ledger).countSendAttempt(BROKER_MESSAGE_ID);
+        sequence.verify(this.sqs).sendMessage(any(SendMessageRequest.class));
+    }
+
+    /**
+     * A redelivery whose claim is already retired is suppressed and is NOT counted.
+     *
+     * <p>Purpose: the count answers how many times the send of one reply was attempted, and this path
+     * attempts none -- the requester demonstrably has its answer, so the duplicate is dropped. Counting
+     * here would keep advancing for as long as the queue kept redelivering a request that had already been
+     * answered, which is the one case where a high count would mean nothing is wrong.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a suppressed duplicate is not counted as a send attempt")
+    void aSuppressedDuplicateIsNotCounted() {
+        when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+        when(this.ledger.claim(anyString(), anyString(), anyString(), any(), any(),
+                any(LocalDateTime.class))).thenReturn(false);
+        when(this.ledger.find(BROKER_MESSAGE_ID)).thenReturn(Optional.of(
+                new InquiryReplyLedger.RecordedReply(InquiryReplyLedger.STATUS_SENT,
+                        "RECORDED", RECORDED_URL, RECORDED_CORRELATION_ID, "recorded-msg")));
+
+        this.listener.onRequest(redelivery());
+
+        verify(this.ledger, never()).countSendAttempt(anyString());
+        verify(this.sqs, never()).sendMessage(any(SendMessageRequest.class));
+    }
+
+    /**
+     * A first delivery is counted by the claim itself and never counted again.
+     *
+     * <p>Purpose: the claim inserts the count for the delivery it admits, so the ordinary successful
+     * exchange must not add a second one. This case pins that neither the explicit count nor the
+     * retirement contributes to it on the first-delivery path.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a first delivery is counted by the claim alone")
+    void aFirstDeliveryIsCountedByTheClaimAlone() {
+        when(this.accounts.findById(ACCOUNT_ID)).thenReturn(Optional.of(account()));
+
+        this.listener.onRequest(redelivery());
+
+        verify(this.ledger).claim(eq(BROKER_MESSAGE_ID), anyString(), anyString(), any(), any(),
+                any(LocalDateTime.class));
+        verify(this.ledger, never()).countSendAttempt(anyString());
+        verify(this.ledger).markSent(eq(BROKER_MESSAGE_ID), any(LocalDateTime.class));
     }
 
     /**

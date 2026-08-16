@@ -255,6 +255,29 @@ public class TransactionTypeService {
     static final String SQLSTATE_UNIQUE_VIOLATION = "23505";
 
     /**
+     * The baseline's own name for the table this service maintains, as its refusal sentences write it.
+     *
+     * <p>Assumptions: {@code TRANSACTION_TYPE} without the {@code CARDDEMO} qualifier, exactly as the
+     * baseline writes it into the sentence at physical line 1611 of {@code COTRTUPC.cbl}. The unqualified
+     * form is what appears in the text a user reads, even though the statement above it at line 1598
+     * names the table as {@code CARDDEMO.TRANSACTION_TYPE}, and transformation rule T8 carries the text
+     * rather than the statement.
+     *
+     * <p>Assumptions: this is deliberately NOT the migrated name. The migrated table is
+     * {@code reference.transaction_types}; putting that into a caller-facing sentence would publish the
+     * schema and table this migration created, which is the same disclosure the refusal path already
+     * withholds by ending its sentence at the baseline's colon rather than appending the driver's
+     * diagnostic.
+     *
+     * <p>Assumptions: published rather than kept private because the sentence composed around it is
+     * published in {@code src/main/resources/openapi/reference-api.yaml}, so the value is part of this
+     * module's caller-visible surface in the same way the message constants above it are. A test in
+     * another package can therefore compare against the constant instead of retyping the table name,
+     * which is what stops a document, a body and an assertion drifting into three different tables.
+     */
+    public static final String BASELINE_TABLE_NAME = "TRANSACTION_TYPE";
+
+    /**
      * How many links of a cause chain {@link #sqlStateOf(Throwable)} will follow.
      *
      * <p>Assumptions: a bound rather than an open walk, because a chain that contains a cycle would
@@ -549,13 +572,24 @@ public class TransactionTypeService {
      * <p>This transcribes {@code 9700-INSERT-RECORD} at physical lines 1596 to 1623 of
      * {@code COTRTUPC.cbl}.
      *
-     * <p>Refactoring Rationale: the duplicate is classified and the baseline cannot classify it. That
-     * paragraph carries only a zero arm at physical line 1605 and a {@code WHEN OTHER} at physical line
-     * 1607, with no arm for the duplicate-key SQLCODE, so a repeated primary key is reported with the
-     * same 'Error inserting record into:' sentence as a tablespace failure. Because the shared handler
-     * renders every integrity violation with the referential sentence, leaving it unclassified here
-     * would tell a caller who reused a code to go and delete child records. Reading the SQLSTATE and
-     * raising the contention kind that matches is what makes the two reportable apart.
+     * <p>Refactoring Rationale: a refused insert is reported with the sentence the baseline composes in
+     * the INSERT paragraph, and it used to be reported with the sentence the baseline composes in the
+     * DELETE paragraph. {@code 9700-INSERT-RECORD} carries a zero arm at physical line 1605 and a
+     * {@code WHEN OTHER} at 1607 and nothing else, so every non-zero outcome of the insert -- a repeated
+     * primary key included -- composes 'Error inserting record into: TRANSACTION_TYPE Table. SQLCODE:'
+     * there. The child-records sentence is composed at physical line 1641 of
+     * {@code 9800-DELETE-PROCESSING} and belongs to a statement this method never issues. Because the
+     * shared handler answers an unclassified integrity violation with that delete sentence, leaving the
+     * refusal unclassified told a caller who reused a code to go and delete child records that do not
+     * exist. Classifying on the STATEMENT rather than on the constraint is what the baseline itself does.
+     *
+     * <p>Trade-offs: the duplicate key is NOT told apart from any other integrity refusal in the sentence
+     * a caller receives, and an earlier revision of this method did tell them apart by rendering one of
+     * them with the delete sentence. That separation is given up deliberately: the baseline has one
+     * failing arm for the whole statement, so a second caller-facing sentence here would be text this
+     * migration invented, and transformation rule T8 admits only text the baseline declares. What is kept
+     * is the operator-facing separation -- the SQLSTATE and its classification are logged apart -- which
+     * is where a diagnosis is made and where inventing a name costs a caller nothing.
      *
      * <p>Trade-offs: the existence read before the insert is kept even though the constraint would
      * refuse the row anyway. It answers the ordinary case with one clean refusal instead of a rolled-back
@@ -567,29 +601,30 @@ public class TransactionTypeService {
      *
      * @param request the validated create body; must not be {@code null}
      * @return the stored type as the contract publishes it, never {@code null}
-     * @throws RecordConflictException when a type already carries that code, whether that is found by
+     * @throws RecordConflictException carrying {@link RecordConflictException.Kind#INSERT_REFUSED} and
+     *     {@link #BASELINE_TABLE_NAME} when a type already carries that code, whether that is found by
      *     the read below or by the unique constraint
      * @throws DataIntegrityViolationException when the constraint that refused the insert reports a
-     *     state that is neither of the two this service classifies, in which case the violation is
-     *     propagated unchanged so that the inherited mapping answers it
+     *     state this service does not recognise, in which case the violation is propagated unchanged so
+     *     that the inherited mapping answers it
      */
     @Transactional
     public TransactionTypeResponse create(TransactionTypeCreateRequest request) {
         if (this.types.findByTypeCd(request.typeCd()).isPresent()) {
-            // WHY : Refactoring Rationale: the kind raised is REFERENCED_ROW and it used to be
-            //       STALE_VERSION. The published contract states what a caller receives here: creating a
-            //       code that already exists "is refused with 409 ... which the shared advice reaches
-            //       through the same integrity branch as a restricted delete and therefore answers with
-            //       the referential sentence the Conflict response gives", and that consequence is
-            //       registered as D-REFERENCE-INTEGRITY-SENTENCE. STALE_VERSION renders a DIFFERENT
-            //       sentence -- the before-image data-changed wording -- so the pre-read refusal
-            //       contradicted both the document and its own registered divergence, and told a caller
-            //       that someone else had edited a row it was trying to create.
-            // WHY : Assumptions: the same kind is raised by the constraint path below, so a duplicate
+            // WHY : Refactoring Rationale: the refusal names the table whose insert it is, where it used
+            //       to raise REFERENCED_ROW and so rendered 'Please delete associated child records
+            //       first:'. That sentence is the baseline's DELETE refusal, composed in
+            //       9800-DELETE-PROCESSING at physical line 1641 under the SQLCODE a restricted delete
+            //       raises; no insert can reach it. Its remedy is also wrong for this condition: a caller
+            //       that reused a code was told to remove dependent rows, and there are none to remove.
+            //       The baseline composes its own insert refusal in 9700-INSERT-RECORD at physical lines
+            //       1607 to 1618, and that is the sentence a caller now receives.
+            // WHY : Assumptions: the same refusal is raised by the constraint path below, so a duplicate
             //       found by this read and a duplicate found by the unique constraint are
             //       indistinguishable to a caller. Answering the raced one differently would make the
             //       answer depend on timing.
-            throw new RecordConflictException(RecordConflictException.Kind.REFERENCED_ROW);
+            LOG.warn("event=reference.type.duplicate-key detectedBy=read");
+            throw RecordConflictException.insertRefusedBy(BASELINE_TABLE_NAME);
         }
         TransactionType candidate = TransactionTypeMapper.toNewEntity(request);
         try {
@@ -611,7 +646,7 @@ public class TransactionTypeService {
             this.types.insertType(candidate.getTypeCd(), candidate.getDescription());
             return TransactionTypeMapper.toResponse(candidate);
         } catch (DataIntegrityViolationException failure) {
-            throw classifyIntegrityViolation(failure);
+            throw classifyInsertRefusal(failure);
         }
     }
 
@@ -650,8 +685,8 @@ public class TransactionTypeService {
      *     naming the lock condition when the row could not be locked, or naming the referential
      *     condition when the write violated a constraint
      * @throws DataIntegrityViolationException when the constraint that refused the write reports a state
-     *     that is neither of the two this service classifies, in which case the violation is propagated
-     *     unchanged so that the inherited mapping answers it
+     *     other than the foreign-key violation this service classifies on this path, in which case the
+     *     violation is propagated unchanged so that the inherited mapping answers it
      */
     @Transactional
     public TransactionTypeResponse replace(String typeCd, TransactionTypeUpdateRequest request) {
@@ -758,8 +793,8 @@ public class TransactionTypeService {
      * @throws RecordConflictException when categories still reference the type, whether that is found by
      *     the count below or by the foreign key itself
      * @throws DataIntegrityViolationException when the constraint that refused the delete reports a state
-     *     that is neither of the two this service classifies, in which case the violation is propagated
-     *     unchanged so that the inherited mapping answers it
+     *     other than the foreign-key violation this service classifies on this path, in which case the
+     *     violation is propagated unchanged so that the inherited mapping answers it
      */
     @Transactional
     public void delete(String typeCd) {
@@ -932,16 +967,85 @@ public class TransactionTypeService {
     }
 
     /**
-     * Turns an integrity violation into the contention refusal its SQLSTATE names.
+     * Turns an integrity violation refusing an INSERT into the refusal the baseline composes for it.
      *
-     * <p>Refactoring Rationale: the two conditions are separated here because the baseline separates
-     * neither, and because the shared handler cannot separate them either. That handler recognises an
+     * <p>Assumptions: this transcribes the single failing arm of {@code 9700-INSERT-RECORD} at physical
+     * lines 1607 to 1618 of {@code COTRTUPC.cbl}. That arm is a {@code WHEN OTHER}: it answers every
+     * non-zero outcome of the insert with one sentence naming the table the insert was aimed at, so a
+     * repeated primary key and a foreign key refused from the child side are reported alike. Both
+     * recognised states are therefore mapped to the same refusal rather than to two, which is a
+     * transcription of the baseline's structure and not a simplification of it.
+     *
+     * <p>Refactoring Rationale: this exists as a SEPARATE classifier from
+     * {@link #classifyIntegrityViolation(DataIntegrityViolationException)} because the discriminator the
+     * baseline uses is the statement, not the constraint. One classifier keyed on SQLSTATE alone had to
+     * answer the same state two ways -- a foreign-key violation means 'this parent does not exist' when an
+     * insert raised it and 'dependents still exist' when a delete did -- and it resolved that by answering
+     * every integrity refusal with the delete sentence. Splitting the classifier by the statement that was
+     * refused is what lets each answer be the sentence the baseline composes in that paragraph.
+     *
+     * <p>Assumptions: the logging discipline is the one argued at length on the sibling classifier below.
+     * The SQLSTATE and a type-and-frame digest are recorded and the provider's own message text is not,
+     * because a driver quotes the values that violated the constraint and log storage is the one
+     * destination the masking applied at the api edge does not reach.
+     *
+     * @param failure the violation the insert raised; must not be {@code null}
+     * @return the refusal to throw: the insert refusal naming {@link #BASELINE_TABLE_NAME} when the
+     *     SQLSTATE is one this service recognises, or the original violation when it is not, so that the
+     *     inherited mapping still answers it
+     */
+    private static RuntimeException classifyInsertRefusal(
+            DataIntegrityViolationException failure) {
+
+        String sqlState = sqlStateOf(failure);
+        LOG.debug("event=reference.type.insert-integrity-violation sqlState={} failure={}",
+                sqlState, ThrowableDigest.of(failure));
+
+        if (SQLSTATE_UNIQUE_VIOLATION.equals(sqlState)
+                || SQLSTATE_FOREIGN_KEY_VIOLATION.equals(sqlState)) {
+            // WHY : Assumptions: the two states are logged apart even though they render one sentence,
+            //       which is the whole reason the caller-facing merge costs nothing. An operator reading
+            //       this line learns which constraint class refused the statement; a caller reading the
+            //       body learns that its insert into this table was refused, which is exactly what the
+            //       baseline's own screen tells a user.
+            // WHY : Assumptions: the foreign-key state is recognised here even though THIS table declares
+            //       no outgoing foreign key, so no insert into it can raise one. It is admitted because
+            //       the state set is shared with the sibling category service, where the same insert CAN
+            //       raise it, and because the baseline's catch-all arm makes no distinction; excluding it
+            //       would mean an unreachable branch answered differently from a reachable one for no
+            //       stated reason.
+            LOG.warn("event=reference.type.insert-refused sqlState={} table={}",
+                    sqlState, BASELINE_TABLE_NAME);
+            return RecordConflictException.insertRefusedBy(BASELINE_TABLE_NAME);
+        }
+
+        // WHY : Trade-offs: an unrecognised SQLSTATE is handed back unchanged rather than folded into the
+        //       insert refusal, even though the baseline's catch-all arm WOULD compose the same sentence
+        //       for it. The baseline reaches that arm having already committed to the screen it is
+        //       painting; this method reaches it with no evidence that the condition is one a caller can
+        //       act on, and answering 409 would tell a caller its request conflicted with stored state
+        //       when the cause is not understood. Propagating preserves exactly the answer this path gave
+        //       before any classification existed.
+        LOG.warn("event=reference.type.unclassified-insert-violation sqlState={}", sqlState);
+        return failure;
+    }
+
+    /**
+     * Turns an integrity violation refusing a REPLACE or a DELETE into the refusal its SQLSTATE names.
+     *
+     * <p>Refactoring Rationale: this classifier no longer serves the insert path and no longer carries a
+     * unique-violation arm. Both changes follow from the same finding: the shared handler recognises an
      * integrity violation by class name and answers every one of them with the referential sentence, so
-     * an unclassified duplicate key would be reported to a caller as a child-row problem. The baseline's
-     * insert has no duplicate-key arm to transcribe -- physical lines 1604 to 1619 of
-     * {@code COTRTUPC.cbl} carry only a zero arm and a catch-all -- so the classification is written
-     * from the constraint that raised it rather than copied from a branch that does not exist. The
-     * divergence is documented in {@code docs/architecture/cobol-to-service-traceability.md}.
+     * routing an insert refusal here reported a duplicate primary key as a child-row problem and told a
+     * caller to delete rows that do not exist. The insert path now has
+     * {@link #classifyInsertRefusal(DataIntegrityViolationException)}, which composes the sentence the
+     * baseline's own insert paragraph composes. The unique-violation arm is dropped rather than left
+     * unreachable: on the two statements that remain, a repeated key cannot arise -- the replace sets only
+     * the description and the version, the delete sets nothing, and {@code V1__reference.sql} declares no
+     * unique object on this table beyond its primary key -- so an arm for it would be code that documents
+     * a condition the schema forbids. The divergence between what the baseline composes and what this
+     * service publishes is registered in
+     * {@code docs/architecture/cobol-to-service-traceability.md}.
      *
      * <p>Refactoring Rationale: what reaches the log is the SQLSTATE and this method's own
      * classification of it, and NOT the provider's message text. The text was logged, and it is the one
@@ -954,10 +1058,10 @@ public class TransactionTypeService {
      * declared and can enumerate. Provider text is none of those things, and a diagnostic whose content
      * is decided elsewhere cannot be reviewed here.
      *
-     * <p>Assumptions: nothing needed for triage is lost with it. The two conditions this method
-     * distinguishes are distinguished BY the SQLSTATE, so the SQLSTATE plus the classification names the
-     * condition exactly; and for the third case -- a state neither constant matches -- the SQLSTATE is
-     * the value an operator looks up, which is precisely why it is logged rather than the sentence built
+     * <p>Assumptions: nothing needed for triage is lost with it. The condition this method recognises is
+     * recognised BY the SQLSTATE, so the SQLSTATE plus the classification names it exactly; and for the
+     * other case -- a state the constant does not match -- the SQLSTATE is the value an operator looks up,
+     * which is precisely why it is logged rather than the sentence built
      * around it. Alternatives Considered: keeping the text at debug level on the argument that debug is
      * off in production. Rejected because a level is configuration, not a control: raising it is a
      * one-line change an operator makes while diagnosing exactly the failure that emits the value, so
@@ -979,8 +1083,9 @@ public class TransactionTypeService {
      * conversation. The caller therefore receives the stable sentence and nothing else.
      *
      * @param failure the violation the provider raised; must not be {@code null}
-     * @return the refusal to throw: the contention kind the SQLSTATE names, or the original violation
-     *     when the SQLSTATE is neither of the two, so that the inherited mapping still answers it
+     * @return the refusal to throw: the referential contention kind when the SQLSTATE names a foreign-key
+     *     violation, or the original violation when it names anything else, so that the inherited mapping
+     *     still answers it
      */
     private static RuntimeException classifyIntegrityViolation(
             DataIntegrityViolationException failure) {
@@ -993,7 +1098,7 @@ public class TransactionTypeService {
         //       clause naming the key columns and the offending key -- so the earlier form copied caller
         //       data into log storage, which is the one destination the masking applied at the API edge
         //       does not reach. This service's own key is a two-character code, but the helper is reached
-        //       from three write paths and the hazard is a property of the driver's message rather than
+        //       from two write paths and the hazard is a property of the driver's message rather than
         //       of this table.
         // WHY : Assumptions: nothing an operator acts on is lost. The SQLSTATE names WHICH constraint
         //       class refused the statement, which is what selects the branch below and what an alert
@@ -1009,28 +1114,18 @@ public class TransactionTypeService {
         LOG.debug("event=reference.type.integrity-violation sqlState={} failure={}",
                 sqlState, ThrowableDigest.of(failure));
 
-        if (SQLSTATE_UNIQUE_VIOLATION.equals(sqlState)) {
-            LOG.warn("event=reference.type.duplicate-key sqlState={}", sqlState);
-            // WHY : Refactoring Rationale: REFERENCED_ROW, where this returned STALE_VERSION. The two
-            //       kinds render different sentences -- the before-image data-changed wording and the
-            //       referential wording -- and the published contract states which one a duplicate
-            //       create receives: the referential sentence, reached "through the same integrity branch
-            //       as a restricted delete", with the consequence registered as
-            //       D-REFERENCE-INTEGRITY-SENTENCE. Returning the data-changed kind reported a duplicate
-            //       primary key as somebody else's concurrent edit.
-            // WHY : Assumptions: the SAME refusal the sequential existence read raises, so a duplicate
-            //       caught by the constraint and a duplicate caught by the read are indistinguishable to
-            //       a caller. Answering the raced one differently would make the answer depend on
-            //       timing.
-            return new RecordConflictException(RecordConflictException.Kind.REFERENCED_ROW);
-        }
         if (SQLSTATE_FOREIGN_KEY_VIOLATION.equals(sqlState)) {
+            // WHY : Assumptions: on the two statements that reach this classifier, this state can only be
+            //       the PARENT side of the one foreign key -- a delete refused because categories still
+            //       reference the type. The child side of the same constraint is raised by an INSERT of a
+            //       category, which is a statement in the sibling service and never arrives here, which is
+            //       what makes one state safe to name unambiguously at this call site.
             LOG.warn("event=reference.type.referenced-row sqlState={}", sqlState);
             return new RecordConflictException(RecordConflictException.Kind.REFERENCED_ROW);
         }
 
         // WHY : Trade-offs: an unrecognised SQLSTATE is handed back unchanged rather than being
-        //       reclassified into whichever of the two looks closest. The inherited mapping already
+        //       reclassified into the one condition this method recognises. The inherited mapping already
         //       answers an integrity violation, so returning it preserves exactly the answer this
         //       service gave before any classification existed, and adds no new behaviour on a path
         //       whose cause is not understood.

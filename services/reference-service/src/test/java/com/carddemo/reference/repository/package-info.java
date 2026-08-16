@@ -114,27 +114,32 @@
  *
  * <h2>The inventory this package owns, and the shared base that has a file of its own</h2>
  *
- * <p>Assumptions: the closed set is <b>twelve compilation units</b> -- this charter, the shared
- * container fixture {@code ReferencePersistenceBase}, and ten integration-test classes. The naming rule
- * is that a class takes the name of the type it covers with {@code IT} appended, and the ten are
- * {@code TransactionTypeRepositoryIT}, {@code TransactionCategoryRepositoryIT},
+ * <p>Assumptions: the closed set is <b>thirteen compilation units</b> -- this charter, the shared
+ * container fixture {@code ReferencePersistenceBase}, and eleven integration-test classes. The naming
+ * rule is that a class takes the name of the interface it covers with {@code IT} appended, and the nine
+ * that follow it are {@code TransactionTypeRepositoryIT}, {@code TransactionCategoryRepositoryIT},
  * {@code DisclosureGroupRepositoryIT}, {@code UsPhoneAreaCodeRepositoryIT},
- * {@code PhoneAreaCodeRepositoryIT}, {@code UsStateRepositoryIT},
- * {@code UsStateZipPrefixRepositoryIT}, {@code StateRepositoryIT},
- * {@code StateZipPrefixRepositoryIT} and {@code InquiryReplyLedgerIT}.</p>
+ * {@code PhoneAreaCodeRepositoryIT}, {@code StateRepositoryIT}, {@code StateRepositoryWalkIT},
+ * {@code UsStateZipPrefixRepositoryIT} and {@code StateZipPrefixRepositoryIT}. The two that do not
+ * follow it, {@code AddressLookupPagingIT} and {@code MigrationHistoryIT}, are each argued below.</p>
  *
- * <p>Refactoring Rationale: the set grew from eleven to twelve when the main tree gained
- * {@code InquiryReplyLedger} -- the one CLASS in the data-access package, and therefore the one member
- * here whose covered type is not an interface. The naming rule is unchanged and is simply stated over
- * types rather than over interfaces. Assumptions: that class earns an engine-backed test of its own
- * rather than a substituted one because every property it holds is the ENGINE's: an
- * {@code INSERT ... ON CONFLICT DO NOTHING} reporting zero affected rows on a second claim, two
- * {@code CHECK} constraints, and a guarded {@code UPDATE} reporting whether it retired a row. A
- * substituted ledger would answer whatever a stub was told to and would pass against a statement
- * carrying a typo.</p>
+ * <p>⚠️ Refactoring Rationale: the set previously held {@code InquiryReplyLedgerIT}, and it was the one
+ * member whose covered type was a CLASS rather than an interface -- which is why the naming rule was
+ * once stated over types instead of interfaces. Both the class and that test are withdrawn, so the rule
+ * is stated over interfaces again. The withdrawal is not a judgement about the test, which was correct to
+ * be engine-backed: every property the ledger held was the engine's, and a substituted ledger would have
+ * answered whatever a stub was told to. It is a judgement about the module -- this service declares no
+ * listener, so nothing here ever wrote that table, and the idempotency it provided belongs to
+ * {@code account-service}, which consumes the exchange and has its own identically shaped ledger and its
+ * own engine-backed test over it. Assumptions: coverage is therefore not lost by the removal, because it
+ * was never coverage of a reachable path; what replaces it is a case on {@code MigrationHistoryIT}
+ * asserting the table is absent once the shipped migrations have run, and that the six reference tables
+ * remain, which is the property an operator can act on.</p>
  *
- * <p>⚠️ Refactoring Rationale: the twelfth unit is {@code AddressLookupPagingIT}, and it is the one
- * exception to the naming rule above, deliberately. It covers no single interface: it walks each of the
+ * <p>⚠️ Refactoring Rationale: {@code AddressLookupPagingIT} is the FIRST of the two exceptions to
+ * the naming rule above, deliberately. It is described by role rather than by an ordinal position in the
+ * set, because the set has grown twice since the ordinal was written and an ordinal has to be revised on
+ * every arrival while a role does not. It covers no single interface: it walks each of the
  * three seeded allow-lists page by page through {@code AddressLookupService}, which reads all three
  * repositories, so no interface name would describe it and any one of the three would misdescribe it. It
  * is HERE rather than in the service test package because it extends this package's shared container
@@ -145,6 +150,21 @@
  * the schema declares 20 as its maximum -- so the multi-page continuation a client actually performs was
  * exercised by nothing, and the two failures that continuation exposes, a row repeated at every boundary
  * and a row skipped, were both invisible.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: the set gained {@code MigrationHistoryIT}, and it is the second member
+ * that covers no repository interface. It covers this module's MIGRATIONS: it reads
+ * {@code reference.flyway_schema_history} after Flyway has applied them and holds each script to the
+ * checksum an already-migrated environment stores. It belongs to this package rather than to a package
+ * of its own because the property it asserts is only observable once Flyway has run against a real
+ * engine, which is exactly what this package's shared fixture provides, and because a second engine
+ * start would cost the slowest part of this module's build to gain a directory. Assumptions: it exists
+ * because a released migration was rewritten -- comment text only, no SQL -- and the rewrite changed the
+ * checksum Flyway compares at startup, so every database holding the earlier bytes refused to start
+ * while every gate in the build stayed green. A first apply onto an empty database cannot see that
+ * class of change, and no other class here reads a migration's identity, so nothing was watching.
+ * Trade-offs: the pinned numbers have to be extended in the same change that adds a migration, which is
+ * one edit more per addition; what it buys is that an edit to an APPLIED migration fails on the machine
+ * of whoever made it rather than in an environment nobody rebuilt.</p>
  *
  * <p>⚠️ Refactoring Rationale: this paragraph claimed eight units and named seven classes while the
  * directory held ten, and both halves of the discrepancy are corrected here rather than one of them.
@@ -206,18 +226,22 @@
  * emitted. Checkstyle's silence on the arrangement, which the old paragraph cited in its favour, is not
  * evidence the compiler is silent too. A charter naming eleven files serves the enumerability the closed
  * set exists for exactly as well as one naming eight, so the count is restated and the warnings are
- * gone. Assumptions: the fixture keeps its name and stays package-private, because the ten test classes
- * resolve it by simple name with no import between them and it.</p>
+ * gone. Assumptions: the fixture keeps its name and stays package-private, because the test classes beside it
+ * resolve it by simple name with no import between them and it -- a count deliberately not restated here,
+ * for the reason the paragraph above gives.</p>
  *
- * <p>Refactoring Rationale: the shared fixture's nested configuration now declares ONE bean,
- * {@code InquiryReplyLedger}. Assumptions: it has to be declared rather than discovered, because that
- * configuration enables Spring Data repositories and component-scans nothing, so the one authored class
- * in the data-access package would otherwise be absent from the context while every interface beside it
- * resolved. Alternatives Considered: a component scan over the main-tree repository package -- rejected
- * because such a scan also reaches the nested configuration classes of the test files in THIS package,
- * and the duplicate definitions end context load. Alternatives Considered: a nested configuration inside
- * {@code InquiryReplyLedgerIT} -- rejected because a second configuration class starts a second cached
- * context against the same engine, which is the cost this fixture exists to avoid.</p>
+ * <p>⚠️ Refactoring Rationale: the shared fixture's nested configuration declares NO bean now. It
+ * declared exactly one, for {@code InquiryReplyLedger}, and it had to be declared rather than discovered
+ * because that configuration enables Spring Data repositories and component-scans nothing -- so the one
+ * authored class in the data-access package would otherwise have been absent from the context while every
+ * interface beside it resolved. With that class withdrawn, every member of the data-access package is a
+ * derived interface and {@code @EnableJpaRepositories} reaches all of them. Assumptions: a future
+ * {@code @Bean} appearing here would therefore signal a hand-written data-access class, which is worth
+ * noticing rather than absorbing, and the rejected alternatives are recorded on the fixture itself so the
+ * reasoning is not lost: a component scan over the main-tree repository package would also reach the
+ * nested configuration classes of the test files in THIS package and the duplicate definitions would end
+ * context load, and a nested configuration inside a single test class would start a second cached context
+ * against the same engine, which is the cost this fixture exists to avoid.</p>
  *
  * <h2>The runner split is carried by the class-name suffix alone</h2>
  *

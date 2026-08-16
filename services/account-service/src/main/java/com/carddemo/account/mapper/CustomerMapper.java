@@ -762,6 +762,74 @@ public class CustomerMapper {
     }
 
     /**
+     * Answers whether a submitted value is the marker a read RETURNED in place of a protected identifier.
+     *
+     * <p>Purpose: to recognise a client handing back what it was shown. Every read of an account withholds
+     * both protected identifiers behind {@link #IDENTIFIER_REDACTED}, so a client that reads an account,
+     * changes an address line and submits the whole record submits that marker in the identifier
+     * components. Nothing else in the system can produce it: the marker is bracketed and lettered, and both
+     * identifiers are digits-or-alphanumeric fields whose own edits refuse it.</p>
+     *
+     * <p>Refactoring Rationale: this test did not exist, and its absence made the read-then-write cycle
+     * impossible. A submission carrying the marker in the national identifier's three components was refused
+     * by the numeric edits, which named three fields the client had never filled in; a submission carrying
+     * it in the government-issued identifier was worse, because that field has no content edit at all, so
+     * the eleven literal characters {@code [REDACTED]} were encrypted and STORED as the customer's
+     * identifier reference, destroying the real one. Recognising the marker is what makes the response
+     * contract's own statement -- that a masked echo cannot be resubmitted as it stands -- true in the
+     * benign direction rather than in the destructive one.</p>
+     *
+     * <p>Alternatives Considered: requiring a client to strip the marker before resubmitting, which is what
+     * the previous behaviour effectively demanded. Rejected because the demand was undiscoverable from the
+     * response -- the two components look like ordinary values -- and because the failure mode of not
+     * meeting it was silent data loss rather than a refusal.</p>
+     *
+     * @param submitted the value as it arrived, which may be blank or {@code null}
+     * @return {@code true} when the value is exactly the withheld marker; {@code false} otherwise
+     */
+    public static boolean isWithheldEcho(String submitted) {
+        return IDENTIFIER_REDACTED.equals(submitted);
+    }
+
+    /**
+     * Answers whether a submission leaves the national identifier as it stands.
+     *
+     * <p>Purpose: to state the PRESERVE condition once, so that the edit driver and this mapper cannot
+     * disagree about it. The driver has to know, because it must not demand three components a client is
+     * not editing; this mapper has to know, because it decides what reaches the column.</p>
+     *
+     * <p>Assumptions: the identifier is unedited when every component is absent -- the client sent nothing
+     * for it -- or when ANY component is the withheld marker. The second arm is deliberately ANY rather
+     * than ALL: the marker is not a value, so a submission carrying it in one component and digits in
+     * another cannot be assembled into a nine-digit identifier at all, and the only two readings available
+     * are to refuse the submission or to leave the stored identifier alone. Leaving it alone is the reading
+     * that matches what the client did -- it edited some other field and handed back what it was shown --
+     * and it is the only one of the two that cannot destroy a value the client never saw.</p>
+     *
+     * <p>Trade-offs: a client that genuinely intends to change the identifier and supplies only two of its
+     * three components while echoing the third will find its change silently not applied rather than
+     * refused. Accepted, because the alternative refuses the far more common case above, and because the
+     * response echoes the identifier as withheld either way, so the client is never told that a value it
+     * supplied was stored.</p>
+     *
+     * @param firstPart the submitted first component, which may be blank or {@code null}
+     * @param middlePart the submitted middle component, which may be blank or {@code null}
+     * @param lastPart the submitted last component, which may be blank or {@code null}
+     * @return {@code true} when the submission leaves the stored identifier as it stands; {@code false}
+     *     when it supplies a replacement
+     */
+    public static boolean nationalIdentifierUnedited(String firstPart, String middlePart,
+            String lastPart) {
+
+        if (isWithheldEcho(firstPart) || isWithheldEcho(middlePart) || isWithheldEcho(lastPart)) {
+            return true;
+        }
+        return FieldValidationFlag.isNeverSupplied(firstPart)
+                && FieldValidationFlag.isNeverSupplied(middlePart)
+                && FieldValidationFlag.isNeverSupplied(lastPart);
+    }
+
+    /**
      * Decides what the submission intends for the national identifier.
      *
      * <p>Assumptions: the column is declared {@code NOT NULL}, so the only two available intents are
@@ -774,9 +842,8 @@ public class CustomerMapper {
      * @throws IllegalStateException if the protection boundary cannot protect the identifier
      */
     private Customer.ProtectedValueUpdate nationalIdentifierUpdate(AccountUpdateRequest request) {
-        if (FieldValidationFlag.isNeverSupplied(request.ssnPart1())
-                && FieldValidationFlag.isNeverSupplied(request.ssnPart2())
-                && FieldValidationFlag.isNeverSupplied(request.ssnPart3())) {
+        if (nationalIdentifierUnedited(request.ssnPart1(), request.ssnPart2(),
+                request.ssnPart3())) {
             return Customer.ProtectedValueUpdate.preserve();
         }
         return Customer.ProtectedValueUpdate.replaceWith(this.protection.encrypt(
@@ -809,6 +876,16 @@ public class CustomerMapper {
         String submitted = request.governmentIssuedId();
         if (IDENTIFIER_REMOVAL_MARKER.equals(submitted)) {
             return Customer.ProtectedValueUpdate.clear();
+        }
+        // WHY : Refactoring Rationale: the withheld marker is recognised as PRESERVE, and its absence here
+        //       was the more damaging half of the read-then-write defect. This field has no content edit --
+        //       the reference performs none on it -- so a client echoing what a read showed it reached this
+        //       line with the eleven literal characters of the marker, and the branch below encrypted and
+        //       stored them AS the customer's identifier reference. The real value was gone, the response
+        //       reported success, and nothing in the system could recover it, because the column holds only
+        //       ciphertext of whatever was last written.
+        if (isWithheldEcho(submitted)) {
+            return Customer.ProtectedValueUpdate.preserve();
         }
         if (FieldValidationFlag.isNeverSupplied(submitted)) {
             return Customer.ProtectedValueUpdate.preserve();

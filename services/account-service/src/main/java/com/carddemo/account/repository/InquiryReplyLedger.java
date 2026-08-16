@@ -9,7 +9,7 @@ import java.util.Optional;
 import org.springframework.stereotype.Repository;
 
 /**
- * Records, finds and retires the reply already produced for one account-inquiry request.
+ * Records, counts, finds and retires the reply already produced for one account-inquiry request.
  *
  * <p><b>Purpose.</b> The asynchronous inquiry exchange transcribed from
  * {@code app/app-vsam-mq/cbl/COACCT01.cbl} answers a request by sending a reply and then returning, and
@@ -25,7 +25,7 @@ import org.springframework.stereotype.Repository;
  * {@link com.carddemo.account.service.InquiryMessageListener} records why it now prefers the
  * broker's.</p>
  *
- * <p>Assumptions: the three statements are NATIVE and not JPQL, and the claim is why. A claim has to
+ * <p>Assumptions: the four statements are NATIVE and not JPQL, and the claim is why. A claim has to
  * insert a row if and only if no row holds that key, and report which of the two happened, in ONE round
  * trip -- {@code INSERT ... ON CONFLICT DO NOTHING} is the only construct that does so, and JPQL has no
  * form of it. Expressing the same intent as a read followed by a conditional insert would leave the
@@ -36,7 +36,7 @@ import org.springframework.stereotype.Repository;
  * five repositories in this package are. Rejected because the claim is not expressible through one, as
  * above, and because a mapped entity would let any member of this module read or write the ledger through
  * the persistence context -- including flushing a stale copy over a row a concurrent delivery had already
- * advanced. Three named statements over one table claim nothing else and offer nothing else.</p>
+ * advanced. Four named statements over one table claim nothing else and offer nothing else.</p>
  *
  * <p>Alternatives Considered: {@code SELECT ... FOR UPDATE} to serialise two concurrent deliveries of one
  * request. Rejected because there is nothing to lock until the row exists, so the first two deliveries
@@ -82,6 +82,15 @@ public class InquiryReplyLedger {
      * statement reports one affected row when this delivery is the first to answer the request and zero
      * when another delivery already has. The count is the decision; nothing else in the exchange has to
      * be consulted to reach it.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: {@code attempts} is inserted as ONE and it used to be inserted as
+     * zero. The claim is committed and the send is then attempted immediately, so a row created by this
+     * statement records a delivery that reached the send step -- which is what the column is named for.
+     * Inserting zero and leaving {@link #markSent(String, LocalDateTime)} to do the only counting made
+     * the column carry nothing an operator could use: it was zero for every outstanding claim and one for
+     * every retired one, which is exactly what {@code status} already says, and a reply whose send failed
+     * on every one of its five deliveries still read zero. Counting at the claim is what makes redelivery
+     * pressure visible, and five is then the value that says a request exhausted its receive count.</p>
      */
     private static final String CLAIM_REPLY = """
             insert into account.inquiry_reply_ledger (
@@ -90,7 +99,7 @@ public class InquiryReplyLedger {
             values (
                 :requestKey, '""" + STATUS_PENDING + """
             ', :payload, :destination,
-                :correlationId, :messageId, :claimedAt, 0)
+                :correlationId, :messageId, :claimedAt, 1)
             on conflict (request_key) do nothing
             """;
 
@@ -104,24 +113,50 @@ public class InquiryReplyLedger {
             """;
 
     /**
-     * Marks a claimed reply as sent, and counts the send.
+     * Counts one further delivery of a request whose claim is already outstanding.
+     *
+     * <p>Assumptions: the row is advanced with NO state guard, because a redelivery is a delivery
+     * whatever state the claim is in and the caller has already decided that this one will re-send. The
+     * affected-row count is returned so a caller can tell a counted delivery from one whose row was
+     * removed underneath it -- the same distinction {@link #CLAIM_REPLY} draws from its own count.</p>
+     *
+     * <p>Alternatives Considered: folding this into {@link #FIND_CLAIM} as a single
+     * {@code UPDATE ... RETURNING} so the read and the count were one round trip. Rejected because the
+     * count must be committed BEFORE the re-send is attempted -- the whole point is that a send which
+     * fails still leaves the delivery counted -- and the read has to answer before the caller knows
+     * whether a re-send is even due. One statement would have to do both jobs in the wrong order.</p>
+     */
+    private static final String COUNT_SEND_ATTEMPT = """
+            update account.inquiry_reply_ledger
+               set attempts = attempts + 1
+             where request_key = :requestKey
+            """;
+
+    /**
+     * Marks a claimed reply as sent.
      *
      * <p>Assumptions: the update is guarded on the PENDING state, so a second delivery that re-sent the
      * reply cannot advance a row another delivery already retired -- and the affected-row count therefore
      * tells the caller whether this delivery was the one that retired it.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: this statement no longer touches {@code attempts}, and it used to be
+     * the only statement that did. Counting here counted SUCCESSES, so the count never moved for the one
+     * condition an operator needs it for -- a reply whose send keeps failing -- and it would now
+     * double-count the delivery {@link #CLAIM_REPLY} has already recorded. The retirement records WHEN
+     * the answer reached the queue, in {@code sent_at}; how many deliveries it took is a different fact,
+     * and it is counted where the deliveries arrive.</p>
      */
     private static final String MARK_SENT = """
             update account.inquiry_reply_ledger
                set status = '""" + STATUS_SENT + """
             ',
-                   sent_at = :sentAt,
-                   attempts = attempts + 1
+                   sent_at = :sentAt
              where request_key = :requestKey
                and status = '""" + STATUS_PENDING + """
             '
             """;
 
-    /** The bind name of the request key, so the three statements cannot spell it differently. */
+    /** The bind name of the request key, so the four statements cannot spell it differently. */
     private static final String PARAM_REQUEST_KEY = "requestKey";
 
     /**
@@ -192,6 +227,34 @@ public class InquiryReplyLedger {
         Object[] row = (Object[]) rows.getFirst();
         return Optional.of(new RecordedReply(
                 (String) row[0], (String) row[1], (String) row[2], (String) row[3], (String) row[4]));
+    }
+
+    /**
+     * Counts one further delivery of a request an earlier delivery has already claimed.
+     *
+     * <p>Purpose: this is what makes {@code attempts} answer the question its name asks -- how many times
+     * the send of this one reply has been attempted. The first attempt is recorded by the claim itself;
+     * every later delivery that finds an outstanding claim and decides to re-send records itself here.</p>
+     *
+     * <p>Assumptions: the caller must COMMIT this write BEFORE it re-sends, for the same reason the claim
+     * is committed before the first send. A count taken after a successful send counts successes, and the
+     * condition an operator needs this column for is the one where the send keeps failing.</p>
+     *
+     * <p>Assumptions: this is NOT called when a redelivery finds a retired claim and suppresses the
+     * duplicate. No send is attempted on that path, so counting there would report an attempt that was
+     * deliberately not made -- and it would keep advancing for as long as the queue kept redelivering a
+     * request that had already been answered, which is the one case where a high count means nothing is
+     * wrong.</p>
+     *
+     * @param requestKey the delivery's durable identity, broker-assigned where one is present; must not
+     *     be {@code null} or blank
+     * @return {@code true} when a row held the key and was counted, {@code false} when none did -- which
+     *     can only mean the row was removed between the claim conflict and this call
+     */
+    public boolean countSendAttempt(String requestKey) {
+        Query update = this.entityManager.createNativeQuery(COUNT_SEND_ATTEMPT);
+        update.setParameter(PARAM_REQUEST_KEY, requestKey);
+        return update.executeUpdate() == 1;
     }
 
     /**

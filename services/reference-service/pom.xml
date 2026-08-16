@@ -511,6 +511,51 @@
       <plugin>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
+
+        <!-- =====================================================================
+             WHY : Refactoring Rationale: this plugin previously declared no
+                   execution, so it only repackaged. GET /actuator/info answered
+                   an empty object as a result, while application.yml exposes that
+                   endpoint on the stated ground that "info identifies which build
+                   a task is running, which is what makes a defect report
+                   attributable to a version". The endpoint was reachable and
+                   carried nothing, so that ground was unmet: an operator holding
+                   a misbehaving task could not tell which revision it was.
+             WHY : Assumptions: the build-info goal writes
+                   META-INF/build-info.properties into the archive, which Spring
+                   Boot detects and binds to a BuildProperties bean, which its
+                   own contributor renders at /actuator/info. So the identity is
+                   produced by the build that made the artifact rather than
+                   entered by hand, and it cannot describe a different revision
+                   than the one running.
+             WHY : Alternatives Considered: hand-written info.* properties in
+                   application.yml, enabled with management.info.env.enabled.
+                   Rejected because those values are typed by a person and are
+                   therefore free to disagree with the artifact: a version left
+                   unbumped would report the previous release with total
+                   confidence, which is worse than reporting nothing.
+             WHY : Alternatives Considered: also enabling the git-commit-id
+                   contributor for a commit hash, which is the strongest identity
+                   of all. Rejected here because it needs a further plugin and a
+                   reachable .git directory at package time, and a container build
+                   that copies only sources would then produce an artifact whose
+                   info block silently lost a field. Artifact, version and build
+                   instant are available unconditionally.
+             WHY : Trade-offs: build-info records the build INSTANT, so two
+                   packagings of identical sources produce different files and the
+                   archive is not bit-reproducible. Accepted: the timestamp is
+                   most of the operational value, because it is what distinguishes
+                   two builds of the same snapshot version, and this module ships
+                   no reproducible-build guarantee for that comparison to break.
+             ===================================================================== -->
+        <executions>
+          <execution>
+            <id>build-info</id>
+            <goals>
+              <goal>build-info</goal>
+            </goals>
+          </execution>
+        </executions>
       </plugin>
     </plugins>
   </build>

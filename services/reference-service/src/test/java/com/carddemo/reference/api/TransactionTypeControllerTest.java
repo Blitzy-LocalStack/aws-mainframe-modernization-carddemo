@@ -119,6 +119,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.MockMvcBuilderCustomiz
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Primary;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.MediaType;
@@ -585,9 +586,23 @@ class TransactionTypeControllerTest {
          * that reaches a running task from a secret store, so no test can obtain it. The key here is
          * this class's own constant and seals nothing that outlives the test.</p>
          *
+         * <p>⚠️ Refactoring Rationale: {@code @Primary} is required. {@link CardDemoCommonAutoConfiguration}
+         * publishes its own sealer whenever {@code CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY} is set, which the
+         * documented local runtime does, and its {@code @ConditionalOnMissingBean(CursorToken.class)}
+         * back-off does not apply here: the class arrives through a plain {@code @Import}, so it is treated
+         * as ordinary user configuration and the condition is evaluated before this sibling bean is known.
+         * Both sealers were then registered and every case in this class failed with "expected single
+         * matching bean but found 2: carddemoCursorToken, cursorToken". Verified: 43 errors with the
+         * variable set, 44 passing without it, and 44 passing either way once this annotation was added.
+         *
+         * <p>Assumptions: this slice must be handed the sealer holding ITS key material, because it seals
+         * the boundary keys its expectations are written against. Taking the key from the environment would
+         * make what this slice accepts depend on the machine running it.
+         *
          * @return a cursor codec over the test key and lifetime, never {@code null}
          */
         @Bean
+        @Primary
         CursorToken cursorToken() {
             return new CursorToken(CURSOR_KEY, CURSOR_LIFETIME);
         }
@@ -1436,18 +1451,22 @@ class TransactionTypeControllerTest {
         }
 
         /**
-         * A create carrying a code already stored answers 409 through the referential sentence.
+         * A create carrying a code already stored answers 409 with the baseline's insert-refusal sentence.
          *
-         * <p>Refactoring Rationale: this is a documented divergence rather than a transcription,
-         * and the evidence is specific. The baseline's insert arm has no branch for a duplicate key
-         * at all -- a search of both reference programs for the Db2 code reporting one returns
-         * nothing -- so its catch-all raises the same condition flag as the update arm, and the
-         * classifier reading that flag cannot tell an insert refusal from an update refusal. The
-         * Java keeps the two states apart at the source, a duplicate key arriving as SQLSTATE 23505
-         * and a still-referenced row as 23503, and the service raises a kinded conflict for each.
-         * The published contract states which sentence a duplicate create receives: the referential
-         * one, reached through the same integrity branch as a restricted delete. The divergence is
-         * registered in {@code docs/architecture/cobol-to-service-traceability.md}.
+         * <p>Refactoring Rationale: the sentence asserted is the one the baseline composes in its INSERT
+         * paragraph, where this case asserted the one it composes in its DELETE paragraph. The delete
+         * sentence, 'Please delete associated child records first:', is reached at physical line 1641 of
+         * {@code COTRTUPC.cbl} only under the SQLCODE a restricted delete raises, so no create can produce
+         * it, and its remedy is wrong for this condition -- a caller that reused a code has no dependents
+         * to remove. {@code 9700-INSERT-RECORD} at physical lines 1607 to 1618 composes the sentence a
+         * caller now receives, naming the table the insert was aimed at. The change is registered in
+         * {@code docs/architecture/cobol-to-service-traceability.md}.
+         *
+         * <p>Assumptions: the refusal stubbed here is built the way the real service builds it, through
+         * {@code RecordConflictException.insertRefusedBy} with the service's own table constant, rather
+         * than by naming a kind and a literal table in this file. That is what makes this case fail when
+         * the service stops raising it -- a hand-built refusal would keep asserting a sentence the
+         * boundary no longer receives.
          *
          * @throws Exception if the request cannot be performed
          */
@@ -1456,8 +1475,8 @@ class TransactionTypeControllerTest {
         void aDuplicateCodeIsRefusedAsAConflict() throws Exception {
             when(TransactionTypeControllerTest.this.service
                     .create(any(TransactionTypeCreateRequest.class)))
-                    .thenThrow(new RecordConflictException(
-                            RecordConflictException.Kind.REFERENCED_ROW));
+                    .thenThrow(RecordConflictException.insertRefusedBy(
+                            TransactionTypeService.BASELINE_TABLE_NAME));
 
             MvcResult result = TransactionTypeControllerTest.this.mockMvc
                     .perform(post(TransactionTypeController.BASE_PATH)
@@ -1467,7 +1486,18 @@ class TransactionTypeControllerTest {
 
             assertThat(result.getResponse().getStatus()).isEqualTo(409);
             assertThat(messageOf(result))
-                    .isEqualTo(GlobalExceptionHandler.MESSAGE_REFERENCED_ROW);
+                    .as("the baseline's insert arm, composed around the table it wrote to")
+                    .isEqualTo("Error inserting record into: TRANSACTION_TYPE Table. SQLCODE:")
+                    .isEqualTo(GlobalExceptionHandler.insertRefusalMessage("TRANSACTION_TYPE"))
+                    .hasSize(61);
+            assertThat(messageOf(result))
+                    .as("the delete paragraph's remedy must not reach a caller that wrote nothing")
+                    .isNotEqualTo(GlobalExceptionHandler.MESSAGE_REFERENCED_ROW)
+                    .doesNotContain("child records");
+            assertThat(rawBodyOf(result))
+                    .as("the sentence ends at the baseline's colon, naming no state and no diagnostic")
+                    .doesNotContain("23505")
+                    .doesNotContain("reference.transaction_types");
             assertThat(result.getResponse().getHeader("Location"))
                     .as("nothing was created, so no created-resource address may be published")
                     .isNull();

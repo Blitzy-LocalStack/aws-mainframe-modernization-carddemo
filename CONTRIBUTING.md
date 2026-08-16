@@ -124,6 +124,19 @@ Four properties of that form are load-bearing, and each is a way the label has a
 4. Terraform/HCL uses `infra/.tflint.hcl` for documented variables and outputs and `infra/.terraform-docs.yml` for generated-documentation drift checks.
 5. CI repeats the gates as required steps in `.github/workflows/services-ci.yml`, `.github/workflows/ui-ci.yml`, and `.github/workflows/infra-ci.yml`. The existing `.github/workflows/tests.yml` remains unchanged because the test suite already carries the equivalent convention.
 
+**A test must not read the machine it runs on.** A test that resolves configuration — anything using `ApplicationContextRunner`, `WebApplicationContextRunner`, `ConfigDataApplicationContextInitializer`, or the shared `ProfileConfiguration` harness — must state which environment variables exist for it, including the case of none. Replace the environment rather than inheriting it:
+
+```java
+sources.replace(
+        StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
+        new SystemEnvironmentPropertySource(
+                StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME, Map.of(/* only what this case needs */)));
+```
+
+Assumptions: two properties of Spring's resolution make this necessary rather than merely tidy, and both are easy to reason past. First, only `SystemEnvironmentPropertySource` performs relaxed name matching, so a real `CARDDEMO_ENVIRONMENT` variable supplies `carddemo.environment` while the same name passed to `withPropertyValues` does **not** — it registers a plain map under the literal key. Second, that system source sits **ahead** of the documents a config-data import appends. So passing an environment-variable-shaped key to `withPropertyValues` is not equivalent to setting the variable: wherever the real variable is set, the machine's value wins and the assertion silently compares the shipped file against the developer's shell. The documented local runtime (`/opt/carddemo-tools/svc-common.env`, `svc-aws.env`) sets roughly thirty-four `CARDDEMO_*` names plus `SPRING_PROFILES_ACTIVE`, so this is the normal condition, not an edge case. Trade-offs: substituting the whole source rather than removing one variable costs a line of setup and buys immunity to every future variable, including one added to the runtime long after the test was written.
+
+When a case asserts that something is **withheld** until a deployment names a value, an empty substituted environment is the only way to state that precondition — relying on the variable being unset makes the case pass or fail according to who runs it. Conversely, when a case supplies a value in order to be exercised, prefer the **canonical** property name in `withPropertyValues`; reach for the environment-variable form only when the relaxed mapping itself is what is under test, and then supply it through a substituted source so it is an input rather than an inheritance. Assumptions: making a substituted environment hermetic can also make an assertion toothless — if the substituted variable supplies the very property the shipped file was supposed to map, the file is no longer being consulted. Pair such a case with one that supplies **nothing**, where only the file can produce a value; that pairing is what detects a file that stops reading the variable.
+
 Do not bump the TypeScript pin in `ui/package.json` without first checking the upper bound on the compiler version accepted by the type-aware lint toolchain. Trade-offs: the pin is deliberately held below the newest compiler release, giving up its build-speed improvement to keep gate 2 above running at all. Crossing that bound leaves the manifest installable while silently preventing the type-aware ESLint pass, and therefore the JSDoc gate, from running -- a documentation rule failing open with no error to read. Verify the compatible range and upgrade procedure in [the documentation standard](docs/CODE_DOCUMENTATION_STANDARD.md) before changing the pin.
 
 

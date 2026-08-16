@@ -663,8 +663,8 @@ weaken the documentation gate.
 
 ### 9.3 Test topology
 
-<!-- test-inventory: 28 tests + 8 integration tests -->
-**36** test classes across nine subpackages: **28** matching `*Test`, run by
+<!-- test-inventory: 29 tests + 8 integration tests -->
+**37** test classes across nine subpackages: **29** matching `*Test`, run by
 Surefire, and **8** matching `*IT`, run by Failsafe. The `*RepositoryIT` naming
 already matches Failsafe's default include pattern, so neither plugin needs an
 include list. That census is machine-checked — `ServiceReadmeInventoryTest` in
@@ -675,7 +675,7 @@ a reader.
 | Package | Classes |
 |---|---|
 | `api` | `TransactionControllerTest`, `BillPaymentControllerTest`, `TransactionApiRoutingContractTest`, `TransactionCaptureWireContractTest` |
-| `service` | `TransactionListServiceTest`, `TransactionListServiceCursorBindingTest`, `TransactionAddServiceTest`, `TransactionViewServiceTest`, `BillPaymentServiceTest`, `BillPaymentEvaluationOrderTest`, `BillPaymentUnitOfWorkIT` |
+| `service` | `TransactionListServiceTest`, `TransactionListServiceCursorBindingTest`, `TransactionAddServiceTest`, `TransactionViewServiceTest`, `BillPaymentServiceTest`, `BillPaymentEvaluationOrderTest`, `RestAccountContextClientTest`, `BillPaymentUnitOfWorkIT` |
 | `repository` | `TransactionRepositoryIT`, `DailyTransactionRepositoryIT`, `TransactionCategoryBalanceRepositoryIT`, `TransactionRejectRepositoryIT`, `AccountBalanceRepositoryIT`, `BillPaymentAtomicityIT`, `AccountBalanceSchemaAgreementTest` |
 | `mapper` | `TransactionMapperTest`, `BillPaymentMapperTest`, `BillPaymentMappingTest` |
 | `domain` | `MoneyColumnInvariantTest`, `FixedWidthMappingTest`, `FeedRowIdentityTest`, `OccurrenceIdentityTest` |
@@ -697,6 +697,15 @@ What the tiers assert:
 - **`BillPaymentServiceTest`** covers the single-transaction balance write, with
   `BillPaymentUnitOfWorkIT` and `BillPaymentAtomicityIT` proving the boundary is one
   commit rather than two.
+- **`RestAccountContextClientTest`** covers the account-context cross-reference seam
+  both capture screens resolve their account through: the status-code division (404 is
+  absence, everything else is a dependency failure), the credential the interceptor
+  presents, the masked diagnostic rendering, and the rendering of the account
+  identifier itself. ⚠ It was added because there was no test of that client anywhere,
+  and the gap was not theoretical: both of its conversions rendered the identifier with
+  `String.valueOf`, so the seam carried `"1"` where its own interface declares eleven
+  digit characters — and since `app/data/ASCII/acctdata.txt` numbers its fifty accounts
+  `00000000001` to `00000000050`, that was every shipped account. See [section 9.5](#95-the-identifier-representation-this-context-converts).
 - **`*RepositoryIT`** run under Testcontainers, whose BOM comes from the parent at
   `testcontainers.version` 2.0.5, and exercise all **three** query paths of 4.3
   including the processing-timestamp index.
@@ -778,6 +787,38 @@ set -a && . ./.env.transaction-service.local && set +a
 SERVER_ADDRESS=127.0.0.1 SERVER_SSL_ENABLED=false \
   java -jar services/transaction-service/target/transaction-service-1.0.0-SNAPSHOT.jar
 ```
+
+### 9.5 The identifier representation this context converts
+
+The account context publishes `accountId` on both of its card cross-reference reads
+as a JSON **number**, because the column behind it is `BIGINT`. Every shape on this
+side declares it as eleven digit **characters**, because `XREF-ACCT-ID` is
+`PIC 9(11)` at line 7 of [`CVACT03Y.cpy`](../../app/cpy/CVACT03Y.cpy) and an unsigned
+display numeric is right-justified and **zero-filled**. `RestAccountContextClient`
+is the one place the two representations meet, and `renderAccountId` is the one
+method that converts between them.
+
+⚠ **That conversion was wrong, and the shipped data makes the consequence total
+rather than marginal.** Both of the client's conversions used `String.valueOf`, which
+renders `1L` as `"1"` — beside a comment claiming the rendering was performed "so a
+leading zero survives", which is precisely what `String.valueOf` does not do. The
+fifty accounts in [`acctdata.txt`](../../app/data/ASCII/acctdata.txt) are numbered
+`00000000001` through `00000000050`, so **every** shipped account crossed this seam
+one or two characters wide while `AccountContextClient.CardXref`'s own contract
+declares eleven. The value then travelled onward into a transaction-add preview and
+into the ledger key path at a width no other shape in this system uses.
+
+The width comes from `TransactionAddService.ACCOUNT_ID_WIDTH` rather than being
+declared again, so this rendering and the inbound validation that admits an
+eleven-character submission cannot disagree about how wide the field is.
+`Locale.ROOT` is passed explicitly because a decimal-integer format specifier is
+locale-sensitive, and a default locale carrying a grouping separator or non-Latin
+digits would render an identifier this system cannot parse back.
+
+The sibling consumer in `authorization-service` renders the same value the same way,
+which is why the two contexts' onward calls agree. The obligation is now also stated
+on the producing side, in `CardXrefView` and in the published contract, so a third
+consumer meets it before writing the conversion rather than after.
 
 ---
 

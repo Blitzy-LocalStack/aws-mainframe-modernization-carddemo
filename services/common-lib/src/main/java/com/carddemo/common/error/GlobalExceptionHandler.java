@@ -302,7 +302,10 @@ public class GlobalExceptionHandler {
      * already existed. It is declared identically in the two programs that own the relationship -- line
      * 1919 of {@code app/app-transaction-type-db2/cbl/COTRTLIC.cbl} and line 1641 of that tree's
      * {@code COTRTUPC.cbl} -- and transformation rule T8 carries such a string across verbatim. It is
-     * now that literal, measured at 44 characters.</p>
+     * now that literal, measured at 45 characters. Refactoring Rationale: this paragraph said 44, which
+     * was off by one -- the count is now taken from the value itself rather than by hand, and it is pinned
+     * in {@code GlobalExceptionHandlerTest} so a future edit to the literal fails there rather than leaving
+     * a measured claim in this block that nothing checks.</p>
      *
      * <p>Assumptions: the trailing colon is retained because the baseline retains it, and NOTHING is
      * appended after it. The baseline follows the colon with the database's own diagnostic, which is why
@@ -333,6 +336,71 @@ public class GlobalExceptionHandler {
      * would flag it.</p>
      */
     public static final String MESSAGE_DUPLICATE_KEY = "Tran ID already exist...";
+
+    /**
+     * The opening half of the verbatim sentence the baseline composes when an insert is refused.
+     *
+     * <p>Assumptions: reproduced character for character from line 1610 of
+     * {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl}, the first literal of the {@code STRING} in
+     * that program's {@code 9700-INSERT-RECORD}, and measured at 28 characters. Its own colon-free ending
+     * is the baseline's; the colon that closes the whole sentence belongs to
+     * {@link #MESSAGE_INSERT_REFUSED_SUFFIX}.</p>
+     *
+     * <p>Assumptions: the sentence is held in TWO halves rather than one because the baseline puts a table
+     * name between them and this renderer serves more than one table. Line 1611 declares
+     * {@code ' TRANSACTION_TYPE Table. SQLCODE:'} as a single literal, so its leading space and its
+     * trailing {@code ' Table. SQLCODE:'} bracket a token the baseline hardcodes because it maintains
+     * exactly one table through that screen. The migration's reference context owns two, and the shared
+     * advice renders refusals from both, so the token is a parameter supplied by the refusal and every
+     * character around it is the baseline's. See {@link #insertRefusalMessage(String)}.</p>
+     */
+    public static final String MESSAGE_INSERT_REFUSED_PREFIX = "Error inserting record into:";
+
+    /**
+     * The closing half of the verbatim sentence the baseline composes when an insert is refused.
+     *
+     * <p>Assumptions: reproduced character for character from the tail of line 1611 of
+     * {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl}, after the table name that literal carries,
+     * and measured at 16 characters including its leading space. The capitalised {@code Table} is the
+     * baseline's on this arm and is NOT normalised: the same program writes a lower-case {@code table} in
+     * its read arm at line 1500 and this capitalised form in its insert arm at 1611 and its update arm at
+     * 1571, so transformation rule T8 keeps each as written rather than making the three agree.</p>
+     *
+     * <p>Assumptions: the baseline itself already treats these characters as a REUSABLE bracket rather than
+     * as part of one sentence. Lines 1571 and 1611 of that program declare the identical literal
+     * {@code ' TRANSACTION_TYPE Table. SQLCODE:'} under two different opening halves -- 'Error updating:'
+     * on the update arm and 'Error inserting record into:' on the insert arm -- so composing this half with
+     * a supplied table follows the baseline's own construction rather than inventing a template for it.</p>
+     *
+     * <p>Assumptions: the trailing colon is retained and NOTHING is appended after it, for exactly the
+     * reason given on {@link #MESSAGE_REFERENCED_ROW}. The baseline follows the colon with the database's
+     * own code and diagnostic text; carrying those into a body a caller reads would disclose the schema,
+     * the constraint and, because a driver quotes the values that violated it, the caller's own key back
+     * to whoever holds the response. The sentence therefore ends at the colon and the diagnostic goes to
+     * the operational record under the same correlation identity.</p>
+     */
+    public static final String MESSAGE_INSERT_REFUSED_SUFFIX = " Table. SQLCODE:";
+
+    /**
+     * Composes the verbatim insert-refusal sentence around the table the refusal names.
+     *
+     * <p>Assumptions: the single space between the prefix and the table is the leading space of the
+     * baseline's second literal, so the composed result is byte-identical to what the baseline's
+     * {@code STRING} produces up to its colon. For {@code TRANSACTION_TYPE} that is the 61-character
+     * sentence the maintenance screen displays.</p>
+     *
+     * <p>Assumptions: this is public because the published contracts quote the composed sentence in their
+     * examples, and a contract test that rebuilt it from the two halves itself would be asserting its own
+     * arithmetic rather than this renderer's. Composing it in one place is what keeps a document and a
+     * body from drifting apart.</p>
+     *
+     * @param targetTable the baseline name of the table whose insert was refused; must not be
+     *     {@code null}
+     * @return the sentence a caller receives, ending at the baseline's colon with nothing appended
+     */
+    public static String insertRefusalMessage(String targetTable) {
+        return MESSAGE_INSERT_REFUSED_PREFIX + " " + targetTable + MESSAGE_INSERT_REFUSED_SUFFIX;
+    }
 
     /**
      * The message returned for a failure the client cannot correct.
@@ -1435,15 +1503,18 @@ public class GlobalExceptionHandler {
      * Renders the three PROVIDER-RAISED conflict conditions as HTTP 409 and every other runtime failure
      * as HTTP 500.
      *
-     * <p>Assumptions: three and not four. The contention vocabulary
-     * {@link RecordConflictException.Kind} publishes has four members, and only three of them are
-     * recoverable from a provider exception's type name: an optimistic-lock failure, a pessimistic-lock
-     * failure and an integrity violation. {@link RecordConflictException.Kind#DUPLICATE_KEY} is reached
-     * only through {@link #onRecordConflict}, because a provider reports a duplicate key and a
-     * referenced row as the SAME integrity violation, so the two are distinguishable only by the service
-     * that knows which write it issued. Refactoring Rationale: this sentence read "the three conflict
-     * conditions", which described the whole vocabulary as three once the fourth member existed; the
-     * count is kept and narrowed to the branches this method actually carries.</p>
+     * <p>Assumptions: three, and fewer than the contention vocabulary
+     * {@link RecordConflictException.Kind} publishes. Only three of its members are recoverable from a
+     * provider exception's type name: an optimistic-lock failure, a pessimistic-lock failure and an
+     * integrity violation. {@link RecordConflictException.Kind#DUPLICATE_KEY} and
+     * {@link RecordConflictException.Kind#INSERT_REFUSED} are reached only through
+     * {@link #onRecordConflict}, because a provider reports a duplicate key, an absent parent and a
+     * referenced row as the SAME integrity violation, so they are distinguishable only by the service
+     * that knows WHICH STATEMENT it issued -- and the baseline itself discriminates on the statement,
+     * composing one sentence in its insert paragraph and a different one in its delete paragraph.
+     * Refactoring Rationale: this sentence read "three and not four", pinning the vocabulary's size at a
+     * number that has since changed again; what it is for is saying that this method carries fewer
+     * branches than the vocabulary has members, which is now stated without a count on either side.</p>
      *
      * <p>Alternatives Considered: declaring a handler per exception type, which is how such a mapping is
      * ordinarily written, and which would require this module to depend on the persistence abstraction
@@ -2341,6 +2412,38 @@ public class GlobalExceptionHandler {
         //       multi-member refusal this repository raises is a cross-field COMPARISON -- the members
         //       fail together and for the same reason, so a per-member sentence would repeat one
         //       sentence and a per-member state would offer a distinction no raise site can make.
+        // WHY : Refactoring Rationale: a refusal CARRYING per-field entries is rendered entry by entry,
+        //       each with its own state and its own sentence, and this branch is the whole of the fix for
+        //       a defect the two halves of one screen contract made visible. The account update's edit
+        //       driver accumulates one entry per failing field, and the refusal could previously carry
+        //       only the NAMES -- so this method wrote one sentence against every name and a client shown
+        //       "the first name is too long" against its city control corrected the wrong field. The
+        //       dry-run operation beside it returns the accumulated entries directly and has always shown
+        //       each field its own sentence, so the same submission was described two different ways
+        //       depending on which of the two endpoints it was sent to.
+        // WHY : Assumptions: the older branch below is UNCHANGED and still runs for every refusal built
+        //       through a constructor, which is every raise site in this repository other than that one
+        //       driver. Nothing else had to be edited and nothing else changed shape.
+        if (!failure.fieldErrors().isEmpty()) {
+            List<ApiError.FieldError> carried = new ArrayList<>(failure.fieldErrors().size());
+            for (ApiError.FieldError entry : failure.fieldErrors()) {
+                String own = catalogueMessageOrNull(entry.message());
+                carried.add(new ApiError.FieldError(entry.field(), entry.state(),
+                        own == null ? MESSAGE_VALIDATION_FAILED : own));
+            }
+            // WHY : Assumptions: the aggregate is the refusal's OWN message rather than the first
+            //       entry's, because the raise site latches it the way the reference does -- first
+            //       failure wins, written to a single seventy-five-character line -- and taking it from
+            //       the entries would re-derive a value the raise site already decided. The two normally
+            //       agree; where a raise site deliberately composes a different aggregate, this respects
+            //       it.
+            String carriedAggregate = catalogueMessageOrNull(failure.getMessage());
+            return ResponseEntity.badRequest().body(ApiError.ofFieldErrors(
+                    carriedAggregate == null ? MESSAGE_VALIDATION_FAILED : carriedAggregate,
+                    HttpStatus.BAD_REQUEST.value(), correlationId(), pathOf(request),
+                    List.copyOf(carried), this.clock));
+        }
+
         String rendered = referenceMessageOrNull(failure.getMessage());
         String aggregate = rendered == null ? MESSAGE_VALIDATION_FAILED : rendered;
         List<ApiError.FieldError> fieldErrors;
@@ -2358,6 +2461,52 @@ public class GlobalExceptionHandler {
         return ResponseEntity.badRequest().body(ApiError.ofFieldErrors(aggregate,
                 HttpStatus.BAD_REQUEST.value(), correlationId(), pathOf(request), fieldErrors,
                 this.clock));
+    }
+
+    /**
+     * Returns a sentence composed from this repository's message catalogue, or {@code null}.
+     *
+     * <p>Purpose: to admit the LABELLED form of a reference sentence, which
+     * {@link #referenceMessageOrNull(String)} cannot. That gate was calibrated for a sentence standing
+     * alone, and its admitted punctuation is {@link #REFERENCE_PROSE_EXTRA_CHARACTERS} -- which does not
+     * include a colon. The reference composes almost every field message as a label, a colon and a
+     * clause: {@code app/cbl/COACTUPC.cbl} line 1592 sets the label and lines 2502 and 2503 append the
+     * clause, producing {@code State: is not a valid state code}. So the very sentences the migration
+     * exists to carry across verbatim were the ones that gate refused, and every one of them degraded to
+     * the fixed sentence. That was measured on the account update: nine distinct field refusals, nine
+     * identical answers.</p>
+     *
+     * <p>Refactoring Rationale: widening {@link #REFERENCE_PROSE_EXTRA_CHARACTERS} to include the colon
+     * was considered first and rejected. It would have changed what every raise site in every service is
+     * allowed to render, in one edit, to fix one raise site -- and that constant guards messages this
+     * repository did not compose, which is the case the shape test exists for. This gate is reached only
+     * from the carried-entry branch, whose sentences the factory that builds them declares to be
+     * catalogue text.</p>
+     *
+     * <p>Assumptions: what is kept from the stricter gate is the part that protects a VALUE, and what is
+     * relaxed is only the part that describes a SHAPE. The length bound stays at
+     * {@link #MAX_REFERENCE_MESSAGE_LENGTH}, which is the width of the reference's own message field, so
+     * a sentence too wide for the screen this migrated from is still not published. The digit-run bound
+     * stays at {@link #REFERENCE_PROSE_DIGIT_RUN}, which is what would stop a primary account number, a
+     * national identifier or a card verification value travelling inside a message. Only printable
+     * characters are admitted, so no control character can reach a log record. Relaxing the punctuation
+     * set costs nothing a caller could exploit: a colon carries no value.</p>
+     *
+     * <p>Trade-offs: a catalogue sentence that ever exceeded the length bound or embedded a long digit run
+     * would degrade to the fixed sentence rather than being published. That is the same failure mode the
+     * stricter gate has and it fails safe, and the account context's whole catalogue was measured against
+     * these bounds before they were chosen -- every sentence it composes is inside them.</p>
+     *
+     * @param message the sentence a refusal carried, which may be {@code null}
+     * @return the same sentence when it is within the length bound, holds only printable characters and
+     *     holds no digit run longer than {@link #REFERENCE_PROSE_DIGIT_RUN}; {@code null} otherwise
+     */
+    private static String catalogueMessageOrNull(String message) {
+        if (message == null || message.isBlank()
+                || message.length() > MAX_REFERENCE_MESSAGE_LENGTH) {
+            return null;
+        }
+        return isPrintableWithinDigitRun(message, REFERENCE_PROSE_DIGIT_RUN) ? message : null;
     }
 
     /**
@@ -2501,13 +2650,14 @@ public class GlobalExceptionHandler {
      * parses says the same thing and keeps the shape satisfiable. This is the concrete, satisfiable
      * form the reference contract's conflict schema describes.
      *
-     * <p>Assumptions: the subsystem is {@link ApiError.Subsystem#RELATIONAL} for all FOUR kinds, which
-     * is what the contracts declare. It is the relational store the contention is over even when this
-     * service, rather than the provider, is what noticed it. Refactoring Rationale: this paragraph said
-     * three while the enumeration carried four, having been written before
-     * {@link RecordConflictException.Kind#DUPLICATE_KEY} joined it; the count is corrected rather than
-     * dropped because it is what tells a reader the subsystem is uniform across the set instead of
-     * selected per condition.
+     * <p>Assumptions: the subsystem is {@link ApiError.Subsystem#RELATIONAL} for EVERY kind, which is what
+     * the contracts declare. It is the relational store the contention is over even when this service,
+     * rather than the provider, is what noticed it. Refactoring Rationale: this paragraph used to state
+     * how many kinds there were, and the number went stale twice -- once when
+     * {@link RecordConflictException.Kind#DUPLICATE_KEY} joined the set and again when
+     * {@link RecordConflictException.Kind#INSERT_REFUSED} did. What the paragraph is for is telling a
+     * reader that the subsystem is uniform across the set rather than selected per condition, and that
+     * holds however many members there are, so the count is dropped instead of corrected a third time.
      *
      * @param failure the contention a service raised, naming which condition and carrying the current
      *     version when the condition has one; never {@code null} on any path that reaches here
@@ -2533,6 +2683,11 @@ public class GlobalExceptionHandler {
             case LOCK_UNAVAILABLE -> MESSAGE_LOCK_UNAVAILABLE;
             case REFERENCED_ROW -> MESSAGE_REFERENCED_ROW;
             case DUPLICATE_KEY -> MESSAGE_DUPLICATE_KEY;
+            // WHY : Assumptions: this is the one arm whose sentence is composed rather than selected,
+            //       because the baseline writes the table's name into it. The refusal cannot reach here
+            //       without a table -- RecordConflictException refuses to construct that kind without one
+            //       -- so the composition has no null case to defend against.
+            case INSERT_REFUSED -> insertRefusalMessage(failure.targetTable());
         };
 
         LOG.warn("event=api.conflict.declared code={} status=409 path={} kind={} versionReported={}",

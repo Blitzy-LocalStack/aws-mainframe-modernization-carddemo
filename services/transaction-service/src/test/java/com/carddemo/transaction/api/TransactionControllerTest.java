@@ -2106,9 +2106,32 @@ class TransactionControllerTest {
          * a token the browse is stubbed to answer with is a token this slice would accept back. The
          * lifetime is generous relative to a test exchange, so no case can fail on expiry.</p>
          *
+         * <p>⚠️ Refactoring Rationale: {@code @Primary} is required, and its absence made every case in
+         * this class fail on a machine that has {@code CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY} set -- which
+         * the documented local runtime does. {@link CardDemoCommonAutoConfiguration} publishes its own
+         * sealer under {@code @ConditionalOnProperty} for that key, and although it also carries
+         * {@code @ConditionalOnMissingBean(CursorToken.class)}, that back-off does not apply here: the
+         * class is brought in with a plain {@code @Import}, so it is processed as ORDINARY user
+         * configuration rather than as an auto-configuration, and the missing-bean condition is evaluated
+         * without knowledge of this sibling bean. Both sealers were therefore registered and the adapter's
+         * constructor had two candidates -- reported as "expected single matching bean but found 2:
+         * carddemoCursorToken, sliceCursorToken" on all 43 cases.
+         *
+         * <p>Alternatives Considered: dropping this bean and supplying the signing-key property so the
+         * imported configuration's sealer is the only one. Rejected because this class seals its expected
+         * tokens with {@link #SEALING_KEY} and must hold the same key material the adapter is handed;
+         * taking the key from the environment would make what the slice accepts depend on the machine.
+         *
+         * <p>Alternatives Considered: substituting an empty process environment so the conditional bean
+         * never appears, as the shared-kernel tests do. Rejected here only because a slice assembled with
+         * {@code @ContextConfiguration} would need an initializer class purely to express it, where one
+         * annotation states the same intent -- this slice's sealer is the one to inject -- and states it
+         * whether or not the deployment variable happens to be present.
+         *
          * @return the sealer, never {@code null}
          */
         @Bean
+        @Primary
         CursorToken sliceCursorToken() {
             return new CursorToken(SEALING_KEY, Duration.ofMinutes(15));
         }

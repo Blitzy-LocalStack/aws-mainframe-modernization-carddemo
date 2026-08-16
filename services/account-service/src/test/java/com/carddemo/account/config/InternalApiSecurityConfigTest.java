@@ -283,20 +283,110 @@ class InternalApiSecurityConfigTest {
      */
     private static String handSigned(String keyId, String subject, String scope, String key)
             throws Exception {
-        Instant issuedAt = Instant.now();
-        JWTClaimsSet claims = new JWTClaimsSet.Builder()
+        return handSigned(keyId, subject, scope, key, Instant.now(), Duration.ofMinutes(1));
+    }
+
+    /**
+     * Assembles and signs a token with a chosen issue time and declared lifetime.
+     *
+     * <p>⚠️ Assumptions: this overload exists because the shared minter REFUSES to issue a lifetime beyond
+     * its own bound, so a long-lived credential cannot be produced through it -- and a long-lived credential
+     * is exactly the shape the verifying rule has to be tested against. A {@code null} lifetime omits the
+     * expiry claim altogether, which is the other shape the minter never produces and which the framework's
+     * own timestamp validator does not refuse.</p>
+     *
+     * @param keyId the value to place in the key-identifier header
+     * @param subject the value to place in the subject claim
+     * @param scope the value to place in the scope claim
+     * @param key the key to sign with
+     * @param issuedAt the instant to place in the issue-time claim, or {@code null} to omit it
+     * @param lifetime the declared lifetime, or {@code null} to omit the expiry claim
+     * @return the serialised token, never {@code null}
+     * @throws Exception if signing fails, which would itself be the defect
+     */
+    private static String handSigned(String keyId, String subject, String scope, String key,
+            Instant issuedAt, Duration lifetime) throws Exception {
+        JWTClaimsSet.Builder claims = new JWTClaimsSet.Builder()
                 .issuer(InternalServiceToken.ISSUER)
                 .subject(subject)
                 .audience(InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT)
-                .issueTime(Date.from(issuedAt))
-                .expirationTime(Date.from(issuedAt.plus(Duration.ofMinutes(1))))
-                .claim(InternalServiceToken.SCOPE_CLAIM, scope)
-                .build();
+                .claim(InternalServiceToken.SCOPE_CLAIM, scope);
+        if (issuedAt != null) {
+            claims.issueTime(Date.from(issuedAt));
+            if (lifetime != null) {
+                claims.expirationTime(Date.from(issuedAt.plus(lifetime)));
+            }
+        }
         SignedJWT token = new SignedJWT(new JWSHeader.Builder(InternalServiceToken.SIGNING_ALGORITHM)
                 .keyID(keyId)
-                .build(), claims);
+                .build(), claims.build());
         token.sign(new MACSigner(key.getBytes(StandardCharsets.UTF_8)));
         return token.serialize();
+    }
+
+    /**
+     * Verifies a token declaring a lifetime beyond the shared bound is refused.
+     *
+     * <p>⚠️ Purpose: this is the finding this case was written for. The five-minute bound was applied only in
+     * the shared minter's CONSTRUCTOR, so it constrained a caller that chose to honour it and constrained
+     * nothing about a token arriving here. The token this case presents is correct in every other respect --
+     * real key, real caller, matching key identifier, admitted scope, right audience, unexpired -- and
+     * declares thirty minutes. It used to be accepted for all thirty. What the bound protects is the capture
+     * window of a bearer credential that reaches account and customer reads with no user in the loop.</p>
+     *
+     * @throws Exception if signing the forged token fails, which would itself be the defect
+     */
+    @Test
+    @DisplayName("a token declaring a lifetime beyond the bound is refused")
+    void aTokenDeclaringTooLongALifetimeIsRefused() throws Exception {
+        String overLived = handSigned(SUBJECT, SUBJECT, InternalServiceToken.SCOPE_CARD_XREF_READ, KEY,
+                Instant.now(), Duration.ofMinutes(30));
+
+        assertThatThrownBy(() -> decoder().decode(overLived))
+                .isInstanceOf(JwtException.class)
+                .hasMessageContaining(InternalServiceToken.MAX_LIFETIME.toString());
+    }
+
+    /**
+     * Verifies a token declaring exactly the bound is accepted, so the rule is not simply closed.
+     *
+     * <p>Assumptions: the boundary is asserted from the ACCEPTING side as well, because a rule that refused a
+     * token at exactly the bound would refuse every token the minter issues at its own configured maximum --
+     * and a build in which every internal call fails is a different defect from the one being fixed, not a
+     * safer version of it.</p>
+     *
+     * @throws Exception if signing the token fails, which would itself be the defect
+     */
+    @Test
+    @DisplayName("a token declaring exactly the bound is accepted")
+    void aTokenAtTheBoundIsAccepted() throws Exception {
+        String atTheBound = handSigned(SUBJECT, SUBJECT, InternalServiceToken.SCOPE_CARD_XREF_READ, KEY,
+                Instant.now(), InternalServiceToken.MAX_LIFETIME);
+
+        assertThat(decoder().decode(atTheBound).getSubject()).isEqualTo(SUBJECT);
+    }
+
+    /**
+     * Verifies a token that declares no lifetime at all is refused rather than admitted unbounded.
+     *
+     * <p>⚠️ Assumptions: both omissions are asserted because each is a BYPASS. Omitting the ISSUE TIME leaves
+     * no declared lifetime to bound, so a minter wanting an unbounded credential would need only to drop the
+     * claim. Omitting the EXPIRY is worse: the framework's timestamp validator checks an expiry only when one
+     * is PRESENT, so an expiry-less token was previously refused by nothing in this chain at all -- it would
+     * have been accepted forever.</p>
+     *
+     * @throws Exception if signing either forged token fails, which would itself be the defect
+     */
+    @Test
+    @DisplayName("a token with no issue time, or no expiry, is refused")
+    void aTokenDeclaringNoLifetimeIsRefused() throws Exception {
+        String noExpiry = handSigned(SUBJECT, SUBJECT, InternalServiceToken.SCOPE_CARD_XREF_READ, KEY,
+                Instant.now(), null);
+        String noIssueTime = handSigned(SUBJECT, SUBJECT, InternalServiceToken.SCOPE_CARD_XREF_READ, KEY,
+                null, null);
+
+        assertThatThrownBy(() -> decoder().decode(noExpiry)).isInstanceOf(JwtException.class);
+        assertThatThrownBy(() -> decoder().decode(noIssueTime)).isInstanceOf(JwtException.class);
     }
 
     /**

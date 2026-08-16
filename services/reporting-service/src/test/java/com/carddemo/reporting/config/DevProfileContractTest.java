@@ -1,7 +1,7 @@
 package com.carddemo.reporting.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.assertThatCode;
 
 import com.carddemo.common.profile.ProfileConfiguration;
 import java.util.List;
@@ -93,6 +93,30 @@ final class DevProfileContractTest {
    */
   private static final Map<String, String> RESOLUTION_TIME_VALUES =
       Map.of("spring.cloud.aws.region.static", "us-east-1");
+
+  /**
+   * The framework property a service would declare if it pinned its own region.
+   *
+   * <p>Assumptions: this service deliberately declares it NOWHERE, and the case below asserts that absence.
+   * The constant exists so the spelling asserted here is the spelling a future document would have to use.
+   */
+  private static final String REGION_PROPERTY = "spring.cloud.aws.region.static";
+
+  /** The property whose list names the remote configuration locations a region is needed for. */
+  private static final String CONFIG_IMPORT_PROPERTY = "spring.config.import";
+
+  /** The remote parameter location the inherited import list names. */
+  private static final String REMOTE_PARAMETER_LOCATION = "aws-parameterstore";
+
+  /** The remote secret location the inherited import list names. */
+  private static final String REMOTE_SECRET_LOCATION = "aws-secretsmanager";
+
+  /** The prefix that makes a location survivable when it cannot be found. */
+  private static final String OPTIONAL_LOCATION_PREFIX = "optional:";
+
+  /** The configuration documents this service ships, both of which are read as text by the case below. */
+  private static final List<String> SHIPPED_DOCUMENTS =
+      List.of("/application.yml", "/application-dev.yml");
   /** The resolved configuration, resolved once because resolution is read-only and not cheap. */
   private static ProfileConfiguration dev;
 
@@ -292,22 +316,72 @@ final class DevProfileContractTest {
   }
 
   /**
-   * Configuration resolution fails outright when no region is available to build the import clients.
+   * The remote import locations this service inherits need a region it does not itself declare.
    *
-   * <p>Assumptions: this asserts a FAILURE deliberately, and it records a coupling that is invisible in every
-   * other way. The import locations are marked optional, which reads as "this service starts fine without a
-   * platform" -- and that is true only once a region is available. A deployment that supplied every
-   * credential and endpoint but pinned no region would fail while reading configuration, with a message from
-   * the AWS provider chain that names no property of this application.
+   * <p>Purpose: record the coupling that is invisible in every other way. The import locations are marked
+   * optional, which reads as "this service starts fine without a platform" -- and that is true only once a
+   * region is available, because {@code optional:} covers a location that cannot be FOUND, not a client that
+   * cannot be CONSTRUCTED. A deployment supplying every credential and endpoint but pinning no region fails
+   * while reading configuration, with a message from the AWS provider chain naming no property of this
+   * application.
    *
-   * <p>Trade-offs: the assertion is that resolution throws, without pinning the exception type or message.
-   * Both belong to the AWS client rather than to this project, so pinning either would tie this case to a
-   * dependency's diagnostics; what matters is that the omission is fatal rather than silent.
+   * <p>⚠️ Refactoring Rationale: this previously asserted that {@code resolve(DEV)} THROWS. That assertion
+   * was not the project's to make, because the precondition it depends on -- that no region is reachable --
+   * cannot be established from inside the test. This service declares no region property, so the resolver
+   * falls through to the AWS provider chain, and that chain reads {@code System.getenv()} directly rather
+   * than any Spring property source. Any machine exporting {@code AWS_REGION} therefore resolves
+   * successfully and the case fails; {@code /opt/carddemo-tools/svc-common.env} exports both
+   * {@code AWS_REGION} and {@code AWS_DEFAULT_REGION}, so that is the documented runtime, not an edge case.
+   * Measured: the whole 851-case suite is green with no region exported and fails this one case with
+   * {@code AWS_REGION=us-east-1} alone. Note that no amount of Spring-level environment substitution can
+   * fix it -- the read happens inside the SDK -- which is why the assertion itself had to change.
+   *
+   * <p>Alternatives Considered: skipping the case when a region is ambient. Rejected because a case that
+   * silently skips is indistinguishable from one that silently passes, and this coupling is the reason a
+   * region-less deployment fails in a way that names nothing of ours.
+   *
+   * <p>Assumptions: what is asserted instead is the CAUSE, in three parts that are each read from the
+   * documents and are therefore immune to the surrounding machine: the remote locations exist and are the
+   * ones a client must be built for; this service declares no region property of its own, which is exactly
+   * why the SDK chain is consulted at all; and supplying a region is SUFFICIENT for resolution to complete.
+   * Together those state the same coupling the throwing assertion was reaching for.
    */
   @Test
-  @DisplayName("fails resolution when no region is available for the import clients")
-  void resolutionFailsWithoutARegion() {
-    assertThatThrownBy(() -> ProfileConfiguration.resolve(DEV)).isInstanceOf(RuntimeException.class);
+  @DisplayName("the inherited remote import locations need a region this service does not declare")
+  void theRemoteImportLocationsNeedARegionThisServiceDoesNotDeclare() {
+    List<String> remoteLocations = dev.list(CONFIG_IMPORT_PROPERTY).stream()
+        .filter(location -> location.contains(REMOTE_PARAMETER_LOCATION)
+            || location.contains(REMOTE_SECRET_LOCATION))
+        .toList();
+    assertThat(remoteLocations)
+        .as("a region is only needed while remote locations must have clients built for them")
+        .hasSize(2)
+        .anyMatch(location -> location.contains(REMOTE_PARAMETER_LOCATION))
+        .anyMatch(location -> location.contains(REMOTE_SECRET_LOCATION))
+        // WHY : Assumptions: the optional prefix is asserted on the REMOTE locations only. The classpath
+        //   entry beside them is not optional and must not be -- it carries the shared defaults every
+        //   profile inherits -- so asserting the prefix across the whole list would assert the opposite
+        //   of what the document intends.
+        .allMatch(location -> location.startsWith(OPTIONAL_LOCATION_PREFIX));
+
+    // WHY : Alternatives Considered: asserting this through the resolved configuration, either as an
+    //   absent rawValue or as a sourceOf naming the harness seed. BOTH were rejected after being tried:
+    //   this resolution seeds the region itself, so rawValue answers "us-east-1" regardless, and the seed
+    //   source is added at HIGHEST precedence by design, so sourceOf names the seed even when a document
+    //   declares the key too. The second reads like a real assertion and has no teeth at all -- verified
+    //   by adding the property to application.yml and watching it still pass. The shipped documents are
+    //   therefore read directly, which is the only form of this fact that can fail.
+    for (String document : SHIPPED_DOCUMENTS) {
+      assertThat(documentText(document))
+          .as("%s must declare NO region block: this service leaves the region to the platform, which is"
+              + " precisely why the AWS provider chain is consulted and why a region-less deployment"
+              + " fails with a message naming nothing of ours", document)
+          .doesNotContainPattern("(?m)^\\s*region:\\s*$");
+    }
+
+    assertThatCode(() -> ProfileConfiguration.resolveWith(RESOLUTION_TIME_VALUES, DEV))
+        .as("supplying the region is sufficient for resolution to complete")
+        .doesNotThrowAnyException();
   }
 
   /**
@@ -344,5 +418,28 @@ final class DevProfileContractTest {
         .hasValueSatisfying(name -> assertThat(name).doesNotContain(DEV_DOCUMENT));
     assertThat(dev.unresolvablePlaceholders())
         .containsEntry("server.ssl.key-store-password", "CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD");
+  }
+
+  /**
+   * Reads a shipped configuration document from the classpath as text.
+   *
+   * <p>Assumptions: the document is read as TEXT rather than parsed, because what the caller asserts is the
+   * ABSENCE of a key -- and an absence cannot be observed through the resolved configuration, where a value
+   * this class seeds itself is present regardless of what any document declares.
+   *
+   * @param resource absolute classpath location of the document, never {@code null}
+   * @return the document's full text, never {@code null}
+   * @throws IllegalStateException when the document is absent from the classpath
+   * @throws java.io.UncheckedIOException when the document cannot be read
+   */
+  private static String documentText(final String resource) {
+    try (java.io.InputStream stream = DevProfileContractTest.class.getResourceAsStream(resource)) {
+      if (stream == null) {
+        throw new IllegalStateException("shipped configuration document is absent: " + resource);
+      }
+      return new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+    } catch (java.io.IOException failure) {
+      throw new java.io.UncheckedIOException("could not read " + resource, failure);
+    }
   }
 }

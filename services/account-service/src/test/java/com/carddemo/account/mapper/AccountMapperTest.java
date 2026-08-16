@@ -96,7 +96,16 @@ class AccountMapperTest {
         assertThat(row.getOpenDate()).isEqualTo(LocalDate.of(2014, 11, 20));
         assertThat(row.getExpirationDate()).isEqualTo(LocalDate.of(2026, 12, 31));
         assertThat(row.getReissueDate()).isEqualTo(LocalDate.of(2024, 6, 15));
-        assertThat(row.getGroupId()).isEqualTo("GROUP01");
+        // WHY : ⚠️ Refactoring Rationale: the expectation is the value PADDED to the declared ten
+        //   characters, where it used to be the submission's seven. The column is CHAR(10), so the
+        //   datastore pads it either way; what the padding here buys is that the entity and the row
+        //   carry the same characters, and therefore that the update response -- which is projected
+        //   from this entity -- and a later account view answer the same value. This assertion held
+        //   the shorter form and so recorded the disagreement as correct.
+        assertThat(row.getGroupId())
+                .as("the group is stored at its declared width so a later read returns what this echoes")
+                .isEqualTo("GROUP01   ")
+                .hasSize(10);
 
         // WHY : Assumptions: the seventeenth component is the account identifier and the assertion on it
         //   is that it is NOT written. It is the row's key, the row was loaded by it, and the reference's
@@ -142,6 +151,64 @@ class AccountMapperTest {
 
         assertThat(row.getGroupId()).isNotNull().isBlank().hasSize(10);
         assertThat(row.getGroupId()).isNotEqualTo("DEFAULT");
+    }
+
+    /**
+     * Asserts the group is published at its declared width whichever row produced it.
+     *
+     * <p>⚠️ Purpose: this is the READ half of the rule the case above and
+     * {@code allSeventeenAccountComponentsReachTheRow} assert the write half of, and it is asserted
+     * separately because the two halves failed together and either alone would have let the defect stand.
+     * The projection is built from BOTH a row the datastore loaded -- always ten characters, since the
+     * column is {@code CHAR(10)} -- and a row a writer has just populated in memory, and the second used to
+     * carry the submission's width. The account view and the update response therefore published different
+     * values for one column, which is what a caller comparing them to detect a change saw as a change.</p>
+     *
+     * <p>Assumptions: a SHORT value is exercised deliberately, because that is the state only an in-memory
+     * row can be in and therefore the only state that reproduces the defect. Asserting on a ten-character
+     * fixture alone would pass against the broken rendering.</p>
+     */
+    @Test
+    @DisplayName("the group is published at its declared width even from a short in-memory row")
+    void theGroupIsPublishedAtItsDeclaredWidth() {
+        // WHY : Assumptions: each row is completed through applyUpdate before its group is overridden,
+        //   because toAccountDetail reads every published column and refuses a null one -- the same
+        //   NOT-NULL assertion this case is about, applied to the amounts. A bare empty row would fail on
+        //   the credit limit before reaching the group.
+        Account shortInMemory = populatedRow();
+        shortInMemory.setGroupId("DEFAULT");
+        Account asLoaded = populatedRow();
+        asLoaded.setGroupId("DEFAULT   ");
+
+        assertThat(this.mapper.toAccountDetail(shortInMemory).groupId())
+                .as("a value a writer left short is still published at the width the column declares")
+                .isEqualTo("DEFAULT   ")
+                .hasSize(10);
+        assertThat(this.mapper.toAccountDetail(asLoaded).groupId())
+                .as("a loaded row publishes the same characters, so the two endpoints agree")
+                .isEqualTo(this.mapper.toAccountDetail(shortInMemory).groupId());
+    }
+
+    /**
+     * Asserts a stored group wider than its column is refused rather than truncated for publication.
+     *
+     * <p>Assumptions: the refusal is an {@link IllegalStateException} and NOT the caller-facing refusal the
+     * write path raises, and the distinction is the point of the case. A submission wider than its field is
+     * the caller's fault and becomes a 400 naming the field; a stored row wider than its own column is
+     * nobody's submission, and reporting it as a caller error would tell a caller to correct something it
+     * never sent. {@code CustomerMapper} draws the same line for the three {@code CHAR} columns it
+     * publishes.</p>
+     */
+    @Test
+    @DisplayName("a stored group wider than its column is refused rather than truncated")
+    void anOverWideStoredGroupIsRefused() {
+        Account row = populatedRow();
+        row.setGroupId("ELEVENCHARS");
+
+        assertThatThrownBy(() -> this.mapper.toAccountDetail(row))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("group_id")
+                .hasMessageContaining("truncating it would publish a value the record does not hold");
     }
 
     /**
@@ -219,6 +286,45 @@ class AccountMapperTest {
         assertThat(AccountMapper.isEditedAmount(screenValue))
                 .as("isEditedAmount(%s)", screenValue)
                 .isEqualTo(accepted);
+    }
+
+    /**
+     * Asserts the magnitude bound admits exactly what {@code NUMERIC(12,2)} can hold.
+     *
+     * <p>Refactoring Rationale: this bound did not exist as an edit-phase question, and its absence
+     * produced HTTP 500. The shape test above admits any value the fifteen-character mask can spell, and
+     * fifteen characters hold a sign, ELEVEN integer digits, a point and two fraction digits -- one digit
+     * more than the column stores. Such a value passed every edit, reached the row builder and overflowed
+     * the column, so the persistence provider's integrity violation was reported to the caller as the
+     * service having failed.</p>
+     *
+     * <p>Assumptions: the cases straddle the boundary in both directions and cover the two ways a value can
+     * LOOK too large without being too large -- insignificant leading zeros and grouping separators -- because
+     * a bound that measured characters rather than significant digits would refuse a value the column holds
+     * comfortably, on every submission that padded a screen field to its full width.</p>
+     *
+     * @param screenValue the value as a screen would carry it
+     * @param within whether the value's integer part fits the ten digits the column stores
+     */
+    @ParameterizedTest
+    @DisplayName("the magnitude bound admits exactly what the stored precision holds")
+    @CsvSource({
+        "9999999999.99,      true",
+        "-9999999999.99,     true",
+        "10000000000.00,     false",
+        "-10000000000.00,    false",
+        "99999999999.99,     false",
+        "00000000123.45,     true",
+        "'1,234,567,890.12', true",
+        "'12,345,678,901.12', false",
+        "0.00,               true",
+        "'',                 false",
+        "ABC,                false"
+    })
+    void theMagnitudeBoundAdmitsWhatTheColumnHolds(String screenValue, boolean within) {
+        assertThat(AccountMapper.isAmountWithinPicture(screenValue))
+                .as("isAmountWithinPicture(%s)", screenValue)
+                .isEqualTo(within);
     }
 
     /**
@@ -401,6 +507,21 @@ class AccountMapperTest {
      */
     private static String blankIf(String target, String candidate, String value) {
         return target.equals(candidate) ? "   " : value;
+    }
+
+    /**
+     * Builds a row whose every published column holds a value, for the read-side cases.
+     *
+     * <p>Assumptions: it is built by APPLYING an acceptable submission rather than by setting the columns
+     * one at a time, so the fixture cannot drift from the set of columns the write path populates. A case
+     * that set them individually would keep passing after a new column was added to the projection.</p>
+     *
+     * @return a row every read-side assertion in this class can project, never {@code null}
+     */
+    private Account populatedRow() {
+        Account row = emptyRow();
+        this.mapper.applyUpdate(row, acceptable());
+        return row;
     }
 
     /**

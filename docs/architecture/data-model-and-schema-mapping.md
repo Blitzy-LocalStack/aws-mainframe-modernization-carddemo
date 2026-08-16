@@ -978,7 +978,7 @@ statement grouping token and is granted to the schema owner alone.
 | `account` | `account-service` | `accounts`, `customers`, `card_xref`, plus `inquiry_reply_ledger` — which derives from no copybook and exists so a redelivered account-inquiry request is answered once | `V1__account.sql` and `V2__account_inquiry_reply_ledger.sql` authored |
 | `card` | `card-service` | `cards` | `V1__card.sql` authored |
 | `ledger` | `transaction-service` | `transactions`, `daily_transactions`, `transaction_rejects`, `transaction_category_balances` | `V1__ledger.sql` authored |
-| `reference` | `reference-service` | `transaction_types`, `transaction_categories`, `disclosure_groups`, `us_phone_area_codes`, `us_states`, `us_state_zip_prefixes`, plus `inquiry_reply_ledger` — which derives from no copybook and exists so a redelivered date-inquiry request is answered with the FIRST answer rather than a later timestamp | `V1__reference.sql`, `V2__seed_reference.sql` and `V3__reference_inquiry_reply_ledger.sql` authored |
+| `reference` | `reference-service` | `transaction_types`, `transaction_categories`, `disclosure_groups`, `us_phone_area_codes`, `us_states`, `us_state_zip_prefixes` — six tables, all copybook-derived | `V1__reference.sql`, `V2__seed_reference.sql`, `V3__reference_inquiry_reply_ledger.sql` and `V4__drop_reference_inquiry_reply_ledger.sql` authored |
 | `batch` | `batch-service` | `batch_run`, `daily_feed_watermark`, plus the batch framework's own job-repository tables | `V1__batch.sql` and `V2__batch_feed_watermark.sql` authored |
 | `authorization` | `authorization-service` | `pending_auth_summary`, `pending_auth_detail`, `auth_fraud`, `auth_reply_outbox` | `V1__authorization.sql` authored, extended by `V2`, `V3` and `V4` |
 | `reporting` | `reporting-service`, schema owned in the database by `carddemo_reporting_owner` | **no table the service can read** — eight read-only cross-schema views, plus one owner-only key table | `data-migration/sql/V1__reporting_views.sql` authored |
@@ -1212,17 +1212,25 @@ identity the producer supplies, neither of which is authenticated — before it 
 > stated because a reader counting `\dt account.*` against this document must be able
 > to account for the difference.
 
-Refactoring Rationale: the SAME ruling now applies to a second schema. `reference`
-carries `reference.inquiry_reply_ledger`, created by
-`services/reference-service/src/main/resources/db/migration/V3__reference_inquiry_reply_ledger.sql`,
-and it is likewise absent from the copybook mapping tables because it derives from no
-copybook. Assumptions: its reason for existing is narrower than its account sibling's
-and worth stating separately, because the date-inquiry reply body is the system date
-and time read at the moment of composition — so a redelivery that recomposed would not
-repeat the answer, it would compose a **later** one, and a requester pairing on one
-correlation identifier would hold two replies that disagree about the time. That
-exchange's ledger therefore exists to make the FIRST answer the only answer, where the
-account one exists to stop a second copy being sent at all.
+⚠️ Refactoring Rationale: that ruling applies to the `account` schema ALONE, and a
+previous revision extended it to `reference` on the strength of a second ledger there.
+`reference-service` did ship
+`V3__reference_inquiry_reply_ledger.sql`, creating `reference.inquiry_reply_ledger`, and
+`V4__drop_reference_inquiry_reply_ledger.sql` now withdraws it — so the `reference`
+schema holds six tables, every one copybook-derived, and needs no such exception. The
+reason is that the shared inquiry request queue has one consumer:
+`account-service`'s listener dispatches on the function code and answers `DATE` itself,
+so both exchanges record their composed replies in `account.inquiry_reply_ledger`.
+`reference-service` declares no listener, so nothing could write the table it created.
+
+Assumptions: the date exchange's reason for needing a ledger is narrower than the
+account exchange's and is still worth stating, because it is why the ONE table carries
+both. The date-inquiry reply body is the system date and time read at the moment of
+composition — so a redelivery that recomposed would not repeat the answer, it would
+compose a **later** one, and a requester pairing on one correlation identifier would
+hold two replies that disagree about the time. For that exchange the ledger makes the
+FIRST answer the only answer; for the account exchange it stops a second copy being
+sent at all. One table discharges both, because one listener composes both.
 
 
 > Refactoring Rationale: **this subsection formerly recorded the dependency as
@@ -2271,6 +2279,49 @@ listed so that its absence is a recorded decision rather than an apparent omissi
   transactions** — listed as future work by the baseline itself and not brought into
   this migration. In particular, **no table in this document participates in a
   distributed transaction**.
+
+### The shipped seed data does not satisfy the online edits, and loading it faithfully is the right answer
+
+⚠ A reader who queries the loaded `account.customers` rows against the rules the update
+path enforces will find they fail, and will read that as a migration defect. It is not
+one. Both properties below were measured from
+[`app/data/ASCII/custdata.txt`](../../app/data/ASCII/custdata.txt) itself — a fifty-row,
+500-byte file whose layout is [`CVCUS01Y.cpy`](../../app/cpy/CVCUS01Y.cpy) — rather than
+from the loaded rows, so the figures are properties of the baseline and not of the load:
+
+| Property | Field and offset | Measured in the shipped file |
+|---|---|---|
+| Credit score outside the 300–850 domain the update path enforces | `CUST-FICO-CREDIT-SCORE`, `PIC 9(03)`, zero-based byte offset **329** | **21 of 50** rows, values ranging from **1** to **793** |
+| State + leading two ZIP digits absent from the allow-list | `CUST-ADDR-STATE-CD` at offset **234** with `CUST-ADDR-ZIP` at offset **239** | **48 of 50** rows; the allow-list in [`CSLKPCDY.cpy`](../../app/cpy/CSLKPCDY.cpy) holds **240** prefixes, and `NC` admits only `NC27` and `NC28` |
+
+Assumptions: the baseline's own program would refuse these rows too, so the migrated
+edits are not stricter than what they replace.
+[`COACTUPC.cbl`](../../app/cbl/COACTUPC.cbl) performs the credit-score range edit and
+the state-ZIP combination edit at its update boundary, and those are the edits
+`AddressValidationService` and the update path carry across. These rows never passed
+through that boundary: they arrive by `IDCAMS REPRO`, which validates nothing. The file
+has therefore always held values its own online screen would decline, and reproducing
+that is what fidelity means here.
+
+Assumptions: this is why `customers.addr_state_cd` and `customers.addr_zip` carry **no
+foreign key** to `reference.us_state_zip_prefixes` and `fico_credit_score` carries **no
+range `CHECK`**. That decision is recorded at each column in
+[`V1__account.sql`](../../services/account-service/src/main/resources/db/migration/V1__account.sql)
+and the reason is this data: a constraint narrower than the seeded lookup table would
+refuse rows the baseline holds.
+
+Trade-offs: three alternatives were weighed and all three rejected. **Correcting the
+data** would edit `app/**`, which is reference-only, and would leave the golden masters
+comparing against values the baseline never held. **Constraining the columns** would
+fail the load for 48 of 50 customers, so the migrated system would hold less than the
+one it replaces. **Relaxing the edits** to admit what the data carries would change the
+observable behaviour of the update screen, which is the one thing parity forbids. What
+is delivered is the honest combination: the data loads faithfully, the edits refuse what
+the reference refuses, and a caller editing any other field of one of those 48 customers
+is told its state-ZIP pair is invalid. That refusal is correct and is the baseline's own
+— it is recorded here and in
+[`cobol-to-service-traceability.md`](cobol-to-service-traceability.md) §7.3 so it is not
+diagnosed as a seeding fault.
 
 ### One observation left open
 

@@ -23,6 +23,8 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.test.context.runner.WebApplicationContextRunner;
 import org.springframework.security.web.firewall.RequestRejectedHandler;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.context.ApplicationContextInitializer;
+import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.MutablePropertySources;
@@ -123,6 +125,7 @@ class CardDemoCommonAutoConfigurationIT {
     void contributesEveryComponentToAWebContext() {
         new WebApplicationContextRunner()
                 .withConfiguration(UNDER_TEST)
+                .withInitializer(ambientVariables(Map.of()))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context).hasSingleBean(Clock.class);
@@ -180,6 +183,7 @@ class CardDemoCommonAutoConfigurationIT {
     void theRequestBodyBoundIsConfigurableAndValidated() {
         new WebApplicationContextRunner()
                 .withConfiguration(UNDER_TEST)
+                .withInitializer(ambientVariables(Map.of()))
                 .withPropertyValues(CardDemoCommonAutoConfiguration.MAX_REQUEST_BODY_BYTES_PROPERTY
                         + "=4096")
                 .run(context -> {
@@ -216,6 +220,7 @@ class CardDemoCommonAutoConfigurationIT {
     void omitsServletComponentsOutsideAWebContext() {
         new ApplicationContextRunner()
                 .withConfiguration(UNDER_TEST)
+                .withInitializer(ambientVariables(Map.of()))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context).hasSingleBean(Clock.class);
@@ -239,6 +244,7 @@ class CardDemoCommonAutoConfigurationIT {
     void yieldsToAConsumerDeclaredClock() {
         new WebApplicationContextRunner()
                 .withConfiguration(UNDER_TEST)
+                .withInitializer(ambientVariables(Map.of()))
                 .withUserConfiguration(FixedClockConfiguration.class)
                 .run(context -> {
                     assertThat(context).hasNotFailed();
@@ -270,10 +276,47 @@ class CardDemoCommonAutoConfigurationIT {
     void withholdsTheCursorSealerUntilAKeyIsNamed() {
         new ApplicationContextRunner()
                 .withConfiguration(UNDER_TEST)
+                .withInitializer(ambientVariables(Map.of()))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context).doesNotHaveBean(CursorToken.class);
                 });
+    }
+
+    /**
+     * Substitutes a controlled operating-system environment for the real one.
+     *
+     * <p>Purpose: let a case state exactly which environment variables exist for it, including the case
+     * of none at all. Both halves of the cursor and online-write decisions depend on that: one asserts
+     * the bean appears when a variable names key material, and its partner asserts the bean is withheld
+     * when NOTHING does.
+     *
+     * <p>⚠️ Refactoring Rationale: the two withholding cases previously relied on the build machine
+     * having no such variable set, which the documented runtime environment breaks --
+     * {@code /opt/carddemo-tools/svc-aws.env} and {@code svc-common.env} supply both
+     * {@code CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY} and {@code CARDDEMO_ONLINE_WRITES_PARAMETER}.
+     * Observed: with the documented environment sourced, the auto-configuration published a
+     * {@code CursorToken} and an {@code OnlineWriteGate} that these cases assert are absent, so both
+     * failed for a reason that had nothing to do with the code under test. Making the environment an
+     * input rather than an assumption is what removes that coupling, and it uses the same substitution
+     * this class already relies on to prove the relaxed-name mapping.
+     *
+     * <p>Alternatives Considered: asserting on the bean only when the variable happens to be unset.
+     * Rejected -- a case that silently skips is indistinguishable from one that silently passes, and the
+     * withholding guarantee is the one protecting every context that never pages from failing to start.
+     *
+     * @param variables the environment variables this context may observe, possibly empty
+     * @return an initializer replacing the system-environment source with the supplied variables
+     */
+    private static ApplicationContextInitializer<ConfigurableApplicationContext> ambientVariables(
+            final Map<String, Object> variables) {
+        return context -> {
+            MutablePropertySources sources = context.getEnvironment().getPropertySources();
+            sources.replace(
+                    StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
+                    new SystemEnvironmentPropertySource(
+                            StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME, variables));
+        };
     }
 
     /**
@@ -289,6 +332,7 @@ class CardDemoCommonAutoConfigurationIT {
     void publishesTheCursorSealerWhenAKeyIsNamed() {
         new ApplicationContextRunner()
                 .withConfiguration(UNDER_TEST)
+                .withInitializer(ambientVariables(Map.of()))
                 .withPropertyValues(
                         CardDemoCommonAutoConfiguration.CURSOR_SIGNING_KEY_PROPERTY + "="
                                 + TEST_SIGNING_KEY_BASE64,
@@ -327,17 +371,8 @@ class CardDemoCommonAutoConfigurationIT {
     void bindsTheCursorSigningKeyFromItsDocumentedEnvironmentVariableName() {
         new ApplicationContextRunner()
                 .withConfiguration(UNDER_TEST)
-                .withInitializer(context -> {
-                    MutablePropertySources sources =
-                            context.getEnvironment().getPropertySources();
-                    sources.replace(
-                            StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
-                            new SystemEnvironmentPropertySource(
-                                    StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
-                                    Map.of(
-                                            "CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY",
-                                            TEST_SIGNING_KEY_BASE64)));
-                })
+                .withInitializer(ambientVariables(
+                        Map.of("CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY", TEST_SIGNING_KEY_BASE64)))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context).hasSingleBean(CursorToken.class);
@@ -363,6 +398,7 @@ class CardDemoCommonAutoConfigurationIT {
     void refusesKeyMaterialShorterThanTheAuthenticationCodeRequires() {
         new ApplicationContextRunner()
                 .withConfiguration(UNDER_TEST)
+                .withInitializer(ambientVariables(Map.of()))
                 .withPropertyValues(
                         CardDemoCommonAutoConfiguration.CURSOR_SIGNING_KEY_PROPERTY
                                 + "=dG9vLXNob3J0LWZvci1obWFjLXNoYTI1Ng==")
@@ -383,6 +419,7 @@ class CardDemoCommonAutoConfigurationIT {
     void withholdsTheOnlineWriteGateUntilTheFlagIsNamed() {
         new WebApplicationContextRunner()
                 .withConfiguration(UNDER_TEST)
+                .withInitializer(ambientVariables(Map.of()))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context).doesNotHaveBean(OnlineWriteGate.class);
@@ -408,6 +445,7 @@ class CardDemoCommonAutoConfigurationIT {
     void publishesTheOnlineWriteGateAndItsInterceptor() {
         new WebApplicationContextRunner()
                 .withConfiguration(UNDER_TEST)
+                .withInitializer(ambientVariables(Map.of()))
                 .withUserConfiguration(StubSsmConfiguration.class)
                 .withPropertyValues(
                         CardDemoCommonAutoConfiguration.ONLINE_WRITES_PARAMETER_PROPERTY
@@ -441,6 +479,7 @@ class CardDemoCommonAutoConfigurationIT {
     void contributesTheGateWithoutAnInterceptorOutsideAWebContext() {
         new ApplicationContextRunner()
                 .withConfiguration(UNDER_TEST)
+                .withInitializer(ambientVariables(Map.of()))
                 .withUserConfiguration(StubSsmConfiguration.class)
                 .withPropertyValues(
                         CardDemoCommonAutoConfiguration.ONLINE_WRITES_PARAMETER_PROPERTY
@@ -473,16 +512,8 @@ class CardDemoCommonAutoConfigurationIT {
         new ApplicationContextRunner()
                 .withConfiguration(UNDER_TEST)
                 .withUserConfiguration(StubSsmConfiguration.class)
-                .withInitializer(context -> {
-                    MutablePropertySources sources =
-                            context.getEnvironment().getPropertySources();
-                    sources.replace(
-                            StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
-                            new SystemEnvironmentPropertySource(
-                                    StandardEnvironment.SYSTEM_ENVIRONMENT_PROPERTY_SOURCE_NAME,
-                                    Map.of("CARDDEMO_ONLINE_WRITES_PARAMETER",
-                                            TEST_FLAG_PARAMETER)));
-                })
+                .withInitializer(ambientVariables(
+                        Map.of("CARDDEMO_ONLINE_WRITES_PARAMETER", TEST_FLAG_PARAMETER)))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context).hasSingleBean(OnlineWriteGate.class);
@@ -505,6 +536,7 @@ class CardDemoCommonAutoConfigurationIT {
     void aBlankFlagParameterFailsTheContext() {
         new ApplicationContextRunner()
                 .withConfiguration(UNDER_TEST)
+                .withInitializer(ambientVariables(Map.of()))
                 .withUserConfiguration(StubSsmConfiguration.class)
                 .withPropertyValues(
                         CardDemoCommonAutoConfiguration.ONLINE_WRITES_PARAMETER_PROPERTY + "=   ")

@@ -1,7 +1,7 @@
 package com.carddemo.batch.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.assertThatCode;
 
 import com.carddemo.common.profile.ProfileConfiguration;
 import java.util.List;
@@ -79,10 +79,32 @@ final class DevProfileContractTest {
    * carries the {@code optional:} prefix, that prefix covers a location that cannot be FOUND -- it does not
    * cover a client that cannot be CONSTRUCTED. With the region unresolved the machinery builds a malformed
    * endpoint and resolution fails before any document is read, reporting an invalid URI rather than naming
-   * the missing variable. {@link #resolutionFailsWithoutTheRegion()} pins that coupling so a reader does not
+   * the missing variable. {@link #theRegionTheImportLocationNeedsIsRequiredAndHasNoDefault()} pins that coupling so a reader does not
    * have to rediscover it.
    */
   private static final Map<String, String> RESOLUTION_TIME_VALUES = Map.of("AWS_REGION", "us-east-1");
+
+  /**
+   * The framework property the configuration client reads its region from.
+   *
+   * <p>Assumptions: the constant is declared once and used by the case below rather than written inline,
+   * because the same spelling appears in {@code application.yml} and a mismatch between the two would make
+   * the case assert nothing while still passing -- {@code rawValue} answers empty for a key that does not
+   * exist, and the case would then be pinning the absence of a property nobody declared.
+   */
+  private static final String REGION_PROPERTY = "spring.cloud.aws.region.static";
+
+  /** The environment variable that property's placeholder names. */
+  private static final String REGION_VARIABLE = "AWS_REGION";
+
+  /** The property whose list names the remote configuration location the region is needed for. */
+  private static final String CONFIG_IMPORT_PROPERTY = "spring.config.import";
+
+  /** The remote parameter location the import list names. */
+  private static final String REMOTE_PARAMETER_LOCATION = "aws-parameterstore";
+
+  /** The prefix that makes a location survivable when it cannot be found. */
+  private static final String OPTIONAL_LOCATION_PREFIX = "optional:";
 
   /** The resolved configuration, resolved once because resolution is read-only and not cheap. */
   private static ProfileConfiguration dev;
@@ -324,22 +346,72 @@ final class DevProfileContractTest {
   }
 
   /**
-   * Configuration resolution fails outright when the region the import locations are built from is absent.
+   * The region the import location is built from is required, carries no default, and is what makes
+   * resolution possible.
    *
-   * <p>Assumptions: this asserts a FAILURE deliberately, and it is the most useful case in this class. The
-   * coupling it records is invisible in every other way: the import locations are marked optional, which
-   * reads as "this service starts fine without a platform", and that is true only once a region is present.
-   * A deployment that supplied every credential and endpoint but omitted the region would fail with a
-   * malformed-endpoint message naming no variable at all.
+   * <p>Assumptions: the coupling this pins is invisible in every other way. The import location is marked
+   * optional, which reads as "this service starts fine without a platform", and that is true only once a
+   * region is present -- the {@code optional:} prefix covers a location that cannot be FOUND, not a client
+   * that cannot be CONSTRUCTED. A deployment that supplied every credential but omitted the region would
+   * fail with a malformed-endpoint message naming no variable at all.
    *
-   * <p>Trade-offs: the assertion is that resolution throws, without pinning the exception type or message.
-   * Both belong to the AWS client rather than to this project, so pinning either would tie this case to a
-   * dependency's diagnostics; what matters is that the omission is fatal rather than silent.
+   * <p>⚠️ Refactoring Rationale: this used to assert that {@code ProfileConfiguration.resolve(DEV)} THROWS,
+   * and that assertion was not deterministic -- it depended on a variable neither this project nor this test
+   * sets. With {@code AWS_ENDPOINT_URL} present in the process environment the configuration client is
+   * constructible without a resolved region, so resolution completes and the case failed; the documented
+   * local environment exports exactly that variable, so a build of this module failed on a correct tree. The
+   * failure was also in the one direction that misleads: it reported a defect where there was none, while a
+   * genuine regression -- someone giving the region placeholder a default -- would have been reported the
+   * same way and read as the same known noise. That variable is read by the AWS SDK from the operating-system
+   * environment, so no property source and no test fixture can mask it from inside this JVM.
+   *
+   * <p>⚠️ Assumptions: what replaces it asserts the CAUSE and the MECHANISM rather than the consequence, and
+   * both are read from the configuration documents, so neither can be changed by the surrounding
+   * environment. First, the region property's RAW value is the bare placeholder with NO default part -- that
+   * is precisely the property a later edit could weaken, and a default here is what would let a region-less
+   * job run and then address the wrong partition. Second, the import list genuinely names a remote location,
+   * because a defaultless region only matters while something is built from it. Third, supplying the region
+   * is SUFFICIENT for resolution to complete, which is the consequence half stated in the one direction that
+   * is deterministic in every environment.
+   *
+   * <p>Assumptions: ONE remote location is expected here where the request-serving contexts expect two. This
+   * module imports the parameter store and NOT the secret store, which is its own deliberate choice recorded
+   * beside the import list: a batch job reads endpoints and sizing, and the one credential it needs arrives
+   * through its datasource rather than through a configuration import.
+   *
+   * <p>Assumptions: the identical correction was applied to {@code account-service}, which carried the same
+   * assertion for the same reason. The sibling in {@code reporting-service} deliberately still asserts the
+   * throw and is NOT harmonised with these two: that service declares no region property at all, so its
+   * resolver falls through to the SDK's own provider chain, which an endpoint override does not satisfy.
    */
   @Test
-  @DisplayName("fails resolution when the region the import locations need is absent")
-  void resolutionFailsWithoutTheRegion() {
-    assertThatThrownBy(() -> ProfileConfiguration.resolve(DEV)).isInstanceOf(RuntimeException.class);
+  @DisplayName("requires the region the import location needs, with no default and no fallback")
+  void theRegionTheImportLocationNeedsIsRequiredAndHasNoDefault() {
+    assertThat(dev.rawValue(REGION_PROPERTY))
+        .as("the region property must be declared, since the import location is built from it")
+        .isPresent();
+    assertThat(dev.rawValue(REGION_PROPERTY).orElseThrow())
+        .as("the region placeholder must carry NO default; a default would let a region-less job run"
+            + " and then address a partition nobody chose")
+        .isEqualTo("${" + REGION_VARIABLE + "}")
+        .doesNotContain(":");
+
+    List<String> remoteLocations = dev.list(CONFIG_IMPORT_PROPERTY).stream()
+        .filter(location -> location.contains(REMOTE_PARAMETER_LOCATION))
+        .toList();
+    assertThat(remoteLocations)
+        .as("a defaultless region only matters while a remote location is built from it")
+        .hasSize(1)
+        // WHY : Assumptions: the optional prefix is asserted on the REMOTE location only, and the classpath
+        //   default beside it is deliberately excluded. That entry is not optional and must not be: it
+        //   carries the shared defaults every profile inherits, so a job that could start without it would
+        //   start with those defaults absent. Asserting the prefix across the whole list would therefore
+        //   assert the opposite of what the document intends.
+        .allMatch(location -> location.startsWith(OPTIONAL_LOCATION_PREFIX));
+
+    assertThatCode(() -> ProfileConfiguration.resolveWith(RESOLUTION_TIME_VALUES, DEV))
+        .as("supplying the region is sufficient for resolution to complete")
+        .doesNotThrowAnyException();
   }
 
   /**

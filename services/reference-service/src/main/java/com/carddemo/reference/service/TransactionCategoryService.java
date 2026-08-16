@@ -201,6 +201,36 @@ public class TransactionCategoryService {
      */
     private static final int CAUSE_CHAIN_LIMIT = 8;
 
+    /**
+     * The baseline's own name for the table this service maintains, as a refusal sentence writes it.
+     *
+     * <p>Assumptions: {@code TRANSACTION_TYPE_CATEGORY} without the {@code CARDDEMO} qualifier, taken from
+     * line 1 of {@code app/app-transaction-type-db2/ddl/TRNTYCAT.ddl}, which declares the table as
+     * {@code CARDDEMO.TRANSACTION_TYPE_CATEGORY}. The unqualified form is used because that is the form
+     * the baseline writes into the one refusal sentence it composes around a table name, at line 1611 of
+     * {@code COTRTUPC.cbl}, where it writes {@code TRANSACTION_TYPE} rather than the qualified name the
+     * statement above it uses.</p>
+     *
+     * <p>Assumptions: the baseline composes NO sentence naming this table, because it has no screen that
+     * inserts a category -- the only {@code INSERT INTO} statements anywhere in that tree name
+     * {@code CARDDEMO.TRANSACTION_TYPE}. What is carried across verbatim is therefore the COMPOSITION,
+     * whose every character outside the table token comes from lines 1610 and 1611, applied to the table
+     * this insert names. The alternative was to answer a refused category insert with the sentence naming
+     * the type table, which would name the wrong table to a caller; the divergence is registered in
+     * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+     *
+     * <p>Assumptions: this is deliberately not the migrated name. The migrated table is
+     * {@code reference.transaction_categories}; putting that into a caller-facing sentence would publish
+     * the schema and table this migration created, which is the same disclosure the refusal path already
+     * withholds by ending its sentence at the baseline's colon.</p>
+     *
+     * <p>Assumptions: published rather than kept private for the reason its sibling on
+     * {@link TransactionTypeService} is: the sentence composed around it is published in
+     * {@code src/main/resources/openapi/reference-api.yaml}, so a test in another package compares
+     * against the constant instead of retyping the table name.</p>
+     */
+    public static final String BASELINE_TABLE_NAME = "TRANSACTION_TYPE_CATEGORY";
+
     /** The diagnostic channel for refusals an operator may need to correlate. */
     private static final Logger LOG = LoggerFactory.getLogger(TransactionCategoryService.class);
 
@@ -215,8 +245,8 @@ public class TransactionCategoryService {
      * the referential guard rests on throughout this class: such a read is overtaken by a concurrent
      * delete of the parent, so it can only ever be advisory, while the declared foreign key refuses
      * the orphan whether the read ran or not. The published contract routes that refusal through the
-     * integrity branch and gives it the referential sentence, so a second opinion here would add a
-     * dependency and a statement without changing any answer.</p>
+     * insert-refusal branch, which names the table the insert was aimed at, so a second opinion here
+     * would add a dependency and a statement without changing any answer.</p>
      *
      * <p>Alternatives Considered: injecting {@code TransactionCategoryMapper}. It is a final class
      * with a private constructor exposing static methods only, so there is no instance to inject; it
@@ -426,11 +456,23 @@ public class TransactionCategoryService {
      * refused even when what it submitted happens to match the store, because it read a different row
      * from the one it is now agreeing with.</p>
      *
-     * <p>Assumptions: no flush is issued on this path, unlike on the create above, because no
-     * constraint can refuse this statement. Both key halves are mapped not updatable, so the primary
-     * key and the foreign key are untouched, and the only column written carries nothing beyond a
-     * NOT NULL and a declared width the request has already enforced. A flush here would add a
-     * statement whose failure modes are all already answered by the shared handler.</p>
+     * <p>⚠️ Refactoring Rationale: the write IS flushed on this path, where it was not. The earlier
+     * form reasoned only about constraint refusals -- no constraint can refuse this statement, so no
+     * catch needs the statement to have run -- and that reasoning is sound and incomplete. The
+     * revision is maintained by the persistence provider, which increments it as part of issuing the
+     * UPDATE, so a plain save on a managed row left the increment to happen at the transaction's
+     * commit: AFTER the mapper below had already read the instance. The reply therefore carried the
+     * revision the caller had SENT while the stored row moved on, and a caller obeying the published
+     * instruction -- read the revision with a record and send it back -- was refused with the
+     * data-changed conflict on its very next write, having been handed a stale token by a success
+     * response. Flushing here issues the UPDATE, and its increment, before the instance is read.</p>
+     *
+     * <p>Assumptions: the flush is what makes the reply's revision the STORED one, and that is the
+     * only reason it is here; no catch depends on it, unlike on the create above where the flush
+     * exists so that a constraint refusal is raised inside the try. The sibling type service arrives
+     * at the same statement for its own reason and the two are deliberately alike, because a reader
+     * comparing the two replace paths must not find one of them returning a different revision from
+     * the other for one submission.</p>
      *
      * @param typeCd the two-character type half; must not be {@code null}
      * @param catCd the four-digit category half, leading zeros intact; must not be {@code null}
@@ -476,7 +518,13 @@ public class TransactionCategoryService {
         //       the revision is not written either, because the provider maintains it and it is
         //       compared above rather than assigned. That is asserted by the mapper's own test.
         TransactionCategoryMapper.applyUpdate(request, stored);
-        return TransactionCategoryMapper.toResponse(this.categories.save(stored));
+        // WHY : Refactoring Rationale: saveAndFlush and not save, for the reason argued on this
+        //       method's block above -- the provider increments the revision when it issues the
+        //       UPDATE, so a plain save on a managed row deferred that increment to commit and the
+        //       mapper below read the row before it happened. The reply then carried the caller's own
+        //       revision rather than the stored one, which breaks the read-modify-write loop the
+        //       contract instructs a client to run.
+        return TransactionCategoryMapper.toResponse(this.categories.saveAndFlush(stored));
     }
 
     /**
@@ -949,7 +997,7 @@ public class TransactionCategoryService {
      * itself through an interface that is part of the platform, so the chain is walked for that.</p>
      *
      * <p>Refactoring Rationale: the unique violation is classified apart from the foreign-key
-     * violation even though both reach the caller as the same referential sentence. The baseline does
+     * violation even though both reach the caller as the same insert-refusal sentence. The baseline does
      * not separate them: {@code 9700-INSERT-RECORD} at lines 1596 to 1623 of
      * {@code app/app-transaction-type-db2/cbl/COTRTUPC.cbl} has only a zero arm and a catch-all arm,
      * with no branch for the duplicate-key code at all, so a duplicate and any other insert failure
@@ -959,6 +1007,12 @@ public class TransactionCategoryService {
      * accident either -- it is the published behaviour, recorded against
      * {@code D-REFERENCE-INTEGRITY-SENTENCE}, so separating the types must not and does not separate
      * the wording.</p>
+     *
+     * <p>Refactoring Rationale: the sentence both outcomes now carry is the one the baseline composes in
+     * its INSERT paragraph rather than the one it composes in its DELETE paragraph. Every write reaching
+     * this classifier is an insert -- it is called from one place, the create path -- so the delete
+     * paragraph's child-records sentence was reaching callers from a statement that could not raise it.
+     * The discriminator the baseline uses is the statement, and this classifier serves exactly one.</p>
      *
      * <p>Assumptions: the diagnostic records the SQLSTATE and a type-and-frame digest, never the
      * provider's own most-specific-cause text. That text is composed by the driver and quotes the
@@ -1109,13 +1163,16 @@ public class TransactionCategoryService {
     /**
      * Reports that a category already carries the pair of codes a create supplied.
      *
-     * <p>Assumptions: the contention kind is the referential one rather than the stale-revision one,
-     * so this outcome renders the referential sentence. That is the published behaviour for a
-     * duplicate pair of codes, recorded against {@code D-REFERENCE-INTEGRITY-SENTENCE} in
-     * {@code docs/architecture/cobol-to-service-traceability.md}, and it is what the sibling type
-     * service answers a duplicate parent code with. The stale-revision kind would report a duplicate
-     * primary key as somebody else's concurrent edit, which is a different condition with a different
-     * remedy.</p>
+     * <p>Refactoring Rationale: the contention kind is the insert refusal naming
+     * {@link TransactionCategoryService#BASELINE_TABLE_NAME}, where it used to be the referential one and
+     * so rendered 'Please delete associated child records first:'. That sentence is composed in the
+     * baseline's DELETE paragraph, at line 1641 of {@code COTRTUPC.cbl}, under the SQLCODE a restricted
+     * delete raises; a create can never reach it, and its remedy is wrong for this condition -- a caller
+     * that reused a pair of codes was told to remove dependent rows, and a category has none. The
+     * baseline's insert paragraph composes its own sentence at lines 1607 to 1618, and this outcome now
+     * carries that composition applied to this table. The register entry
+     * {@code D-REFERENCE-INTEGRITY-SENTENCE} in
+     * {@code docs/architecture/cobol-to-service-traceability.md} records what changed and why.</p>
      *
      * <p>Assumptions: the same outcome is raised whether the existence reading or the primary key
      * detected the duplicate, so a caller cannot tell from the answer whether it lost a race. Two
@@ -1131,7 +1188,7 @@ public class TransactionCategoryService {
          * Creates the refusal for a pair of codes that is already present.
          */
         public DuplicateTransactionCategoryException() {
-            super(Kind.REFERENCED_ROW);
+            super(BASELINE_TABLE_NAME);
         }
     }
 
@@ -1145,11 +1202,17 @@ public class TransactionCategoryService {
      * what lets the api package say "that parent does not exist" to one caller and "delete the
      * dependents first" to the other, from one constraint.</p>
      *
-     * <p>Assumptions: the contention kind is the referential one, so this outcome renders the
-     * referential sentence and reaches the caller as a conflict. The published contract states that a
-     * category naming an absent type is refused through the same integrity branch as a restricted
-     * delete and carries the same sentence; the choice of status belongs to the api package, and this
-     * type exists so that the choice can be made without re-reading the SQLSTATE.</p>
+     * <p>Refactoring Rationale: the contention kind is the insert refusal naming
+     * {@link TransactionCategoryService#BASELINE_TABLE_NAME}, where it used to be the referential one. The
+     * two readings of this one constraint are the reason: the parent-side reading is a DELETE refused
+     * because dependents survive, and the baseline answers it with the child-records sentence composed in
+     * its delete paragraph; the child-side reading, which is this one, is an INSERT refused because the
+     * parent is absent, and the baseline's insert paragraph answers every non-zero outcome of that
+     * statement with a sentence naming the table it wrote to. Carrying the delete sentence here told a
+     * caller that mistyped a parent code to go and delete dependent rows -- the one action that cannot
+     * help, since nothing was written. Both readings are still conflicts, and the choice of status still
+     * belongs to the api package; this type exists so that the choice can be made without re-reading the
+     * SQLSTATE.</p>
      */
     public static final class UnknownParentTransactionTypeException
             extends RecordConflictException {
@@ -1161,7 +1224,7 @@ public class TransactionCategoryService {
          * Creates the refusal for a category whose named parent type is absent.
          */
         public UnknownParentTransactionTypeException() {
-            super(Kind.REFERENCED_ROW);
+            super(BASELINE_TABLE_NAME);
         }
     }
 }

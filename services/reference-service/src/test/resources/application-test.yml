@@ -187,17 +187,23 @@ spring:
 
   flyway:
     # WHY : (1) Assumptions: Flyway remains enabled because this context is the
-    #       executable check of all THREE migrations. V1__reference.sql creates
+    #       executable check of all FOUR migrations. V1__reference.sql creates
     #       the six reference tables; V2__seed_reference.sql inserts 862 rows: 7
     #       transaction types, 18 transaction categories, 51 disclosure groups,
-    #       490 phone area codes, 56 states and 240 state/zip prefixes; and
-    #       V3__reference_inquiry_reply_ledger.sql creates the one operational
-    #       table the date-inquiry exchange records its answers in, whose two
-    #       CHECK constraints and pruning index InquiryReplyLedgerIT asserts
-    #       against this engine. Narrowing the location or disabling Flyway would
-    #       make count, rate and foreign-key assertions operate on absent or
-    #       hand-created data, and would leave that ledger's statements
-    #       unexercised against a real engine. (2) Assumptions:
+    #       490 phone area codes, 56 states and 240 state/zip prefixes;
+    #       V3__reference_inquiry_reply_ledger.sql creates an operational table
+    #       for the date-inquiry exchange; and
+    #       V4__drop_reference_inquiry_reply_ledger.sql drops it again, because
+    #       this module declares no listener and so never wrote to it -- the
+    #       exchange's one consumer, and its ledger, live in account-service.
+    #       Refactoring Rationale: V3 is NOT deleted, because removing a released
+    #       migration makes an already-migrated environment refuse to start, so
+    #       the table is created and then withdrawn on every database and the
+    #       schema settles at the six reference tables. MigrationHistoryIT
+    #       asserts exactly that end state here, against this engine. Narrowing
+    #       the location or disabling Flyway would make count, rate and
+    #       foreign-key assertions operate on absent or hand-created data, and
+    #       would leave the withdrawal unverified. (2) Assumptions:
     #       exactly 17 of the disclosure rows use the CHAR(10) key
     #       'DEFAULT   '. CBACT04C retries a missed account-group lookup with
     #       that key and calls its abend paragraph if the second read also

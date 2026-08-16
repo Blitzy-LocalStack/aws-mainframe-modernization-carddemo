@@ -1,9 +1,9 @@
 //=============================================================================
 // WHY : Assumptions: this descriptor is the one place the rulings below are
 //       recorded, and the seven repository interfaces beside it cite it rather
-//       than restating them. The one CLASS beside them, InquiryReplyLedger, is
-//       governed by none of the browse rulings -- it reads by primary key only --
-//       and the exception it represents is argued in the prose below. The questions it settles are the ones each author
+//       than restating them. Every member of this package is now a derived
+//       interface; the one authored CLASS that used to sit among them is
+//       withdrawn, for the reason the prose below records. The questions it settles are the ones each author
 //       would otherwise answer alone -- whether a window is taken by key or by
 //       ordinal, which row's key a page publishes, whether a category code is
 //       character or numeric -- and seven independent answers to one question is
@@ -60,47 +60,42 @@
  * <h2>The seven repositories, the entities they read, and their identities</h2>
  *
  * <p>Assumptions: all seven are landed as compilation units beside this descriptor, so a reader who
- * cannot open one has found a gap rather than the expected state. The closed set is nine compilation
- * units: this descriptor, the seven interfaces, and the one class described immediately below. The
- * pairing further down is settled here and enumerated nowhere else, which is why it is written out in
- * full rather than left to be inferred from a file name.</p>
+ * cannot open one has found a gap rather than the expected state. The closed set is eight compilation
+ * units: this descriptor and the seven interfaces. The pairing further down is settled here and
+ * enumerated nowhere else, which is why it is written out in full rather than left to be inferred from a
+ * file name.</p>
  *
- * <p>⚠️ Refactoring Rationale: this package declares ONE CLASS, {@code InquiryReplyLedger}, and it is the
- * single documented exception to "one repository interface per table". This descriptor previously stated
- * that every type here is an {@code interface} declaration and that the closed set is eight units; both
- * sentences are withdrawn rather than stretched. The exception exists because the class's central
- * statement cannot be expressed as a Spring Data method: it must insert a row if and only if no row
- * holds that key and report which of the two happened, in ONE round trip, which is
- * {@code INSERT ... ON CONFLICT DO NOTHING} and has no JPQL form. Expressing the same intent as a read
- * followed by a conditional insert would leave the decision to the gap between two statements, which is
- * exactly where two concurrent deliveries of one message would both decide they were first. Alternatives
- * Considered: mapping {@code reference.inquiry_reply_ledger} as an eighth entity so an eighth interface
- * could be declared over it. Rejected because a mapped entity would let any member of this module read or
- * write the ledger through the persistence context -- including flushing a stale copy over a row a
- * concurrent delivery had already advanced -- where three named statements over one table offer nothing
- * else. Assumptions: the precedent does not generalise; it is admissible here because the statement is
- * not expressible otherwise, not because a class is a convenient shape. The identically shaped ledger in
- * {@code account-service} reached the same conclusion first, and it is followed rather than re-argued so
- * the two asynchronous exchanges cannot acquire two idempotency disciplines.</p>
+ * <p>⚠️ Refactoring Rationale: this package declared ONE CLASS, {@code InquiryReplyLedger}, held out as
+ * the single documented exception to "one repository interface per table" because its central statement
+ * -- insert a row if and only if no row holds that key, and report which of the two happened, in one
+ * round trip -- is {@code INSERT ... ON CONFLICT DO NOTHING} and has no JPQL form. That argument was
+ * sound about the STATEMENT and beside the point about this MODULE, and the class is now withdrawn along
+ * with the table it addressed. The reason is that nothing here could ever call it: this module declares
+ * no {@code SqsConfig} and no {@code @SqsListener}, so no delivery reaches it, and the idempotency the
+ * ledger provides is only meaningful to the component that composes a reply. That component is
+ * {@code account-service}'s {@code InquiryMessageListener}, which consumes the shared inquiry request
+ * queue, answers the date function itself, and records each composed reply in
+ * {@code account.inquiry_reply_ledger} before sending it. The guarantee is therefore intact and
+ * exercised; what is removed is a second, unreachable copy of its storage.</p>
  *
- * <p>Assumptions: what that ledger is FOR belongs to the exchange rather than to this package, and the
- * argument is recorded in full on the class and on
- * {@code services/reference-service/src/main/resources/db/migration/V3__reference_inquiry_reply_ledger.sql}.
- * In outline: the asynchronous date-conversion consumer sends its reply and then returns, and the queue
- * acknowledges the request only on that return, so a task killed between the two leaves the request
- * visible again -- and because that reply body is the system date and time read at the moment of
- * composition, a redelivery that recomposed would answer with a LATER timestamp rather than the same
- * answer. The ledger records the composed reply under the BROKER's own identifier for the delivery and
- * commits before it is sent, so a redelivery re-sends the recorded bytes instead of asking the clock
- * again. Assumptions: it holds no reference DATA, and it is the only table in this schema that does not;
- * the migration header records why it lives beside the context that owns the exchange rather than in a
- * schema of its own.</p>
+ * <p>Assumptions: the guarantee itself is NOT withdrawn and the reasoning behind it still holds, which is
+ * why it is restated here rather than deleted. The asynchronous consumer sends its reply and then
+ * returns, and the queue acknowledges the request only on that return, so a task killed between the two
+ * leaves the request visible again -- and because that reply body is the system date and time read at the
+ * moment of composition, a redelivery that recomposed would answer with a LATER timestamp rather than the
+ * same answer. A ledger that records the composed reply and commits before sending is the remedy. It
+ * belongs beside the consumer that composes the reply, and that is where it lives. Alternatives
+ * Considered: keeping this module's copy in case a listener is added here later. Rejected because a table
+ * no code path can insert into provides no guarantee at all, so keeping it would document a discipline
+ * this schema does not enforce -- and because the exchange has one consumer by design, recorded as an
+ * ownership decision in {@code docs/architecture/cobol-to-service-traceability.md}.</p>
  *
- * <p>Trade-offs: one class among seven interfaces makes the package's shape non-uniform, so a reader
- * cannot infer from the directory alone that every member is a derived interface. That cost is accepted
- * over the alternative of a second package for one type, which would put the exchange's durable state
- * outside the data-access package that every other row of this context is reached through and would need
- * its own descriptor to say the same things this one now says.</p>
+ * <p>Assumptions: the withdrawal is a FORWARD-only operation, and this is the part a reader tracing the
+ * migrations needs. {@code V3__reference_inquiry_reply_ledger.sql} still ships and still creates the
+ * table, because deleting a released migration makes every already-migrated environment refuse to start;
+ * {@code V4__drop_reference_inquiry_reply_ledger.sql} drops it afterwards. So on every database the table
+ * is created and then removed, and the {@code reference} schema settles at exactly the six reference
+ * tables this context owns.</p>
  *
  * <p>Assumptions: the mapping is one interface per table for five of the six tables. The sixth,
  * {@code reference.us_phone_area_codes}, carries TWO, and the division between them is by question:

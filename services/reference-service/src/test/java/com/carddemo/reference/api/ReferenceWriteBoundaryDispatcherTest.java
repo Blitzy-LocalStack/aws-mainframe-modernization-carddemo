@@ -62,10 +62,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.money.MoneyModule;
+import com.carddemo.common.validation.FieldValidationFlag;
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.reference.dto.MaintenanceActionBatchRequest;
 import com.carddemo.reference.dto.MaintenanceActionBatchResponse;
 import com.carddemo.reference.dto.MaintenanceActionOutcomeResponse;
+import com.carddemo.reference.dto.MaintenanceActionRequest;
 import com.carddemo.reference.dto.TransactionCategoryResponse;
 import com.carddemo.reference.dto.TransactionCategoryUpdateRequest;
 import com.carddemo.reference.service.ReferenceBatchUpdateService;
@@ -552,11 +554,11 @@ class ReferenceWriteBoundaryDispatcherTest {
                             new MaintenanceActionOutcomeResponse(1,
                                     ReferenceBatchUpdateService.ACTION_INSERT, TYPE_CD,
                                     ReferenceBatchUpdateService.OUTCOME_APPLIED, true,
-                                    ReferenceBatchUpdateService.MESSAGE_APPLIED),
+                                    ReferenceBatchUpdateService.MESSAGE_RECORD_INSERTED),
                             new MaintenanceActionOutcomeResponse(2,
                                     ReferenceBatchUpdateService.ACTION_DELETE, "02",
                                     ReferenceBatchUpdateService.OUTCOME_NO_ROWS_FOUND, false,
-                                    ReferenceBatchUpdateService.MESSAGE_NO_ROWS)),
+                                    ReferenceBatchUpdateService.MESSAGE_NO_RECORDS_FOUND)),
                             4));
 
             ReferenceWriteBoundaryDispatcherTest.this.mockMvc
@@ -573,7 +575,7 @@ class ReferenceWriteBoundaryDispatcherTest {
                     .andExpect(jsonPath("$.outcomes[1].outcome")
                             .value(ReferenceBatchUpdateService.OUTCOME_NO_ROWS_FOUND))
                     .andExpect(jsonPath("$.outcomes[1].message")
-                            .value(ReferenceBatchUpdateService.MESSAGE_NO_ROWS));
+                            .value(ReferenceBatchUpdateService.MESSAGE_NO_RECORDS_FOUND));
         }
 
         /**
@@ -595,15 +597,17 @@ class ReferenceWriteBoundaryDispatcherTest {
                             new MaintenanceActionOutcomeResponse(1,
                                     ReferenceBatchUpdateService.ACTION_INSERT, TYPE_CD,
                                     ReferenceBatchUpdateService.OUTCOME_APPLIED, true,
-                                    ReferenceBatchUpdateService.MESSAGE_APPLIED),
+                                    ReferenceBatchUpdateService.MESSAGE_RECORD_INSERTED),
                             new MaintenanceActionOutcomeResponse(2,
                                     ReferenceBatchUpdateService.ACTION_UPDATE, "02",
                                     ReferenceBatchUpdateService.OUTCOME_APPLIED, true,
-                                    ReferenceBatchUpdateService.MESSAGE_APPLIED),
+                                    ReferenceBatchUpdateService.MESSAGE_RECORD_UPDATED),
                             new MaintenanceActionOutcomeResponse(3,
                                     ReferenceBatchUpdateService.ACTION_DELETE, "03",
                                     ReferenceBatchUpdateService.OUTCOME_FAILED, false,
-                                    ReferenceBatchUpdateService.MESSAGE_ALREADY_EXISTS)),
+                                    ReferenceBatchUpdateService.MESSAGE_ERROR_ACCESSING
+                                            + ReferenceBatchUpdateService
+                                                    .MESSAGE_ERROR_ACCESSING_SUFFIX)),
                             8));
 
             ReferenceWriteBoundaryDispatcherTest.this.mockMvc
@@ -671,6 +675,137 @@ class ReferenceWriteBoundaryDispatcherTest {
                     .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION));
 
             verify(ReferenceWriteBoundaryDispatcherTest.this.maintenance, never()).apply(any(MaintenanceActionBatchRequest.class));
+        }
+
+        /**
+         * An INSERT carrying no description is refused as a request, naming that field.
+         *
+         * <p>Refactoring Rationale: this condition used to answer 200 with that action's outcome at
+         * FAILED and a sentence reading 'Description is required...', which is text no file under
+         * app/ contains -- a search for it returns nothing. The published contract already places the
+         * rule on the request: the MaintenanceAction schema declares required: [description] under an
+         * if on the action being INSERT or UPDATE, so a caller reading the document expected a 400 and
+         * received a success-shaped body. MaintenanceActionRequest now carries that rule.
+         *
+         * <p>Assumptions: the ENTRY is asserted and not only the status, because a 400 whose per-field
+         * array named the request type rather than the member would satisfy a status check and would
+         * still be an error a form cannot render beside an input. A class-level rule attributes itself
+         * to a member only if its validator says so, and that attribution is the thing under test.
+         *
+         * <p>Assumptions: the state asserted is BLANK rather than the not-acceptable one, because the
+         * rejected value is absent rather than wrong. That is the distinction the reference's templated
+         * highlight draws at lines 17 to 27 of app/cpy/CSSETATY.cpy, where a never-supplied control
+         * additionally gets an asterisk, and it is what the contract's own FieldError example publishes.
+         *
+         * <p>Refactoring Rationale: the field is asserted as the exact indexed path rather than through a
+         * suffix pattern. The looser form this replaced passed against any path ending in the member name,
+         * so it could not tell an entry that located the offending action from one that named the member
+         * alone -- and naming the member alone is useless on a batch, where the caller has to know WHICH
+         * action to correct. The path is published on the operation for that reason, and the case below
+         * submits a valid action first so the index under test is not zero.
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("an INSERT with no description is refused as a 400 naming the description")
+        void anInsertWithNoDescriptionIsRefusedAsABadRequest() throws Exception {
+            String body = "{\"actions\":[{\"action\":\""
+                    + ReferenceBatchUpdateService.ACTION_INSERT + "\",\"typeCd\":\"" + TYPE_CD
+                    + "\",\"description\":null}]}";
+
+            ReferenceWriteBoundaryDispatcherTest.this.mockMvc
+                    .perform(post(ReferenceMaintenanceController.BASE_PATH)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(body))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION))
+                    .andExpect(jsonPath("$.fieldErrors[0].field")
+                            .value("actions[0].description"))
+                    .andExpect(jsonPath("$.fieldErrors[0].state")
+                            .value(FieldValidationFlag.BLANK.name()))
+                    .andExpect(jsonPath("$.fieldErrors[0].message")
+                            .value(MaintenanceActionRequest.MESSAGE_NO_INPUT_RECEIVED));
+
+            verify(ReferenceWriteBoundaryDispatcherTest.this.maintenance, never())
+                    .apply(any(MaintenanceActionBatchRequest.class));
+        }
+
+        /**
+         * The entry locates the offending action by its own position, not by a fixed leading index.
+         *
+         * <p>Assumptions: the case above submits the faulty action first, so an implementation that
+         * emitted a constant 'actions[0]' prefix would satisfy it. This one puts a well-formed action
+         * ahead of the faulty one, so the index asserted can only be right if the path is derived from
+         * the element that actually failed. That is the whole value of the path to a caller submitting a
+         * batch: the contract permits up to 500 actions, and an entry that cannot say which one is
+         * faulty leaves the caller to find it by bisection.
+         *
+         * <p>Trade-offs: this asserts one entry for a two-action body rather than sweeping every arity.
+         * The path is produced by the container's own traversal of the collection, so a second index
+         * proves the traversal is real; a third would exercise the same mechanism again.
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("the refusal names the position of the action that failed, not a fixed index")
+        void theRefusalNamesThePositionOfTheFailingAction() throws Exception {
+            String body = "{\"actions\":[{\"action\":\""
+                    + ReferenceBatchUpdateService.ACTION_DELETE + "\",\"typeCd\":\"" + TYPE_CD + "\"},"
+                    + "{\"action\":\"" + ReferenceBatchUpdateService.ACTION_UPDATE
+                    + "\",\"typeCd\":\"02\",\"description\":null}]}";
+
+            ReferenceWriteBoundaryDispatcherTest.this.mockMvc
+                    .perform(post(ReferenceMaintenanceController.BASE_PATH)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(body))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.fieldErrors[0].field")
+                            .value("actions[1].description"))
+                    .andExpect(jsonPath("$.fieldErrors[0].message")
+                            .value(MaintenanceActionRequest.MESSAGE_NO_INPUT_RECEIVED));
+
+            verify(ReferenceWriteBoundaryDispatcherTest.this.maintenance, never())
+                    .apply(any(MaintenanceActionBatchRequest.class));
+        }
+
+        /**
+         * A DELETE carrying no description is accepted, because a delete supplies none.
+         *
+         * <p>Assumptions: this is the half of the conditional rule that a case on the refusal alone does
+         * not reach, and it is the half that would break a well-formed request if the rule were made
+         * unconditional. The baseline reuses one record layout for all three actions, so the description
+         * position is simply unused on a delete; a shape that demanded one would refuse a record the
+         * reference applies.
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("a DELETE with no description is accepted and reaches the service")
+        void aDeleteWithNoDescriptionIsAccepted() throws Exception {
+            when(ReferenceWriteBoundaryDispatcherTest.this.maintenance
+                    .apply(any(MaintenanceActionBatchRequest.class)))
+                    .thenReturn(new MaintenanceActionBatchResponse(List.of(
+                            new MaintenanceActionOutcomeResponse(1,
+                                    ReferenceBatchUpdateService.ACTION_DELETE, TYPE_CD,
+                                    ReferenceBatchUpdateService.OUTCOME_APPLIED, true,
+                                    ReferenceBatchUpdateService.MESSAGE_RECORD_DELETED)),
+                            0));
+
+            String body = "{\"actions\":[{\"action\":\""
+                    + ReferenceBatchUpdateService.ACTION_DELETE + "\",\"typeCd\":\"" + TYPE_CD
+                    + "\",\"description\":null}]}";
+
+            ReferenceWriteBoundaryDispatcherTest.this.mockMvc
+                    .perform(post(ReferenceMaintenanceController.BASE_PATH)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(body))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.returnCode").value(0))
+                    .andExpect(jsonPath("$.outcomes[0].message")
+                            .value("RECORD DELETED SUCCESSFULLY"));
+
+            verify(ReferenceWriteBoundaryDispatcherTest.this.maintenance)
+                    .apply(any(MaintenanceActionBatchRequest.class));
         }
 
         /**

@@ -1198,7 +1198,7 @@ class CardControllerTest {
     void aConditionWithNoRefreshedRowStillCarriesTheMemberAsNull(RecordConflictException.Kind raised)
             throws Exception {
         when(writes.update(anyString(), any(CardUpdateRequest.class)))
-                .thenThrow(new RecordConflictException(raised));
+                .thenThrow(refusalOf(raised));
 
         MvcResult answered = mockMvc.perform(put(CardController.CARD_PATH, selectorFor(1))
                         .contentType(MediaType.APPLICATION_JSON)
@@ -1212,6 +1212,32 @@ class CardControllerTest {
         assertThat(answered.getResponse().getContentAsString())
                 .contains("\"card\":null")
                 .doesNotContain(CardNumberMasker.mask(cardNumber(1)));
+    }
+
+    /**
+     * Builds a bare refusal of a given condition, whatever components that condition requires.
+     *
+     * <p>Refactoring Rationale: the cases that sweep the whole enumeration used to construct the refusal
+     * with {@code new RecordConflictException(kind)} directly, and that stopped working when
+     * {@link RecordConflictException.Kind#INSERT_REFUSED} joined the set: that condition's sentence is
+     * composed around the table whose insert was refused, so the shared type refuses to construct it
+     * without one and the sweep failed with an {@code IllegalArgumentException} rather than a conflict.
+     * Selecting the construction here keeps the sweep exhaustive by the compiler's own reckoning, which is
+     * the property those cases exist for -- a condition added to the shared type is covered from the day it
+     * is added, and the one place that has to learn how to build it is this method.</p>
+     *
+     * <p>Assumptions: the table named for the insert refusal is a stand-in used by THIS suite only. No card
+     * path can raise that condition -- this context has one table, one system-assigned key and no
+     * dependents -- so the value exercises the rendering rather than reproducing a card outcome, and the
+     * name is deliberately one no schema declares so it cannot be mistaken for a real one.</p>
+     *
+     * @param kind the condition to build a refusal for; must not be {@code null}
+     * @return a refusal of that condition carrying no refreshed card; never {@code null}
+     */
+    private static RecordConflictException refusalOf(RecordConflictException.Kind kind) {
+        return kind == RecordConflictException.Kind.INSERT_REFUSED
+                ? RecordConflictException.insertRefusedBy("CARD_TABLE_NOT_REACHED_BY_THIS_CONTEXT")
+                : new RecordConflictException(kind);
     }
 
     /**
@@ -1256,7 +1282,7 @@ class CardControllerTest {
     void eachConflictConditionKeepsItsOwnSentence(RecordConflictException.Kind raised,
             String expected) throws Exception {
         when(writes.update(anyString(), any(CardUpdateRequest.class)))
-                .thenThrow(new RecordConflictException(raised));
+                .thenThrow(refusalOf(raised));
 
         mockMvc.perform(put(CardController.CARD_PATH, selectorFor(1))
                         .contentType(MediaType.APPLICATION_JSON)
@@ -1504,7 +1530,7 @@ class CardControllerTest {
     void eachConflictConditionPublishesItsOwnSubordinateCode(RecordConflictException.Kind raised,
             String expectedCode) throws Exception {
         when(writes.update(anyString(), any(CardUpdateRequest.class)))
-                .thenThrow(new RecordConflictException(raised));
+                .thenThrow(refusalOf(raised));
 
         mockMvc.perform(put(CardController.CARD_PATH, selectorFor(1))
                         .contentType(MediaType.APPLICATION_JSON)
@@ -1632,20 +1658,36 @@ class CardControllerTest {
     /**
      * Supplies each contention condition with the subordinate code this contract publishes for it.
      *
-     * <p>Assumptions: all FOUR constants of the shared enumeration appear, not only the two this context
-     * can raise, so a condition whose code was added to the document later is covered by the case from the
-     * day the switch gains an arm rather than from the day someone remembers to widen a list.</p>
+     * <p>Assumptions: EVERY constant of the shared enumeration appears, not only the two this context can
+     * raise, so a condition whose code was added to the document later is covered by the case from the day
+     * the switch gains an arm rather than from the day someone remembers to widen a list. Refactoring
+     * Rationale: this note said "all FOUR", which went stale when
+     * {@link RecordConflictException.Kind#INSERT_REFUSED} joined the set; the count is dropped rather than
+     * corrected, because the completeness is what the note is for and the number goes stale on every
+     * addition. The completeness itself is asserted below rather than left to the prose.</p>
      *
      * @return one argument pair per condition; never {@code null}
+     * @throws AssertionError if the pairs do not cover the shared enumeration exactly, which would mean a
+     *     condition was added without this contract deciding what code it publishes
      */
     private static Stream<Arguments> conflictSubordinateCodes() {
-        return Stream.of(
+        List<Arguments> pairs = List.of(
                 Arguments.of(RecordConflictException.Kind.STALE_VERSION,
                         CardController.CONFLICT_CODE_DATA_CHANGED),
                 Arguments.of(RecordConflictException.Kind.LOCK_UNAVAILABLE,
                         CardController.CONFLICT_CODE_LOCK_NOT_ACQUIRED),
                 Arguments.of(RecordConflictException.Kind.REFERENCED_ROW, ApiError.NO_SECONDARY_CODE),
-                Arguments.of(RecordConflictException.Kind.DUPLICATE_KEY, ApiError.NO_SECONDARY_CODE));
+                Arguments.of(RecordConflictException.Kind.DUPLICATE_KEY, ApiError.NO_SECONDARY_CODE),
+                Arguments.of(RecordConflictException.Kind.INSERT_REFUSED, ApiError.NO_SECONDARY_CODE));
+
+        // WHY : Assumptions: the completeness the paragraph above claims is CHECKED here rather than
+        //       asserted in prose. Nothing else in this class would notice a condition added to the shared
+        //       enumeration and left out of this list -- the parameterised case would simply run one fewer
+        //       time and still pass -- so the claim would quietly become false.
+        assertThat(pairs.stream().map(pair -> pair.get()[0]))
+                .as("every condition the shared type declares must have a published subordinate code here")
+                .containsExactlyInAnyOrder((Object[]) RecordConflictException.Kind.values());
+        return pairs.stream();
     }
 
     /**

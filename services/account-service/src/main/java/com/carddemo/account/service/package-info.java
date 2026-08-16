@@ -42,7 +42,7 @@
  * directory mechanically rather than by review:
  *
  * <pre>
- * this directory: 8 java files = 7 classes + 1 charter
+ * this directory: 9 java files = 8 classes + 1 charter
  * </pre>
  *
  * <p>Refactoring Rationale: that marker line is not decoration. This roster
@@ -84,6 +84,19 @@
  *       baseline the lookup lists are a copybook compiled INTO the program, so
  *       the adapter exists because the target moved that data behind a service
  *       boundary and something has to cross it.</li>
+ *   <li>{@code InquiryListenerHealth} reports whether the inquiry consumer above
+ *       is actually consuming, as a health contribution. It carries no reference
+ *       source in the sense the entries above do, and it does carry that program's
+ *       DISCIPLINE: {@code app/app-vsam-mq/cbl/COACCT01.cbl} opens all three of its
+ *       queues before it takes a single message -- at lines 227, 261 and 318 -- and
+ *       performs {@code 8000-TERMINATION} if any open fails, at lines 250, 284 and
+ *       319, so a consumer that cannot reach its queues ends rather than lingering.
+ *       A container-hosted consumer cannot end itself, so the same intent is
+ *       expressed through the signal its platform acts on. Assumptions: it is a
+ *       separate class rather than an interface on the listener because the state it
+ *       reports belongs to the listener's CONTAINER, which the listener does not own
+ *       and does not reach; this class resolves it from the container registry by the
+ *       identifier the listener's own annotation declares.</li>
  *   <li>{@code AccountRevision} renders the optimistic concurrency token both
  *       published routes carry, from the before-image comparison
  *       {@code app/cbl/COACTUPC.cbl} declares at line 669 and tests at lines 521

@@ -1,6 +1,8 @@
 package com.carddemo.common.error;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
 
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
@@ -8,10 +10,12 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.carddemo.common.control.OnlineWritesDisabledException;
 import com.carddemo.common.observability.ThrowableDigest;
+import com.carddemo.common.validation.FieldValidationFlag;
 import com.carddemo.common.web.CorrelationIdFilter;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.NoSuchElementException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -362,6 +366,193 @@ class GlobalExceptionHandlerTest {
     }
 
     /**
+     * Confirms a refusal CARRYING per-field entries renders each field's own state and own sentence.
+     *
+     * <p>Refactoring Rationale: this is the property whose absence made an accumulating edit driver
+     * unusable. The handler could previously be given only field NAMES plus one state and one sentence, so
+     * it wrote that single sentence against every name -- a client with a too-long first name, a blank last
+     * name and a bad city was told the same thing three times and corrected the wrong control. The three
+     * sentences and the two distinct states below are all different on purpose, because a rendering that
+     * kept only the first would still pass a test in which they agreed.</p>
+     */
+    @Test
+    @DisplayName("a refusal carrying entries renders each field's own state and own sentence")
+    void carriedFieldEntriesAreRenderedIndividually() {
+        ResponseEntity<ApiError> response = this.handler.onRejectedCallerInput(
+                ClientInputException.ofFieldErrors(ApiError.CODE_VALIDATION, List.of(
+                        new ApiError.FieldError("firstName", FieldValidationFlag.NOT_OK,
+                                "First Name must not be longer than 25 characters."),
+                        new ApiError.FieldError("lastName", FieldValidationFlag.BLANK,
+                                "Last Name must be supplied."),
+                        new ApiError.FieldError("stateCode", FieldValidationFlag.NOT_OK,
+                                "State: is not a valid state code")),
+                        "First Name must not be longer than 25 characters."),
+                requestFor(CARD_PATH));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().severity()).isEqualTo(ApiError.Severity.WARNING);
+        assertThat(response.getBody().abend()).isNull();
+        assertThat(response.getBody().message())
+                .as("the aggregate is the refusal's own latched sentence")
+                .isEqualTo("First Name must not be longer than 25 characters.");
+        assertThat(response.getBody().fieldErrors()).hasSize(3);
+        assertThat(response.getBody().fieldErrors())
+                .as("each entry keeps the field, the state and the sentence its own edit produced")
+                .extracting(ApiError.FieldError::field, ApiError.FieldError::state,
+                        ApiError.FieldError::message)
+                .containsExactly(
+                        tuple("firstName", FieldValidationFlag.NOT_OK,
+                                "First Name must not be longer than 25 characters."),
+                        tuple("lastName", FieldValidationFlag.BLANK,
+                                "Last Name must be supplied."),
+                        tuple("stateCode", FieldValidationFlag.NOT_OK,
+                                "State: is not a valid state code"));
+    }
+
+    /**
+     * Confirms a LABELLED reference sentence reaches the client, colon and all.
+     *
+     * <p>Refactoring Rationale: this is the second half of the same defect and it is easy to miss, because
+     * the entries could be rendered individually and still all read "Please correct the highlighted
+     * fields". The older gate admits only letters, digits, spaces, commas, full stops and question marks --
+     * no colon -- and the reference composes almost every field message as a label, a colon and a clause,
+     * at {@code app/cbl/COACTUPC.cbl} line 1592 for the label and lines 2502 and 2503 for one clause. So
+     * every sentence the migration exists to carry across verbatim was the sentence that gate discarded.</p>
+     */
+    @Test
+    @DisplayName("a labelled reference sentence carrying a colon is rendered rather than replaced")
+    void carriedLabelledSentenceSurvivesTheGate() {
+        String labelled = "Phone Number 1: Not valid North America general purpose area code";
+
+        ResponseEntity<ApiError> response = this.handler.onRejectedCallerInput(
+                ClientInputException.ofFieldErrors(ApiError.CODE_VALIDATION,
+                        List.of(new ApiError.FieldError("phone1.areaCode",
+                                FieldValidationFlag.NOT_OK, labelled)), labelled),
+                requestFor(CARD_PATH));
+
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().message()).isEqualTo(labelled);
+        assertThat(response.getBody().fieldErrors().get(0).message()).isEqualTo(labelled);
+    }
+
+    /**
+     * Confirms a carried sentence that could disclose a value is still replaced, per entry.
+     *
+     * <p>Assumptions: relaxing the punctuation the gate admits must not relax what it protects. Two
+     * properties are kept and both are asserted: a sentence wider than the reference's own
+     * seventy-five-character message line is not published, and one carrying a digit run long enough to be
+     * an identifier is not published either. The third entry is well-formed, so the test also proves the
+     * replacement is PER ENTRY rather than applied to the whole array.</p>
+     */
+    @Test
+    @DisplayName("an over-long or identifier-bearing carried sentence is replaced, entry by entry")
+    void carriedSentencesThatCouldDiscloseAreReplaced() {
+        String overLong = "the supplied value of firstName occupies 26 characters but the reference "
+                + "field declares 25; truncating it would store a value the submission does not carry";
+        String withIdentifier = "Card Number 4111111111111111 is not valid";
+
+        ResponseEntity<ApiError> response = this.handler.onRejectedCallerInput(
+                ClientInputException.ofFieldErrors(ApiError.CODE_VALIDATION, List.of(
+                        new ApiError.FieldError("firstName", FieldValidationFlag.NOT_OK, overLong),
+                        new ApiError.FieldError("cardNumber", FieldValidationFlag.NOT_OK,
+                                withIdentifier),
+                        new ApiError.FieldError("city", FieldValidationFlag.NOT_OK,
+                                "City can have alphabets only.")),
+                        overLong),
+                requestFor(CARD_PATH));
+
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().message())
+                .isEqualTo(GlobalExceptionHandler.MESSAGE_VALIDATION_FAILED);
+        assertThat(response.getBody().fieldErrors())
+                .extracting(ApiError.FieldError::message)
+                .containsExactly(GlobalExceptionHandler.MESSAGE_VALIDATION_FAILED,
+                        GlobalExceptionHandler.MESSAGE_VALIDATION_FAILED,
+                        "City can have alphabets only.");
+        assertThat(response.getBody().fieldErrors().get(1).message())
+                .as("no part of a long digit run may reach a response body")
+                .doesNotContain("4111111111111111");
+    }
+
+    /**
+     * Confirms a refusal built through a CONSTRUCTOR renders exactly as it did before entries existed.
+     *
+     * <p>Assumptions: this is the regression guard for the other seven services, none of which was edited.
+     * Every raise site outside the account context's edit driver builds its refusal through a constructor,
+     * so those refusals must keep taking the older branch: one aggregate sentence, the older gate, and the
+     * same sentence written against each named field.</p>
+     */
+    @Test
+    @DisplayName("a refusal built through a constructor keeps the single-sentence rendering")
+    void constructorBuiltRefusalKeepsTheOlderRendering() {
+        ClientInputException failure = new ClientInputException(ApiError.CODE_VALIDATION,
+                List.of("authDate", "authTime"), FieldValidationFlag.NOT_OK,
+                "the body and the selector disagree");
+
+        assertThat(failure.fieldErrors()).as("a constructor carries no entries").isEmpty();
+
+        ResponseEntity<ApiError> response =
+                this.handler.onRejectedCallerInput(failure, requestFor(CARD_PATH));
+
+        assertThat(response.getBody()).isNotNull();
+        assertThat(response.getBody().fieldErrors())
+                .as("the older branch writes ONE aggregate against every name, as it always did")
+                .extracting(ApiError.FieldError::field, ApiError.FieldError::state,
+                        ApiError.FieldError::message)
+                .containsExactly(
+                        tuple("authDate", FieldValidationFlag.NOT_OK,
+                                "the body and the selector disagree"),
+                        tuple("authTime", FieldValidationFlag.NOT_OK,
+                                "the body and the selector disagree"));
+
+        // WHY : Assumptions: the older GATE is asserted alongside the older rendering, because the two
+        //       together are what "unchanged" means for the seven services that were not edited. A
+        //       colon-carrying sentence raised through a constructor must still be replaced -- widening
+        //       what those raise sites may render was the alternative considered and rejected on
+        //       catalogueMessageOrNull, and this is what would catch it having happened anyway.
+        ResponseEntity<ApiError> labelled = this.handler.onRejectedCallerInput(
+                new ClientInputException(ApiError.CODE_VALIDATION, "stateCode",
+                        "State: is not a valid state code"),
+                requestFor(CARD_PATH));
+
+        assertThat(labelled.getBody()).isNotNull();
+        assertThat(labelled.getBody().fieldErrors().get(0).message())
+                .isEqualTo(GlobalExceptionHandler.MESSAGE_VALIDATION_FAILED);
+    }
+
+    /**
+     * Confirms the entry-carrying factory derives the older components and refuses an empty list.
+     *
+     * <p>Assumptions: the derived components matter because {@code fields()}, {@code field()} and
+     * {@code state()} are read by code that does not know which shape it holds -- the handler's log line
+     * among them -- so a refusal built from entries has to answer them sensibly. The duplicate field name
+     * is deliberate: the entries keep it, because two entries against one control is a defect at the raise
+     * site rather than something to hide, while the derived name list collapses it, because a caller
+     * reading that list positions a form on it once.</p>
+     */
+    @Test
+    @DisplayName("the entry-carrying factory derives the older components and refuses an empty list")
+    void entryCarryingFactoryDerivesTheOlderComponents() {
+        ClientInputException failure = ClientInputException.ofFieldErrors(ApiError.CODE_VALIDATION,
+                List.of(new ApiError.FieldError("stateCode", FieldValidationFlag.BLANK, "a"),
+                        new ApiError.FieldError("zipCode", FieldValidationFlag.NOT_OK, "b"),
+                        new ApiError.FieldError("stateCode", FieldValidationFlag.NOT_OK, "c")),
+                "a");
+
+        assertThat(failure.fields()).containsExactly("stateCode", "zipCode");
+        assertThat(failure.field()).isEqualTo("stateCode");
+        assertThat(failure.state()).isEqualTo(FieldValidationFlag.BLANK);
+        assertThat(failure.fieldErrors()).hasSize(3);
+
+        assertThatThrownBy(() -> ClientInputException.ofFieldErrors(ApiError.CODE_VALIDATION,
+                List.of(), "nothing named"))
+                .as("a raise site that meant to name fields must not ship a refusal naming none")
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must not be empty");
+    }
+
+    /**
      * Confirms a refusal that names no field is still keyed by the request as a whole.
      *
      * <p>Assumptions: this is the fallback branch of the same handler and it has to keep working, because
@@ -607,10 +798,16 @@ class GlobalExceptionHandlerTest {
     @Test
     @DisplayName("the two contention sentences are the baseline literals")
     void contentionSentencesAreBaselineLiterals() {
+        // WHY : Assumptions: the WIDTH is pinned alongside the characters, because the Javadoc on each
+        //       constant states a measured length and nothing checked it -- one of the two said 44 where
+        //       the literal is 45. A measured claim no test reads is a comment that can be wrong, and this
+        //       is the cheapest place to make it read.
         assertThat(GlobalExceptionHandler.MESSAGE_LOCK_UNAVAILABLE)
-                .isEqualTo("Could not lock record for update");
+                .isEqualTo("Could not lock record for update")
+                .hasSize(32);
         assertThat(GlobalExceptionHandler.MESSAGE_REFERENCED_ROW)
-                .isEqualTo("Please delete associated child records first:");
+                .isEqualTo("Please delete associated child records first:")
+                .hasSize(45);
 
         // WHY : Assumptions: the emitted BODY is asserted as well as the constant, because a contract
         //       reader is promised the sentence a 409 carries and not the value of a field. A future
@@ -628,6 +825,103 @@ class GlobalExceptionHandlerTest {
         assertThat(referential.getBody().message())
                 .isEqualTo("Please delete associated child records first:");
         assertThat(locked.getBody().message()).isEqualTo("Could not lock record for update");
+    }
+
+    /**
+     * Confirms the insert refusal composes the baseline's two literals around the table it names.
+     *
+     * <p>Refactoring Rationale: this condition had no sentence of its own, and every insert refusal
+     * reached a caller carrying {@link GlobalExceptionHandler#MESSAGE_REFERENCED_ROW}. That sentence is
+     * composed in the baseline's DELETE paragraph, at line 1641 of
+     * app/app-transaction-type-db2/cbl/COTRTUPC.cbl, under the code only a restricted delete raises -- so
+     * it told a caller whose insert wrote nothing to go and delete dependent rows. The insert paragraph of
+     * the same program composes its own sentence at lines 1610 and 1611, and that is what this arm now
+     * emits.</p>
+     *
+     * <p>Assumptions: the emitted BODY is asserted as well as the two halves, for the reason the case above
+     * gives -- a contract reader is promised the sentence a 409 carries, not the value of a field. The
+     * composition is additionally asserted for a SECOND table, because a renderer that ignored the table it
+     * was given and emitted one hardcoded name would satisfy a single-table assertion while naming the
+     * wrong table for every other caller.</p>
+     *
+     * <p>Assumptions: the expected characters are written out in full rather than read from the baseline at
+     * run time, for the reason the case above gives. The citations are lines 1610 and 1611 of
+     * app/app-transaction-type-db2/cbl/COTRTUPC.cbl, whose second literal is
+     * ' TRANSACTION_TYPE Table. SQLCODE:' -- a leading space, the table, and the trailing text this
+     * constant holds.</p>
+     */
+    @Test
+    @DisplayName("the insert refusal is the baseline's composition around the table it names")
+    void insertRefusalIsTheBaselineComposition() {
+        assertThat(GlobalExceptionHandler.MESSAGE_INSERT_REFUSED_PREFIX)
+                .isEqualTo("Error inserting record into:")
+                .hasSize(28);
+        assertThat(GlobalExceptionHandler.MESSAGE_INSERT_REFUSED_SUFFIX)
+                .isEqualTo(" Table. SQLCODE:")
+                .hasSize(16);
+        assertThat(GlobalExceptionHandler.insertRefusalMessage("TRANSACTION_TYPE"))
+                .isEqualTo("Error inserting record into: TRANSACTION_TYPE Table. SQLCODE:")
+                .hasSize(61);
+
+        ResponseEntity<ApiError> refused = this.handler.onRecordConflict(
+                RecordConflictException.insertRefusedBy("TRANSACTION_TYPE"), requestFor(CARD_PATH));
+        ResponseEntity<ApiError> refusedElsewhere = this.handler.onRecordConflict(
+                RecordConflictException.insertRefusedBy("TRANSACTION_TYPE_CATEGORY"),
+                requestFor(CARD_PATH));
+
+        assertThat(refused.getStatusCode().value()).isEqualTo(409);
+        assertThat(refused.getBody()).isNotNull();
+        assertThat(refused.getBody().message())
+                .isEqualTo("Error inserting record into: TRANSACTION_TYPE Table. SQLCODE:")
+                .isNotEqualTo(GlobalExceptionHandler.MESSAGE_REFERENCED_ROW);
+        assertThat(refused.getBody().subsystem()).isEqualTo(ApiError.Subsystem.RELATIONAL);
+        // WHY : Assumptions: the array is asserted EMPTY because an insert that was refused wrote nothing,
+        //       so there is no revision for a caller to compare against and the published contracts say
+        //       only the concurrency condition carries a version entry.
+        assertThat(refused.getBody().fieldErrors()).isEmpty();
+
+        assertThat(refusedElsewhere.getBody()).isNotNull();
+        assertThat(refusedElsewhere.getBody().message())
+                .isEqualTo(
+                        "Error inserting record into: TRANSACTION_TYPE_CATEGORY Table. SQLCODE:")
+                .hasSizeLessThanOrEqualTo(ApiError.MESSAGE_RENDERING_WIDTH);
+    }
+
+    /**
+     * Confirms the insert refusal cannot be constructed without the table its sentence needs.
+     *
+     * <p>Assumptions: the invariant is enforced at the raise site rather than defended in the renderer.
+     * The composition puts the table between two literals, so a refusal reaching the renderer without one
+     * would print the word 'null' inside a sentence a user reads; refusing to construct it means the
+     * mistake is a fault at the one line that made it. Both public constructors are exercised, because
+     * either could otherwise admit the kind.</p>
+     *
+     * <p>Assumptions: the blank table is refused as well as the null one, because a blank name composes a
+     * grammatical sentence naming nothing -- which is worse than a loud failure, since it would ship.</p>
+     */
+    @Test
+    @DisplayName("the insert refusal cannot be raised without naming a table")
+    void insertRefusalRequiresATable() {
+        assertThatThrownBy(() -> new RecordConflictException(
+                RecordConflictException.Kind.INSERT_REFUSED))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("insertRefusedBy");
+        assertThatThrownBy(() -> new RecordConflictException(
+                RecordConflictException.Kind.INSERT_REFUSED, 4L))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("insertRefusedBy");
+        assertThatThrownBy(() -> RecordConflictException.insertRefusedBy(null))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> RecordConflictException.insertRefusedBy("   "))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        assertThat(RecordConflictException.insertRefusedBy("TRANSACTION_TYPE").targetTable())
+                .isEqualTo("TRANSACTION_TYPE");
+        // WHY : Assumptions: the other kinds are asserted to carry NO table, so the accessor is a
+        //       discriminator rather than a field that happens to be set. A renderer selecting on the
+        //       table instead of on the kind would still work if every kind carried one.
+        assertThat(new RecordConflictException(RecordConflictException.Kind.REFERENCED_ROW)
+                .targetTable()).isNull();
     }
 
     /**

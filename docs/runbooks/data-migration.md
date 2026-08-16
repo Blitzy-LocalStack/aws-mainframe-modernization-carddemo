@@ -269,6 +269,66 @@ psql -v ON_ERROR_STOP=1 -c "SELECT att.attname, coalesce(coll.collname,'default'
 # Expect: card_num | default   and   transaction_id | C
 ```
 
+### An applied migration whose file has changed: `flyway repair`
+
+A service refuses to start with
+`FlywayValidateException: Migration checksum mismatch for migration version <n>` when
+the bytes of a migration it already applied are not the bytes it resolves now. Flyway
+checksums the **whole file**, so this happens for a change to comment text alone —
+which is how it happened here: `services/reference-service/.../V1__reference.sql` was
+rewritten for comment style after it had been applied, with byte-identical executable
+SQL, and every database holding the earlier bytes then refused startup while the
+schema itself was entirely correct.
+
+The standing rule is therefore that **an applied migration file is immutable** and a
+further change goes into a new migration; each service's test tree pins the checksum
+of every script it ships so that an edit fails a build rather than a deployment.
+`repair` is the remedy for the environments that already hold superseded bytes, and it
+has one precondition that must be checked first, because `repair` realigns the stored
+checksum **without re-running anything**:
+
+```bash
+# WHAT: prove the executable SQL is unchanged between the applied revision and the
+#       resolved one BEFORE realigning any checksum.
+# WHY : Assumptions: repair rewrites flyway_schema_history to accept the current file
+#       and applies no statement, so if the SQL did change, repair records a schema the
+#       database does not have and every later migration builds on a false premise.
+#       Comments are stripped from both sides because a comment-only difference is the
+#       one case repair is the right answer to; a non-empty diff here means the change
+#       belongs in a NEW migration instead.
+git show "<applied-revision>:<path-to-migration>" | grep -vE '^\s*--' | grep -v '^$' > /tmp/applied.sql
+grep -vE '^\s*--' "<path-to-migration>" | grep -v '^$' > /tmp/resolved.sql
+diff /tmp/applied.sql /tmp/resolved.sql && echo "SQL identical - repair is safe"
+```
+
+```bash
+# WHAT: realign the stored checksums for one context's history, as that context's
+#       migrator principal, then start the service so it validates and proceeds.
+# WHY : Assumptions: the migrator credential is used and not the runtime one -- the
+#       runtime role holds no privilege on flyway_schema_history at all, which is
+#       deliberate and is why repair is an operator step rather than something the
+#       service can do for itself at startup. Trade-offs: an automatic
+#       repair-before-migrate in the service would remove this step and is NOT adopted:
+#       it would accept a genuine SQL change as silently as a comment change, and the
+#       diff above is the only thing that tells the two apart.
+export PGSSLMODE=verify-full
+export PGSSLROOTCERT=/opt/carddemo-pg-certs/ca.pem
+flyway -url="jdbc:postgresql://${PGHOST}:${PGPORT}/${PGDATABASE}" \
+       -user="carddemo_<context>_migrator" -password="${MIGRATOR_PASSWORD}" \
+       -schemas=<context> -defaultSchema=<context> \
+       -locations="filesystem:services/<context>-service/src/main/resources/db/migration" \
+       repair
+```
+
+```bash
+# WHAT: confirm the realignment from the history table, not from the absence of an
+#       error, then start the service.
+# WHY : Assumptions: the stored checksum is what startup compares, so it is the value
+#       to read back; a successful repair run says nothing about which rows it touched.
+psql -v ON_ERROR_STOP=1 -c "SELECT version, script, checksum, success
+  FROM <context>.flyway_schema_history ORDER BY installed_rank;"
+```
+
 `V3` is what makes the two whole-schema verification queries below runnable by the
 least-privilege read-only role. It publishes the row counts and the money totals as
 aggregate-only views owned by the schema owners, and grants `SELECT` on those views

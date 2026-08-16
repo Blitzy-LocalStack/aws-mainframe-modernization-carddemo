@@ -363,4 +363,65 @@ class InternalServiceTokenTest {
                 .isEqualTo(minter.mint(InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
                         InternalServiceToken.SCOPE_CARD_XREF_READ));
     }
+
+    /**
+     * Verifies the shared lifetime rule admits exactly what the minting constructor would issue.
+     *
+     * <p>⚠️ Purpose: this rule is the VERIFYING half of a bound that used to exist only on the minting side.
+     * A bound applied solely by the party that chooses to honour it is not a bound: a token declaring thirty
+     * minutes, signed with a real key and naming a real caller, was accepted for as long as it declared. The
+     * agreement asserted here is what makes the two halves one rule -- a lifetime the constructor accepts is
+     * a lifetime this rule admits, and a lifetime the constructor refuses is one this rule refuses.</p>
+     *
+     * <p>Assumptions: the boundary is asserted from BOTH sides at exactly the bound, because an off-by-one in
+     * either direction is the failure mode a single-sided assertion cannot see: admitting one second past the
+     * bound weakens it silently, and refusing a token exactly at it would refuse every token the minter
+     * issues at its own maximum.</p>
+     */
+    @Test
+    @DisplayName("the lifetime rule admits at the bound and refuses one second past it")
+    void theLifetimeRuleHoldsTheSameBoundAsTheConstructor() {
+        assertThat(InternalServiceToken.isWithinMaximumLifetime(
+                NOW, NOW.plus(InternalServiceToken.MAX_LIFETIME)))
+                .as("a token declaring exactly the bound is one the minter itself would issue")
+                .isTrue();
+        assertThat(InternalServiceToken.isWithinMaximumLifetime(
+                NOW, NOW.plus(InternalServiceToken.MAX_LIFETIME).plusSeconds(1)))
+                .as("one second past the bound is refused, as the constructor refuses it")
+                .isFalse();
+        assertThat(InternalServiceToken.isWithinMaximumLifetime(NOW, NOW.plus(Duration.ofMinutes(30))))
+                .as("the thirty-minute credential the verifier used to accept")
+                .isFalse();
+        assertThat(InternalServiceToken.isWithinMaximumLifetime(NOW, NOW.plus(Duration.ofMinutes(1))))
+                .as("an ordinary one-minute token")
+                .isTrue();
+    }
+
+    /**
+     * Verifies an absent claim, and a self-contradictory pair, are refused rather than passed over.
+     *
+     * <p>⚠️ Assumptions: each of these three is a BYPASS if it is admitted, which is why they are asserted
+     * separately from the bound itself. A token with no issue time declares no lifetime to bound, so a minter
+     * wanting an unbounded credential would need only to omit the claim. A token with no expiry is refused by
+     * nothing else at all -- the framework's timestamp validator checks an expiry only when one is present.
+     * And an expiry BEFORE the issue time yields a negative duration, which is at most the bound by any
+     * comparison, so without an explicit clause it would satisfy the rule while being internally
+     * contradictory.</p>
+     */
+    @Test
+    @DisplayName("an absent issue time, an absent expiry and a backwards pair are all refused")
+    void theLifetimeRuleRefusesAnythingItCannotBound() {
+        assertThat(InternalServiceToken.isWithinMaximumLifetime(null, NOW.plusSeconds(60)))
+                .as("no issue time means no declared lifetime to bound")
+                .isFalse();
+        assertThat(InternalServiceToken.isWithinMaximumLifetime(NOW, null))
+                .as("no expiry is otherwise refused by nothing")
+                .isFalse();
+        assertThat(InternalServiceToken.isWithinMaximumLifetime(null, null))
+                .as("neither claim present")
+                .isFalse();
+        assertThat(InternalServiceToken.isWithinMaximumLifetime(NOW, NOW.minusSeconds(1)))
+                .as("an expiry before the issue time is contradictory, not merely late")
+                .isFalse();
+    }
 }

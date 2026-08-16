@@ -1331,9 +1331,13 @@ class TransactionCategoryServiceTest {
      *
      * <p>Assumptions: one declared constraint bites in two directions that mean opposite things to a
      * caller. Deleting a type that categories still reference is the parent's refusal; inserting a
-     * category under a type that does not exist is this one. Both arrive as the same SQLSTATE, so a merged
-     * outcome would tell a caller who mistyped a parent code to go and delete dependent rows that do not
-     * exist.
+     * category under a type that does not exist is this one. Both arrive as the same SQLSTATE, and the
+     * baseline tells them apart by the PARAGRAPH each is refused in rather than by the state -- the
+     * child-records sentence at line 1641 belongs to the delete, and the table-naming sentence at lines
+     * 1607 to 1618 belongs to the insert. Classifying on the state alone therefore had to answer both with
+     * one of the two, and it answered with the delete's sentence, telling a caller who mistyped a parent
+     * code to go and delete dependent rows that do not exist. These cases keep the types apart at the
+     * source; the sentence each carries is decided by which statement was refused.
      */
     @Nested
     @DisplayName("on the typed integrity classification")
@@ -1382,12 +1386,21 @@ class TransactionCategoryServiceTest {
         /**
          * The two outcomes are distinct types although they deliberately carry the same contention kind.
          *
-         * <p>Assumptions: separating the TYPES must not separate the WORDING. Both conditions reach the
-         * caller through the same integrity branch with the same referential sentence, which is the
-         * published behaviour; the distinct types exist so that the api package can choose without
-         * re-reading the SQLSTATE itself. A case asserting only that the types differ would permit a
-         * change that also split the sentence, and a case asserting only the shared kind would permit the
-         * merge this classification exists to prevent.
+         * <p>Assumptions: separating the TYPES must not separate the WORDING. Both conditions refuse the
+         * same INSERT, and the baseline's insert paragraph answers every non-zero outcome of a statement
+         * with one sentence naming the table it wrote to -- {@code 9700-INSERT-RECORD} at lines 1607 to
+         * 1618 of {@code COTRTUPC.cbl} -- so one sentence serves both here too. The distinct types exist
+         * so that the api package can choose without re-reading the SQLSTATE itself. A case asserting only
+         * that the types differ would permit a change that also split the sentence, and a case asserting
+         * only the shared kind would permit the merge this classification exists to prevent.
+         *
+         * <p>Refactoring Rationale: the kind asserted is the insert refusal, where this case asserted the
+         * referential one. That sentence, 'Please delete associated child records first:', is composed in
+         * the baseline's DELETE paragraph at line 1641 and cannot be reached by an insert; carrying it here
+         * told a caller that reused a pair of codes, or named a parent that does not exist, to remove
+         * dependent rows -- the one action that cannot help, because nothing was written. The table is
+         * asserted alongside the kind, because the sentence is composed around it and a refusal naming the
+         * sibling table would satisfy a kind-only assertion.
          *
          * <p>It takes no parameter and returns no value.
          */
@@ -1407,9 +1420,13 @@ class TransactionCategoryServiceTest {
                     .isNotInstanceOf(
                             TransactionCategoryService.DuplicateTransactionCategoryException.class);
             assertThat(duplicate.kind())
-                    .as("one referential sentence, selected from the kind, serves both")
-                    .isEqualTo(RecordConflictException.Kind.REFERENCED_ROW)
+                    .as("one insert-refusal sentence, selected from the kind, serves both")
+                    .isEqualTo(RecordConflictException.Kind.INSERT_REFUSED)
                     .isEqualTo(orphan.kind());
+            assertThat(duplicate.targetTable())
+                    .as("the table the refused insert named, which the sentence is composed around")
+                    .isEqualTo("TRANSACTION_TYPE_CATEGORY")
+                    .isEqualTo(orphan.targetTable());
         }
 
         /**
@@ -1582,7 +1599,11 @@ class TransactionCategoryServiceTest {
         void aReplaceAcceptsTheSeededHyphenatedDescription() {
             TransactionCategory stored = storedCategory("06", "0002", "Fraud reversal");
             when(categories.findByIdIs(id("06", "0002"))).thenReturn(Optional.of(stored));
-            when(categories.save(any(TransactionCategory.class)))
+            // WHY : Refactoring Rationale: the flushing member is stubbed, where this stubbed the plain
+            //       save. The replace route flushes so that the reply carries the revision the provider
+            //       has already advanced; a stub of the non-flushing member would now go unused and the
+            //       route would receive a null row to publish.
+            when(categories.saveAndFlush(any(TransactionCategory.class)))
                     .thenAnswer(call -> call.getArgument(0));
 
             TransactionCategoryResponse published = service.replace("06", "0002",

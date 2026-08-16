@@ -157,8 +157,8 @@ tried to would need privileges the runtime role deliberately does not hold.
 |---|---|---|
 | JDK | Amazon Corretto **21** | Compiling and running this module; the enforcer rule requires `[21,)` |
 | Maven | **3.9.16** or newer | The reactor build; the enforcer rule requires `[3.9.0,)` |
-| Container runtime | any Docker-compatible daemon | The twelve Testcontainers-backed `*IT` classes, and building the image |
-| PostgreSQL | **17** reachable | Running the service locally; Flyway applies both migrations at startup |
+| Container runtime | any Docker-compatible daemon | The Testcontainers-backed `*IT` classes, and building the image |
+| PostgreSQL | **17** reachable | Running the service locally; Flyway applies every migration at startup |
 | Python | **3.13** | Only for the repository-wide Rule 1 gate described in [§14](#14-documentation-gate) |
 
 Every version above is the one the toolchain is pinned to. The database driver is
@@ -293,11 +293,35 @@ mvn -B -f services/pom.xml -pl reference-service -am package
   java -jar services/reference-service/target/reference-service-1.0.0-SNAPSHOT.jar )
 ```
 
-Flyway applies **all three** migrations during startup — `V1__reference.sql` creates
-the six reference tables, `V2__seed_reference.sql` seeds them, and
-`V3__reference_inquiry_reply_ledger.sql` creates the one operational table the
-date-inquiry exchange records its answers in. The actuator health endpoint reports
+> ⚠️ **`SERVER_SSL_ENABLED=false` is right for exercising this module alone and
+> wrong when `account-service` is the caller.** The account update path reads the
+> three address allow-lists published here, and it relays the calling user's own
+> bearer token to do it, so `common-lib`'s `ApprovedOriginPolicy` refuses a
+> `carddemo.reference-context.base-url` that is not an absolute **https** origin —
+> a plain-HTTP listener here makes every address edit over there unreachable rather
+> than merely unencrypted. Run this listener with TLS **enabled** whenever
+> `account-service` points at it; the exact mint-and-trust commands, and the
+> reasoning for not exempting loopback, are in
+> [`services/account-service/README.md`](../account-service/README.md) under
+> *"Exercising the address edits locally"*.
+
+Flyway applies **all four** migrations during startup — `V1__reference.sql` creates
+the six reference tables, `V2__seed_reference.sql` seeds them,
+`V3__reference_inquiry_reply_ledger.sql` creates an operational table for the
+date-inquiry exchange, and `V4__drop_reference_inquiry_reply_ledger.sql` withdraws
+it again, because this module declares no listener and never wrote to it. The schema
+therefore settles at the six reference tables. The actuator health endpoint reports
 not-ready until that finishes.
+
+> ⚠️ **`V1__reference.sql` and `V2__seed_reference.sql` have been applied in real
+> environments and are therefore immutable.** Flyway's checksum covers the whole
+> file, comments included, so an edit to either one — even one that changes only
+> prose — makes every already-migrated environment refuse to start with
+> `Migration checksum mismatch for migration version 1`. That is not hypothetical:
+> a comment-only edit to `V1__reference.sql` did exactly that, and
+> `ReleasedMigrationImmutabilityTest` in `common-lib` now fails the build for any
+> such change. A later change to this schema arrives as a **new** versioned
+> migration.
 
 Refactoring Rationale: three inquiry queue names, a region and a
 `queue-not-found-strategy` pin used to be startup requirements of this module and
@@ -323,11 +347,22 @@ tree, so adding a test class without updating the marker fails the build.
 
 | Package | Classes | Package | Classes |
 |---|---|---|---|
-| `service` | 12 (11 `*Test`, 1 `*IT`) | `api` | 9 |
-| `repository` | 10 (all `*IT`) | `config` | 5 |
-| `mapper` | 3 | `dto` | 2 |
+| `service` | 10 (9 `*Test`, 1 `*IT`) | `api` | 10 |
+| `repository` | 11 (all `*IT`) | `config` | 7 |
+| `mapper` | 2 | `dto` | 2 |
 | `fixtures` | 2 | `domain` | 1 |
 | root `com.carddemo.reference` | 1 | | |
+
+⚠️ Refactoring Rationale: the per-package row counts above are corrected, not
+merely decremented. The integration tier lost `repository/InquiryReplyLedgerIT`
+with the table it covered ([§9](#9-schema-and-migrations)), which is the change
+this revision makes — but the table also still described a distribution from
+several revisions back, and its column total happened to agree with the tree only
+because the two errors cancelled. The counts are now re-derived from the tree.
+Assumptions: `ServiceReadmeInventoryTest` checks the two tier totals in the marker
+and not this breakdown, so a stale row here fails nothing and has to be read
+rather than trusted; it is stated accurately for the reader's sake and flagged
+here so the next arrival does not assume the breakdown was verified by the build.
 
 Refactoring Rationale: four classes left these counts and one arrived, on the one
 topology fact recorded in [§1](#1-overview) rather than on four decisions.
@@ -346,6 +381,19 @@ the withdrawal itself, the copybook-versus-codec offset agreement, the two
 ten-character date pictures, the delegation of every rule to the shared validator,
 and the two separate four-character codes — without driving a transport.
 
+Refactoring Rationale: the integration tier gained one class,
+`repository/MigrationHistoryIT`, which pins the checksum Flyway stores for every
+migration this module ships. It is a test of the module's *released* artefacts
+rather than of its code, and it exists because a migration file that had already
+been applied in a deployed environment was later rewritten — comment text only, no
+SQL — which changed the checksum Flyway compares on startup and left the service
+unable to start against any database holding the earlier bytes. Nothing in the
+build could observe that: a first apply onto an empty database succeeds whatever
+the bytes are. Reading the checksum back out of `reference.flyway_schema_history`
+after Flyway has applied the files makes Flyway itself the oracle, so the pinned
+value is the value a deployment stores rather than one this repository recomputes.
+The remedy that class points at is in [§9.4](#94-a-released-migration-is-immutable).
+
 One further file under `src/test/java` is deliberately not in those counts:
 `repository/ReferencePersistenceBase.java` is the shared Testcontainers base
 class, and it matches neither suffix because it carries no test case of its own.
@@ -353,8 +401,8 @@ class, and it matches neither suffix because it carries no test case of its own.
 ```bash
 # WHAT: run both test tiers for this module and the module it depends on.
 # WHY : Assumptions: `verify` rather than `test`, because Failsafe binds to the
-#       `integration-test` and `verify` phases. Stopping at `test` runs 36 of the
-#       46 classes and skips all TEN Failsafe classes -- every persistence
+#       `integration-test` and `verify` phases. Stopping at `test` runs the 34
+#       Surefire classes and skips every Failsafe class -- so every persistence
 #       assertion in the module, including the referential refusal and the padded
 #       `DEFAULT` seed, which are the two properties this schema exists to
 #       preserve. A container runtime is required.
@@ -651,12 +699,24 @@ Three migrations, all applied at startup.
 |---|---|
 | [`V1__reference.sql`](src/main/resources/db/migration/V1__reference.sql) | The six tables, their keys, the referential constraint and the classification check |
 | [`V2__seed_reference.sql`](src/main/resources/db/migration/V2__seed_reference.sql) | The seed rows, idempotently |
-| [`V3__reference_inquiry_reply_ledger.sql`](src/main/resources/db/migration/V3__reference_inquiry_reply_ledger.sql) | `reference.inquiry_reply_ledger` — one row per answered date-conversion request, so a redelivery is answered with the FIRST answer rather than a later timestamp. See [§12.6](#126-date-conversion--two-front-doors-one-implementation) |
+| [`V3__reference_inquiry_reply_ledger.sql`](src/main/resources/db/migration/V3__reference_inquiry_reply_ledger.sql) | Created `reference.inquiry_reply_ledger`. **Superseded by `V4`** — retained because a released migration cannot be deleted, only reversed |
+| [`V4__drop_reference_inquiry_reply_ledger.sql`](src/main/resources/db/migration/V4__drop_reference_inquiry_reply_ledger.sql) | Drops that table, leaving the six reference tables. See [§12.6](#126-date-conversion--two-questions-two-owners-one-set-of-rules) |
 
-Assumptions: `V3` is the only table in this schema that holds no reference DATA, and
-it is called out here so a reader browsing the schema does not take it for a lookup
-that failed to seed. The migration header records why it lives beside the context
-that owns the exchange rather than in a schema of its own.
+⚠️ Refactoring Rationale: `V3` added a table this module cannot write to, and `V4`
+withdraws it. The guarantee it existed for is real and is **not** withdrawn — a
+redelivered date-conversion request must be answered with the FIRST reply, because the
+reply body is read from the clock and a recomposed answer would carry a later
+timestamp. But the guarantee belongs to whichever component composes the reply, and
+that is `account-service`: it consumes the shared inquiry request queue, answers the
+date function, and records each reply in `account.inquiry_reply_ledger` before sending
+it. This module declares no messaging starter and no listener ([§11](#11-messaging)),
+so no delivery ever reached the table here and no code path inserted into it.
+
+Assumptions: `V3` is deliberately **kept** rather than deleted. Removing a released
+migration makes every already-migrated database refuse to start, because Flyway
+validates its applied history against the scripts it can resolve. So the table is
+created and then dropped on every database, and `MigrationHistoryIT` asserts the end
+state — the table absent, the six reference tables present — against a real engine.
 
 ### 9.1 Why this module carries the only seed migration in the tree
 
@@ -724,6 +784,37 @@ PostgreSQL support out of the core artifact, so core alone resolves at build tim
 and then fails at run time when it tries to select a dialect. Both are managed in
 [`../pom.xml`](../pom.xml) and this module declares the companion explicitly.
 
+### 9.4 A released migration is immutable
+
+**Once a migration file has been applied anywhere, its bytes are frozen.** Flyway
+stores a checksum for each applied script and, on every later startup, recomputes it
+from the file and refuses to start when the two differ. That checksum is a cyclic
+redundancy check over the **whole file**, so a change that touches only comment text
+breaks startup exactly as hard as a change to a statement: the schema is still
+correct, and the service is still unstartable, in every environment that applied the
+earlier bytes.
+
+That is not hypothetical here. `V1__reference.sql` was rewritten for comment style
+after it had been applied — the executable SQL was byte-identical before and after —
+and the result was
+`FlywayValidateException: Migration checksum mismatch for migration version 1`, with
+nothing bound to the port. Two mechanisms now stand between that and a deployment:
+
+- `repository/MigrationHistoryIT` pins the checksum Flyway stores for every script in
+  this module, reading it back out of `reference.flyway_schema_history` after Flyway
+  has applied it. A change to an applied file fails **the build**, on the machine of
+  whoever made the change.
+- The operator remedy for an environment that has already applied superseded bytes is
+  Flyway's `repair`, whose exact procedure and its one precondition are recorded in
+  [`docs/runbooks/data-migration.md`](../../docs/runbooks/data-migration.md).
+
+So a change to this schema — including a change to a comment in an applied
+migration — goes into a **new** migration. Trade-offs: the tree therefore accumulates
+small migrations rather than keeping one tidy file per table, and a comment correction
+may have to wait for the next migration that touches the same object. What that buys
+is that no already-deployed environment is ever made unstartable by an edit that a
+reviewer reads as cosmetic.
+
 ---
 
 ## 10. API endpoints
@@ -783,7 +874,7 @@ starter, builds no queue client, requires no region and holds no queue name.
 
 | Role | Consumed or produced | Notes |
 |---|---|---|
-| Request | consumed by `DateInquiryMessageListener` | Standard queue; delete-on-success, with the composed reply recorded and committed **before** it is sent — see [§12.6](#126-date-conversion--two-front-doors-one-implementation) |
+| Request | consumed by `account-service`'s `InquiryMessageListener` | Standard queue; delete-on-success, with the composed reply recorded in `account.inquiry_reply_ledger` and committed **before** it is sent — see [§12.6](#126-date-conversion--two-questions-two-owners-one-set-of-rules) |
 | Reply | produced | Shared with the account-inquiry flow, which publishes its own replies to the same queue |
 | Error | produced | Terminal sink for a message this service cannot answer |
 
@@ -800,7 +891,10 @@ returned.
 Two of the contracts below are the module's acceptance criteria. Stated so they can
 be checked rather than believed:
 
-1. **Deleting a transaction type that still has categories answers HTTP 409.**
+1. **Deleting a transaction type that still has categories answers HTTP 409** carrying
+   the baseline's child-records sentence, and a refused **create** answers 409 carrying
+   the baseline's *insert* sentence instead — two statements, two paragraphs, two
+   sentences.
 2. **The `'DEFAULT'` disclosure-group row exists after `V2`, and the fallback
    lookup returns its rate.**
 
@@ -831,6 +925,36 @@ duplicated here. This module must not declare a second `@RestControllerAdvice` �
 two advices competing for the same exception make the status a function of bean
 ordering, which is exactly the kind of behaviour that differs between a test
 context and a running task.
+
+**A refused INSERT is a different 409 carrying a different sentence, and the two
+must not converge.** The baseline composes its integrity sentences **per
+paragraph**, so the statement that was refused is what selects the wording:
+`9800-DELETE-PROCESSING` builds the child-records sentence above at L1641, and
+`9700-INSERT-RECORD` builds its own at L1610–L1611 around the name of the table it
+wrote to. The target follows that split exactly:
+
+| Refused statement | Sentence a caller receives | Length |
+|---|---|---|
+| `DELETE /transaction-types/{typeCd}` with categories beneath it | `Please delete associated child records first:` | 45 |
+| `POST /transaction-types` with a code already stored | `Error inserting record into: TRANSACTION_TYPE Table. SQLCODE:` | 61 |
+| `POST /transaction-categories` with a pair already stored, or naming a type that does not exist | `Error inserting record into: TRANSACTION_TYPE_CATEGORY Table. SQLCODE:` | 70 |
+
+Three properties of that table are load-bearing. The table named is the
+**baseline's** unqualified name, not `reference.transaction_types` — so no response
+body discloses a schema or table this migration created. The sentence **ends at the
+colon**: the baseline follows it with the SQLCODE and `SQLERRM`, and a driver quotes
+the values that violated the constraint, so those go to the operational record under
+the response's own correlation identity instead. And a duplicate key is **not**
+separated from an absent parent in the text, because the baseline's insert paragraph
+has one failing arm for the whole statement and this module publishes only text the
+baseline declares; the two are separated in the log, where the SQLSTATE and its
+classification are written.
+
+Answering a refused create with the delete sentence is a defect of the same class as
+a 500 here, and for the same reason: it is remediation advice a caller cannot act on.
+A caller that reused a code has no dependent rows to remove. The change and its
+reasoning are registered as `D-REFERENCE-INTEGRITY-SENTENCE` in
+[`docs/architecture/cobol-to-service-traceability.md`](../../docs/architecture/cobol-to-service-traceability.md).
 
 ### 12.2 The mandatory `'DEFAULT'` disclosure-group row
 
@@ -986,7 +1110,14 @@ hold two replies that disagree with nothing on the wire to say which was the ans
 
 What the consumer therefore does is narrower than an outbox and stronger than
 delete-on-success alone: it records the composed reply in
-`reference.inquiry_reply_ledger`, commits, sends, and only then marks the row sent.
+`account.inquiry_reply_ledger`, commits, sends, and only then marks the row sent.
+⚠️ Refactoring Rationale: that ledger is named here as `account`'s because the
+consumer is `account-service`'s, which is what this section says two paragraphs
+above. An earlier revision named a `reference.inquiry_reply_ledger` instead, and this
+module did ship a migration creating one — but with no listener here, nothing could
+write it, so the sentence described a guarantee this schema did not enforce. `V4`
+drops that table ([§9](#9-schema-and-migrations)) and the attribution now matches the
+ownership.
 A redelivery whose row is outstanding re-sends the **recorded bytes**; one whose row
 is retired sends nothing. The guarantee is that one request is never answered with
 two *different* answers — not that the reply is sent only once. The residual window,
@@ -1024,13 +1155,22 @@ Recorded plainly, in the manner of [`tests/README.md`](../../tests/README.md) §
 so that no claim above hides a gap.
 
 - ⚠ **A date-inquiry reply can still be delivered twice — never with two different
-  answers.** The reply ledger of [§12.6](#126-date-conversion--two-front-doors-one-implementation)
+  answers.** The reply ledger of [§12.6](#126-date-conversion--two-questions-two-owners-one-set-of-rules)
   records the composed reply, commits, sends, and only then marks the row sent. A task
   that dies **after** the send and **before** the mark leaves the row outstanding, so
   the redelivery re-sends it and the requester receives two copies. The copies are
   byte-identical and carry the same two echoed identities, so the far end can discard
-  either; `reference.inquiry_reply_ledger.attempts` counts the sends, which is how an
-  operator measures whether this window was actually entered.
+  either; `account.inquiry_reply_ledger.attempts` counts the **deliveries that reached
+  the send step** — one recorded by the claim, one by each redelivery that re-sends —
+  which is how an operator measures whether this window was actually entered, in the
+  schema of the service that owns the consumer, not this one. ⚠ Refactoring Rationale:
+  that column counted **completed sends**, and the comment inside its own applied
+  migration still says so; the reasoning for counting deliveries instead, and the
+  frozen-migration reason the correction is documented rather than edited into the DDL,
+  are recorded once where the ledger now lives —
+  [`services/account-service/README.md`](../account-service/README.md), the
+  `inquiry_reply_ledger` column table. Stating it once keeps two sibling readings of one
+  column from drifting apart, which is how one of them later gets read as the other.
 
   Alternatives Considered: committing the send and the mark together, which would
   close the window entirely. Rejected because that is a distributed transaction across
@@ -1083,8 +1223,25 @@ so that no claim above hides a gap.
   - `app/app-transaction-type-db2/cbl/COBTUPDT.cbl` has **no** `SQLCODE -532`
     handling at all. Its only negative-code path is the generic
     `WHEN SQLCODE < 0` at L154, which reports the code without distinguishing a
-    referential refusal from any other failure. The maintenance endpoint here
-    surfaces the refusal as a 409 instead.
+    referential refusal from any other failure — and the maintenance endpoint here
+    **reproduces exactly that**: a referenced delete submitted through
+    `POST /maintenance-actions` answers **HTTP 200** with that action's own outcome
+    at `FAILED`, the verbatim sentence
+    `Error accessing: TRANSACTION_TYPE table. SQLCODE:` (L156–L157) and an aggregate
+    `returnCode` of **4**. That is `9999-ABEND`'s own behaviour — `DISPLAY`,
+    `MOVE 4 TO RETURN-CODE`, `EXIT`, and the read loop takes the next record — so one
+    refused action costs one action and the rest of the batch still applies.
+    ⚠️ Refactoring Rationale: this bullet said "The maintenance endpoint here surfaces
+    the refusal as a 409 instead", which was true of neither the runtime nor the
+    contract. The published contract declares **no** 409 for that operation at all,
+    and a 409 would mean the whole batch was refused rather than one action within it,
+    which is the opposite of the per-record granularity the paragraph above is
+    describing. The distinction that IS real is the one drawn in
+    [§12.1](#121-on-delete-restrict-surfaces-as-http-409-never-500): the *item* routes
+    `DELETE /transaction-types/{typeCd}` and `POST /transaction-types` refuse a single
+    addressed operation and therefore answer 409, while this batch route reports a
+    per-action outcome and answers 200 with `returnCode: 4`. Two routes, two
+    granularities, two statuses — and the same underlying constraint.
   - The operator message in `app/app-transaction-type-db2/cbl/COTRTUPC.cbl`
     concatenates its literals with no separating space — L1641 ends
     `...child records first:` and L1642 begins `SQLCODE :` — so the rendered text

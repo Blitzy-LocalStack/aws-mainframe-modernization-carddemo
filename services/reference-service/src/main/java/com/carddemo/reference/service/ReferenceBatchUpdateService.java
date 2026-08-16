@@ -41,6 +41,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -189,26 +191,39 @@ public class ReferenceBatchUpdateService {
     /** The outcome state of an action refused for any other reason. */
     public static final String OUTCOME_FAILED = "FAILED";
 
-    /** The insert action, as the published request body names it. */
-    public static final String ACTION_INSERT = "INSERT";
+    /**
+     * The insert action, as the published request body names it.
+     *
+     * <p>Refactoring Rationale: the three action names below are now read from
+     * {@link MaintenanceActionRequest} rather than declared here a second time. The shape's own
+     * conditional description rule has to recognise two of them, and a request shape must not import a
+     * service -- none in this migration does -- so the vocabulary moved to the shape that publishes it and
+     * this class reads it. The constants stay public here because callers and tests already name them
+     * through this class, and both names now resolve to one literal instead of two that could drift.</p>
+     */
+    public static final String ACTION_INSERT = MaintenanceActionRequest.ACTION_INSERT;
 
     /** The update action, as the published request body names it. */
-    public static final String ACTION_UPDATE = "UPDATE";
+    public static final String ACTION_UPDATE = MaintenanceActionRequest.ACTION_UPDATE;
 
     /** The delete action, as the published request body names it. */
-    public static final String ACTION_DELETE = "DELETE";
+    public static final String ACTION_DELETE = MaintenanceActionRequest.ACTION_DELETE;
 
-    /** The message reported when an action applied. */
-    public static final String MESSAGE_APPLIED = "Record applied...";
-
-    /** The message reported when the target row did not exist. */
-    public static final String MESSAGE_NO_ROWS = "Record NOT found...";
-
-    /** The message reported when an insert names a code that already exists. */
-    public static final String MESSAGE_ALREADY_EXISTS = "Record already exists...";
-
-    /** The message reported when an insert or update carries no description. */
-    public static final String MESSAGE_DESCRIPTION_REQUIRED = "Description is required...";
+    // WHY : ⚠️ Refactoring Rationale: FOUR message constants stood here -- 'Record applied...',
+    //       'Record NOT found...', 'Record already exists...' and 'Description is required...' -- and
+    //       every one of them was text this migration authored. A search of app/ for each returns no
+    //       file. They were the only wording the HTTP path published, while the verbatim COBTUPDT
+    //       literals declared further down this class were reachable only from the record-stream path,
+    //       so the endpoint a caller can actually reach was the one endpoint speaking an invented
+    //       vocabulary. Transformation rule T8 admits only text the baseline declares, so they are
+    //       deleted rather than reworded and both paths now select from the one verbatim set below.
+    // WHY : Assumptions: no constant replaces the description refusal, because the baseline has no arm
+    //       for it. 10031-INSERT-DB carries a zero arm at line 152 and a negative arm at line 154 and
+    //       nothing else, so a record whose description position is unused is simply sent and answered
+    //       by the SQLCODE. The refusal now happens where the published contract puts it -- the
+    //       MaintenanceAction schema requires a description when the action is INSERT or UPDATE, which
+    //       MaintenanceActionRequest enforces, so the condition is a 400 naming the field rather than a
+    //       200 carrying a sentence about it. See applyOneWithin below.
 
     /**
      * The action code that selects the add branch, from line 111.
@@ -343,6 +358,28 @@ public class ReferenceBatchUpdateService {
      * all.</p>
      */
     private static final CopybookLayout.RecordSpec MAINTENANCE_RECORD = maintenanceRecordLayout();
+
+    /**
+     * Where the classification of a refused write is recorded for an operator.
+     *
+     * <p>Assumptions: this class held no logger, because its record-stream path carries the typed reason
+     * and the SQLSTATE onto its OWN outcome shape and therefore needs no second channel. The published
+     * HTTP outcome shape carries neither -- it publishes a position, an action, a code, a state, a flag
+     * and a sentence, and nothing else -- so once the caller-facing wording collapsed to the one sentence
+     * the baseline declares, the operator-facing distinction between a duplicate key, a referential
+     * refusal and an unclassified state had nowhere else to go. It goes here.</p>
+     *
+     * <p>Trade-offs: the alternative was to publish the reason and the state on the outcome shape so the
+     * distinction stayed in one place. Rejected because the shape is a published contract with
+     * {@code additionalProperties: false}: adding two members would change every client's generated type
+     * and would put a database state into a body an untrusted caller reads, which is the disclosure the
+     * sentence itself stops at the colon to avoid.</p>
+     *
+     * <p>Assumptions: the driver's own message text is never written here, only the SQLSTATE and this
+     * class's typed reason. That text quotes the values that violated the constraint, and log storage is
+     * the one destination the masking applied at the api edge does not reach.</p>
+     */
+    private static final Logger LOG = LoggerFactory.getLogger(ReferenceBatchUpdateService.class);
 
     /** Access to the transaction-type table. */
     private final TransactionTypeRepository types;
@@ -801,6 +838,27 @@ public class ReferenceBatchUpdateService {
     }
 
     /**
+     * Composes the verbatim sentence all three of the baseline's SQL paragraphs give a refused write.
+     *
+     * <p>Assumptions: the two halves are concatenated with nothing between them, which is what the
+     * baseline's own {@code STRING} does -- the second literal carries its own leading space. The result
+     * ends at the colon the baseline prefixes its SQLCODE with, and the SQLCODE is NOT appended: a
+     * caller-facing sentence carrying a database code and the driver's text would name the constraint and
+     * quote the values that violated it, so the state goes to the diagnostic channel instead.</p>
+     *
+     * <p>Assumptions: composed in one member rather than concatenated at each of the four sites that need
+     * it, so the two halves cannot be joined one way on one path and another way on another. The
+     * record-stream path reaches the same pair of constants directly, which is the one site left
+     * inline because it also carries the state onto its own outcome shape.</p>
+     *
+     * @return the sentence of lines 156 and 157 of {@code COBTUPDT.cbl}, which lines 187 and 188 and
+     *     lines 218 and 219 declare identically; never {@code null}
+     */
+    private static String sqlRefusalMessage() {
+        return MESSAGE_ERROR_ACCESSING + MESSAGE_ERROR_ACCESSING_SUFFIX;
+    }
+
+    /**
      * Walks a cause chain for the first state a database driver reported.
      *
      * <p>Assumptions: the state is carried by a cause rather than by the exception the persistence layer
@@ -939,29 +997,56 @@ public class ReferenceBatchUpdateService {
 
         if (ACTION_DELETE.equals(action.action())) {
             if (stored.isEmpty()) {
-                return outcome(position, action, OUTCOME_NO_ROWS_FOUND, false, MESSAGE_NO_ROWS);
+                // WHY : Assumptions: this is 10033-DELETE-DB's own SQLCODE +100 arm at lines 210 and
+                //       211, whose literal is 'No records found.' with its terminating period. It used
+                //       to report an authored 'Record NOT found...' instead, which exists nowhere in the
+                //       baseline.
+                return outcome(position, action, OUTCOME_NO_ROWS_FOUND, false,
+                        MESSAGE_NO_RECORDS_FOUND);
             }
             return removeFor(position, action, stored.get());
         }
 
-        // WHY : Assumptions: an insert and an update both need a description and the shape cannot demand
-        //       one, because a delete in the same array needs none. The refusal is therefore made here
-        //       and reported as this action's own outcome, which is exactly how the baseline handles a
-        //       record it cannot apply -- it reports and reads the next one.
-        if (action.description() == null || action.description().isBlank()) {
-            return outcome(position, action, OUTCOME_FAILED, false, MESSAGE_DESCRIPTION_REQUIRED);
-        }
+        // WHY : ⚠️ Refactoring Rationale: the description refusal that stood here is GONE, and it is not
+        //       replaced by a differently-worded one. It reported an authored sentence as this action's
+        //       outcome under a 200, and the published contract already places the refusal elsewhere:
+        //       the MaintenanceAction schema declares description required when the action is INSERT or
+        //       UPDATE, so a missing one is a request the boundary refuses with 400 and a field entry
+        //       keyed 'description' -- which is transformation rule T7's per-field error and is what a
+        //       form can actually render beside an input. MaintenanceActionRequest carries that rule.
+        // WHY : Assumptions: nothing is weakened by moving it. The column is declared NOT NULL by
+        //       V1__reference.sql, so a null description that somehow bypassed the boundary is refused
+        //       by the database and classified by refusalOutcome below into the baseline's own
+        //       'Error accessing:' composition -- the wording 10031-INSERT-DB and 10032-UPDATE-DB both
+        //       use for a negative SQLCODE. The condition is therefore refused twice over, and neither
+        //       refusal is text this migration invented.
+        // WHY : Assumptions: the trim tolerates a null, returning null, so no guard is needed here for
+        //       the value to reach the write that refuses it.
         String description = TransactionTypeMapper.trimForStorage(action.description());
 
         if (ACTION_INSERT.equals(action.action())) {
             if (stored.isPresent()) {
-                return outcome(position, action, OUTCOME_FAILED, false, MESSAGE_ALREADY_EXISTS);
+                // WHY : Assumptions: 10031-INSERT-DB has NO arm for a repeated key -- a search of that
+                //       program for the Db2 duplicate code returns nothing -- so a duplicate reaches its
+                //       negative arm at line 154 and is answered with the 'Error accessing:'
+                //       composition of lines 156 and 157. That is the wording carried here, replacing an
+                //       authored 'Record already exists...'.
+                // WHY : Assumptions: the SAME sentence refusalOutcome composes for a duplicate the
+                //       constraint raises, so a duplicate caught by the reading above and one caught by
+                //       the unique key are indistinguishable to a caller and the answer cannot come to
+                //       depend on timing.
+                LOG.warn("event=reference.maintenance.duplicate-key detectedBy=read position={}",
+                        position);
+                return outcome(position, action, OUTCOME_FAILED, false, sqlRefusalMessage());
             }
             return insertFor(position, action, description);
         }
 
         if (stored.isEmpty()) {
-            return outcome(position, action, OUTCOME_NO_ROWS_FOUND, false, MESSAGE_NO_ROWS);
+            // WHY : Assumptions: 10032-UPDATE-DB's own SQLCODE +100 arm at lines 180 and 181, the
+            //       identical literal the delete arm above uses. One constant serves both because the
+            //       baseline declares the same text in both places.
+            return outcome(position, action, OUTCOME_NO_ROWS_FOUND, false, MESSAGE_NO_RECORDS_FOUND);
         }
         return replaceFor(position, action, stored.get(), description);
     }
@@ -986,7 +1071,10 @@ public class ReferenceBatchUpdateService {
     private MaintenanceActionOutcomeResponse insertFor(int position, MaintenanceActionRequest action,
             String description) {
         this.types.insertType(action.typeCd(), description);
-        return outcome(position, action, OUTCOME_APPLIED, true, MESSAGE_APPLIED);
+        // WHY : Assumptions: 10031-INSERT-DB's zero arm at line 153, verbatim. The record-stream path
+        //       already reported this literal; this path reported an authored 'Record applied...', so
+        //       one endpoint spoke the baseline's vocabulary and the other did not.
+        return outcome(position, action, OUTCOME_APPLIED, true, MESSAGE_RECORD_INSERTED);
     }
 
     /**
@@ -1002,7 +1090,10 @@ public class ReferenceBatchUpdateService {
             TransactionType target, String description) {
         target.setDescription(description);
         this.types.saveAndFlush(target);
-        return outcome(position, action, OUTCOME_APPLIED, true, MESSAGE_APPLIED);
+        // WHY : Assumptions: 10032-UPDATE-DB's zero arm at line 179, verbatim -- and a DIFFERENT literal
+        //       from the insert and delete arms. The three success texts are three strings in the
+        //       baseline, so reporting one 'applied' message for all three retired two of them.
+        return outcome(position, action, OUTCOME_APPLIED, true, MESSAGE_RECORD_UPDATED);
     }
 
     /**
@@ -1025,17 +1116,21 @@ public class ReferenceBatchUpdateService {
             TransactionType target) {
         this.types.delete(target);
         this.types.flush();
-        return outcome(position, action, OUTCOME_APPLIED, true, MESSAGE_APPLIED);
+        // WHY : Assumptions: 10033-DELETE-DB's zero arm at line 209, verbatim.
+        return outcome(position, action, OUTCOME_APPLIED, true, MESSAGE_RECORD_DELETED);
     }
 
     /**
      * Renders a constraint refusal in the vocabulary the published contract uses.
      *
-     * <p>Assumptions: the typed reason is resolved by the same classifier the record-stream path uses,
-     * so the two entry points agree on what a state means even though they report it in different words.
-     * A duplicate code is the one refusal the published vocabulary already has a message for; every other
-     * refusal reports the general failure state, because inventing a message per state would extend a
-     * published shape from here.</p>
+     * <p>Assumptions: the typed reason is resolved by the same classifier the record-stream path uses, so
+     * the two entry points agree on what a state means -- and both now report it in the same words, which
+     * they did not before. ⚠️ Refactoring Rationale: this paragraph read "even though they report it in
+     * different words", and those different words were the problem rather than a design: the duplicate
+     * branch published an authored sentence while every other state published the baseline's. All three
+     * of the baseline's SQL paragraphs answer every negative SQLCODE with one composition and none has a
+     * duplicate-key arm, so there is one sentence to carry and the reason is now a diagnostic rather than
+     * a selector.</p>
      *
      * @param position the one-based index of the action within the submitted array
      * @param action the action whose write was refused
@@ -1045,11 +1140,21 @@ public class ReferenceBatchUpdateService {
     private static MaintenanceActionOutcomeResponse refusalOutcome(int position,
             MaintenanceActionRequest action, DataIntegrityViolationException failure) {
 
-        RejectReason reason = reasonForState(sqlStateOf(failure));
-        String message = reason == RejectReason.DUPLICATE_KEY
-                ? MESSAGE_ALREADY_EXISTS
-                : MESSAGE_ERROR_ACCESSING + MESSAGE_ERROR_ACCESSING_SUFFIX;
-        return outcome(position, action, OUTCOME_FAILED, false, message);
+        String sqlState = sqlStateOf(failure);
+        RejectReason reason = reasonForState(sqlState);
+        // WHY : ⚠️ Refactoring Rationale: ONE sentence now, where a duplicate key was answered with an
+        //       authored 'Record already exists...' and every other refusal with the baseline's
+        //       composition. All three of this program's SQL paragraphs answer a negative SQLCODE with
+        //       the same two literals -- lines 156 and 157, 187 and 188, 218 and 219 -- and none of them
+        //       has an arm for a duplicate key at all, so the split published one string the baseline
+        //       declares and one it does not.
+        // WHY : Assumptions: the classification is not lost with the split, it moves to the operator
+        //       channel. The typed reason and the SQLSTATE are logged, which is where a duplicate is
+        //       told from a referential refusal and from an unclassified state; the caller receives the
+        //       sentence the baseline gives, which names the table and stops at its colon.
+        LOG.warn("event=reference.maintenance.write-refused position={} reason={} sqlState={}",
+                position, reason, sqlState);
+        return outcome(position, action, OUTCOME_FAILED, false, sqlRefusalMessage());
     }
 
     /**

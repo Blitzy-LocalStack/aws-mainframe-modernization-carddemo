@@ -70,6 +70,9 @@ import static org.assertj.core.api.Assertions.catchThrowableOfType;
 
 import com.carddemo.reference.domain.TransactionCategory;
 import com.carddemo.reference.domain.TransactionType;
+import com.carddemo.reference.dto.TransactionCategoryResponse;
+import com.carddemo.reference.dto.TransactionCategoryUpdateRequest;
+import com.carddemo.reference.service.TransactionCategoryService;
 import jakarta.persistence.EntityManager;
 import java.sql.SQLException;
 import java.util.ArrayList;
@@ -842,6 +845,74 @@ class TransactionCategoryRepositoryIT extends ReferencePersistenceBase {
         assertThat(followingAfter)
                 .as("a row behind the position is not served again by the window that follows it")
                 .doesNotContain(interleaved);
+    }
+
+    /**
+     * Confirms a replace publishes the revision the row now holds, which only a flushed write can do.
+     *
+     * <p>Purpose: this is the property a client's read-modify-write loop depends on. The published
+     * revision schema instructs a caller to read the revision with a record and send it back, so a reply
+     * carrying the revision the caller SENT rather than the one the row now holds hands that caller a
+     * token that is already stale -- and its next write is refused with the data-changed conflict
+     * although nothing else touched the row.</p>
+     *
+     * <p>Assumptions: the case is engine-backed and {@code @Transactional} because the defect it pins
+     * exists only in that combination. The provider increments the optimistic-lock counter when it
+     * ISSUES the update, so with a transaction open a non-flushing save defers the statement, and its
+     * increment, to the commit -- which happens after the response has been composed. Outside a
+     * transaction each repository call commits on its own, so the increment lands early and the reply
+     * looks correct: a case without the ambient transaction would pass against the defect.</p>
+     *
+     * <p>Assumptions: the service is built here over the injected repository rather than injected, which
+     * is the arrangement this package's charter already blesses for the paging case -- the property is
+     * only observable against a real engine, this package is where the engine is, and a second context
+     * elsewhere would start a second engine to gain a directory.</p>
+     *
+     * <p>Assumptions: TWO consecutive replaces are performed, not one. One replace establishes that the
+     * reply's number is the incremented one; the second establishes the property that actually matters,
+     * that a caller obeying the contract with the number it was just handed is accepted. A single
+     * replace would satisfy the first and leave the loop unproven.</p>
+     *
+     * <p>Trade-offs: the write is rolled back with the ambient transaction, so nothing is left behind for
+     * the counting cases; what is given up is that the committed row is never observed, which is
+     * immaterial here because the assertion is about what the reply carries rather than about durability.</p>
+     *
+     * <p>It takes no parameter and returns no value.</p>
+     */
+    @Test
+    @Transactional
+    @DisplayName("a replace publishes the incremented revision, and the next replace accepts it")
+    void aReplacePublishesTheIncrementedRevision() {
+        TransactionCategoryService service = new TransactionCategoryService(this.categories);
+        TransactionCategory seeded = this.categories.saveAndFlush(new TransactionCategory(
+                new TransactionCategory.TransactionCategoryId(POPULATED_TYPE_CD, "0007"),
+                "Revision fixture"));
+        assertThat(seeded.getVersion())
+                .as("fixture guard only: a newly stored row opens at revision zero")
+                .isZero();
+
+        TransactionCategoryResponse first = service.replace(POPULATED_TYPE_CD, "0007",
+                new TransactionCategoryUpdateRequest("Revision fixture replaced", 0L));
+
+        assertThat(first.version())
+                .as("the reply must carry the revision the row now holds, not the one the caller sent;"
+                        + " a non-flushing save leaves the increment to the commit and publishes the"
+                        + " caller's own number back to it")
+                .isEqualTo(1L);
+        assertThat(this.categories.findByIdIs(
+                new TransactionCategory.TransactionCategoryId(POPULATED_TYPE_CD, "0007"))
+                .orElseThrow().getVersion())
+                .as("the stored row and the published reply must report the same revision")
+                .isEqualTo(1L);
+
+        TransactionCategoryResponse second = service.replace(POPULATED_TYPE_CD, "0007",
+                new TransactionCategoryUpdateRequest("Revision fixture replaced again",
+                        first.version()));
+
+        assertThat(second.version())
+                .as("a caller resubmitting with the revision the previous reply handed it must be"
+                        + " accepted, which is the read-modify-write loop the contract documents")
+                .isEqualTo(2L);
     }
 
     /**
