@@ -5,20 +5,28 @@ import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import com.carddemo.common.error.ClientInputException;
+import com.carddemo.common.validation.DateEditValidator;
+import com.carddemo.common.validation.DateEditValidator.LanguageEnvironmentResult;
 import com.carddemo.common.validation.FieldValidationFlag;
 import com.carddemo.reporting.dto.ReportRequest;
 import com.carddemo.reporting.dto.ReportSubmissionResponse;
 import com.carddemo.reporting.mapper.ReportBandLayouts;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.NoSuchElementException;
 import java.time.ZoneOffset;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -72,6 +80,47 @@ import software.amazon.awssdk.services.sfn.model.StartExecutionResponse;
  * constants themselves are checked against the reference by their own Javadoc, which cites the line
  * each was copied from; what these cases check is that the right constant reaches the right branch.
  *
+ * <h2>There is no golden master for this class, and that is stated rather than glossed</h2>
+ *
+ * <p>Trade-offs: the two report generators this package holds are driven by batch programs and do
+ * have a byte-for-byte oracle. {@code CORPT00C} has none. L83 to L85 of {@code tests/README.md}
+ * records that the online programs cannot be run end to end without a CICS runtime, which the runner
+ * does not have, and that only their extractable field-validation logic is therefore unit-tested.
+ * Parity for every case below consequently rests on transcribed logic plus the copybook, job and
+ * resource-definition contracts each case cites by line -- a weaker footing than a captured artifact,
+ * and one that raises rather than lowers what the citations have to carry. No case here should be
+ * read as comparing output against a recorded baseline, because none of them can.
+ *
+ * <h2>Alternatives Considered: a stubbed orchestration client rather than an emulator</h2>
+ *
+ * <p>Driving these cases against an emulated orchestrator was considered and rejected, and the
+ * module settles it rather than preference. The emulator module is absent from
+ * {@code services/reporting-service/pom.xml} by design, where the dependency block records the
+ * omission deliberately, and the register of deliberate omissions in
+ * {@code src/test/resources/application-test.yml} states that no test in this module loads a context
+ * instantiating the classes that read an execution identifier or a bucket, so the orchestration call
+ * is proven by a unit test verifying the request the service builds against a stubbed client with no
+ * framework context at all. Two further objections stand on their own. An emulator converts a
+ * by-design absence into a hard failure on any host without one, so a case about which input the
+ * request carries would fail for a reason unrelated to the input. And an emulator reports the
+ * argument's correctness only as the absence of a refusal, whereas the argument IS the subject here:
+ * a captor makes the state machine, the execution name and the input document each independently
+ * assertable, which is what the cases below actually do.
+ *
+ * <h2>Assumptions: this is the one class in the package whose clock is genuinely consulted</h2>
+ *
+ * <p>The request edge resolves a preset exactly once, and it does so through an injected
+ * {@link Clock} rather than an ambient read, so a pinned day yields a predictable pair of bounds. The
+ * two generators sit on the other side of that line and must never consult a clock at all, because a
+ * run whose range came from a clock could not be repeated to the same output. The baseline holds the
+ * same division: {@code app/jcl/TRANREPT.jcl} fixes the selection range as two literals in its sort
+ * symbol table at L43 and L44, and {@code app/cbl/CBTRN03C.cbl} receives its range as a parameter
+ * record it reads at L220 rather than reading a date of its own. An injected date is what makes a
+ * rerun reproducible in both systems. {@code TransactionReportServiceTest} and
+ * {@code StatementServiceTest} each assert their subject declares no clock on any field, constructor
+ * or method; this class is the counterpart that pins what the permitted clock is for, and the case
+ * below asserts the generator side of the same line from here.
+ *
  * <p>A test class accepts no parameter, yields no value and raises nothing, so this block carries no
  * parameter, return or exception at-clause; the members below carry their own where they have any.
  */
@@ -90,13 +139,27 @@ class ReportExecutionServiceTest {
      */
     private static final Instant MID_JULY = Instant.parse("2022-07-18T12:00:00Z");
 
-    /** The state machine identifier this class hands the service, standing for a provisioned one. */
+    // WHY : Assumptions: the three identifiers below are OPAQUE STAND-INS and are deliberately not
+    //       written in the provider's resource-identifier form. The module's own test profile settles
+    //       this rather than taste: the register of deliberate omissions in
+    //       src/test/resources/application-test.yml declines to carry an orchestrator execution
+    //       identifier at all and records that an identifier of that shape is prohibited in this
+    //       directory unconditionally, even inside a comment, so that a scan of the directory has
+    //       nothing to report. A stand-in cannot be mistaken for a reachable location, which is the
+    //       whole property that entry buys.
+    // WHY : Assumptions: the SHAPE is still load-bearing and is not free to be arbitrary. The service
+    //       derives an execution handle by locating the machine segment in the configured identifier
+    //       and substituting the execution segment for it, and it answers with nothing at all when the
+    //       segment is absent or the part after it holds a further colon. The token below therefore
+    //       keeps that segment and gives it a colon-free tail, so the derivation under test is
+    //       exercised rather than short-circuited into its null arm.
+    /** The state machine this class hands the service, standing in for a provisioned one. */
     private static final String STATE_MACHINE_ARN =
-            "arn:aws:states:us-east-1:000000000000:stateMachine:carddemo-transaction-report-dev";
+            "stub-orchestrator:stateMachine:carddemo-transaction-report-under-test";
 
     /** The handle the stubbed orchestrator answers a started run with. */
     private static final String EXECUTION_ARN =
-            "arn:aws:states:us-east-1:000000000000:execution:carddemo-transaction-report-dev:1";
+            "stub-orchestrator:execution:carddemo-transaction-report-under-test:1";
 
     /**
      * The handle prefix the service composes an execution handle under.
@@ -105,7 +168,7 @@ class ReportExecutionServiceTest {
      * a case asserting the composed handle is comparing against an independently written value.</p>
      */
     private static final String EXECUTION_ARN_PREFIX =
-            "arn:aws:states:us-east-1:000000000000:execution:carddemo-transaction-report-dev:";
+            "stub-orchestrator:execution:carddemo-transaction-report-under-test:";
 
     /** The execution input this service composes, as the describe path expects to read it back. */
     private static final String RECOGNISED_INPUT =
@@ -256,6 +319,8 @@ class ReportExecutionServiceTest {
      * <p>Assumptions: the sentence is asserted from the published constant and the field name is
      * asserted too, because the per-field array is this target's analogue of the cursor move -- a
      * refusal naming no field would leave a client unable to place the operator anywhere.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
     @DisplayName("no mark is refused with the reference's select-a-type sentence")
@@ -319,6 +384,8 @@ class ReportExecutionServiceTest {
      * parameterised string source value without the annotation admitting nulls, and folding it in
      * would make the source's three entries read as four states when one of them was a literal
      * "null" text.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
     @DisplayName("a null answer is unanswered")
@@ -361,29 +428,45 @@ class ReportExecutionServiceTest {
      * The monthly preset covers the whole calendar month, including across a year boundary and a leap
      * February.
      *
-     * <p>Purpose: the reference derives the end bound at {@code app/cbl/CORPT00C.cbl} L223 to L230 by
-     * moving one into the day, adding one to the month, rolling the year when the incremented month
-     * exceeds twelve, and then taking the date of the integer of the date minus one. That lands on the
-     * LAST day of the current month, not on today.</p>
+     * <p>Purpose: the reference derives the end bound over L213 to L238 of
+     * {@code app/cbl/CORPT00C.cbl}, and the derivation is four steps rather than a lookup. L223 moves
+     * one into the day, L224 adds one to the month, L225 to L228 roll the year when the incremented
+     * month exceeds twelve, and L229 to L230 take the date of the integer of that date minus one. That
+     * lands on the LAST day of the CURRENT month. The start bound is built alongside it at L217 to
+     * L219 by moving a literal day of one into the current year and month.</p>
      *
-     * <p>Assumptions: the three instants below are the three cases the derivation can get wrong, and a
-     * single mid-year instant exercises none of them. December is where the year roll at L225 to L228
-     * is the only thing standing between the answer and an invalid month thirteen. A leap February is
-     * where a table of month lengths would be wrong and the subtract-a-day idiom is right. A 30-day
-     * month is included so that a hard-coded 31 fails.</p>
+     * <p>Assumptions: the monthly preset is a WHOLE calendar month, which is recorded on the
+     * production method as correction F1 and is asserted here rather than assumed. A peer document of
+     * this program reads the same span as ending on the current day and describes the preset as
+     * asymmetric with the yearly one; the four steps above admit no such reading, because nothing in
+     * them carries the current day forward -- L223 overwrites it with one before the arithmetic
+     * begins. First-hand program text supersedes derived prose, so the assertions below are taken from
+     * L223 to L230 and the peer reading is not reconciled with.</p>
      *
-     * @param pinned the instant the clock reports
-     * @param expectedStart the first day the range covers
-     * @param expectedEnd the last day the range covers
+     * <p>Assumptions: the five instants below are the five outcomes the derivation can get wrong, and
+     * a single mid-year instant exercises none of them. A 31-day month is the case a naive
+     * add-a-month-and-subtract-a-day would also pass, so it is the control rather than the evidence. A
+     * 30-day month is included so that a hard-coded thirty-one fails. February in a NON-leap year and
+     * February in a leap year are separated deliberately: a single February row would let an
+     * implementation that always answered twenty-eight, or always twenty-nine, pass on whichever one
+     * it was pinned to, and the pair is what forces the length to be computed. December is where the
+     * year roll at L225 to L228 is the only thing standing between the answer and an invalid month
+     * thirteen.</p>
+     *
+     * @param pinned the instant the clock reports, chosen to sit inside the month under test
+     * @param expectedStart the first day the range covers, always the first of the pinned month
+     * @param expectedEnd the last day the range covers, which is the pinned month's own final day and
+     *     never the pinned day itself
      */
     @ParameterizedTest
     @CsvSource({
         "2022-07-18T12:00:00Z,2022-07-01,2022-07-31",
-        "2022-12-05T00:00:00Z,2022-12-01,2022-12-31",
+        "2022-06-30T00:00:00Z,2022-06-01,2022-06-30",
+        "2023-02-10T23:59:59Z,2023-02-01,2023-02-28",
         "2024-02-10T23:59:59Z,2024-02-01,2024-02-29",
-        "2022-06-30T00:00:00Z,2022-06-01,2022-06-30"
+        "2022-12-05T00:00:00Z,2022-12-01,2022-12-31"
     })
-    @DisplayName("the monthly preset covers a whole calendar month, over a year roll and a leap February")
+    @DisplayName("the monthly preset covers a whole calendar month, over both Februaries and a year roll")
     void theMonthlyPresetCoversTheWholeMonth(
             String pinned, String expectedStart, String expectedEnd) {
         ReportExecutionService.DateRange range = serviceAt(Instant.parse(pinned))
@@ -405,6 +488,8 @@ class ReportExecutionServiceTest {
      * <p>Assumptions: the pinned instant is in July, so an end bound resolved to "today" would be
      * visibly wrong. Both presets legitimately carry an end bound later than the current day for most
      * of their period, and that is the property being pinned.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
     @DisplayName("the yearly preset covers the whole calendar year, ending after the pinned day")
@@ -418,6 +503,57 @@ class ReportExecutionServiceTest {
     }
 
     /**
+     * Neither preset stops at the pinned day, so the two are shaped alike rather than asymmetrically.
+     *
+     * <p>Purpose: this case exists to deny one specific misreading directly instead of leaving it to
+     * be inferred from the two cases above. Both presets open on a period boundary and close on the
+     * same period's own final boundary: the monthly one at L217 to L219 and L223 to L230 of
+     * {@code app/cbl/CORPT00C.cbl}, the yearly one at L243 to L246 and L250 to L251. Neither carries
+     * the current day into its end bound, so for every day of a period except its last the resolved
+     * end bound lies AFTER the day the clock reports, and that is a property of both rather than a
+     * quirk of one.</p>
+     *
+     * <p>Assumptions: the pinned instant is deliberately mid-period on both scales -- the pinned day
+     * of July is neither the last day of its month nor the last day of its year -- so both presets
+     * have a strictly later end bound to be wrong about. A case pinned to the thirty-first of December
+     * would make an end-bound-is-today implementation agree with a whole-period one on both presets at
+     * once, and would assert nothing.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("both presets end after the pinned day, so neither is month-limited to it")
+    void neitherPresetEndsOnThePinnedDay() {
+        ReportExecutionService service = serviceAt(MID_JULY);
+        LocalDate pinnedDay = LocalDate.of(2022, 7, 18);
+
+        ReportExecutionService.DateRange monthly = service.resolveRange(
+                selection(MARK, null, null, MARK), ReportExecutionService.MONTHLY_REPORT_NAME);
+        ReportExecutionService.DateRange yearly = service.resolveRange(
+                selection(null, MARK, null, MARK), ReportExecutionService.YEARLY_REPORT_NAME);
+
+        // WHY : Assumptions: the comparison is strictly AFTER rather than not-before, because an
+        //       implementation that resolved the end bound to the pinned day would satisfy a
+        //       not-before test while being exactly the reading this case exists to rule out.
+        assertThat(monthly.end())
+                .as("the monthly end bound is the month's own last day, later than the pinned day")
+                .isAfter(pinnedDay);
+        assertThat(yearly.end())
+                .as("the yearly end bound is the year's own last day, later than the pinned day")
+                .isAfter(pinnedDay);
+
+        // WHY : Assumptions: both presets are asserted to open on a first-of-period boundary in the
+        //       same case as their end bounds, because the symmetry claim is about the SHAPE of the
+        //       pair and a case that checked only the end bounds would leave the openings unpinned.
+        assertThat(monthly.start().getDayOfMonth())
+                .as("the monthly range opens on the first of the month, per L219")
+                .isEqualTo(1);
+        assertThat(yearly.start())
+                .as("the yearly range opens on the first of January, per L245 and L246")
+                .isEqualTo(LocalDate.of(2022, 1, 1));
+    }
+
+    /**
      * A custom range is taken from the request and both bounds pass the shared date edit.
      *
      * <p>Purpose: the reference assembles each bound from three typed screen components at L381 to
@@ -427,6 +563,8 @@ class ReportExecutionServiceTest {
      * <p>Assumptions: the clock is pinned and the asserted bounds are in a DIFFERENT year from it, so
      * a custom range that had silently fallen through to a preset would be caught. The two are
      * otherwise indistinguishable when a test picks custom bounds inside the pinned year.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
     @DisplayName("a custom range is the caller's own pair, not a preset")
@@ -514,6 +652,8 @@ class ReportExecutionServiceTest {
      * carry, and borrowing an unrelated one -- the assembled-date message, say -- would tell a caller
      * that a perfectly valid date was invalid. The refusal is registered on the production method that
      * raises it.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
     @DisplayName("an inverted range is refused with the one sentence the catalog does not hold")
@@ -541,6 +681,8 @@ class ReportExecutionServiceTest {
      * own invariant broken rather than a request to correct -- so it is raised as a plain argument
      * exception, which the shared advice routes to the internal channel rather than back to the
      * client.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
     @DisplayName("an unknown report name is an internal fault and not a client refusal")
@@ -584,6 +726,8 @@ class ReportExecutionServiceTest {
      * retry after an abandoned call collides rather than starting the report twice. A name carrying a
      * random component would satisfy any assertion about its presence while defeating that purpose,
      * so presence is not what is checked.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
     @DisplayName("a confirmed start passes the resolved range, a deterministic name and the typed input")
@@ -624,6 +768,318 @@ class ReportExecutionServiceTest {
     }
 
     /**
+     * One resolved range reaches both of the baseline's two range channels, for all three types.
+     *
+     * <p>Purpose: the baseline carries its range on TWO structurally distinct channels and writes both
+     * from a single value. {@code PARM-START-DATE-1} at L106 and {@code PARM-END-DATE-1} at L111 of
+     * {@code app/cbl/CORPT00C.cbl} sit inside the two cards that follow the
+     * {@code "//STEP05R.SYMNAMES DD *"} override at L98, so they are sort SYMBOLS and therefore the
+     * record-selection channel; {@code PARM-START-DATE-2} at L118 and {@code PARM-END-DATE-2} at L120
+     * sit inside the card that follows the {@code "//STEP10R.DATEPARM DD *"} override at L116, so they
+     * are the parameter RECORD and therefore the report-heading channel. Every one of the three types
+     * writes both: the monthly arm at L220 to L221 and L235 to L236, the yearly arm at L247 to L248 and
+     * L252 to L253, and the custom arm at L429 to L432, which writes both pairs BEFORE moving the
+     * literal {@code 'Custom'} into the report name at L433. This case asserts the target keeps the two
+     * channels agreeing.</p>
+     *
+     * <p>Assumptions: the parameter-record channel's layout is corroborated independently, which is
+     * why the two channels can be treated as carrying the same pair rather than merely similar values.
+     * The group {@code FILLER-3} at L117 to L121 is a ten-character start bound, EXACTLY ONE space at
+     * L119, a ten-character end bound and fifty-nine characters of padding, which is 10 + 1 + 10 + 59 =
+     * 80 and therefore a whole record of the {@code RECORDSIZE(80)} the queue declares at L502 of
+     * {@code app/csd/CARDDEMO.CSD}. The consuming program declares the same record from the other side:
+     * {@code app/cbl/CBTRN03C.cbl} holds {@code 01 FD-DATEPARM-REC PIC X(80).} at its L88 and reads it
+     * at L220 to L221 into the twenty-one-character working copy at L122 to L125, which is a
+     * ten-character field, a one-character filler and a ten-character field in that order. Two
+     * independently written declarations agreeing byte for byte is what makes the channel's shape a
+     * fact rather than a reading.</p>
+     *
+     * <p>Assumptions: one artifact of the baseline is recorded here as an OBSERVATION and is neither
+     * acted on nor described as a defect, because {@code app/jcl/**} is reference material this
+     * migration reads and never edits. The step-qualified override at L98 names {@code STEP05R}, and
+     * {@code app/jcl/TRANREPT.jcl} declares that step name TWICE -- at L23 as
+     * {@code EXEC PROC=REPROC} and again at L37 as {@code EXEC PGM=SORT} -- so which step the symbol
+     * override attaches to is genuinely ambiguous in the baseline. The other override at L116 has no
+     * such ambiguity: {@code STEP10R} is declared once, at L59. The observation is noted so that a
+     * reader who finds the target carrying one unambiguous range knows the ambiguity was seen and left
+     * where it is.</p>
+     *
+     * <p>Assumptions: the target's two channels are the execution input, which the generator filters
+     * records on, and the accepted response, which the caller heads its report from. They are the same
+     * two roles under different transports, so a case asserting only one of them would leave the other
+     * free to carry a different range -- which is exactly the exposure the batch-only path has, where
+     * {@code app/jcl/TRANREPT.jcl} fixes the selection range in its own symbols at L43 and L44 while
+     * {@code app/cbl/CBTRN03C.cbl} heads the output from the separate parameter record it reads at
+     * L220, and nothing reconciles the two.</p>
+     *
+     * <p>Assumptions: the bounds are asserted to be EQUAL ACROSS the two channels rather than each
+     * compared against a literal, which is the stronger of the two available statements. Comparing
+     * each against its own expected literal would pass for an implementation that wrote one channel
+     * from the resolved range and the other from a second, coincidentally equal computation; asserting
+     * the identity is what pins them to one origin. The literals are asserted too, so the pair cannot
+     * agree on a wrong value.</p>
+     *
+     * @param reportName the report name whose channels are under test, one of the three the reference
+     *     assigns at L214, L240 and L433
+     * @param monthlyMark the monthly selector mark for this case, blank when another type is selected
+     * @param yearlyMark the yearly selector mark for this case, blank when another type is selected
+     * @param customMark the custom selector mark for this case, blank when another type is selected
+     * @param expectedStart the lower bound both channels must carry
+     * @param expectedEnd the upper bound both channels must carry
+     */
+    @ParameterizedTest
+    @CsvSource({
+        "Monthly,Y,,,2022-07-01,2022-07-31",
+        "Yearly,,Y,,2022-01-01,2022-12-31",
+        "Custom,,,Y,2019-03-04,2019-03-29"
+    })
+    @DisplayName("one resolved range reaches the filter channel and the heading channel alike")
+    void oneResolvedRangeReachesBothChannels(String reportName, String monthlyMark,
+            String yearlyMark, String customMark, String expectedStart, String expectedEnd) {
+        ReportExecutionService service = serviceAt(MID_JULY);
+        when(this.sfn.startExecution(any(StartExecutionRequest.class)))
+                .thenReturn(StartExecutionResponse.builder().executionArn(EXECUTION_ARN).build());
+        ReportRequest request = new ReportRequest(null, null, null, null, null, null,
+                monthlyMark, yearlyMark, customMark, "2019-03-04", "2019-03-29", MARK, null);
+
+        ReportExecutionService.DateRange resolved = service.resolveRange(request, reportName);
+        ReportSubmissionResponse accepted = service.start(
+                request, reportName, resolved.start(), resolved.end(), NO_SUPPLIED_KEY);
+
+        ArgumentCaptor<StartExecutionRequest> started =
+                ArgumentCaptor.forClass(StartExecutionRequest.class);
+        verify(this.sfn).startExecution(started.capture());
+
+        assertThat(resolved.start()).isEqualTo(LocalDate.parse(expectedStart));
+        assertThat(resolved.end()).isEqualTo(LocalDate.parse(expectedEnd));
+        assertThat(started.getValue().input())
+                .as("the filter channel carries the resolved range")
+                .contains("\"startDate\":\"" + expectedStart + "\"")
+                .contains("\"endDate\":\"" + expectedEnd + "\"");
+        assertThat(accepted.startDate())
+                .as("the heading channel opens on the same day the filter channel does")
+                .isEqualTo(expectedStart);
+        assertThat(accepted.endDate())
+                .as("the heading channel closes on the same day the filter channel does")
+                .isEqualTo(expectedEnd);
+    }
+
+    /**
+     * Nothing resembling a job control card image survives the transport change.
+     *
+     * <p>Refactoring Rationale: the baseline serialises this request as SEVENTEEN eighty-character job
+     * control card images, declared as the {@code 05}-level items of the request group at L81 to L127
+     * of {@code app/cbl/CORPT00C.cbl} -- at L83, L85, L87, L89, L91, L93, L95, L97, L99, L101, L103,
+     * L108, L113, L115, L117, L122 and L124. Three of them are worth naming because the count is easy
+     * to get wrong in either direction: L126 and L127 are a redefinition of that same group as a
+     * thousand-entry array, not a further card, and the terminator at L124 to L125 holding
+     * {@code "/*EOF"} IS one of the seventeen rather than an extra. The write loop reaches it too,
+     * because L502 to L505 set the stop flag inside the test while L507 performs the write OUTSIDE it,
+     * so the card that satisfied the test is written before the loop ends. Those seventeen serialised
+     * writes collapse to ONE typed call here, and this case asserts the collapse is total: not one
+     * fragment of the card syntax is reproduced under a new name.</p>
+     *
+     * <p>Assumptions: three distinct fragments are searched for rather than one, because each would
+     * betray a different half-migration. A line opening with the job control prefix would mean the
+     * step structure was still being composed as text; the {@code "/*EOF"} sentinel would mean the
+     * internal-reader submission protocol was still being spoken to a transport that has no reader;
+     * and an eighty-character run of padding would mean the fixed record width of the queue -- the
+     * {@code RECORDSIZE(80)} at L502 of {@code app/csd/CARDDEMO.CSD} -- was still being honoured by a
+     * transport that imposes no record width at all.</p>
+     *
+     * <p>Assumptions: every string the operation emits is searched, not just the execution input. The
+     * execution name and the accepted response are the other two places a card fragment could
+     * plausibly be assembled, so checking the input alone would leave two escape routes open.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("no job control card image, terminator sentinel or fixed-width padding is composed")
+    void noJobControlCardImageIsComposed() {
+        ReportExecutionService service = serviceAt(MID_JULY);
+        when(this.sfn.startExecution(any(StartExecutionRequest.class)))
+                .thenReturn(StartExecutionResponse.builder().executionArn(EXECUTION_ARN).build());
+
+        ReportSubmissionResponse accepted = service.start(
+                selection(MARK, null, null, MARK),
+                ReportExecutionService.MONTHLY_REPORT_NAME,
+                LocalDate.of(2022, 7, 1),
+                LocalDate.of(2022, 7, 31), NO_SUPPLIED_KEY);
+
+        ArgumentCaptor<StartExecutionRequest> started =
+                ArgumentCaptor.forClass(StartExecutionRequest.class);
+        verify(this.sfn).startExecution(started.capture());
+
+        // WHY : Assumptions: the padding probe is a run of eighty spaces rather than a length check,
+        //       because the input document is legitimately longer than eighty characters and a length
+        //       assertion would therefore say nothing. What would betray a card image is a FIXED-WIDTH
+        //       run, which is what the reference's PIC X(80) items produce and what a structured
+        //       document never contains.
+        String eightyByteRun = " ".repeat(80);
+        for (String emitted : java.util.List.of(
+                started.getValue().input(),
+                started.getValue().name(),
+                accepted.reportName(),
+                accepted.startDate(),
+                accepted.endDate(),
+                accepted.executionName())) {
+            assertThat(emitted)
+                    .as("no job control prefix, no terminator sentinel and no fixed-width padding")
+                    .doesNotContain("//")
+                    .doesNotContain("/*EOF")
+                    .doesNotContain("/*")
+                    .doesNotContain(eightyByteRun);
+        }
+
+        // WHY : Assumptions: the input is asserted to be a STRUCTURED document naming its three
+        //       members, which is the positive half of the same claim. Proving only that card syntax
+        //       is absent would also pass for an empty input, and an empty input starts a run that
+        //       filters on nothing.
+        assertThat(started.getValue().input())
+                .startsWith("{")
+                .endsWith("}")
+                .contains("\"reportType\"", "\"startDate\"", "\"endDate\"");
+    }
+
+    /**
+     * The request edge STARTS a run and holds nothing it could generate a report with.
+     *
+     * <p>Purpose: the baseline's request path submits and returns; it does not produce the report. The
+     * driver paragraph {@code SUBMIT-JOB-TO-INTRDR} at L462 of {@code app/cbl/CORPT00C.cbl} -- reached
+     * from the monthly arm at L238, the yearly arm at L255 and the custom arm at L435 -- writes card
+     * images to a queue through {@code WIRTE-JOBSUB-TDQ}, and the report is produced later by the job
+     * the reader starts, so the online program never holds a report record at all. This case pins the
+     * same separation in the target.</p>
+     *
+     * <p>Alternatives Considered: injecting stand-ins for the two generator classes and asserting no
+     * interaction with them. Rejected because the service under test declares only THREE constructor
+     * parameters -- the orchestration client, the configured state machine and the clock -- so there is
+     * no seam to inject a generator through, and adding one merely to observe that it goes unused
+     * would introduce the very dependency this case exists to deny. Asserting the absence structurally
+     * is also the stronger statement: an uninteracted stand-in shows the current path does not call a
+     * generator, whereas this shows no path can, because the class holds no reference to reach one
+     * through. The package already settles this idiom -- {@code TransactionReportServiceTest} and
+     * {@code StatementServiceTest} deny their own clock the same way.</p>
+     *
+     * <p>Assumptions: the orchestration client is additionally asserted to receive exactly one call
+     * and nothing further, which closes the other half. A service that started the run correctly and
+     * then also polled, described or stopped it would be doing work on the request path that the
+     * baseline's fire-and-return submission does not, and no assertion above would notice.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("the request edge starts the run and cannot generate a report inline")
+    void theRequestEdgeStartsAndCannotGenerateInline() {
+        ReportExecutionService service = serviceAt(MID_JULY);
+        when(this.sfn.startExecution(any(StartExecutionRequest.class)))
+                .thenReturn(StartExecutionResponse.builder().executionArn(EXECUTION_ARN).build());
+
+        service.start(
+                selection(MARK, null, null, MARK),
+                ReportExecutionService.MONTHLY_REPORT_NAME,
+                LocalDate.of(2022, 7, 1),
+                LocalDate.of(2022, 7, 31), NO_SUPPLIED_KEY);
+
+        verify(this.sfn).startExecution(any(StartExecutionRequest.class));
+        verifyNoMoreInteractions(this.sfn);
+
+        for (Class<?> generator
+                : java.util.List.of(TransactionReportService.class, StatementService.class)) {
+            for (Field field : ReportExecutionService.class.getDeclaredFields()) {
+                assertThat(field.getType())
+                        .as("field %s is not a report generator", field.getName())
+                        .isNotEqualTo(generator);
+            }
+            for (Constructor<?> constructor
+                    : ReportExecutionService.class.getDeclaredConstructors()) {
+                assertThat(constructor.getParameterTypes())
+                        .as("no constructor takes a report generator")
+                        .doesNotContain(generator);
+            }
+            for (Method method : ReportExecutionService.class.getDeclaredMethods()) {
+                assertThat(method.getParameterTypes())
+                        .as("method %s takes no report generator", method.getName())
+                        .doesNotContain(generator);
+                assertThat(method.getReturnType())
+                        .as("method %s returns no report generator", method.getName())
+                        .isNotEqualTo(generator);
+            }
+        }
+    }
+
+    /**
+     * The range handed downstream is the explicit pair, so no clock reaches a generator.
+     *
+     * <p>Purpose: this is the generator half of the line the class documentation draws. The request
+     * edge is permitted a clock and consults it to expand a preset; from that point the range travels
+     * as an explicit pair, which is the discipline {@code app/jcl/TRANREPT.jcl} keeps at L43 and L44
+     * by fixing the selection range as two literals, and which {@code app/cbl/CBTRN03C.cbl} keeps at
+     * L220 by reading its range from a parameter record rather than a date of its own. An injected
+     * range is what lets a rerun produce the same report.</p>
+     *
+     * <p>Assumptions: two services built on two DIFFERENT clocks are driven over the SAME explicit
+     * range and asserted to emit the identical execution input, which is the property that matters
+     * downstream. A single-clock case would establish only that one run is self-consistent; the pair
+     * establishes that once a range is explicit the clock contributes nothing further to it, so
+     * nothing a generator receives can vary with the day the submission happened to be made.</p>
+     *
+     * <p>Assumptions: neither generator is asserted here to consult a clock indirectly -- that would
+     * need their own collaborators -- but both are asserted to declare none, which is the structural
+     * form of the same claim and is what each generator's own test class also asserts of itself.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("an explicit range yields the same input under two clocks, and no generator has one")
+    void anExplicitRangeIsInvariantAcrossClocksAndNoGeneratorHoldsOne() {
+        when(this.sfn.startExecution(any(StartExecutionRequest.class)))
+                .thenReturn(StartExecutionResponse.builder().executionArn(EXECUTION_ARN).build());
+        LocalDate start = LocalDate.of(2022, 1, 1);
+        LocalDate end = LocalDate.of(2022, 7, 6);
+
+        // WHY : Assumptions: the explicit pair is the canonical fixture range the baseline hard-codes
+        //       as sort symbols at L43 and L44 of app/jcl/TRANREPT.jcl, used here so the case is
+        //       driven by the same range the reference's own reproducible run is driven by.
+        serviceAt(MID_JULY).start(selection(null, MARK, null, MARK),
+                ReportExecutionService.YEARLY_REPORT_NAME, start, end, "fixedkey");
+        serviceAt(Instant.parse("2031-11-09T03:17:44Z")).start(selection(null, MARK, null, MARK),
+                ReportExecutionService.YEARLY_REPORT_NAME, start, end, "fixedkey");
+
+        ArgumentCaptor<StartExecutionRequest> started =
+                ArgumentCaptor.forClass(StartExecutionRequest.class);
+        verify(this.sfn, times(2)).startExecution(started.capture());
+
+        assertThat(started.getAllValues().get(0).input())
+                .as("an explicit range carries no trace of the day it was submitted on")
+                .isEqualTo(started.getAllValues().get(1).input());
+        assertThat(started.getAllValues().get(0).name())
+                .as("a keyed submission names the same run under either clock")
+                .isEqualTo(started.getAllValues().get(1).name());
+
+        for (Class<?> generator
+                : java.util.List.of(TransactionReportService.class, StatementService.class)) {
+            for (Field field : generator.getDeclaredFields()) {
+                assertThat(field.getType())
+                        .as("%s field %s is not a time source", generator.getSimpleName(),
+                                field.getName())
+                        .isNotEqualTo(Clock.class);
+            }
+            for (Constructor<?> constructor : generator.getDeclaredConstructors()) {
+                assertThat(constructor.getParameterTypes())
+                        .as("no %s constructor takes a time source", generator.getSimpleName())
+                        .doesNotContain(Clock.class);
+            }
+            for (Method method : generator.getDeclaredMethods()) {
+                assertThat(method.getParameterTypes())
+                        .as("%s method %s takes no time source", generator.getSimpleName(),
+                                method.getName())
+                        .doesNotContain(Clock.class);
+            }
+        }
+    }
+
+    /**
      * The two header names come from the report record contract, and the stamp comes from the clock.
      *
      * <p>Purpose: {@code app/cpy/CVTRA07Y.cpy} declares the two names as values of the report header
@@ -635,6 +1091,8 @@ class ReportExecutionServiceTest {
      * what proves the clock is the injected one rather than an ambient read. A case comparing it
      * against a wall-clock read would pass for a reason unrelated to the code under test and fail
      * whenever the two reads straddled a boundary.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
     @DisplayName("the response carries the record contract's names and the injected clock's stamp")
@@ -657,19 +1115,43 @@ class ReportExecutionServiceTest {
     /**
      * A start the orchestrator refuses is raised loudly, carrying the refusal as its cause.
      *
-     * <p>Purpose: this is the one behaviour the transport change exists to remove. The baseline's queue
-     * definition carries {@code ERROROPTION(IGNORE)} at L501 of {@code app/csd/CARDDEMO.CSD}, which
-     * lets the region drop an extrapartition write and leave the request unrecorded -- while the
-     * program itself checks the response code at L521 to L531 and holds
-     * {@code 'Unable to Write TDQ (JOBS)...'} ready for exactly that condition. Raising here is what
-     * keeps a submission this service could not place from being reported as one it did.</p>
+     * <p>Refactoring Rationale: two SEPARATE facts make this the one behaviour the transport change
+     * exists to remove, and each is false on its own. The queue the baseline writes to is defined with
+     * {@code ERROROPTION(IGNORE)} at L501 of {@code app/csd/CARDDEMO.CSD}, within the stanza spanning
+     * L499 to L505 that carries {@code DDNAME(INREADER)} on that same L501 -- and that option is what
+     * makes the REGION itself swallow an extrapartition write error, so a request could be accepted at
+     * the screen and never reach the job entry subsystem with nothing recording the loss. The PROGRAM,
+     * meanwhile, does the opposite of omitting the check: {@code WIRTE-JOBSUB-TDQ} at L515 of
+     * {@code app/cbl/CORPT00C.cbl} -- the paragraph name quoted with the baseline's own spelling
+     * rather than respelled -- requests a response code at L521, EVALUATES it at L525, and on any
+     * non-normal outcome moves {@code 'Unable to Write TDQ (JOBS)...'} at L531. Attributing the
+     * silence to the program would be false, and attributing the readiness to check to the region
+     * would be false too. Raising here reproduces the program's readiness and declines the region's
+     * silence, which is the only combination that loses nothing.</p>
      *
-     * <p>Assumptions: the raised type is asserted NOT to be the client-input type, and the cause is
-     * asserted present. The type decides which channel the shared advice routes it to: a caller's
-     * request was well formed and the orchestrator declined it, so reporting it as a caller fault
-     * would tell a client to correct a correct request and would keep a real outage out of the
-     * internal channel. The cause is the evidence the baseline held ready and the region was told to
-     * ignore, so dropping it would reproduce the loss in a different form.</p>
+     * <p>Assumptions: the exception this case captures is the AWS SDK's
+     * {@link SdkClientException}, thrown by the stubbed client to stand for the orchestrator declining
+     * the start, and it surfaces as a {@link IllegalStateException} carrying that refusal as its
+     * cause. Both types are named because {@code validateThrows} cannot inspect a lambda, so the pair
+     * is recorded here rather than inferred from the body. The surfaced type is additionally asserted
+     * NOT to be {@link ClientInputException}: the type is what decides which channel the shared advice
+     * routes the failure to, and a caller whose request was well formed must not be told to correct
+     * it while a real outage stays out of the internal channel.</p>
+     *
+     * <p>Trade-offs: the surfaced exception's OWN message is target-authored and is deliberately not
+     * the reference sentence, which is a divergence rather than an oversight and is recorded as such.
+     * The reference has one channel for both audiences -- it moves the sentence into the screen's
+     * message field at L531 and L532 and re-sends the screen at L534 -- whereas the target separates
+     * them, so the sentence a caller is shown is enumerated on the published contract for this
+     * surface while the internal exception carries the report name an operator needs in order to tell
+     * WHICH report failed to start. Asserting the report name here is therefore asserting the datum
+     * the reference emits alongside the sentence, in its {@code DISPLAY} of the response and reason
+     * codes at L529. The full catalog of nineteen reference sentences, this one included at its L531,
+     * is asserted against the published contract by
+     * {@code com.carddemo.reporting.api.ReportControllerTest}; it is named rather than duplicated here
+     * so this class does not become a second authority on a catalog it does not own.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
     @DisplayName("a refused start is raised loudly, in the internal channel, carrying its cause")
@@ -686,7 +1168,55 @@ class ReportExecutionServiceTest {
                 .withCause(refusal)
                 .satisfies(raised -> assertThat(raised)
                         .as("a refused start belongs in the internal channel, not the caller's")
-                        .isNotInstanceOf(ClientInputException.class));
+                        .isNotInstanceOf(ClientInputException.class))
+                // WHY : Assumptions: the report name is asserted to be PRESENT in the internal
+                //       sentence, which is the analogue of the reference emitting the response and
+                //       reason codes at L529 beside the sentence it moves at L531. A failure naming no
+                //       report leaves an operator unable to tell which of the three submissions was
+                //       lost, and the shared advice records the exception class and the request path
+                //       but not the report.
+                .satisfies(raised -> assertThat(raised.getMessage())
+                        .as("the internal sentence names which report failed to start")
+                        .contains(ReportExecutionService.MONTHLY_REPORT_NAME));
+    }
+
+    /**
+     * The refusal is reported, never absorbed, so no accepted response is produced for a failed start.
+     *
+     * <p>Refactoring Rationale: this is the second half of declining the region's silence, and it is a
+     * different claim from the one above. That case establishes that SOMETHING is raised; this one
+     * establishes that nothing is also RETURNED, which is the shape the {@code ERROROPTION(IGNORE)}
+     * option at L501 of {@code app/csd/CARDDEMO.CSD} produces in the baseline: the write is dropped,
+     * the program's check at L525 of {@code app/cbl/CORPT00C.cbl} is never reached because the region
+     * reported normal completion, and the screen goes on to the success path. An implementation that
+     * caught the refusal, logged it and answered a response anyway would satisfy every assertion about
+     * the loud path while reproducing exactly that outcome.</p>
+     *
+     * <p>Assumptions: the captured exception is the {@link IllegalStateException} the surfaced failure
+     * arrives as, and the stub raises the AWS SDK's {@link SdkClientException} beneath it. The
+     * assertion is that the call yields NO value at all -- the reference for the response is left
+     * unassigned and asserted null afterwards -- because a returned response is the one outcome that
+     * would let a caller believe a report was queued when none was.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("a refused start yields no accepted response, so the loss cannot read as a success")
+    void aRefusedStartYieldsNoAcceptedResponse() {
+        ReportExecutionService service = serviceAt(MID_JULY);
+        when(this.sfn.startExecution(any(StartExecutionRequest.class)))
+                .thenThrow(SdkClientException.create("the orchestrator declined the start"));
+        ReportRequest request = selection(MARK, null, null, "Y");
+        ReportSubmissionResponse[] answered = new ReportSubmissionResponse[1];
+
+        assertThatExceptionOfType(IllegalStateException.class)
+                .isThrownBy(() -> answered[0] = service.start(request,
+                        ReportExecutionService.MONTHLY_REPORT_NAME,
+                        LocalDate.of(2022, 7, 1), LocalDate.of(2022, 7, 31), NO_SUPPLIED_KEY));
+
+        assertThat(answered[0])
+                .as("a submission that could not be placed produces no acceptance to report")
+                .isNull();
     }
 
     /**
@@ -726,6 +1256,8 @@ class ReportExecutionServiceTest {
      * <p>Assumptions: this is asserted because all three methods declare it, and a declared exception
      * nothing exercises is a claim rather than a contract. The refusal names the parameter, which is
      * what tells a caller which of several arguments was missing.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
     @DisplayName("a null request is refused by name at every entry point")
@@ -751,6 +1283,8 @@ class ReportExecutionServiceTest {
     //       absent run, and an input this service did not write.
     /**
      * Asserts that the handle is composed from the configured machine rather than from the caller.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
     @DisplayName("the described handle is composed from the configured state machine")
@@ -770,6 +1304,8 @@ class ReportExecutionServiceTest {
 
     /**
      * Asserts that the three coordinates are recovered from the execution's own input.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
     @DisplayName("the coordinates are recovered from the execution input")
@@ -794,6 +1330,8 @@ class ReportExecutionServiceTest {
     //       which is the only way this can break.
     /**
      * Asserts that the input the submission path writes is the input the describe path reads.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
     @DisplayName("the input the submission writes is the input the describe reads")
@@ -829,6 +1367,8 @@ class ReportExecutionServiceTest {
 
     /**
      * Asserts that an unknown execution is reported as an absent record.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
     @DisplayName("an unknown execution is reported as an absent record")
@@ -847,6 +1387,8 @@ class ReportExecutionServiceTest {
     //       exactly the runs an operator most often asks about.
     /**
      * Asserts that an input this service did not compose yields a status without coordinates.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
     @DisplayName("an input this service did not compose yields no coordinates")
@@ -868,6 +1410,8 @@ class ReportExecutionServiceTest {
 
     /**
      * Asserts that a status the orchestration adds later is refused rather than mapped to a nearby one.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
     @DisplayName("an unpublished orchestration status is refused")
@@ -883,6 +1427,219 @@ class ReportExecutionServiceTest {
         assertThatExceptionOfType(IllegalStateException.class)
                 .isThrownBy(() -> serviceAt(MID_JULY).describeExecution("some-run-name"))
                 .withMessageContaining("status this service does not publish");
+    }
+
+    /**
+     * The custom bounds are edited by the shared validator, not by rules restated here.
+     *
+     * <p>Refactoring Rationale: the date rules are DELEGATED and this group asserts the delegation
+     * rather than the rules. The baseline delegates too: it does not implement its own date arithmetic
+     * but calls the dynamically-invoked subprogram {@code CSUTLDTC} twice, at L392 for the lower bound
+     * and L412 for the upper one, passing the parameter group declared at L129 to L136 of
+     * {@code app/cbl/CORPT00C.cbl} with the mask {@code 'YYYY-MM-DD'} that its L72 fixes. AAP
+     * transformation rule T2 turns one such shared contract into exactly one type import from the
+     * single package that owns it, so the rules live in {@code com.carddemo.common.validation} and this
+     * service calls them. Restating the leap-year test, the month and day ranges or the feedback
+     * severities here would create a second authority on whether a date is valid, and two authorities
+     * can disagree -- so those belong to the shared kernel's own test class and are deliberately not
+     * re-tested in this module.</p>
+     */
+    @Nested
+    @DisplayName("the shared date edit, delegated rather than restated")
+    class DelegatedDateEdit {
+
+        /**
+         * A well-formed bound the shared edit rejects only for range is FORGIVEN by this caller.
+         *
+         * <p>Assumptions: this tolerance is CALLER-SPECIFIC and is the reason this case exists. The
+         * two call sites in {@code app/cbl/CORPT00C.cbl} are the {@code CALL 'CSUTLDTC'} at L392 for
+         * the lower bound and the one at L412 for the upper, each passing the parameter group declared
+         * at L129 to L136. Both test the severity first -- at L396 for the lower bound and L416 for the
+         * upper -- and then add a second, narrower acceptance: L399 and L419 each read
+         * {@code IF CSUTLDTC-RESULT-MSG-NUM NOT = '2513'}, so a non-zero severity whose message number
+         * IS 2513 is accepted anyway. That number names the unsupported-range outcome, which the shared
+         * kernel reaches only for a well-formed calendar date below the supported calendar floor, so a
+         * bound this tolerance forgives is always still a date that converts. Dropping the tolerance
+         * would refuse a bound the baseline accepts. The proof that the tolerance belongs to THIS
+         * caller and not to the shared rules is that {@code app/cpy/CSUTLDPY.cpy} calls the same
+         * subprogram and tests the severity alone with no tolerance at all, so pushing it down into the
+         * shared validator would relax every other caller.</p>
+         *
+         * <p>Assumptions: the bound is the day IMMEDIATELY below the floor rather than a date centuries
+         * under it, which makes the case a boundary rather than an illustration. A bound far below the
+         * floor would pass equally against an implementation whose threshold was off by any amount.</p>
+         *
+         * <p>Assumptions: the shared edit's verdict on that same bound is asserted FIRST, so the case
+         * cannot silently become vacuous. If a future change to the shared kernel started accepting the
+         * bound outright, the tolerance would no longer be what carries it and this case would pass
+         * while proving nothing -- the precondition assertion is what fails instead.</p>
+         *
+         * <p>This case takes no parameter and yields no value.</p>
+         */
+        @Test
+        @DisplayName("an unsupported-range bound is forgiven, because the two call sites forgive it")
+        void anUnsupportedRangeBoundIsForgiven() {
+            LanguageEnvironmentResult verdict = DateEditValidator.evaluateWithLanguageEnvironment(
+                    "1582-10-14", DateEditValidator.DATE_FORMAT_MASK);
+
+            assertThat(verdict.acceptable())
+                    .as("the shared edit does NOT accept this bound outright")
+                    .isFalse();
+            assertThat(verdict.unsupportedRange())
+                    .as("it rejects it for range alone, which is the condition the tolerance names")
+                    .isTrue();
+
+            ReportExecutionService.DateRange range = serviceAt(MID_JULY).resolveRange(
+                    customRange("1582-10-14", "2022-07-31", MARK),
+                    ReportExecutionService.CUSTOM_REPORT_NAME);
+
+            assertThat(range.start())
+                    .as("the caller-specific tolerance at L399 and L419 carries the bound through")
+                    .isEqualTo(LocalDate.of(1582, 10, 14));
+        }
+
+        /**
+         * A bound the shared edit rejects for any OTHER reason is refused, so the tolerance is narrow.
+         *
+         * <p>Assumptions: this is the contrast that makes the case above meaningful. A service that
+         * forgave every non-zero severity would pass the tolerance case and would accept a bound the
+         * baseline refuses, so the tolerance has to be shown to be narrow as well as present. The bound
+         * below is rejected by the shared edit with a message number that is NOT the forgiven one,
+         * which is asserted rather than assumed, and the service must then refuse it with the
+         * reference's own sentence for an unusable assembled bound -- the string L420 moves for the
+         * upper bound.</p>
+         *
+         * <p>Assumptions: the captured exception is {@link ClientInputException}, because a bound the
+         * caller supplied and the edit refused is a request to correct rather than an internal fault.
+         * The field it names is asserted too, since the field is this target's analogue of the cursor
+         * position the reference sets.</p>
+         *
+         * <p>This case takes no parameter and yields no value.</p>
+         */
+        @Test
+        @DisplayName("a bound rejected for any other reason is refused, so the tolerance stays narrow")
+        void aDifferentlyRejectedBoundIsRefused() {
+            LanguageEnvironmentResult verdict = DateEditValidator.evaluateWithLanguageEnvironment(
+                    "2022-13-01", DateEditValidator.DATE_FORMAT_MASK);
+
+            assertThat(verdict.acceptable()).as("the shared edit rejects this bound").isFalse();
+            assertThat(verdict.messageNumber())
+                    .as("and it rejects it for something other than the forgiven range outcome")
+                    .isNotEqualTo(DateEditValidator.MSG_NO_UNSUPP_RANGE);
+            assertThat(verdict.unsupportedRange())
+                    .as("so the tolerance does not apply to it")
+                    .isFalse();
+
+            ReportExecutionService service = serviceAt(MID_JULY);
+            ReportRequest request = customRange("2022-07-01", "2022-13-01", MARK);
+
+            assertThatExceptionOfType(ClientInputException.class)
+                    .isThrownBy(() -> service.resolveRange(
+                            request, ReportExecutionService.CUSTOM_REPORT_NAME))
+                    .withMessage(ReportExecutionService.MESSAGE_END_DATE_INVALID)
+                    .satisfies(refused -> assertThat(refused.field()).isEqualTo("endDate"));
+        }
+
+        /**
+         * The verdict carries the severity, number and message TRIPLE, with the padding dropped.
+         *
+         * <p>Assumptions: the baseline transports the edit's answer as a fixed-width group and this
+         * case pins which parts of it survive. {@code CSUTLDTC-RESULT} is declared at L132 to L136 of
+         * {@code app/cbl/CORPT00C.cbl} as a four-character severity at L133, ELEVEN characters of
+         * {@code FILLER} at L134, a four-character message number at L135 and a sixty-one character
+         * message at L136, which is 4 + 11 + 4 + 61 = 80 and therefore the whole declared result. The
+         * enclosing {@code CSUTLDTC-PARM} at L129 is a different and larger figure -- the ten-character
+         * date at L130 plus the ten-character mask at L131 plus that result, so 10 + 10 + 80 = 100 --
+         * and the two are asserted separately here because attributing the 80 to the whole group is the
+         * available mistake.</p>
+         *
+         * <p>Assumptions: the eleven-character {@code FILLER} at L134 is DROPPED and the drop is
+         * recorded, as AAP transformation rule T1 requires of a dropped filler item. The target's
+         * verdict type carries a component for the severity, one for the message number and one for the
+         * message text, and NONE for the padding, so the drop is observable as the absence of a
+         * component rather than merely asserted in prose -- which is what the component-name assertion
+         * below checks. Padding exists to reach the declared record length and carries no datum, so
+         * nothing downstream can want it.</p>
+         *
+         * <p>Assumptions: the triple is asserted to be a triple rather than collapsed to a boolean,
+         * because the published contract for this surface expresses the reference tolerance for the
+         * forgiven number to a client, which a bare accept-or-reject flag could not express at all.</p>
+         *
+         * <p>This case takes no parameter and yields no value.</p>
+         */
+        @Test
+        @DisplayName("the verdict is a severity, number and message triple, and the filler is dropped")
+        void theVerdictCarriesTheTripleAndDropsTheFiller() {
+            LanguageEnvironmentResult verdict = DateEditValidator.evaluateWithLanguageEnvironment(
+                    "1582-10-14", DateEditValidator.DATE_FORMAT_MASK);
+
+            assertThat(verdict.severity())
+                    .as("the severity is the first of the three, from L133")
+                    .isNotEqualTo(DateEditValidator.SEVERITY_VALID);
+            assertThat(verdict.messageNumber())
+                    .as("the message number is the second, from L135")
+                    .isEqualTo(DateEditValidator.MSG_NO_UNSUPP_RANGE);
+            assertThat(verdict.verdict())
+                    .as("the message text is the third, from L136")
+                    .isNotBlank();
+
+            // WHY : Assumptions: the result group's own width is asserted against the sum of its four
+            //       declared parts rather than against a bare 80, so the assertion states WHERE the
+            //       figure comes from. The whole parameter group is 100 and is written out beside it so
+            //       the two figures cannot be conflated by a later reader.
+            assertThat(DateEditValidator.RESULT_LENGTH)
+                    .as("CSUTLDTC-RESULT at L132 to L136 is 4 + 11 + 4 + 61")
+                    .isEqualTo(4 + 11 + 4 + 61)
+                    .isEqualTo(80);
+            assertThat(2 * DateEditValidator.MASKED_DATE_LENGTH + DateEditValidator.RESULT_LENGTH)
+                    .as("the whole CSUTLDTC-PARM at L129 to L136 is 10 + 10 + 80, which is not the 80")
+                    .isEqualTo(100);
+
+            assertThat(LanguageEnvironmentResult.class.getRecordComponents())
+                    .extracting(java.lang.reflect.RecordComponent::getName)
+                    .as("the eleven-character FILLER at L134 has no component and is dropped")
+                    .contains("severity", "messageNumber", "verdict")
+                    .doesNotContain("filler", "padding");
+        }
+
+        /**
+         * The mask the service edits against is the one the reference declares, not a second spelling.
+         *
+         * <p>Assumptions: {@code app/cbl/CORPT00C.cbl} L72 declares
+         * {@code WS-DATE-FORMAT PIC X(10) VALUE 'YYYY-MM-DD'} and passes it as the second part of the
+         * parameter group, so the mask is part of the delegated contract rather than a local choice.
+         * The shared kernel also publishes the baseline's other, unseparated spelling for callers that
+         * need it, which is precisely why the one this caller uses is worth pinning: picking the other
+         * would change the accepted width from ten to eight and refuse every bound this surface
+         * receives.</p>
+         *
+         * <p>Trade-offs: the reference takes each bound as SIX separate screen components -- two-digit
+         * month, two-digit day and four-digit year per bound, with hyphen separators as {@code FILLER}
+         * at L62, L64, L68 and L70 -- and assembles them before editing, whereas this surface takes one
+         * ten-character value per bound. The narrower wire shape cannot say which of the three
+         * components a caller omitted, so an omitted bound reports the reference's month sentence for
+         * the whole bound; the per-component sentences survive individually in the structured error
+         * array where the client assembles them, which is where the six components now live.</p>
+         *
+         * <p>This case takes no parameter and yields no value.</p>
+         */
+        @Test
+        @DisplayName("the delegated mask is the ten-character separated one the reference declares")
+        void theDelegatedMaskIsTheSeparatedTenCharacterOne() {
+            assertThat(DateEditValidator.DATE_FORMAT_MASK)
+                    .as("the mask app/cbl/CORPT00C.cbl declares at L72")
+                    .isEqualTo("YYYY-MM-DD");
+            assertThat(DateEditValidator.MASKED_DATE_LENGTH)
+                    .as("which admits exactly the ten positions the two bound fields declare")
+                    .isEqualTo("YYYY-MM-DD".length());
+
+            ReportExecutionService.DateRange range = serviceAt(MID_JULY).resolveRange(
+                    customRange("2022-01-01", "2022-07-06", MARK),
+                    ReportExecutionService.CUSTOM_REPORT_NAME);
+
+            assertThat(range.start()).isEqualTo(LocalDate.of(2022, 1, 1));
+            assertThat(range.end()).isEqualTo(LocalDate.of(2022, 7, 6));
+        }
     }
 
     /**
