@@ -1297,14 +1297,31 @@ target behaviour.
 
 ### 10.2 Test inventory
 
-<!-- test-inventory: 34 tests + 4 integration tests -->
-**38** test classes across nine subpackages and the module root: **34** matching `*Test`, run
-by Surefire, and **4** matching `*IT` — `repository/ReportingQueryBootstrapIT`,
-`repository/StatementHeadingChunkIT`, `repository/ReportingDeployedRelationIT` and
-`repository/StatementCardXrefRepositoryIT` — run by
+<!-- test-inventory: 34 tests + 8 integration tests -->
+**42** test classes across nine subpackages and the module root: **34** matching `*Test`, run
+by Surefire, and **8** matching `*IT` — `repository/ReportingQueryBootstrapIT`,
+`repository/StatementHeadingChunkIT`, `repository/ReportingDeployedRelationIT`,
+`repository/StatementCardXrefRepositoryIT`,
+`repository/StatementTransactionRepositoryIT`,
+`repository/StatementCustomerRepositoryIT`,
+`repository/StatementAccountRepositoryIT` and
+`repository/TransactionReportRepositoryIT` — run by
 Failsafe against a Testcontainers-backed
 PostgreSQL, with the Testcontainers BOM at **2.0.5** managed by the parent. Every test package
 carries a `package-info.java`, because the documentation gate audits test sources (§8.2).
+
+One of the four newest is the customer lookup's, and it is named here because what it asserts
+is not obvious from its name. `StatementCustomerRepository.findById` stands in for the keyed read
+of the `'CUSTFILE'` branch of `app/cbl/CBSTM03B.CBL` (L181–L204), and that read is an **exact
+whole-key** read rather than a partial-key browse — `ACCESS MODE IS RANDOM` at L45, a plain `READ`
+at L190, and a caller that recomputes the whole key's length at `app/cbl/CBSTM03A.CBL` L374 after
+zeroing it transiently at L373. The class probes that property from both sides: a whole identifier
+resolves, while a leading fragment of one and an absent key whose successor is published each
+resolve nothing. It also pins the missing-dimension contract — the customer read's status
+evaluation at `app/cbl/CBSTM03A.CBL` L379–L386 carries **no** end-of-file arm, unlike the driving
+cross-reference read at L356, so an unresolved customer **aborts** the run rather than ending it —
+and asserts that the projection withholds both protected identifier columns the base table
+carries.
 
 Refactoring Rationale: the census reached 35 by two independent additions, and both are stated
 because each is a different kind of change. It moved from 30 to 34 with the category-balance
@@ -1354,6 +1371,92 @@ the refusal carries condition code `42501` rather than the non-updatable-view re
 projection would answer with. It also assumes the role on a direct connection rather than
 authenticating as it, so **no credential appears in the class**.
 
+Refactoring Rationale: it then moved from 38 to 42 with four further integration tests. The
+customer lookup's is described above; the remaining three are stated here, because each covers a
+different surface. The first is
+`repository/StatementTransactionRepositoryIT`, added because the **second ordered scan of a
+statement run** had no engine-backed consumer and neither did `fixtures/trnxfile.txt`, the
+700-row statement-path transaction fixture. That cursor replaces the `TRNXFILE` DD at
+[`app/jcl/CREASTMT.JCL`](../../app/jcl/CREASTMT.JCL) **L83**, whose file definition is
+[`app/cbl/CBSTM03B.CBL`](../../app/cbl/CBSTM03B.CBL) **L58** under `ACCESS MODE IS SEQUENTIAL`
+at **L33**. It carries the module's two arity-removal assertions down to the repository, where
+§10.1 assertions 2 and 3 had only rendering-level consumers: **600** rows on the fixture's
+single busiest card, past the **512** measured same-card overrun, and **88** distinct cards, past
+the **51** entries `app/cbl/CBSTM03A.CBL` **L226** declares — both asserting **correct output**
+rather than an exception, per D-2. Three further properties are invisible to every cheaper gate:
+the order is **card then transaction identifier** and is asserted as a composition of per-card
+cursors, because the interface declares no whole-table cursor and its own Javadoc records that
+withdrawal; a card whose identifier order and processing-date order **disagree** proves the
+secondary key is the identifier rather than accidentally the date; and each amount equals the
+codec-decoded fixture value **including its scale**, which `stripTrailingZeros` would break while
+leaving every equality that ignores scale intact. It decodes against the `TRNX` descriptor and
+never the `TRAN` one, because the two are separate geometries rather than aliases — `TRNX-AMT`
+begins at one-based **149** where `TRAN-AMT` begins at **133**, so a unified layout would read
+every amount 16 bytes early. Like the two classes above it, it applies the **shipped DDL** rather
+than a stand-in, and it assumes the read-only role on a direct connection, so **no credential
+appears in the class**.
+
+Refactoring Rationale: the second is
+`repository/StatementAccountRepositoryIT`, added because the **second keyed lookup of the
+statement path** had no consumer that asserted anything about it. The class above it reaches
+`StatementAccountRepository`, but only to establish that a joined heading's account *resolves* —
+an existence check plus a comparison of the joined balance against the projection's own — which
+asserts no absolute value, no precision, no scale, no column name, no key width and no absence.
+Five properties are consequently invisible to every existing gate, and each one fails silently
+rather than loudly if it breaks. The surface must be **one keyed lookup and nothing else**,
+because the reference's `'ACCTFILE'` branch implements a keyed read arm and no plain-sequential
+arm, so a traversal method here would stand in for nothing. The key must be a **whole eleven
+digits**, which the caller establishes by recomputing the key length from the cross-reference
+field immediately after zeroing it — the contrast being the customer lookup's **nine**, out of
+the one 25-character key buffer that serves all four definitions. The published money must be
+`NUMERIC(12,2)` and must **never** be unified with the statement transaction projection's
+`NUMERIC(11,2)`, since one integer digit either way shifts every following field and moves the
+implied decimal point, so a balance reads as ten times or a tenth of itself while every row
+still decodes. The projected column name is `expiration_date` where the baseline field name
+carries a misspelling — one of exactly three such divergences in the whole migration, recorded in
+`docs/architecture/data-model-and-schema-mapping.md`, with the copybook left exactly as it is.
+And the owning table's optimistic-locking column must be **neither mapped, published nor named
+in a generated read**, which the class proves four independent ways — by reflection, by the
+persistence provider's own model, by the catalogue contrasted against the base table that does
+carry it, and by recording the statements the provider actually emits — because a `SELECT`-only
+role can never participate in optimistic locking and must not appear able to. It applies the
+shipped DDL like the two classes above it, and it loads `fixtures/acctfile.txt` whose four
+synthetic accounts deliberately include a **negative** and a **zero** balance, so the zoned
+sign overpunch is exercised rather than assumed.
+
+Refactoring Rationale: the third is
+`repository/TransactionReportRepositoryIT`, added because the **report query surface** had no
+engine-backed consumer and neither did `fixtures/tranfile.txt`, the 31-row driving corpus. That
+surface reads one date range **two ways that are never interchangeable**, and the separation is
+the property no cheaper gate can reach: report generation consumes an open cursor over a whole
+range, while the interactive list consumes one keyset window at a time, and a paged surface
+cannot generate a report without one round trip per window just as a cursor cannot answer a
+step-forward request without re-scanning. Four further properties need rows and an engine rather
+than a stub: the range predicate is **inclusive on both bounds** and applied **once** where the
+baseline applies it twice, so a boundary row has to exist on each bound to tell an inclusive test
+from an exclusive one; the ordering adds a **stable secondary key** the single-key sort at
+`app/jcl/TRANREPT.jcl` L46 does not declare, so determinism is only observable over rows
+committed in a deliberately unordered sequence; the eight printed values of
+`app/cbl/CBTRN03C.cbl` L361 to L374 are assembled by a **four-way join** whose account identifier
+comes from the cross-reference rather than from any master; and keyset positioning is proved
+**behaviourally** against the alternative by inserting a row across a window boundary between two
+requests and requiring that no row is skipped and none repeated, which an ordinal-addressed query
+could not satisfy. It applies the shipped DDL like the two classes above it and loads five
+fixtures through the shared codec, and it authenticates as the container owner rather than as the
+SELECT-only role, because the privilege boundary is already covered by those two and what this
+class exercises is the query algebra.
+
+Assumptions: authoring that class surfaced a defect in the surface it covers, and the fix is
+recorded here because the census paragraph is where this module's changes are narrated. The
+reconciliation query that names transactions whose dimensions do not resolve counted its
+**category** dimension by alias. That dimension carries a two-attribute embedded identifier, so
+the provider rendered the count over a **row constructor** of both key columns, and a row
+constructor whose every component is null is itself a non-null datum — so the leg counted one for
+an unmatched outer join and could never detect the miss it exists to detect. It now counts a
+single component of that key. The other two dimensions carry single-attribute identifiers and
+were never affected, which is why the defect survived every earlier gate: two of the three legs
+worked.
+
 Assumptions: the marker comment above this paragraph is **machine-checked**, not decorative.
 `ServiceReadmeInventoryTest` in `common-lib` parses it, re-measures both figures against this
 module's test tree, and additionally requires that the stated total equals their sum — so
@@ -1370,7 +1473,7 @@ fails the build in `common-lib` rather than here.
 | `domain` | 1 |
 | `fixtures` | 1 |
 | `task` | 3 |
-| `repository` | 4 (`ReportingQueryBootstrapIT`, `StatementHeadingChunkIT`, `ReportingDeployedRelationIT`, `StatementCardXrefRepositoryIT`) |
+| `repository` | 8 (`ReportingQueryBootstrapIT`, `StatementHeadingChunkIT`, `ReportingDeployedRelationIT`, `StatementCardXrefRepositoryIT`, `StatementTransactionRepositoryIT`, `StatementCustomerRepositoryIT`, `StatementAccountRepositoryIT`, `TransactionReportRepositoryIT`) |
 | module root | 1 |
 
 ### 10.3 What the suites must cover
@@ -1387,6 +1490,7 @@ fails the build in `common-lib` rather than here.
 | `*RepositoryIT` | the read-only role **cannot write**, and the views return the expected **card-then-date** ordering |
 | `StatementHeadingChunkIT` | the statement heading walk's keyset continuation reproduces its whole `ORDER BY`, so a chunked run visits every card **exactly once** and in the declared order — plus a companion case proving the seeded cards distinguish that order from fingerprint order, without which the first would hold vacuously |
 | `StatementCardXrefRepositoryIT` | the driving cursor yields all **88** cards of `fixtures/xreffile.txt` once in the declared order, **stably across two walks**, **refuses to open with no enclosing transaction**, and is unwritable at both levels — the mapping declares no write surface and no updatable column, and the login role's write to `card.cards` is refused with condition code `42501` |
+| `StatementTransactionRepositoryIT` | the transaction cursor of the same run streams **600** rows on one card and **88** distinct cards — past the **512** measured same-card overrun and the **51** entries declared at `app/cbl/CBSTM03A.CBL` **L226** — as **correct output** rather than an exception; its order is **card then transaction identifier**, stable across two walks and proven against a card whose identifier order and date order disagree; every amount matches the codec-decoded fixture value **including scale 2**; and the interface exposes **no keyed read and no write surface** |
 
 Assumptions: the execution-start test asserts an absence as well as a presence. Asserting only
 that the state machine was called would still pass if the handler also assembled the report

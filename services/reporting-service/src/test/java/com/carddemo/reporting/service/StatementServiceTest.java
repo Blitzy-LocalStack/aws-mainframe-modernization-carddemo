@@ -12,8 +12,12 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.carddemo.common.codec.CopybookLayout;
+import com.carddemo.common.codec.FixedWidthCodec;
+import com.carddemo.common.error.AbendDetail;
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.money.Money;
+import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.security.OpaqueIdentifier;
 import com.carddemo.reporting.domain.AccountView;
 import com.carddemo.reporting.domain.CardXrefView;
@@ -22,23 +26,37 @@ import com.carddemo.reporting.domain.StatementTransactionView;
 import com.carddemo.reporting.dto.StatementDocument;
 import com.carddemo.reporting.dto.StatementRequest;
 import com.carddemo.reporting.dto.StatementResponse;
+import com.carddemo.reporting.mapper.CobolEditMask;
+import com.carddemo.reporting.mapper.StatementBandLayouts;
+import com.carddemo.reporting.mapper.StatementHtmlMapper;
+import com.carddemo.reporting.mapper.StatementTextMapper;
 import com.carddemo.reporting.repository.StatementAccountRepository;
 import com.carddemo.reporting.repository.StatementCardXrefRepository;
 import com.carddemo.reporting.repository.StatementCustomerRepository;
 import com.carddemo.reporting.repository.StatementTransactionRepository;
 import com.carddemo.reporting.sink.S3StatementSink;
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Clock;
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mockito;
 import org.springframework.data.domain.Limit;
 
@@ -62,6 +80,109 @@ import org.springframework.data.domain.Limit;
  * service passes the fingerprint it was given through unchanged; how the digest is produced is a
  * property of {@code data-migration/sql/V1__reporting_views.sql} and is verified against a live engine
  * rather than here.
+ *
+ * <p>Refactoring Rationale: the fixture-driven groups below replace nothing that existed and are added
+ * because the cases above assert what a service RETURNS while a statement run is judged by what it
+ * EMITS. Two independent arities were removed from the baseline when this service was written, and each
+ * removal is stated here separately because collapsing them produces a figure that is wrong on both
+ * axes. The inner, same-card table is declared {@code 10 WS-TRAN-TBL OCCURS 10 TIMES} at L228 of
+ * {@code app/cbl/CBSTM03A.CBL} and its MEASURED overrun is 512 -- 512 transactions on one card render
+ * and the 513th faults, which {@code tests/README.md} records at L70 to L82 under the marker
+ * {@code F-STMT-INNER-OVERFLOW}. The outer, distinct-card table is declared
+ * {@code 05 WS-CARD-TBL OCCURS 51 TIMES} at L226 with its parallel counter
+ * {@code 05 WS-TRN-TBL-CTR OCCURS 51 TIMES} at L232, and both its declaration and its measurement are
+ * 51 -- 51 distinct cards render and the 52nd faults, recorded at the same lines under
+ * {@code F-STMT-OUTER-OVERFLOW}. The declared inner arity, the measured inner overrun and the outer
+ * card limit are three separate numbers; this file uses 10 only as the declared inner arity and never
+ * as a bound. The migrated service holds no table of either kind, which is divergence {@code D-2} in
+ * {@code docs/architecture/cobol-to-service-traceability.md}; the baseline under {@code app/} is read as
+ * the specification and is never edited, so what is asserted here is the migrated behaviour and never a
+ * repair of the reference.
+ *
+ * <p>Trade-offs: the fixtures driven below EXCEED both thresholds where the COBOL suite deliberately
+ * stays under them. {@code tests/README.md} L78 to L80 keeps every one of its fixtures safely under both
+ * bounds, and it must: the baseline faults past either one, so a larger fixture there would crash the
+ * program rather than measure it. This tree has the opposite obligation, because the property under test
+ * is the ABSENCE of a bound, and a fixture inside both bounds cannot distinguish that absence from a
+ * limit that happens to be larger. The two choices are opposite on purpose and the difference is not a
+ * drift to be aligned away: {@code trnxfile.txt} supplies 600 transactions on one card against a
+ * measured 512, and {@code xreffile.txt} supplies 88 distinct cards against a declared and measured 51,
+ * so an off-by-one cap at either boundary cannot pass.
+ *
+ * <p>Alternatives Considered: modelling the baseline's file-handling subprogram as one collaborator with
+ * an operation code, mirroring its own shape. {@code app/cbl/CBSTM03B.CBL} is a called subprogram rather
+ * than a job -- L114 declares {@code PROCEDURE DIVISION USING LK-M03B-AREA}, where
+ * {@code app/cbl/CBSTM03A.CBL} L262 declares a bare {@code PROCEDURE DIVISION} -- and it dispatches on
+ * the data-definition name first, at L118 over the four names at L119 to L126, and only then on the
+ * operation code its L103 to L108 declares as open, close, read, keyed read, write and rewrite. The
+ * thirteen {@code CALL 'CBSTM03B'} sites at L351, L377, L401, L734, L746, L769, L787, L805, L835, L860,
+ * L877, L893 and L909 are therefore thirteen calls into four different inputs. Modelling that as one
+ * mock taking an operation code was rejected: it would reproduce the dispatch inside the stub itself, so
+ * a case could pass while the service read the wrong input. Four separately mocked read-only repositories
+ * make the input part of the method being stubbed, and only the four operations this module performs --
+ * open, close, read and keyed read -- have any surface at all, because writing belongs to a path this
+ * module does not own.
+ *
+ * <p>Trade-offs: the four mappers are REAL and not mocked, and the cost is that a failure here can be a
+ * fault of the band assembler rather than of the service. That cost is accepted because the two claims
+ * this file carries about the removed arities are claims about complete, correct OUTPUT: a mocked mapper
+ * would return whatever it was told to, so a run that dropped every second transaction would satisfy
+ * every assertion written against it. Per-band byte arithmetic is not re-derived here -- it belongs to
+ * {@code StatementBandLayoutsTest}, {@code StatementTextMapperTest}, {@code StatementHtmlMapperTest} and
+ * {@code CobolEditMaskTest} in the sibling mapper package -- so the cases below read band items through
+ * the band descriptors those classes own rather than through offsets written out again.
+ *
+ * <p>Assumptions: the width assertions govern the record the service EMITS and not the line the shipped
+ * oracle stores, and the two are different forms of the same statement. The emitted plain-text record is
+ * exactly 80 bytes, declared {@code 01 FD-STMTFILE-REC PIC X(80)} at L45 of
+ * {@code app/cbl/CBSTM03A.CBL} and confirmed by {@code LRECL=80} at L73 and L89 of
+ * {@code app/jcl/CREASTMT.JCL}; the emitted markup record is exactly 100 bytes, declared
+ * {@code 01 FD-HTMLFILE-REC PIC X(100)} at L47, restated as {@code 05 HTML-FIXED-LN PIC X(100)} at L149
+ * and confirmed by {@code LRECL=100} at L94. The {@code LRECL=80} at L69 sits on the deletion step's
+ * markup stanza, where {@code IEFBR14} writes no data at all, so it is inert and is not an alternative
+ * markup width. Both goldens are right-trimmed rather than fixed width, because the runtime drops
+ * trailing blanks as it writes: {@code tests/golden/statement/happy_path/statement.txt.expected} stores
+ * 22 lines measuring 9, 14, 16, 16, 23, 31, 32, 46, 49, three of 79 and ten of 80, and
+ * {@code statement.html.expected} stores 97 lines from 4 characters up to 85. Any comparison against
+ * either artifact therefore normalises the emitted record DOWN by the same trim, and an assertion that a
+ * stored golden LINE is 80 or 100 bytes long could never pass. The plain-text side needs no padding at
+ * all for a separate reason worth stating: all seventeen {@code ST-LINE} bands are natively exactly 80,
+ * which is the exact inverse of the 133-column report, where six of seven bands are natively short and
+ * are padded to reach the declared width.
+ *
+ * <p>Assumptions: an exhausted driving cursor and an unresolved dimension are opposite outcomes, and the
+ * difference is the whole of the missing-row policy. The cross-reference read is the only statement read
+ * paragraph carrying an end-of-file arm -- L353 to L362 of {@code app/cbl/CBSTM03A.CBL}, whose
+ * {@code WHEN '10'} at L357 moves the end-of-file flag -- so its exhaustion ENDS the run normally with
+ * every statement already produced left intact. The customer read at L368 to L390 and the account read
+ * at L392 to L414 carry no such arm: their {@code EVALUATE} blocks at L379 to L386 and L403 to L410 have
+ * only a success arm and a catch-all, so any other status displays a message and performs the abend
+ * paragraph at L921 to L923. A dimension missing for an existing cross-reference row is a
+ * referential-integrity violation rather than an absence to render around, which is why the cases below
+ * assert a failure carrying the four {@code AbendDetail} fields and never an empty document.
+ *
+ * <p>Assumptions: a rerun REPLACES both artifacts and never appends to them.
+ * {@code app/jcl/CREASTMT.JCL} runs {@code IEFBR14} as its own step at L66 to L75, gated
+ * {@code COND=(0,NE)} and holding {@code DISP=(MOD,DELETE,DELETE)} on the markup output at L67 and on
+ * the plain-text output at L72, and only then does L79 onward run the generator with
+ * {@code DISP=(NEW,CATLG,DELETE)} on both. Two runs of the night therefore leave one copy of each
+ * artifact rather than two, which is asserted below by running the writer twice into one destination.
+ *
+ * <p>Assumptions: the processing timestamp is carried at reduced precision by the baseline's own sort
+ * step, and that is reproduced as an observation rather than put right anywhere. L54 of
+ * {@code app/jcl/CREASTMT.JCL} reformats the record as
+ * {@code OUTREC FIELDS=(1:263,16,17:1,262,279:279,50)}, which populates 328 of the 350 bytes: with
+ * {@code TRAN-CARD-NUM} at 263 to 278, {@code TRAN-ORIG-TS} at 279 to 304 and {@code TRAN-PROC-TS} at
+ * 305 to 330 by the declared widths of {@code app/cpy/CVTRA05Y.cpy}, the output's 305 to 330 receives
+ * only 24 of its 26 characters and the final two microsecond digits are lost. The statement bands render
+ * neither timestamp, so the reduced precision cannot reach either artifact at all, and the case below
+ * asserts that absence so that a band added later cannot introduce the truncation unnoticed.
+ *
+ * <p>Assumptions: a statement's total covers its own card alone. {@code MOVE ZERO TO WS-TOTAL-AMT} at
+ * L325 of {@code app/cbl/CBSTM03A.CBL} stands immediately before the traversal the mainline performs at
+ * L326, so the accumulator resets once per cross-reference row. A single-card fixture cannot observe
+ * that reset -- every total is correct when there is only one -- so the case below drives four cards
+ * whose fixture totals are all different and asserts each card's own trailer independently.
  *
  * <p>A test class accepts no parameter, yields no value and raises nothing, so this block carries no
  * parameter, return or exception at-clause; the methods below carry their own where they have any.
@@ -140,6 +261,69 @@ class StatementServiceTest {
      */
     private static final byte[] ARTIFACT_KEY =
             "carddemo-reporting-artifact-test!".repeat(2).getBytes(StandardCharsets.UTF_8);
+
+    /** The directory on the test classpath holding the four fixed-width statement fixtures. */
+    private static final String FIXTURE_DIRECTORY = "fixtures";
+
+    /** The 350-byte transaction fixture, which is the input side of BOTH removed-arity cases. */
+    private static final String TRANSACTION_FIXTURE = "trnxfile.txt";
+
+    /** The 50-byte cross-reference fixture, which is the driving cursor's source. */
+    private static final String CROSS_REFERENCE_FIXTURE = "xreffile.txt";
+
+    /** The 500-byte customer fixture, supplying every printed heading attribute. */
+    private static final String CUSTOMER_FIXTURE = "custfile.txt";
+
+    /** The 300-byte account fixture, supplying the heading balance at its declared scale. */
+    private static final String ACCOUNT_FIXTURE = "acctfile.txt";
+
+    /**
+     * The one card of {@link #TRANSACTION_FIXTURE} carrying more rows than the inner table admits.
+     *
+     * <p>Assumptions: this is a card of the published demonstration seed and it is named as a literal
+     * rather than discovered as "the card with the most rows", so a fixture edit that moved the bulk to
+     * a different card fails the case instead of silently retargeting it.</p>
+     */
+    private static final String INNER_OVERFLOW_CARD = "0500024453765740";
+
+    /**
+     * How many rows {@link #TRANSACTION_FIXTURE} holds for {@link #INNER_OVERFLOW_CARD}.
+     *
+     * <p>Assumptions: 600, measured on the shipped fixture, which stands decisively above the measured
+     * inner overrun of {@link #BASELINE_INNER_TABLE_THRESHOLD} rather than one past it. The case one past
+     * it already exists above; this figure is what an off-by-one cap cannot satisfy.</p>
+     */
+    private static final int INNER_OVERFLOW_FIXTURE_ROWS = 600;
+
+    /**
+     * How many distinct cards {@link #CROSS_REFERENCE_FIXTURE} holds.
+     *
+     * <p>Assumptions: 88, measured on the shipped fixture, standing decisively above the declared and
+     * measured outer card limit of {@link #BASELINE_OUTER_TABLE_ARITY}.</p>
+     */
+    private static final int OUTER_OVERFLOW_FIXTURE_CARDS = 88;
+
+    /** How many rows {@link #TRANSACTION_FIXTURE} holds across all of its cards. */
+    private static final int TRANSACTION_FIXTURE_ROWS = 700;
+
+    /**
+     * The card whose heading and lines reproduce every width class the shipped oracle stores.
+     *
+     * <p>Assumptions: this card's account balance is positive and exactly one of its four rows is
+     * negative, which is what lets one run exercise both the trailing-blank and the trailing-minus form
+     * of the two thirteen-character masks.</p>
+     */
+    private static final String WIDTH_CLASS_CARD = "4859452612877065";
+
+    /**
+     * The four cards whose fixture totals are all different, in ascending walk order.
+     *
+     * <p>Assumptions: four distinct totals rather than four cards, because the property under test is
+     * that no total survives into the next statement; two cards sharing a total would let a leak pass on
+     * one of them.</p>
+     */
+    private static final List<String> DISTINCT_TOTAL_CARDS = List.of(
+            "9900001020000001", "9900001010000029", "9900000000000502", "4859452612877065");
 
     private StatementTransactionRepository transactions;
 
@@ -1297,6 +1481,1875 @@ class StatementServiceTest {
         @Override
         public void writeMarkupRecord(byte[] record) {
             markupRecords.add(record.clone());
+        }
+    }
+
+    /**
+     * A destination that DISCARDS what it holds when a run clears it, as the baseline's job step does.
+     *
+     * <p>Assumptions: clearing empties the two buffers rather than counting the call, which is what
+     * makes a second run over the same destination observable. {@code app/jcl/CREASTMT.JCL} deletes both
+     * outputs in its own step at L66 to L75 and only then creates them at L79 onward, so two runs of the
+     * night leave one copy of each artifact. A destination that merely counted clearings would report the
+     * call and still hold both copies, which is exactly the state the case using this class exists to
+     * rule out.</p>
+     */
+    private static final class ReplacingSink implements StatementService.StatementSink {
+
+        /** How many times a run asked for the previous artifacts to be discarded. */
+        private int replacements;
+
+        /** The plain-text records the current artifact holds, in the order they were offered. */
+        private final List<byte[]> plainRecords = new ArrayList<>();
+
+        /** The markup records the current artifact holds, in the order they were offered. */
+        private final List<byte[]> markupRecords = new ArrayList<>();
+
+        /**
+         * Discards both artifacts, so what follows is a replacement rather than an addition.
+         */
+        @Override
+        public void replaceArtifacts() {
+            plainRecords.clear();
+            markupRecords.clear();
+            replacements++;
+        }
+
+        /**
+         * Appends one plain-text record to the current artifact, defensively copied.
+         *
+         * @param record the encoded statement record offered by the run
+         */
+        @Override
+        public void writeStatementRecord(byte[] record) {
+            plainRecords.add(record.clone());
+        }
+
+        /**
+         * Appends one markup record to the current artifact, defensively copied.
+         *
+         * @param record the encoded markup record offered by the run
+         */
+        @Override
+        public void writeMarkupRecord(byte[] record) {
+            markupRecords.add(record.clone());
+        }
+    }
+
+    /**
+     * One fixture card: its walk anchor, its selector, its joined heading row and its own rows.
+     *
+     * @param cardNumber the whole sixteen-digit card number as {@code xreffile.txt} holds it
+     * @param maskedCardNum the masked rendering the reporting relations publish, which is the leading
+     *     component of the order the heading query declares
+     * @param fingerprint the sixty-four-character selector standing for this card
+     * @param headingRow the joined heading row a whole-run walk reads for this card
+     * @param rows this card's transaction projections in ascending identifier order
+     */
+    private record FixtureCard(
+            String cardNumber,
+            String maskedCardNum,
+            String fingerprint,
+            StatementCardXrefRepository.StatementHeadingRow headingRow,
+            List<StatementTransactionView> rows) {
+    }
+
+    /**
+     * Reads one fixture file and returns its rows as fixed-width byte arrays.
+     *
+     * <p>Assumptions: the fixture is located on the test CLASSPATH rather than by a path relative to the
+     * module, so a case behaves identically under a reactor build and under a single-module build. Each
+     * line is one record of the declared length, which {@code ReportingFixtureContractTest} already
+     * asserts for each of these four files, so no length check is repeated here.</p>
+     *
+     * @param fileName the fixture file name, relative to the fixtures directory on the test classpath
+     * @return one byte array per fixture row, in file order; never {@code null}
+     * @throws IllegalStateException if the fixture directory is not on the test classpath or is not
+     *     addressable as a path, which is a broken test resource rather than a failure of the subject
+     * @throws UncheckedIOException if the named file cannot be read
+     */
+    private static List<byte[]> fixtureRows(String fileName) {
+        java.net.URL located =
+                StatementServiceTest.class.getClassLoader().getResource(FIXTURE_DIRECTORY);
+        if (located == null) {
+            throw new IllegalStateException(
+                    "fixture directory " + FIXTURE_DIRECTORY + " is not on the test classpath");
+        }
+        try {
+            Path file = Path.of(located.toURI()).resolve(fileName);
+            List<byte[]> rows = new ArrayList<>();
+            for (String row : Files.readAllLines(file, StandardCharsets.US_ASCII)) {
+                if (!row.isEmpty()) {
+                    rows.add(row.getBytes(StandardCharsets.US_ASCII));
+                }
+            }
+            return rows;
+        } catch (java.net.URISyntaxException malformed) {
+            throw new IllegalStateException("fixture directory is not addressable as a path", malformed);
+        } catch (IOException unreadable) {
+            throw new UncheckedIOException("fixture " + fileName + " could not be read", unreadable);
+        }
+    }
+
+    /**
+     * Decodes every row of one fixture against the layout the shared registry holds for it.
+     *
+     * <p>Assumptions: the offsets come from {@link CopybookLayout} and are never written out here. That
+     * registry transcribes {@code app/cpy/} and is asserted against it by its own tests, so a second
+     * copy of a byte position in this file would be a second place for one number to be wrong in, with
+     * each suite passing against its own arithmetic.</p>
+     *
+     * @param fileName the fixture file name on the test classpath
+     * @param layoutName the registry name of the layout to decode against, such as {@code TRNX}
+     * @return one decoded field map per row, keyed by copybook field name, in file order; never
+     *     {@code null}
+     */
+    private static List<Map<String, Object>> decodedFixture(String fileName, String layoutName) {
+        CopybookLayout.RecordSpec spec = CopybookLayout.layout(layoutName);
+        List<Map<String, Object>> decoded = new ArrayList<>();
+        for (byte[] row : fixtureRows(fileName)) {
+            decoded.add(FixedWidthCodec.decodeRecord(row, spec));
+        }
+        return decoded;
+    }
+
+    /**
+     * Decodes one fixture and keys its rows by one unsigned identifier field.
+     *
+     * @param fileName the fixture file name on the test classpath
+     * @param layoutName the registry name of the layout to decode against
+     * @param keyField the copybook field name of the unsigned identifier to key by
+     * @return the decoded rows keyed by that identifier, in file order; never {@code null}
+     */
+    private static Map<Long, Map<String, Object>> keyedFixture(
+            String fileName, String layoutName, String keyField) {
+        Map<Long, Map<String, Object>> keyed = new LinkedHashMap<>();
+        for (Map<String, Object> row : decodedFixture(fileName, layoutName)) {
+            keyed.put((Long) row.get(keyField), row);
+        }
+        return keyed;
+    }
+
+    /**
+     * Reads one decoded text field with its declared blank padding removed.
+     *
+     * @param fields the decoded row as {@link FixedWidthCodec} returned it
+     * @param fieldName the copybook field name to read
+     * @return that field's value with trailing blanks removed; never {@code null}
+     */
+    private static String trimmedText(Map<String, Object> fields, String fieldName) {
+        return String.valueOf(fields.get(fieldName)).stripTrailing();
+    }
+
+    /**
+     * Groups the transaction fixture into projections by card, in ascending identifier order.
+     *
+     * <p>Assumptions: the fixture is already ordered by card and then by identifier, which is the order
+     * {@code SORT FIELDS=(263,16,CH,A,1,16,CH,A)} at L53 of {@code app/jcl/CREASTMT.JCL} produces, so
+     * grouping in file order preserves the within-card order the repository query also declares. No
+     * re-sort is applied, because a re-sort here would hide a fixture that had stopped being ordered.</p>
+     *
+     * <p>Assumptions: only the three members a statement line reads are assigned -- the key, the
+     * description and the amount -- because {@code writeTransaction} prepares a line from those alone.
+     * Assigning the other ten would suggest they were load-bearing here.</p>
+     *
+     * @return the card's rows keyed by whole card number; never {@code null}
+     */
+    private static Map<String, List<StatementTransactionView>> fixtureTransactionsByCard() {
+        Map<String, List<StatementTransactionView>> byCard = new LinkedHashMap<>();
+        for (Map<String, Object> row : decodedFixture(TRANSACTION_FIXTURE, "TRNX")) {
+            String cardNumber = trimmedText(row, "TRNX-CARD-NUM");
+            StatementTransactionView projection = newProjection();
+            setMember(projection, "key", new StatementTransactionView.StatementTransactionKey(
+                    cardNumber, trimmedText(row, "TRNX-ID")));
+            setMember(projection, "description", trimmedText(row, "TRNX-DESC"));
+            setMember(projection, "amount", Money.of((BigDecimal) row.get("TRNX-AMT")));
+            byCard.computeIfAbsent(cardNumber, card -> new ArrayList<>()).add(projection);
+        }
+        return byCard;
+    }
+
+    /**
+     * Renders the sixty-four-character selector standing for one whole card number.
+     *
+     * <p>Assumptions: the whole card number is placed in the tail of the selector, so every selector is
+     * distinct, every selector orders the way the card number it stands for does, and the selector
+     * CONTAINS the card number. The last of those is deliberate: the disclosure case below asserts that
+     * no emitted record carries a whole card number, and embedding it in the selector means a rendering
+     * that leaked either value fails that one assertion rather than only the one written for it. A
+     * digest would satisfy neither property -- it reorders the cards, so the expected statement order
+     * would depend on the digest function rather than on the fixture.</p>
+     *
+     * @param cardNumber the whole card number the selector stands for
+     * @return the selector at the width {@link CardXrefView#CARD_FINGERPRINT_WIDTH}; never {@code null}
+     */
+    private static String fingerprintOf(String cardNumber) {
+        return "f".repeat(CardXrefView.CARD_FINGERPRINT_WIDTH - cardNumber.length()) + cardNumber;
+    }
+
+    /**
+     * Builds one joined heading row from a cross-reference row and its customer and account rows.
+     *
+     * <p>Assumptions: the row is an anonymous implementation of the closed projection rather than a
+     * mock, for the reason the builder above records -- all fifteen accessors are read while a statement
+     * is assembled, and a mock answering an unstubbed accessor with {@code null} would fail the run's
+     * own resolution guard rather than the case under test.</p>
+     *
+     * <p>Assumptions: the text attributes arrive right-trimmed, because the relation projects
+     * {@code VARCHAR} columns in which a trailing blank is padding rather than data, and the band
+     * assembler materialises each item back to its declared width. Handing over the fixture's padded
+     * bytes instead would reach the same bytes for the three name parts, which are cut at their first
+     * blank anyway, so trimming states the contract the relation actually has rather than resting on
+     * that coincidence.</p>
+     *
+     * @param cardNumber the whole card number the cross-reference row names
+     * @param customerId the customer identifier that row names
+     * @param accountId the account identifier that row names
+     * @param customer the decoded customer fixture row for {@code customerId}
+     * @param account the decoded account fixture row for {@code accountId}
+     * @return the heading row with all fifteen components resolved; never {@code null}
+     */
+    private static StatementCardXrefRepository.StatementHeadingRow fixtureHeadingRow(
+            String cardNumber, long customerId, long accountId,
+            Map<String, Object> customer, Map<String, Object> account) {
+        return new StatementCardXrefRepository.StatementHeadingRow() {
+            @Override
+            public String getCardNum() {
+                return CardNumberMasker.mask(cardNumber);
+            }
+
+            @Override
+            public String getCardFingerprint() {
+                return fingerprintOf(cardNumber);
+            }
+
+            @Override
+            public Long getCustomerId() {
+                return customerId;
+            }
+
+            @Override
+            public Long getAccountId() {
+                return accountId;
+            }
+
+            @Override
+            public String getFirstName() {
+                return trimmedText(customer, "CUST-FIRST-NAME");
+            }
+
+            @Override
+            public String getMiddleName() {
+                return trimmedText(customer, "CUST-MIDDLE-NAME");
+            }
+
+            @Override
+            public String getLastName() {
+                return trimmedText(customer, "CUST-LAST-NAME");
+            }
+
+            @Override
+            public String getAddressLine1() {
+                return trimmedText(customer, "CUST-ADDR-LINE-1");
+            }
+
+            @Override
+            public String getAddressLine2() {
+                return trimmedText(customer, "CUST-ADDR-LINE-2");
+            }
+
+            @Override
+            public String getAddressLine3() {
+                return trimmedText(customer, "CUST-ADDR-LINE-3");
+            }
+
+            @Override
+            public String getStateCode() {
+                return trimmedText(customer, "CUST-ADDR-STATE-CD");
+            }
+
+            @Override
+            public String getCountryCode() {
+                return trimmedText(customer, "CUST-ADDR-COUNTRY-CD");
+            }
+
+            @Override
+            public String getPostalCode() {
+                return trimmedText(customer, "CUST-ADDR-ZIP");
+            }
+
+            @Override
+            public Short getFicoCreditScore() {
+                return ((Long) customer.get("CUST-FICO-CREDIT-SCORE")).shortValue();
+            }
+
+            @Override
+            public Money getCurrentBalance() {
+                return Money.of((BigDecimal) account.get("ACCT-CURR-BAL"));
+            }
+        };
+    }
+
+    /**
+     * Builds the fixture cards a run walks, in the order the heading query declares.
+     *
+     * <p>Assumptions: the walk order is the pair (masked rendering, selector) ascending, because that is
+     * the order {@code findHeadingChunk} declares, and it is NOT ascending whole card number. The
+     * relation publishes the masked rendering, so the leading component carries only the last four
+     * digits and the selector breaks a tie between two cards sharing them. Sorting here by the same pair
+     * makes the expected statement order a property of the query rather than of the fixture's file
+     * order.</p>
+     *
+     * <p>Assumptions: each heading row is JOINED from the three fixtures rather than invented, so every
+     * printed attribute, the credit score and the balance are the shipped seed's own values at their
+     * declared widths. The cross-reference fixture names four customers and four accounts across its 88
+     * cards and both are present in their own fixtures, so every selected row resolves.</p>
+     *
+     * @param cardNumbers the whole card numbers to select, or none at all to select every card the
+     *     cross-reference fixture holds
+     * @return the selected cards in ascending walk order; never {@code null}
+     * @throws IllegalStateException if a selected cross-reference row names a customer or an account the
+     *     fixtures do not hold, which is a broken test resource rather than a failure of the subject
+     */
+    private static List<FixtureCard> fixtureCards(String... cardNumbers) {
+        List<String> selection = List.of(cardNumbers);
+        Map<Long, Map<String, Object>> customers =
+                keyedFixture(CUSTOMER_FIXTURE, "CUSTOMER", "CUST-ID");
+        Map<Long, Map<String, Object>> accounts =
+                keyedFixture(ACCOUNT_FIXTURE, "ACCOUNT", "ACCT-ID");
+        Map<String, List<StatementTransactionView>> rowsByCard = fixtureTransactionsByCard();
+
+        List<FixtureCard> cards = new ArrayList<>();
+        for (Map<String, Object> crossReference : decodedFixture(CROSS_REFERENCE_FIXTURE, "XREF")) {
+            String cardNumber = trimmedText(crossReference, "XREF-CARD-NUM");
+            if (!selection.isEmpty() && !selection.contains(cardNumber)) {
+                continue;
+            }
+            long customerId = (Long) crossReference.get("XREF-CUST-ID");
+            long accountId = (Long) crossReference.get("XREF-ACCT-ID");
+            Map<String, Object> customer = customers.get(customerId);
+            Map<String, Object> account = accounts.get(accountId);
+            if (customer == null || account == null) {
+                throw new IllegalStateException("the cross-reference fixture names customer "
+                        + customerId + " or account " + accountId + " and its own fixture omits it");
+            }
+            cards.add(new FixtureCard(cardNumber, CardNumberMasker.mask(cardNumber),
+                    fingerprintOf(cardNumber),
+                    fixtureHeadingRow(cardNumber, customerId, accountId, customer, account),
+                    rowsByCard.getOrDefault(cardNumber, List.of())));
+        }
+        cards.sort(Comparator.comparing(FixtureCard::maskedCardNum)
+                .thenComparing(FixtureCard::fingerprint));
+        return List.copyOf(cards);
+    }
+
+    /**
+     * Installs keyset-faithful answers for the two cursors a whole run drives.
+     *
+     * <p>Assumptions: both answers implement the CONTINUATION PREDICATE the repository declares rather
+     * than returning a prepared chunk per call. The heading answer admits a row strictly past the
+     * anchor pair and the window answer admits a row strictly past the last identifier, each bounded by
+     * the limit it was asked for, so a service that failed to advance either anchor loops on the same
+     * chunk and a service that advanced it by the wrong component skips or repeats rows. A
+     * call-count-keyed stub would answer the second call correctly however the anchor had been built,
+     * which is the defect these answers are shaped to catch.</p>
+     *
+     * <p>Assumptions: the aggregate read is deliberately left unstubbed. A whole run reads the two
+     * cursors alone, so a stubbed aggregate would state a collaboration the run does not have.</p>
+     *
+     * @param cards the run's cards in ascending walk order; must not be {@code null}
+     */
+    private void stubFixtureWalk(List<FixtureCard> cards) {
+        when(cardXrefs.findHeadingChunk(anyString(), anyString(), anyInt())).thenAnswer(call -> {
+            String afterCardNum = call.getArgument(0);
+            String afterFingerprint = call.getArgument(1);
+            int limit = call.getArgument(2);
+            List<StatementCardXrefRepository.StatementHeadingRow> chunk = new ArrayList<>();
+            for (FixtureCard card : cards) {
+                int byCardNum = card.maskedCardNum().compareTo(afterCardNum);
+                boolean pastTheAnchor = byCardNum > 0
+                        || (byCardNum == 0 && card.fingerprint().compareTo(afterFingerprint) > 0);
+                if (pastTheAnchor && chunk.size() < limit) {
+                    chunk.add(card.headingRow());
+                }
+            }
+            return List.copyOf(chunk);
+        });
+
+        Map<String, List<StatementTransactionView>> rowsBySelector = new LinkedHashMap<>();
+        for (FixtureCard card : cards) {
+            rowsBySelector.put(card.fingerprint(), card.rows());
+        }
+        when(transactions.findWindowByCardFingerprint(anyString(), anyString(), anyInt()))
+                .thenAnswer(call -> {
+                    String fingerprint = call.getArgument(0);
+                    String after = call.getArgument(1);
+                    int limit = call.getArgument(2);
+                    List<StatementTransactionView> window = new ArrayList<>();
+                    for (StatementTransactionView row
+                            : rowsBySelector.getOrDefault(fingerprint, List.of())) {
+                        if (row.key().transactionId().compareTo(after) > 0 && window.size() < limit) {
+                            window.add(row);
+                        }
+                    }
+                    return List.copyOf(window);
+                });
+    }
+
+    /**
+     * Reads one band item out of an emitted record, at the offset the band descriptor declares.
+     *
+     * @param record one emitted record, of the band's declared length
+     * @param band the band descriptor the record was assembled from
+     * @param itemName the declared field name of the item to read
+     * @return that item exactly as emitted, including any declared padding; never {@code null}
+     */
+    private static String bandItem(byte[] record, CopybookLayout.RecordSpec band, String itemName) {
+        CopybookLayout.FieldSpec item = band.field(itemName);
+        return new String(record, item.start(), item.length(), StandardCharsets.US_ASCII);
+    }
+
+    /**
+     * Right-trims one emitted record the way line-sequential output trims a written record.
+     *
+     * <p>Assumptions: the two shipped oracles store right-trimmed lines -- the plain-text artifact in
+     * eleven width classes from 9 to 80 and the markup artifact from 4 to 85 characters -- because the
+     * runtime drops trailing blanks on the way out. Normalising the EMITTED record down to that form is
+     * the only way a comparison against either artifact can hold, and it is done here rather than by
+     * relaxing the padding requirement: the service still emits the full declared width, which the
+     * width case asserts separately on every record of a run.</p>
+     *
+     * @param record one emitted record
+     * @return the record rendered with its trailing blanks removed; never {@code null}
+     */
+    private static String rightTrimmed(byte[] record) {
+        return new String(record, StandardCharsets.US_ASCII).stripTrailing();
+    }
+
+    /**
+     * Extracts the transaction identifiers of the detail lines in one emitted plain-text stream.
+     *
+     * <p>Assumptions: a detail line is recognised by its leading item being sixteen DIGITS, which is
+     * what {@code ST-TRANID} carries and what no other band of the statement can carry. The two banners
+     * lead with an asterisk run, the six rules with hyphens, the three basic-detail bands with their
+     * label literals, the column headings with {@code Tran ID}, the trailer with {@code Total EXP:}, and
+     * the four name and address bands with the shipped seed's own values, none of which begins with
+     * sixteen consecutive digits. Matching on the band descriptor would be stronger still, but a band
+     * descriptor is not recoverable from an emitted record -- the sink receives bytes, which is exactly
+     * what the artifact holds.</p>
+     *
+     * @param plainRecords the plain-text records a run offered, in offer order
+     * @return the identifiers of the detail lines, in the order they were emitted; never {@code null}
+     */
+    private static List<String> renderedTransactionIdentifiers(List<byte[]> plainRecords) {
+        List<String> identifiers = new ArrayList<>();
+        for (byte[] record : plainRecords) {
+            String leading = bandItem(record, StatementBandLayouts.ST_LINE14, "ST-TRANID");
+            if (leading.chars().allMatch(Character::isDigit)) {
+                identifiers.add(leading);
+            }
+        }
+        return identifiers;
+    }
+
+    /**
+     * Reports how many plain-text records one statement of a given size occupies.
+     *
+     * @param transactionCount how many transactions that statement renders
+     * @return the header block, one line per transaction and the trailer, summed
+     */
+    private static int plainRecordsPerStatement(int transactionCount) {
+        return StatementTextMapper.HEADER_BLOCK_LINE_COUNT + transactionCount
+                + StatementTextMapper.CARD_TRAILER_LINE_COUNT;
+    }
+
+    /**
+     * Reports how many markup records one statement of a given size occupies.
+     *
+     * @param transactionCount how many transactions that statement renders
+     * @return the document header, the name and address block, eleven lines per transaction and the
+     *     document footer, summed
+     */
+    private static int markupRecordsPerStatement(int transactionCount) {
+        return StatementHtmlMapper.DOCUMENT_HEADER_LINE_COUNT
+                + StatementHtmlMapper.NAME_ADDRESS_BASIC_DETAIL_LINE_COUNT
+                + StatementHtmlMapper.TRANSACTION_ROW_LINE_COUNT * transactionCount
+                + StatementHtmlMapper.DOCUMENT_FOOTER_LINE_COUNT;
+    }
+
+    /**
+     * Finds the first emitted record whose named band item carries an expected value.
+     *
+     * <p>Assumptions: the item is located through the band descriptor rather than through a written-out
+     * offset, so a band whose geometry changed fails in the mapper package that owns it rather than
+     * silently reading the wrong span here.</p>
+     *
+     * @param records the emitted records to search, in offer order
+     * @param band the band descriptor whose item names the position to read
+     * @param itemName the declared field name of the item to compare
+     * @param expectedItem the value that item carries in the wanted record, at its declared width
+     * @return the first matching record; never {@code null}
+     * @throws IllegalStateException if no record carries that value, which means the band was not
+     *     emitted at all and is reported separately from an assertion about its content
+     */
+    private static byte[] firstRecordWithItem(List<byte[]> records, CopybookLayout.RecordSpec band,
+            String itemName, String expectedItem) {
+        for (byte[] record : records) {
+            if (bandItem(record, band, itemName).equals(expectedItem)) {
+                return record;
+            }
+        }
+        throw new IllegalStateException(
+                "no emitted record carries " + expectedItem + " in " + band.name() + "." + itemName);
+    }
+
+    /**
+     * Splits one emitted plain-text stream into the detail identifiers of each statement.
+     *
+     * <p>Assumptions: the split is on the opening banner, which
+     * {@code WRITE FD-STMTFILE-REC FROM ST-LINE0} at L460 of {@code app/cbl/CBSTM03A.CBL} writes exactly
+     * once per statement. Splitting on the banner rather than counting a fixed block size keeps the
+     * grouping independent of how many records a heading happens to occupy, which is the mapper
+     * package's concern rather than this one's.</p>
+     *
+     * @param plainRecords the plain-text records a run offered, in offer order
+     * @return one list of identifiers per statement, in the order the statements were emitted; never
+     *     {@code null}
+     */
+    private static List<List<String>> identifiersPerStatement(List<byte[]> plainRecords) {
+        String openingBanner = StatementBandLayouts.OPENING_ASTERISK_RUN
+                + StatementBandLayouts.START_OF_STATEMENT_SENTINEL
+                + StatementBandLayouts.OPENING_ASTERISK_RUN;
+        List<List<String>> perStatement = new ArrayList<>();
+        for (byte[] record : plainRecords) {
+            if (new String(record, StandardCharsets.US_ASCII).equals(openingBanner)) {
+                perStatement.add(new ArrayList<>());
+                continue;
+            }
+            String leading = bandItem(record, StatementBandLayouts.ST_LINE14, "ST-TRANID");
+            if (!perStatement.isEmpty() && leading.chars().allMatch(Character::isDigit)) {
+                perStatement.get(perStatement.size() - 1).add(leading);
+            }
+        }
+        return perStatement;
+    }
+
+    /**
+     * Renders the transaction identifiers one fixture card holds, in fixture order.
+     *
+     * @param card the fixture card whose rows are wanted
+     * @return that card's identifiers in ascending order; never {@code null}
+     */
+    private static List<String> identifiersOf(FixtureCard card) {
+        return card.rows().stream().map(row -> row.key().transactionId()).toList();
+    }
+
+    /**
+     * The two arities the migrated generator does not have, driven decisively past both of them.
+     *
+     * <p>Purpose: these two cases are the executable form of divergence {@code D-2}, and they are two
+     * cases rather than one because two independent tables were removed. Each drives its own axis from a
+     * shipped fixture and asserts what the run EMITTED, so an implementation that fetched every row and
+     * then dropped some while rendering fails here rather than passing quietly.</p>
+     */
+    @Nested
+    @DisplayName("the two removed statement-table arities")
+    class RemovedArities {
+
+        /**
+         * Asserts one card's 600 transactions all reach both artifacts, past the inner overrun.
+         *
+         * <p>Purpose: {@code F-STMT-INNER-OVERFLOW} is the marker under which {@code tests/README.md}
+         * records the inner, same-card table's measured overrun at its L70 to L82: one card renders up to
+         * 512 transactions and the 513th faults. The migrated service holds no such table, so the 600th
+         * transaction of a card must be as ordinary as its first. This case drives the shipped fixture's
+         * 600 rows for one card and asserts the emitted identifiers are those 600, in order, with the
+         * per-artifact record budgets to match.</p>
+         *
+         * <p>Refactoring Rationale: the two thresholds are stated here separately because the numbers
+         * differ on both axes and by two orders of magnitude. The inner table is declared
+         * {@code 10 WS-TRAN-TBL OCCURS 10 TIMES} at L228 of {@code app/cbl/CBSTM03A.CBL} and measured at
+         * 512, so its declaration is not its failure boundary; the outer table is declared
+         * {@code 05 WS-CARD-TBL OCCURS 51 TIMES} at L226 with its parallel counter
+         * {@code 05 WS-TRN-TBL-CTR OCCURS 51 TIMES} at L232 and measured at 51 distinct CARDS, which is a
+         * different axis entirely. {@code tests/README.md} L70 to L82 states the same conclusion in its
+         * own words and records its reasoning at L80 to L82. Neither figure is the other's, and this case
+         * asserts only the transaction axis; its sibling below asserts the card axis under
+         * {@code F-STMT-OUTER-OVERFLOW}.</p>
+         *
+         * <p>Trade-offs: the fixture EXCEEDS the measured threshold by 88 rows where the COBOL suite
+         * stays under it. {@code tests/README.md} L78 to L80 keeps every one of its fixtures safely under
+         * both bounds, and it has to, because the baseline faults past either. The opposite choice is made
+         * here on purpose: the property under test is the absence of a bound, which a fixture inside the
+         * bound cannot distinguish from a larger bound.</p>
+         *
+         * <p>WHY: the provenance is the inner traversal of {@code 4000-TRNXFILE-GET} at L416 to L432 of
+         * {@code app/cbl/CBSTM03A.CBL}, whose {@code PERFORM VARYING TR-JMP} is bounded by
+         * {@code WS-TRCT (CR-JMP)} and calls {@code 6000-WRITE-TRANS} at L428 once per row. The streaming
+         * design replaces that bounded traversal, and this case is what holds it to rendering every
+         * row.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("a card carrying 600 transactions renders every one of them, past F-STMT-INNER-OVERFLOW")
+        void everyTransactionOfACardPastTheInnerOverflowMarkerReachesBothArtifacts() {
+            List<FixtureCard> cards = fixtureCards(INNER_OVERFLOW_CARD);
+            stubFixtureWalk(cards);
+            List<String> fixtureIdentifiers = identifiersOf(cards.get(0));
+
+            RecordingSink sink = new RecordingSink();
+            StatementRunOutcome outcome = service.generateStatements(sink);
+
+            assertThat(fixtureIdentifiers)
+                    .as("the shipped fixture supplies 600 rows for card %s", INNER_OVERFLOW_CARD)
+                    .hasSize(INNER_OVERFLOW_FIXTURE_ROWS);
+            assertThat(INNER_OVERFLOW_FIXTURE_ROWS)
+                    .as("and 600 stands decisively past the measured inner overrun of 512, so an "
+                            + "off-by-one cap at that boundary cannot pass this case")
+                    .isGreaterThan(BASELINE_INNER_TABLE_THRESHOLD);
+            assertThat(renderedTransactionIdentifiers(sink.plainRecords))
+                    .as("every fixture row reaches the plain-text artifact, in its own order; the "
+                            + "identifiers are compared rather than counted so a run that preserved the "
+                            + "count by repeating a row could not pass")
+                    .containsExactlyElementsOf(fixtureIdentifiers);
+            assertThat(sink.plainRecords)
+                    .as("the plain-text artifact holds the header block, 600 detail lines and the trailer")
+                    .hasSize(plainRecordsPerStatement(INNER_OVERFLOW_FIXTURE_ROWS));
+            assertThat(sink.markupRecords)
+                    .as("and the markup artifact holds eleven records for each of the same 600 rows, "
+                            + "so a row dropped from one artifact alone would fail here")
+                    .hasSize(markupRecordsPerStatement(INNER_OVERFLOW_FIXTURE_ROWS));
+            assertThat(outcome.statementsProduced()).as("one card, one statement").isEqualTo(1);
+            assertThat(outcome.index()).hasSize(1);
+            assertThat(outcome.index().get(0).recordCount())
+                    .as("and the index accounts for every record that statement wrote")
+                    .isEqualTo(plainRecordsPerStatement(INNER_OVERFLOW_FIXTURE_ROWS));
+        }
+
+        /**
+         * Asserts a run over 88 distinct cards statements every one of them, past the outer overrun.
+         *
+         * <p>Purpose: {@code F-STMT-OUTER-OVERFLOW} is the marker under which {@code tests/README.md}
+         * records the outer, distinct-card table's limit at its L70 to L82: 51 distinct cards render and
+         * the 52nd faults. The migrated run walks the portfolio by keyset and holds no card table, so the
+         * 88th card must be as ordinary as the first. This case drives every card the cross-reference
+         * fixture holds and asserts a statement for each, sized to that card's own row count, with the
+         * run's 700 detail lines all present.</p>
+         *
+         * <p>Refactoring Rationale: the two thresholds are stated here separately for the same reason
+         * they are separated in the sibling case above. The outer table is declared
+         * {@code 05 WS-CARD-TBL OCCURS 51 TIMES} at L226 of {@code app/cbl/CBSTM03A.CBL}, with the
+         * parallel counter {@code 05 WS-TRN-TBL-CTR OCCURS 51 TIMES} at L232, and 51 is both its
+         * declaration and its measurement -- on the CARD axis. The inner table is declared
+         * {@code 10 WS-TRAN-TBL OCCURS 10 TIMES} at L228 and measured at 512 under
+         * {@code F-STMT-INNER-OVERFLOW} -- on the TRANSACTION axis, where its declaration is not its
+         * boundary. {@code tests/README.md} L70 to L82 records both and its own reasoning at L80 to L82.
+         * This case asserts the card axis alone.</p>
+         *
+         * <p>Trade-offs: 88 cards EXCEED the outer limit by 37 where the COBOL suite stays under it, for
+         * the reason its own L78 to L80 gives -- the baseline faults past 51, so its fixtures cannot go
+         * there. This tree must, because a run of 51 or fewer cards cannot tell the absence of a card
+         * table from a card table that happens to be larger.</p>
+         *
+         * <p>WHY: the provenance is the outer traversal of {@code 4000-TRNXFILE-GET} at L416 to L432 of
+         * {@code app/cbl/CBSTM03A.CBL}, whose {@code PERFORM VARYING CR-JMP} is bounded by
+         * {@code CR-CNT} over {@code WS-CARD-NUM (CR-JMP)}, driven once per cross-reference row from the
+         * mainline at L326. The chunked keyset walk replaces that bounded traversal.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("a run over 88 distinct cards produces every statement, past F-STMT-OUTER-OVERFLOW")
+        void everyCardOfARunPastTheOuterOverflowMarkerProducesItsOwnStatement() {
+            List<FixtureCard> cards = fixtureCards();
+            stubFixtureWalk(cards);
+
+            RecordingSink sink = new RecordingSink();
+            StatementRunOutcome outcome = service.generateStatements(sink);
+
+            assertThat(cards)
+                    .as("the shipped cross-reference fixture holds 88 distinct cards")
+                    .hasSize(OUTER_OVERFLOW_FIXTURE_CARDS);
+            assertThat(OUTER_OVERFLOW_FIXTURE_CARDS)
+                    .as("and 88 stands decisively past the declared and measured outer limit of 51")
+                    .isGreaterThan(BASELINE_OUTER_TABLE_ARITY);
+            assertThat(outcome.statementsProduced())
+                    .as("every card is statemented, so no card table bounds this run")
+                    .isEqualTo(OUTER_OVERFLOW_FIXTURE_CARDS);
+            assertThat(outcome.index())
+                    .extracting(StatementIndexEntry::cardFingerprint)
+                    .as("and the index names each card exactly once, in walk order, so a skipped or "
+                            + "repeated card could not pass")
+                    .containsExactlyElementsOf(cards.stream().map(FixtureCard::fingerprint).toList());
+
+            long accountedRecords = 0;
+            for (int position = 0; position < cards.size(); position++) {
+                FixtureCard card = cards.get(position);
+                StatementIndexEntry entry = outcome.index().get(position);
+                assertThat(entry.firstRecord())
+                        .as("statement %d begins where the statement before it ended", position)
+                        .isEqualTo(accountedRecords);
+                assertThat(entry.recordCount())
+                        .as("statement %d renders every one of its %d fixture rows", position,
+                                card.rows().size())
+                        .isEqualTo(plainRecordsPerStatement(card.rows().size()));
+                accountedRecords += entry.recordCount();
+            }
+
+            assertThat(renderedTransactionIdentifiers(sink.plainRecords))
+                    .as("and the run's detail lines are all 700 rows of the transaction fixture")
+                    .hasSize(TRANSACTION_FIXTURE_ROWS);
+            assertThat(accountedRecords)
+                    .as("with the index accounting for every plain-text record all 88 statements wrote")
+                    .isEqualTo(sink.plainRecords.size());
+        }
+    }
+
+    /**
+     * The order a statement is assembled in, and the accumulator that resets between statements.
+     *
+     * <p>Purpose: the mainline at L316 to L339 of {@code app/cbl/CBSTM03A.CBL} fixes an order and one
+     * reset, and both are invisible to a case that only counts records. These cases assert the order the
+     * records arrive in, the reads the keyed path performs, and that a total covers its own card.</p>
+     */
+    @Nested
+    @DisplayName("the mainline order and the per-card total")
+    class MainlineOrder {
+
+        /**
+         * Asserts the keyed request path reads the cross-reference, then the customer, then the account.
+         *
+         * <p>Purpose: {@code 1000-MAINLINE} performs {@code 1000-XREFFILE-GET-NEXT} at L319,
+         * {@code 2000-CUSTFILE-GET} at L321 and {@code 3000-ACCTFILE-GET} at L322, in that order, and the
+         * two dimension reads are keyed by values the cross-reference row supplies -- L372 to L374 moves
+         * {@code XREF-CUST-ID} and computes the key length as {@code LENGTH OF XREF-CUST-ID}, and L396 to
+         * L398 does the same for the eleven digits of {@code XREF-ACCT-ID}. A path that read a dimension
+         * first would have nothing to key it with.</p>
+         *
+         * <p>Assumptions: the order is asserted on the keyed single-card path rather than on a whole run,
+         * because the run reads its heading from one joined chunk and therefore makes no separate
+         * dimension calls at all. Asserting an order that the run does not have would state a
+         * collaboration this service deliberately removed.</p>
+         *
+         * <p>WHY: the provenance is L319, L321 and L322 of {@code app/cbl/CBSTM03A.CBL} for the sequence
+         * and L372 to L374 with L396 to L398 for the keys those two reads use.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("the keyed path reads the cross-reference, then the customer, then the account")
+        void theKeyedPathReadsTheCrossReferenceThenTheCustomerThenTheAccount() {
+            stubOneCard();
+
+            service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+
+            InOrder reads = Mockito.inOrder(cardXrefs, customers, accounts);
+            reads.verify(cardXrefs).resolveByWholeCardNumber(SEED_CARD_NUMBER);
+            reads.verify(cardXrefs).findById(FINGERPRINT);
+            reads.verify(customers).findById(CUSTOMER_ID);
+            reads.verify(accounts).findById(ACCOUNT_ID);
+        }
+
+        /**
+         * Asserts each card's heading is emitted once and before that card's own detail lines.
+         *
+         * <p>Purpose: the mainline performs {@code 5000-CREATE-STATEMENT} at L323 and only then
+         * {@code 4000-TRNXFILE-GET} at L326, once per cross-reference row, so a statement's banner and
+         * heading block stand ahead of its detail lines and are written exactly once per card. A run that
+         * emitted one heading for the whole night, or one per transaction, would still write the right
+         * total of records for a single-card fixture, which is why this case drives four cards.</p>
+         *
+         * <p>Assumptions: the heading is counted by its opening banner, which
+         * {@code WRITE FD-STMTFILE-REC FROM ST-LINE0} at L460 writes once per statement, and the closing
+         * banner written at L437 counts the trailers. Counting the banners rather than the whole block
+         * makes the assertion independent of the block's internal composition, which the mapper package
+         * owns.</p>
+         *
+         * <p>WHY: the provenance is L323 and L326 of {@code app/cbl/CBSTM03A.CBL} for the order, L460 for
+         * the run of banner writes and L437 for the closing banner.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("each card's heading is emitted once and ahead of that card's detail lines")
+        void eachCardsHeadingIsEmittedOnceAndAheadOfItsDetailLines() {
+            List<FixtureCard> cards = fixtureCards(DISTINCT_TOTAL_CARDS.toArray(new String[0]));
+            stubFixtureWalk(cards);
+
+            RecordingSink sink = new RecordingSink();
+            service.generateStatements(sink);
+
+            String openingBanner = StatementBandLayouts.OPENING_ASTERISK_RUN
+                    + StatementBandLayouts.START_OF_STATEMENT_SENTINEL
+                    + StatementBandLayouts.OPENING_ASTERISK_RUN;
+            String closingBanner = StatementBandLayouts.CLOSING_ASTERISK_RUN
+                    + StatementBandLayouts.END_OF_STATEMENT_SENTINEL
+                    + StatementBandLayouts.CLOSING_ASTERISK_RUN;
+            List<String> rendered = new ArrayList<>();
+            for (byte[] record : sink.plainRecords) {
+                rendered.add(new String(record, StandardCharsets.US_ASCII));
+            }
+
+            assertThat(rendered.stream().filter(openingBanner::equals).count())
+                    .as("one heading per card and no more")
+                    .isEqualTo(cards.size());
+            assertThat(rendered.stream().filter(closingBanner::equals).count())
+                    .as("and one trailer per card")
+                    .isEqualTo(cards.size());
+            assertThat(rendered.get(0))
+                    .as("the run opens with a heading rather than with a detail line")
+                    .isEqualTo(openingBanner);
+            assertThat(rendered.get(rendered.size() - 1))
+                    .as("and closes with a trailer")
+                    .isEqualTo(closingBanner);
+
+            int statementIndex = -1;
+            for (int position = 0; position < rendered.size(); position++) {
+                if (rendered.get(position).equals(openingBanner)) {
+                    statementIndex++;
+                    continue;
+                }
+                String leading = bandItem(sink.plainRecords.get(position),
+                        StatementBandLayouts.ST_LINE14, "ST-TRANID");
+                if (leading.chars().allMatch(Character::isDigit)) {
+                    assertThat(cards.get(statementIndex).rows())
+                            .as("detail line %s falls inside the statement of the card it belongs to",
+                                    leading)
+                            .anySatisfy(row -> assertThat(row.key().transactionId())
+                                    .isEqualTo(leading));
+                }
+            }
+        }
+
+        /**
+         * Asserts each card's trailer total covers that card's own transactions alone.
+         *
+         * <p>Purpose: {@code MOVE ZERO TO WS-TOTAL-AMT} at L325 of {@code app/cbl/CBSTM03A.CBL} stands
+         * immediately before the traversal performed at L326, which accumulates with
+         * {@code ADD TRNX-AMT TO WS-TOTAL-AMT} at L429 and moves the result into the trailer band at
+         * L433 and L434. Without that reset every card after the first would carry the previous cards'
+         * activity as well as its own.</p>
+         *
+         * <p>Assumptions: four cards whose fixture totals are all different, so a total that survived
+         * into the next statement is visible on every card after the first. A single-card fixture cannot
+         * observe the reset at all, and two cards sharing a total would let a leak pass on one of
+         * them.</p>
+         *
+         * <p>Assumptions: the expected total is accumulated through {@link Money} in fixture order, which
+         * is the order the run adds them in, and is rendered through the same named edit mask the trailer
+         * band uses. Comparing rendered items rather than numbers is what makes the case sensitive to the
+         * mask as well as to the arithmetic.</p>
+         *
+         * <p>WHY: the provenance is L325 of {@code app/cbl/CBSTM03A.CBL} for the reset, L429 for the
+         * accumulation and L436 for the trailer write that carries the result.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("each card's trailer total covers that card's own transactions alone")
+        void eachCardsTrailerTotalCoversThatCardsTransactionsAlone() {
+            List<FixtureCard> cards = fixtureCards(DISTINCT_TOTAL_CARDS.toArray(new String[0]));
+            stubFixtureWalk(cards);
+
+            RecordingSink sink = new RecordingSink();
+            service.generateStatements(sink);
+
+            List<String> expectedTotals = new ArrayList<>();
+            for (FixtureCard card : cards) {
+                Money total = Money.ZERO;
+                for (StatementTransactionView row : card.rows()) {
+                    total = total.plus(row.amount());
+                }
+                expectedTotals.add(CobolEditMask.formatStatementAmount(total));
+            }
+
+            List<String> renderedTotals = new ArrayList<>();
+            for (byte[] record : sink.plainRecords) {
+                if (bandItem(record, StatementBandLayouts.ST_LINE14A, "FILLER-1")
+                        .equals(StatementBandLayouts.TOTAL_EXPENDITURE_LABEL)) {
+                    renderedTotals.add(
+                            bandItem(record, StatementBandLayouts.ST_LINE14A, "ST-TOTAL-TRAMT"));
+                }
+            }
+
+            assertThat(expectedTotals)
+                    .as("the four fixture cards carry four DIFFERENT totals, so a total that survived "
+                            + "one statement into the next is observable on three of them")
+                    .doesNotHaveDuplicates();
+            assertThat(renderedTotals)
+                    .as("each card's trailer carries its own total and not a running sum")
+                    .containsExactlyElementsOf(expectedTotals);
+        }
+    }
+
+    /**
+     * The shape of what a run emits: the two declared record widths and the repetitions inside them.
+     *
+     * <p>Purpose: the two artifacts are fixed-width record streams, and every case here is about a
+     * property of the bytes rather than of the values in them. Both widths are asserted on every record
+     * of a run, the shipped oracles' stored width classes are reproduced through the same right-trim the
+     * oracles encode, and the bands the reference writes more than once are asserted to arrive more than
+     * once.</p>
+     */
+    @Nested
+    @DisplayName("the emitted record shape")
+    class EmittedRecordShape {
+
+        /**
+         * Asserts every plain-text record is exactly 80 bytes and every markup record exactly 100.
+         *
+         * <p>Purpose: the plain-text width is declared {@code 01 FD-STMTFILE-REC PIC X(80)} at L45 of
+         * {@code app/cbl/CBSTM03A.CBL} and confirmed by {@code LRECL=80} at L73 and L89 of
+         * {@code app/jcl/CREASTMT.JCL}; the markup width is declared
+         * {@code 01 FD-HTMLFILE-REC PIC X(100)} at L47, restated as {@code 05 HTML-FIXED-LN PIC X(100)}
+         * at L149 and confirmed by {@code LRECL=100} at L94. Every record of a whole run is measured
+         * rather than one of each kind, because a band that reached the wrong width would otherwise have
+         * to be the one sampled.</p>
+         *
+         * <p>Assumptions: the {@code LRECL=80} at L69 of {@code app/jcl/CREASTMT.JCL} is INERT and is not
+         * a second markup width. It sits on the markup stanza of the deletion step, whose program is
+         * {@code IEFBR14} at L66 -- a program that opens nothing and writes no data -- so the attribute
+         * describes a data set that step never writes. Reading it as an alternative markup width would
+         * contradict the four places that agree on 100.</p>
+         *
+         * <p>WHY: the provenance is L45 and L47 of {@code app/cbl/CBSTM03A.CBL} for the two file
+         * definitions, with L73, L89 and L94 of {@code app/jcl/CREASTMT.JCL} confirming both.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("every statement record is 80 bytes and every markup record is 100")
+        void everyStatementRecordIsEightyBytesAndEveryMarkupRecordIsOneHundred() {
+            List<FixtureCard> cards = fixtureCards(DISTINCT_TOTAL_CARDS.toArray(new String[0]));
+            stubFixtureWalk(cards);
+
+            RecordingSink sink = new RecordingSink();
+            service.generateStatements(sink);
+
+            assertThat(sink.plainRecords).isNotEmpty();
+            assertThat(sink.markupRecords).isNotEmpty();
+            for (byte[] record : sink.plainRecords) {
+                assertThat(record.length)
+                        .as("statement record %s is the declared width",
+                                rightTrimmed(record))
+                        .isEqualTo(StatementBandLayouts.STATEMENT_LINE_LENGTH);
+            }
+            for (byte[] record : sink.markupRecords) {
+                assertThat(record.length)
+                        .as("markup record %s is the declared width", rightTrimmed(record))
+                        .isEqualTo(StatementHtmlMapper.HTML_RECORD_LENGTH);
+            }
+        }
+
+        /**
+         * Asserts the right-trim normalisation reproduces the width classes the shipped oracle stores.
+         *
+         * <p>Purpose: {@code tests/golden/statement/happy_path/statement.txt.expected} stores 22 lines
+         * measuring 9, 14, 16, 16, 23, 31, 32, 46, 49, three of 79 and ten of 80 -- measured on the
+         * shipped file, not estimated -- because line-sequential output drops trailing blanks as it
+         * writes. This case emits a statement and asserts that the same trim puts each structural band
+         * into the class the oracle holds it in, which is what makes a comparison against that artifact
+         * meaningful.</p>
+         *
+         * <p>Assumptions: an assertion that a stored golden LINE is 80 bytes long could never pass, so
+         * none is written. The trim runs on the EMITTED record and the padding requirement itself is
+         * asserted separately by the case above, on every record of a run. The classes are content rather
+         * than a second width contract: the balance band trims to 32 for a non-negative balance because
+         * the trailing sign position is blank, and to 33 for a negative one because the position then
+         * carries a minus, so this case drives a card whose balance is positive and whose rows include
+         * one negative amount in order to exercise both forms.</p>
+         *
+         * <p>Assumptions: all seventeen {@code ST-LINE} bands are natively exactly 80, so the plain-text
+         * statement needs no padding at all to reach its declared width -- the exact inverse of the
+         * 133-column report, six of whose seven bands are natively short. The classes below are therefore
+         * the columns each band's own content ends at.</p>
+         *
+         * <p>WHY: the provenance is the band block at L86 to L146 of {@code app/cbl/CBSTM03A.CBL}, whose
+         * items fix where each band's content ends, and the shipped oracle that stores the trimmed
+         * result.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("the right-trim normalisation reproduces the oracle's stored width classes")
+        void theRightTrimReproducesTheOraclesStoredWidthClasses() {
+            List<FixtureCard> cards = fixtureCards(WIDTH_CLASS_CARD);
+            stubFixtureWalk(cards);
+
+            RecordingSink sink = new RecordingSink();
+            service.generateStatements(sink);
+            List<byte[]> records = sink.plainRecords;
+
+            assertThat(rightTrimmed(records.get(0)))
+                    .as("the opening banner survives the trim whole, the oracle's 80-byte class")
+                    .hasSize(StatementBandLayouts.STATEMENT_LINE_LENGTH);
+            assertThat(rightTrimmed(records.get(records.size() - 1)))
+                    .as("and so does the closing banner")
+                    .hasSize(StatementBandLayouts.STATEMENT_LINE_LENGTH);
+            assertThat(rightTrimmed(firstRecordWithItem(records, StatementBandLayouts.ST_LINE12,
+                    "FILLER-1", StatementBandLayouts.HYPHEN_RULE)))
+                    .as("an all-hyphen rule survives whole, because its last byte is a hyphen")
+                    .hasSize(StatementBandLayouts.HYPHEN_RULE_LENGTH);
+            assertThat(rightTrimmed(firstRecordWithItem(records, StatementBandLayouts.ST_LINE13,
+                    "FILLER-1", StatementBandLayouts.TRAN_ID_HEADING)))
+                    .as("the column headings end at the last letter of the amount heading, at column 80")
+                    .hasSize(StatementBandLayouts.STATEMENT_LINE_LENGTH);
+            assertThat(rightTrimmed(firstRecordWithItem(records, StatementBandLayouts.ST_LINE7,
+                    "FILLER-1", StatementBandLayouts.ACCOUNT_ID_LABEL)))
+                    .as("the account band ends at the last of the eleven identifier digits, "
+                            + "the oracle's 31-byte class")
+                    .hasSize(StatementBandLayouts.ACCOUNT_ID_LABEL.length()
+                            + StatementTextMapper.ACCOUNT_ID_DIGITS);
+            assertThat(rightTrimmed(firstRecordWithItem(records, StatementBandLayouts.ST_LINE8,
+                    "FILLER-1", StatementBandLayouts.CURRENT_BALANCE_LABEL)))
+                    .as("a non-negative balance leaves its trailing sign position blank, so the band "
+                            + "trims to the oracle's 32-byte class")
+                    .hasSize(StatementBandLayouts.CURRENT_BALANCE_LABEL.length()
+                            + CobolEditMask.STATEMENT_AMOUNT_WIDTH - 1);
+            assertThat(rightTrimmed(firstRecordWithItem(records, StatementBandLayouts.ST_LINE9,
+                    "FILLER-1", StatementBandLayouts.FICO_SCORE_LABEL)))
+                    .as("the score band ends at the last of three digits, the oracle's 23-byte class")
+                    .hasSize(StatementBandLayouts.FICO_SCORE_LABEL.length()
+                            + StatementTextMapper.CREDIT_SCORE_DIGITS);
+            assertThat(rightTrimmed(firstRecordWithItem(records, StatementBandLayouts.ST_LINE11,
+                    "FILLER-2", StatementBandLayouts.TRANSACTION_SUMMARY_HEADING)))
+                    .as("the summary heading ends at its last letter, the oracle's 49-byte class")
+                    .hasSize(49);
+            assertThat(rightTrimmed(records.get(6)))
+                    .as("the basic-details heading ends at its last letter, the oracle's 46-byte class")
+                    .hasSize(46);
+
+            List<byte[]> detailLines = new ArrayList<>();
+            for (byte[] record : records) {
+                if (bandItem(record, StatementBandLayouts.ST_LINE14, "ST-TRANID")
+                        .chars().allMatch(Character::isDigit)) {
+                    detailLines.add(record);
+                }
+            }
+            byte[] positiveLine = null;
+            byte[] negativeLine = null;
+            for (byte[] record : detailLines) {
+                String amount = bandItem(record, StatementBandLayouts.ST_LINE14, "ST-TRANAMT");
+                if (amount.endsWith("-")) {
+                    negativeLine = record;
+                } else {
+                    positiveLine = record;
+                }
+            }
+
+            assertThat(positiveLine).as("the fixture card carries a positive amount").isNotNull();
+            assertThat(negativeLine).as("and exactly one negative amount").isNotNull();
+            assertThat(rightTrimmed(positiveLine))
+                    .as("a positive amount leaves the trailing sign blank, so the line trims to the "
+                            + "oracle's 79-byte class")
+                    .hasSize(StatementBandLayouts.STATEMENT_LINE_LENGTH - 1);
+            assertThat(rightTrimmed(negativeLine))
+                    .as("a negative amount ends in a minus, so the line stays in the 80-byte class -- "
+                            + "which is why the oracle holds three lines of 79 and one detail line of 80")
+                    .hasSize(StatementBandLayouts.STATEMENT_LINE_LENGTH);
+            assertThat(rightTrimmed(firstRecordWithItem(records, StatementBandLayouts.ST_LINE14A,
+                    "FILLER-1", StatementBandLayouts.TOTAL_EXPENDITURE_LABEL)))
+                    .as("and this card's total is positive, so its trailer trims to 79 as the oracle's "
+                            + "does")
+                    .hasSize(StatementBandLayouts.STATEMENT_LINE_LENGTH - 1);
+        }
+
+        /**
+         * Asserts the six hyphen rules stand at their declared positions and that none is collapsed.
+         *
+         * <p>Purpose: the reference writes three distinct rule bands and writes two of them TWICE.
+         * {@code ST-LINE5} is written at L492 and again at L494 of {@code app/cbl/CBSTM03A.CBL}, once on
+         * each side of the basic-details heading; {@code ST-LINE12} is written at L500 and again at L502,
+         * once on each side of the column headings, and a third time in the card trailer at L435; and
+         * {@code ST-LINE10} is written once at L498. All three bands render as 80 hyphens, so a run that
+         * emitted each of them once would still produce a plausible statement -- two lines shorter, with
+         * every remaining line byte-correct.</p>
+         *
+         * <p>Assumptions: the repetitions are asserted by POSITION rather than by counting alone, because
+         * the bands are indistinguishable in the emitted bytes. Positions 5 and 7 bracket the
+         * basic-details heading at 6 and are therefore the pair from L492 and L494; positions 13 and 15
+         * bracket the column headings at 14 and are the pair from L500 and L502; position 11 is the
+         * single rule from L498; and the last rule stands immediately before the trailer's total, which
+         * is the write at L435. Counting six without their positions would pass a run that emitted one
+         * pair twice and the other pair not at all.</p>
+         *
+         * <p>WHY: the provenance is the fifteen consecutive writes at L488 to L502 of
+         * {@code app/cbl/CBSTM03A.CBL} and the three trailer writes at L435 to L437.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("the six hyphen rules stand at their declared positions and none is collapsed")
+        void theSixHyphenRulesStandAtTheirDeclaredPositionsAndNoneIsCollapsed() {
+            List<FixtureCard> cards = fixtureCards(WIDTH_CLASS_CARD);
+            stubFixtureWalk(cards);
+
+            RecordingSink sink = new RecordingSink();
+            service.generateStatements(sink);
+            int transactionCount = cards.get(0).rows().size();
+
+            List<Integer> rulePositions = new ArrayList<>();
+            for (int position = 0; position < sink.plainRecords.size(); position++) {
+                if (rightTrimmed(sink.plainRecords.get(position))
+                        .equals(StatementBandLayouts.HYPHEN_RULE)) {
+                    rulePositions.add(position);
+                }
+            }
+
+            assertThat(rulePositions)
+                    .as("two rules bracket the basic-details heading, two bracket the column headings, "
+                            + "one stands between the two heading groups and one opens the trailer")
+                    .containsExactly(5, 7, 11, 13, 15,
+                            StatementTextMapper.HEADER_BLOCK_LINE_COUNT + transactionCount);
+            assertThat(rulePositions)
+                    .as("which is the per-statement count the assembler publishes")
+                    .hasSize(StatementTextMapper.HYPHEN_RULES_PER_STATEMENT);
+            assertThat(bandItem(sink.plainRecords.get(6), StatementBandLayouts.ST_LINE6, "FILLER-2")
+                    .stripTrailing())
+                    .as("the first pair brackets the basic-details heading")
+                    .isEqualTo(StatementBandLayouts.BASIC_DETAILS_HEADING);
+            assertThat(bandItem(sink.plainRecords.get(14), StatementBandLayouts.ST_LINE13, "FILLER-1"))
+                    .as("and the second pair brackets the column headings")
+                    .isEqualTo(StatementBandLayouts.TRAN_ID_HEADING);
+            assertThat(bandItem(sink.plainRecords.get(
+                    StatementTextMapper.HEADER_BLOCK_LINE_COUNT + transactionCount + 1),
+                    StatementBandLayouts.ST_LINE14A, "FILLER-1"))
+                    .as("and the sixth stands immediately before the trailer's total")
+                    .isEqualTo(StatementBandLayouts.TOTAL_EXPENDITURE_LABEL);
+        }
+
+        /**
+         * Asserts the markup name cell assembled into the record area survives as one record per card.
+         *
+         * <p>Purpose: L568 of {@code app/cbl/CBSTM03A.CBL} is the program's only
+         * {@code WRITE FD-HTMLFILE-REC.} with no {@code FROM} clause: the name cell is assembled directly
+         * into the output record area by the preceding {@code STRING} and written bare, where the three
+         * address cells that follow are assembled into a separate buffer and written from it. A cell with
+         * no source item is the one a rebuild is most likely to lose, because there is no buffer to
+         * notice the absence of.</p>
+         *
+         * <p>Assumptions: the cell is identified by the emphasised cell prefix TOGETHER WITH the
+         * customer's own surname, because that prefix is shared by several fixed fragments of the
+         * document -- the bank name, the basic-details heading, the summary heading and the three column
+         * headings all carry it. Requiring the surname is what distinguishes the one cell whose content
+         * comes from the customer row.</p>
+         *
+         * <p>WHY: the provenance is L566 and L568 of {@code app/cbl/CBSTM03A.CBL} for the bare write, and
+         * L574 to L592 for the three buffered address cells it is deliberately unlike.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("the markup name cell written from the record area survives as one record per card")
+        void theMarkupNameCellWrittenFromTheRecordAreaSurvivesAsOneRecordPerCard() {
+            List<FixtureCard> cards = fixtureCards(WIDTH_CLASS_CARD);
+            stubFixtureWalk(cards);
+            String surname = cards.get(0).headingRow().getLastName();
+
+            RecordingSink sink = new RecordingSink();
+            service.generateStatements(sink);
+
+            List<String> nameCells = new ArrayList<>();
+            for (byte[] record : sink.markupRecords) {
+                String rendered = rightTrimmed(record);
+                if (rendered.startsWith(StatementHtmlMapper.NAME_CELL_PREFIX)
+                        && rendered.contains(surname)) {
+                    nameCells.add(rendered);
+                }
+            }
+
+            assertThat(surname).as("the fixture customer has a surname to look for").isNotEmpty();
+            assertThat(nameCells)
+                    .as("exactly one markup record carries the customer's name in the emphasised cell")
+                    .hasSize(1);
+            assertThat(nameCells.get(0))
+                    .as("and that cell is closed, so the bare write carries a whole element")
+                    .endsWith(StatementHtmlMapper.CELL_SUFFIX);
+            assertThat(sink.markupRecords)
+                    .as("with the whole markup document at its per-statement budget, so no other record "
+                            + "of the name and address block is lost either")
+                    .hasSize(markupRecordsPerStatement(cards.get(0).rows().size()));
+        }
+    }
+
+    /**
+     * The order rows are grouped and read in, and the continuation that walks past one chunk.
+     *
+     * <p>Purpose: {@code SORT FIELDS=(263,16,CH,A,1,16,CH,A)} at L53 of {@code app/jcl/CREASTMT.JCL} is a
+     * TWO-key sort: the card number groups the rows and the transaction identifier orders them inside
+     * each group. Both halves are asserted here, and so is the continuation that carries a card whose
+     * rows exceed one chunk.</p>
+     */
+    @Nested
+    @DisplayName("grouping, ordering and chunk continuation")
+    class OrderingAndContinuation {
+
+        /**
+         * Asserts the emitted statements group by card and order by identifier inside each card.
+         *
+         * <p>Purpose: the two sort keys at L53 of {@code app/jcl/CREASTMT.JCL} are the card number at
+         * position 263 and the transaction identifier at position 1, in that precedence, and the migrated
+         * run reproduces both -- one statement per cross-reference row, and each card's rows read in
+         * ascending identifier order. Comparing each statement's identifiers against that card's own
+         * fixture rows asserts the grouping and the ordering together, so a row rendered inside the wrong
+         * card's statement fails as surely as a row out of order.</p>
+         *
+         * <p>Assumptions: the card ORDER of the statements themselves follows the pair the heading query
+         * declares, which leads on the masked rendering the relation publishes rather than on the whole
+         * card number. That is a consequence of publishing a masked column and it changes which statement
+         * comes first; it does not change which transactions belong to a statement or their order inside
+         * it, which is what L53 fixes.</p>
+         *
+         * <p>WHY: the provenance is L53 of {@code app/jcl/CREASTMT.JCL} for the two-key sort and L416 to
+         * L432 of {@code app/cbl/CBSTM03A.CBL}, whose traversal renders one card's rows in the order the
+         * sorted input holds them.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("statements group by card and each card's lines ascend by transaction identifier")
+        void statementsGroupByCardAndEachCardsLinesAscendByIdentifier() {
+            List<FixtureCard> cards = fixtureCards(DISTINCT_TOTAL_CARDS.toArray(new String[0]));
+            stubFixtureWalk(cards);
+
+            RecordingSink sink = new RecordingSink();
+            service.generateStatements(sink);
+
+            List<List<String>> emitted = identifiersPerStatement(sink.plainRecords);
+            List<List<String>> expected = cards.stream()
+                    .map(StatementServiceTest::identifiersOf)
+                    .map(identifiers -> (List<String>) new ArrayList<>(identifiers))
+                    .toList();
+
+            assertThat(emitted)
+                    .as("each statement carries exactly its own card's rows, in ascending identifier "
+                            + "order")
+                    .containsExactlyElementsOf(expected);
+            for (List<String> statement : emitted) {
+                assertThat(statement)
+                        .as("and no statement's identifiers are out of order or repeated")
+                        .isSorted()
+                        .doesNotHaveDuplicates();
+            }
+        }
+
+        /**
+         * Asserts a card whose rows exceed one chunk continues from the previous chunk's last identifier.
+         *
+         * <p>Purpose: the run reads a card's rows in bounded chunks and advances a strict continuation on
+         * the identifier the query orders by, so a card of 600 rows is read in three calls: the first
+         * from the start, the second from the 500th identifier, and a third that returns nothing and ends
+         * the card. A run that restarted each chunk from the start would loop on a real card, and one
+         * that advanced by the wrong value would skip or repeat rows at the boundary -- neither of which a
+         * count of rendered lines alone can distinguish from a correct read.</p>
+         *
+         * <p>Assumptions: the two boundary identifiers are taken from the fixture rather than written as
+         * literals, so the case states the continuation rule instead of restating the fixture's
+         * contents.</p>
+         *
+         * <p>WHY: the provenance is the inner traversal at L416 to L432 of
+         * {@code app/cbl/CBSTM03A.CBL}, which the chunked read replaces, and L53 of
+         * {@code app/jcl/CREASTMT.JCL}, whose second sort key is the identifier the continuation
+         * advances on.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("a card larger than one chunk continues from the previous chunk's last identifier")
+        void aCardLargerThanOneChunkContinuesFromThePreviousChunksLastIdentifier() {
+            List<FixtureCard> cards = fixtureCards(INNER_OVERFLOW_CARD);
+            stubFixtureWalk(cards);
+            List<String> identifiers = identifiersOf(cards.get(0));
+            String lastOfFirstChunk = identifiers.get(StatementService.TRANSACTION_CHUNK_SIZE - 1);
+            String lastOfCard = identifiers.get(identifiers.size() - 1);
+
+            service.generateStatements(new RecordingSink());
+
+            ArgumentCaptor<String> continuation = ArgumentCaptor.forClass(String.class);
+            verify(transactions, Mockito.times(3)).findWindowByCardFingerprint(
+                    eq(cards.get(0).fingerprint()), continuation.capture(),
+                    eq(StatementService.TRANSACTION_CHUNK_SIZE));
+            assertThat(continuation.getAllValues())
+                    .as("the first read starts from the beginning, the second from the 500th identifier "
+                            + "and the third from the card's last, which ends the card")
+                    .containsExactly("", lastOfFirstChunk, lastOfCard);
+        }
+    }
+
+    /**
+     * What ends a run normally, and what stops it.
+     *
+     * <p>Purpose: three of the run's four reads behave differently when a row is absent, and the
+     * difference is the whole of the missing-row policy. The cross-reference cursor's exhaustion is the
+     * run's normal ending; an unresolved customer or account is a referential-integrity violation that
+     * stops it. These cases assert both arms so that neither can be quietly turned into the other.</p>
+     */
+    @Nested
+    @DisplayName("normal ending and the two aborting reads")
+    class MissingRowPolicy {
+
+        /**
+         * Asserts an unresolved customer stops the request rather than producing a partial statement.
+         *
+         * <p>Purpose: {@code 2000-CUSTFILE-GET} at L368 to L390 of {@code app/cbl/CBSTM03A.CBL} carries
+         * an {@code EVALUATE} at L379 to L386 with a success arm and a catch-all and NO not-found arm at
+         * all, so any other status displays {@code ERROR READING CUSTFILE} at L383 and performs the abend
+         * paragraph at L385. The migrated read raises instead, and the failure carries the four elements
+         * of the abend structure declared at L21 to L29 of {@code app/cpy/CSMSG02Y.cpy}.</p>
+         *
+         * <p>Assumptions: the captured failure is a nested {@link IllegalStateException} and NOT a client
+         * input refusal, and the distinction is the point of asserting the type. A refusal would tell the
+         * caller to correct the request, when what has actually happened is that a cross-reference row
+         * names a customer the customer relation does not hold -- a state no caller can correct and one
+         * that a partial document would conceal.</p>
+         *
+         * <p>Assumptions: the account read is asserted NOT to have happened, which is what places the
+         * failure at the customer read rather than merely somewhere in the path. The order is the
+         * reference's own, at L321 and L322.</p>
+         *
+         * <p>WHY: the provenance is L379 to L386 of {@code app/cbl/CBSTM03A.CBL} for the absent
+         * not-found arm, L383 for the display text carried into the message, and L921 to L923 for the
+         * abend paragraph, whose own display is the message element.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("a cross-reference row naming an unresolved customer stops the request")
+        void aCrossReferenceRowNamingAnUnresolvedCustomerStopsTheRequest() {
+            stubOneCard();
+            when(customers.findById(CUSTOMER_ID)).thenReturn(Optional.empty());
+
+            assertThatExceptionOfType(IllegalStateException.class)
+                    .isThrownBy(() -> service.compose(new StatementRequest(SEED_CARD_NUMBER, null)))
+                    .withMessageStartingWith("ERROR READING CUSTFILE")
+                    .withMessageContainingAll("abendCode=", "abendReason=")
+                    .withMessageContaining("abendCulprit=CBSTM03A")
+                    .withMessageContaining("abendMsg=ABENDING PROGRAM");
+
+            assertThat("CBSTM03A".length())
+                    .as("the culprit is the program being transcribed, at the width ABEND-CULPRIT "
+                            + "declares at L24 of app/cpy/CSMSG02Y.cpy")
+                    .isEqualTo(AbendDetail.ABEND_CULPRIT_LENGTH);
+            verify(accounts, never()).findById(anyLong());
+        }
+
+        /**
+         * Asserts an unresolved account stops the request rather than producing a partial statement.
+         *
+         * <p>Purpose: {@code 3000-ACCTFILE-GET} at L392 to L414 of {@code app/cbl/CBSTM03A.CBL} is shaped
+         * identically to the customer read and its {@code EVALUATE} at L403 to L410 likewise has no
+         * not-found arm, displaying {@code ERROR READING ACCTFILE} at L407 before the same abend
+         * paragraph. The two are asserted separately because they name different relations in their
+         * message, and a single case covering both would pass against an implementation that reported the
+         * wrong one -- which is the one thing the message is for.</p>
+         *
+         * <p>Assumptions: the captured failure is a nested {@link IllegalStateException}, for the reason
+         * the customer case records, and the customer read is asserted to have happened first so that the
+         * failure is located at the account read.</p>
+         *
+         * <p>WHY: the provenance is L403 to L410 of {@code app/cbl/CBSTM03A.CBL} for the absent
+         * not-found arm, L407 for the display text, and L921 to L923 for the abend paragraph.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("a cross-reference row naming an unresolved account stops the request")
+        void aCrossReferenceRowNamingAnUnresolvedAccountStopsTheRequest() {
+            stubOneCard();
+            when(accounts.findById(ACCOUNT_ID)).thenReturn(Optional.empty());
+
+            assertThatExceptionOfType(IllegalStateException.class)
+                    .isThrownBy(() -> service.compose(new StatementRequest(SEED_CARD_NUMBER, null)))
+                    .withMessageStartingWith("ERROR READING ACCTFILE")
+                    .withMessageContainingAll("abendCode=", "abendReason=")
+                    .withMessageContaining("abendCulprit=CBSTM03A")
+                    .withMessageContaining("abendMsg=ABENDING PROGRAM");
+
+            verify(customers).findById(CUSTOMER_ID);
+        }
+
+        /**
+         * Asserts an exhausted cross-reference cursor ends the run with every statement left intact.
+         *
+         * <p>Purpose: the cross-reference read is the only statement read paragraph carrying an
+         * end-of-file arm -- L353 to L362 of {@code app/cbl/CBSTM03A.CBL}, whose {@code WHEN '10'} at
+         * L357 moves the end-of-file flag that the mainline's {@code PERFORM UNTIL} at L317 tests -- so
+         * running out of rows is how a successful run ENDS. This case drives four cards, lets the walk
+         * read past the last of them, and asserts the run returned normally with all four statements
+         * whole. It is the deliberate contrast with the two cases above: the same absence of a row is a
+         * normal ending on one read and a stop on the other two.</p>
+         *
+         * <p>Assumptions: intactness is asserted as the per-card record budget and one closing banner per
+         * card, not merely as a count of statements. A run that ended after writing a heading and no
+         * trailer would still report the statement it had started.</p>
+         *
+         * <p>WHY: the provenance is L353 to L362 of {@code app/cbl/CBSTM03A.CBL} for the end-of-file arm
+         * and L317 for the loop it ends.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("an exhausted cross-reference cursor ends the run with every statement intact")
+        void anExhaustedCrossReferenceCursorEndsTheRunWithEveryStatementIntact() {
+            List<FixtureCard> cards = fixtureCards(DISTINCT_TOTAL_CARDS.toArray(new String[0]));
+            stubFixtureWalk(cards);
+
+            RecordingSink sink = new RecordingSink();
+            StatementRunOutcome outcome = service.generateStatements(sink);
+
+            int expectedRecords = 0;
+            for (FixtureCard card : cards) {
+                expectedRecords += plainRecordsPerStatement(card.rows().size());
+            }
+            String closingBanner = StatementBandLayouts.CLOSING_ASTERISK_RUN
+                    + StatementBandLayouts.END_OF_STATEMENT_SENTINEL
+                    + StatementBandLayouts.CLOSING_ASTERISK_RUN;
+            long trailers = sink.plainRecords.stream()
+                    .filter(record -> new String(record, StandardCharsets.US_ASCII)
+                            .equals(closingBanner))
+                    .count();
+
+            assertThat(outcome.statementsProduced())
+                    .as("the walk ended by running out of rows, with every card statemented")
+                    .isEqualTo(cards.size());
+            assertThat(sink.plainRecords)
+                    .as("and each of those statements is whole, not merely started")
+                    .hasSize(expectedRecords);
+            assertThat(trailers)
+                    .as("with one closing banner per card")
+                    .isEqualTo(cards.size());
+            verify(cardXrefs, Mockito.times(2))
+                    .findHeadingChunk(anyString(), anyString(), anyInt());
+        }
+    }
+
+    /**
+     * Rerunning a night, and the absence of anything that would make two runs differ.
+     *
+     * <p>Purpose: a statement run is compared against a stored oracle, so two runs over one input have to
+     * produce one byte stream, and a second run has to leave one copy of each artifact rather than two.
+     * Both are properties nothing else in this file would reveal.</p>
+     */
+    @Nested
+    @DisplayName("rerunning a night")
+    class RerunAndDeterminism {
+
+        /**
+         * Asserts a second run replaces both artifacts rather than appending to them.
+         *
+         * <p>Purpose: {@code app/jcl/CREASTMT.JCL} deletes both outputs in a step of its own --
+         * {@code IEFBR14} at L66, gated {@code COND=(0,NE)}, with {@code DISP=(MOD,DELETE,DELETE)} on the
+         * markup output at L67 and on the plain-text output at L72 -- and only then does L79 onward run
+         * the generator with {@code DISP=(NEW,CATLG,DELETE)} on both. A rerun therefore leaves one copy of
+         * each artifact. This case runs the writer twice into one destination that discards what it holds
+         * when it is cleared, and asserts the destination ends with exactly one run's records.</p>
+         *
+         * <p>Assumptions: the destination is asked to clear itself rather than to count clearings,
+         * because a destination that only counted would report the call and still hold both copies -- and
+         * holding both copies is precisely the state this case exists to rule out. The first run's stream
+         * is captured separately so the comparison is against a whole run's records rather than against a
+         * number.</p>
+         *
+         * <p>WHY: the provenance is L66 to L75 of {@code app/jcl/CREASTMT.JCL} for the deletion step and
+         * L79 onward for the creation that follows it.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("a second run replaces both artifacts rather than appending to them")
+        void aSecondRunReplacesBothArtifactsRatherThanAppendingToThem() {
+            List<FixtureCard> cards = fixtureCards(DISTINCT_TOTAL_CARDS.toArray(new String[0]));
+            stubFixtureWalk(cards);
+
+            RecordingSink singleRun = new RecordingSink();
+            service.generateStatements(singleRun);
+
+            ReplacingSink artifacts = new ReplacingSink();
+            service.generateStatements(artifacts);
+            service.generateStatements(artifacts);
+
+            assertThat(artifacts.replacements)
+                    .as("each run cleared the previous artifacts before writing its first record")
+                    .isEqualTo(2);
+            assertThat(artifacts.plainRecords)
+                    .as("so the plain-text artifact holds one run's records and not two")
+                    .hasSameSizeAs(singleRun.plainRecords);
+            assertThat(artifacts.markupRecords)
+                    .as("and so does the markup artifact")
+                    .hasSameSizeAs(singleRun.markupRecords);
+            for (int position = 0; position < singleRun.plainRecords.size(); position++) {
+                assertThat(artifacts.plainRecords.get(position))
+                        .as("record %d of the reran artifact is the record a single run wrote", position)
+                        .isEqualTo(singleRun.plainRecords.get(position));
+            }
+        }
+
+        /**
+         * Asserts two runs over identical input emit byte-identical streams.
+         *
+         * <p>Purpose: this is the property a comparison against a stored oracle rests on. Anything
+         * carried between two runs -- a field holding an accumulator, a counter surviving a run, a value
+         * read from the environment -- would show as a difference in the second stream. The reference's
+         * own accumulator is process-wide working storage, which is exactly the arrangement that needs
+         * the reset at L325 of {@code app/cbl/CBSTM03A.CBL} and which would fail here.</p>
+         *
+         * <p>Assumptions: this is also how the clock-free property is asserted for the run itself, and it
+         * is asserted this way rather than with a time source that throws when consulted because there is
+         * no clock seam to inject one through. The companion case below asserts that absence
+         * structurally.</p>
+         *
+         * <p>WHY: the provenance is L325 of {@code app/cbl/CBSTM03A.CBL}, whose reset exists because the
+         * reference's accumulator outlives a statement.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("two runs over identical input emit byte-identical streams")
+        void twoRunsOverIdenticalInputEmitByteIdenticalStreams() {
+            List<FixtureCard> cards = fixtureCards(DISTINCT_TOTAL_CARDS.toArray(new String[0]));
+            stubFixtureWalk(cards);
+
+            RecordingSink first = new RecordingSink();
+            RecordingSink second = new RecordingSink();
+            service.generateStatements(first);
+            service.generateStatements(second);
+
+            assertThat(second.plainRecords).hasSameSizeAs(first.plainRecords);
+            assertThat(second.markupRecords).hasSameSizeAs(first.markupRecords);
+            for (int position = 0; position < first.plainRecords.size(); position++) {
+                assertThat(second.plainRecords.get(position))
+                        .as("no value survives one run into the next, at plain-text record %d", position)
+                        .isEqualTo(first.plainRecords.get(position));
+            }
+            for (int position = 0; position < first.markupRecords.size(); position++) {
+                assertThat(second.markupRecords.get(position))
+                        .as("nor at markup record %d", position)
+                        .isEqualTo(first.markupRecords.get(position));
+            }
+        }
+
+        /**
+         * Asserts the service declares no time source on any field, constructor or method.
+         *
+         * <p>Purpose: a statement is compared against a stored oracle, so a generator that read the wall
+         * clock would produce a different artifact every day from identical input and the comparison it
+         * exists to satisfy could never pass twice. Every date this service renders comes from a row it
+         * read.</p>
+         *
+         * <p>Alternatives Considered: injecting a {@link Clock} whose accessors throw, so that any
+         * consultation would fail a run. Rejected because this service has no clock seam to inject one
+         * through -- it takes four read-only repositories, a key prefix, an artifact store and a
+         * tokeniser -- and adding a constructor parameter merely to prove it is unused would introduce the
+         * very dependency the case exists to deny. Asserting the absence directly is the stronger
+         * statement: a throwing clock proves only that the exercised path does not consult it, where this
+         * proves no path can, because there is nothing to consult.</p>
+         *
+         * <p>WHY: the provenance is the injected business date of the batch window rather than a line of
+         * {@code app/cbl/CBSTM03A.CBL}, which reads no clock either: its only dated values arrive in the
+         * records it reads, and {@code app/jcl/CREASTMT.JCL} supplies no date parameter at all.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("the service declares no clock, on any field, constructor or method")
+        void theServiceDeclaresNoClock() {
+            for (java.lang.reflect.Field field : StatementService.class.getDeclaredFields()) {
+                assertThat(field.getType())
+                        .as("field %s is not a time source", field.getName())
+                        .isNotEqualTo(Clock.class);
+            }
+            for (java.lang.reflect.Constructor<?> constructor
+                    : StatementService.class.getDeclaredConstructors()) {
+                assertThat(constructor.getParameterTypes())
+                        .as("no constructor takes a time source")
+                        .doesNotContain(Clock.class);
+            }
+            for (java.lang.reflect.Method method : StatementService.class.getDeclaredMethods()) {
+                assertThat(method.getParameterTypes())
+                        .as("method %s takes no time source", method.getName())
+                        .doesNotContain(Clock.class);
+            }
+        }
+    }
+
+    /**
+     * What the two artifacts must not carry, and the two money masks that are not interchangeable.
+     *
+     * <p>Purpose: the statement's transaction layout carries a whole card number and its money items use
+     * a sign convention opposite to the report's, so both are places where a plausible artifact can be
+     * wrong. These cases assert what the emitted records do not contain and which named mask each money
+     * position is rendered through.</p>
+     */
+    @Nested
+    @DisplayName("disclosure and the two statement money masks")
+    class DisclosureAndMoney {
+
+        /**
+         * Asserts no emitted record carries a whole card number, and that no projection carries a
+         * verification value.
+         *
+         * <p>Purpose: {@code TRNX-CARD-NUM PIC X(16)} at L22 of {@code app/cpy/COSTM01.CPY} carries the
+         * WHOLE card number, so a statement assembled straight from that layout would print it. The
+         * migrated bands render no card number at all, which makes this a regression guard rather than a
+         * masking assertion: a band added later that rendered the card would fail here.</p>
+         *
+         * <p>Assumptions: the run's own anchor is asserted to be a masked rendering, because the walk
+         * carries a card value in its continuation and a walk anchored on the whole number would put one
+         * in every query the run issues even if no artifact showed it.</p>
+         *
+         * <p>Assumptions: the verification value is asserted STRUCTURALLY, on the four projections this
+         * service reads, rather than by searching the artifacts for a three-digit value. A three-digit
+         * string occurs inside almost every rendered amount, so a search would report a match that means
+         * nothing; a projection declaring no such member cannot supply one to any band.</p>
+         *
+         * <p>Assumptions: the response-level masking of a card number is NOT asserted here. That belongs
+         * to {@code ReportingDtoMapperTest} in the sibling mapper test package, and duplicating it would
+         * leave two owners for one rule.</p>
+         *
+         * <p>WHY: the provenance is L22 of {@code app/cpy/COSTM01.CPY} for the whole card number in the
+         * statement's own layout, and the absence of any card item among the seventeen bands declared at
+         * L86 to L146 of {@code app/cbl/CBSTM03A.CBL}.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("no emitted record carries a whole card number and no projection carries a "
+                + "verification value")
+        void noEmittedRecordCarriesAWholeCardNumberAndNoProjectionCarriesAVerificationValue() {
+            List<FixtureCard> cards = fixtureCards();
+            stubFixtureWalk(cards);
+
+            RecordingSink sink = new RecordingSink();
+            service.generateStatements(sink);
+
+            StringBuilder emitted = new StringBuilder();
+            for (byte[] record : sink.plainRecords) {
+                emitted.append(new String(record, StandardCharsets.US_ASCII));
+            }
+            for (byte[] record : sink.markupRecords) {
+                emitted.append(new String(record, StandardCharsets.US_ASCII));
+            }
+            String[] wholeCardNumbers = cards.stream().map(FixtureCard::cardNumber)
+                    .toArray(String[]::new);
+
+            assertThat(emitted.toString())
+                    .as("neither artifact carries any of the 88 whole card numbers the run walked")
+                    .doesNotContain(wholeCardNumbers);
+            for (FixtureCard card : cards) {
+                assertThat(card.headingRow().getCardNum())
+                        .as("and the walk itself is anchored on a masked rendering")
+                        .matches(CardNumberMasker.MASKED_FORM_PATTERN);
+            }
+            for (Class<?> projection : List.of(CardXrefView.class, CustomerView.class,
+                    AccountView.class, StatementTransactionView.class)) {
+                for (java.lang.reflect.Field member : projection.getDeclaredFields()) {
+                    assertThat(member.getName().toLowerCase(java.util.Locale.ROOT))
+                            .as("%s declares no verification-value member", projection.getSimpleName())
+                            .doesNotContain("cvv", "verification");
+                }
+            }
+        }
+
+        /**
+         * Asserts the balance uses the unsuppressed mask and the two amount items the suppressed one.
+         *
+         * <p>Purpose: the statement carries two thirteen-character money masks of the same shape that
+         * differ in one respect. {@code ST-CURR-BAL PIC 9(9).99-} at L113 of
+         * {@code app/cbl/CBSTM03A.CBL} spells its nine integer positions with DIGIT positions, so leading
+         * zeros print -- which is why the shipped oracle shows a balance of {@code 000000492.00}.
+         * {@code ST-TRANAMT PIC Z(9).99-} at L137 and {@code ST-TOTAL-TRAMT PIC Z(9).99-} at L142 spell
+         * the same nine with SUPPRESSION positions, so leading zeros blank. Substituting one for the
+         * other yields a value that still fills the item and still reads as the same number, so only a
+         * byte comparison shows it.</p>
+         *
+         * <p>Assumptions: the assertions name the {@link CobolEditMask} method and the PICTURE clause the
+         * method transcribes, and never a numbered regime. The numbering differs between documents, so a
+         * numeric reference would rot while still reading as precise.</p>
+         *
+         * <p>Assumptions: BOTH masks trail their sign, which is the opposite of every report regime.
+         * {@code CobolEditMask#formatReportDetailAmount} places its sign in a fixed LEADING position, and
+         * a zero under it blanks the whole fifteen-character item, where a zero under the statement's
+         * suppressed mask keeps the point and the two decimal positions. The two conventions are asserted
+         * side by side here so that neither is carried into the other's bands.</p>
+         *
+         * <p>WHY: the provenance is L113, L137 and L142 of {@code app/cbl/CBSTM03A.CBL} for the three
+         * pictures, and L484 for the move that reaches the balance item.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("the balance uses the unsuppressed mask and the amount items the suppressed one")
+        void theBalanceUsesTheUnsuppressedMaskAndTheAmountItemsTheSuppressedOne() {
+            List<FixtureCard> cards = fixtureCards(WIDTH_CLASS_CARD);
+            stubFixtureWalk(cards);
+
+            RecordingSink sink = new RecordingSink();
+            service.generateStatements(sink);
+
+            Money balance = cards.get(0).headingRow().getCurrentBalance();
+            Money total = Money.ZERO;
+            for (StatementTransactionView row : cards.get(0).rows()) {
+                total = total.plus(row.amount());
+            }
+
+            assertThat(bandItem(firstRecordWithItem(sink.plainRecords, StatementBandLayouts.ST_LINE8,
+                    "FILLER-1", StatementBandLayouts.CURRENT_BALANCE_LABEL),
+                    StatementBandLayouts.ST_LINE8, "ST-CURR-BAL"))
+                    .as("the balance band is rendered through the unsuppressed statement balance mask")
+                    .isEqualTo(CobolEditMask.formatStatementBalance(balance));
+            assertThat(bandItem(firstRecordWithItem(sink.plainRecords, StatementBandLayouts.ST_LINE14A,
+                    "FILLER-1", StatementBandLayouts.TOTAL_EXPENDITURE_LABEL),
+                    StatementBandLayouts.ST_LINE14A, "ST-TOTAL-TRAMT"))
+                    .as("and the trailer total through the suppressed statement amount mask")
+                    .isEqualTo(CobolEditMask.formatStatementAmount(total));
+
+            assertThat(CobolEditMask.formatStatementBalance(Money.of("492.00")))
+                    .as("PIC 9(9).99- prints its leading zeros, which is why the oracle holds "
+                            + "000000492.00")
+                    .isEqualTo("000000492.00 ")
+                    .hasSize(CobolEditMask.STATEMENT_AMOUNT_WIDTH);
+            assertThat(CobolEditMask.formatStatementAmount(Money.of("183.88")))
+                    .as("PIC Z(9).99- blanks them, which is why the oracle holds a leading run of "
+                            + "blanks before 183.88")
+                    .isEqualTo("      183.88 ")
+                    .hasSize(CobolEditMask.STATEMENT_AMOUNT_WIDTH);
+            assertThat(CobolEditMask.formatStatementAmount(Money.of("-47.88")))
+                    .as("a negative amount trails its sign, as the oracle's one negative line does")
+                    .isEqualTo("       47.88-");
+            assertThat(CobolEditMask.formatStatementAmount(Money.ZERO))
+                    .as("and a zero keeps the point and both decimal positions, so it is nine blanks, "
+                            + "a point, two zeros and a blank sign")
+                    .isEqualTo("         .00 ");
+            assertThat(CobolEditMask.formatStatementAmount(Money.of("492.00")))
+                    .as("the two thirteen-character masks are never interchangeable for one value")
+                    .isNotEqualTo(CobolEditMask.formatStatementBalance(Money.of("492.00")));
+            assertThat(CobolEditMask.formatReportDetailAmount(Money.of("-47.88")))
+                    .as("and the report convention leads with its sign where the statement trails it")
+                    .startsWith("-")
+                    .hasSize(CobolEditMask.REPORT_AMOUNT_WIDTH);
+            assertThat(CobolEditMask.formatReportDetailAmount(Money.ZERO))
+                    .as("with a zero blanking its whole item, unlike the statement mask above")
+                    .isBlank();
+        }
+
+        /**
+         * Asserts the transaction and balance precisions stay distinct rather than being unified.
+         *
+         * <p>Purpose: two money precisions coexist in the statement path and unifying them would break
+         * one of them. The transaction amount is declared with nine integer positions and two decimals,
+         * which the target carries as {@code NUMERIC(11,2)}, and the account balance with TEN integer
+         * positions and two decimals, carried as {@code NUMERIC(12,2)}. The statement's own balance item
+         * holds only nine, which is why the reference's move at L484 of {@code app/cbl/CBSTM03A.CBL}
+         * discards a high-order digit for a balance of a thousand million or more.</p>
+         *
+         * <p>Assumptions: the target REFUSES such a balance where the reference narrows it silently, and
+         * that difference is registered as {@code D-EDIT-MASK-OVERFLOW} in
+         * {@code docs/architecture/cobol-to-service-traceability.md}. It is cited rather than restated
+         * here, and this case asserts the refusal so the registered divergence is executable: a
+         * nine-digit string that had silently dropped its leading digit would understate a balance by at
+         * least a thousand million while filling the item and parsing cleanly.</p>
+         *
+         * <p>Assumptions: the two precisions are read from the shared layout registry rather than written
+         * out here, so the case measures the declaration that the schema and the codecs both derive from
+         * rather than a copy of it.</p>
+         *
+         * <p>WHY: the provenance is L484 of {@code app/cbl/CBSTM03A.CBL} for the narrowing move, L113 for
+         * the nine-position balance item and the two declared field widths of
+         * {@code app/cpy/CVTRA05Y.cpy} and {@code app/cpy/CVACT01Y.cpy} for the two precisions.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("the transaction and balance precisions stay distinct")
+        void theTransactionAndBalancePrecisionsStayDistinct() {
+            CopybookLayout.FieldSpec transactionAmount =
+                    CopybookLayout.layout("TRNX").field("TRNX-AMT");
+            CopybookLayout.FieldSpec accountBalance =
+                    CopybookLayout.layout("ACCOUNT").field("ACCT-CURR-BAL");
+
+            assertThat(transactionAmount.intDigits() + transactionAmount.decDigits())
+                    .as("the transaction amount is NUMERIC(11,2)")
+                    .isEqualTo(11);
+            assertThat(accountBalance.intDigits() + accountBalance.decDigits())
+                    .as("and the account balance is NUMERIC(12,2), which is one integer digit wider")
+                    .isEqualTo(12);
+            assertThat(accountBalance.intDigits())
+                    .as("the difference is on the integer side alone")
+                    .isEqualTo(transactionAmount.intDigits() + 1);
+            assertThat(accountBalance.decDigits())
+                    .as("and both carry exactly two decimal positions")
+                    .isEqualTo(transactionAmount.decDigits());
+
+            assertThatCode(() -> CobolEditMask.formatStatementAmount(Money.of("999999999.99")))
+                    .as("the statement mask holds the transaction precision exactly")
+                    .doesNotThrowAnyException();
+            assertThatExceptionOfType(ArithmeticException.class)
+                    .as("and refuses the balance precision's tenth integer digit rather than "
+                            + "discarding it as the reference's move does")
+                    .isThrownBy(() -> CobolEditMask.formatStatementBalance(Money.of("1000000000.00")));
+        }
+
+        /**
+         * Asserts neither processing nor originating timestamp reaches either artifact.
+         *
+         * <p>Purpose: the baseline's own sort step carries the processing timestamp at reduced precision.
+         * {@code OUTREC FIELDS=(1:263,16,17:1,262,279:279,50)} at L54 of {@code app/jcl/CREASTMT.JCL}
+         * populates 328 of the record's 350 bytes, and with the card number at 263 to 278, the
+         * originating stamp at 279 to 304 and the processing stamp at 305 to 330 by the declared widths of
+         * {@code app/cpy/CVTRA05Y.cpy}, the output's processing stamp receives only 24 of its 26
+         * characters -- the final two microsecond digits are lost.</p>
+         *
+         * <p>Assumptions: this is an artifact observation and is reproduced as one. The seventeen
+         * statement bands render no timestamp of any kind, so the reduced precision cannot reach either
+         * output, and asserting that absence is what keeps a band added later from introducing the
+         * truncation unnoticed. Both the whole stamp and its 24-character prefix are searched for, so a
+         * band rendering either form would fail.</p>
+         *
+         * <p>WHY: the provenance is L54 of {@code app/jcl/CREASTMT.JCL} for the reformatting, the field
+         * widths of {@code app/cpy/CVTRA05Y.cpy} for the arithmetic, and the band block at L86 to L146 of
+         * {@code app/cbl/CBSTM03A.CBL}, which declares no timestamp item at all.</p>
+         *
+         * <p>It takes no parameter and returns no value.</p>
+         */
+        @Test
+        @DisplayName("neither timestamp of a transaction reaches either artifact")
+        void neitherTimestampOfATransactionReachesEitherArtifact() {
+            List<FixtureCard> cards = fixtureCards(WIDTH_CLASS_CARD);
+            stubFixtureWalk(cards);
+
+            RecordingSink sink = new RecordingSink();
+            service.generateStatements(sink);
+
+            StringBuilder emitted = new StringBuilder();
+            for (byte[] record : sink.plainRecords) {
+                emitted.append(new String(record, StandardCharsets.US_ASCII));
+            }
+            for (byte[] record : sink.markupRecords) {
+                emitted.append(new String(record, StandardCharsets.US_ASCII));
+            }
+
+            int truncatedWidth = 24;
+            List<String> stamps = new ArrayList<>();
+            for (Map<String, Object> row : decodedFixture(TRANSACTION_FIXTURE, "TRNX")) {
+                if (!trimmedText(row, "TRNX-CARD-NUM").equals(WIDTH_CLASS_CARD)) {
+                    continue;
+                }
+                for (String field : List.of("TRNX-PROC-TS", "TRNX-ORIG-TS")) {
+                    String stamp = trimmedText(row, field);
+                    stamps.add(stamp);
+                    stamps.add(stamp.substring(0, truncatedWidth));
+                }
+            }
+
+            assertThat(stamps)
+                    .as("the fixture rows for this card carry both stamps, so there is something to "
+                            + "look for")
+                    .isNotEmpty();
+            assertThat(emitted.toString())
+                    .as("and no band renders either stamp, in the whole or the 24-character form the "
+                            + "sort step's reformatting would leave")
+                    .doesNotContain(stamps.toArray(new String[0]));
         }
     }
 }

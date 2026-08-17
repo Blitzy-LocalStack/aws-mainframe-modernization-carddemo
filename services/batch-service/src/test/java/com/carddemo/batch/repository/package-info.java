@@ -51,14 +51,15 @@
  *
  * <h2>The closed inventory</h2>
  *
- * <p>This directory holds ten files and an eleventh is prohibited: this charter, together with
+ * <p>This directory holds eleven files and a twelfth is prohibited: this charter, together with
  * {@code BatchRunRepositoryIT}, {@code CrossSchemaFeedRepositoryIT}, {@code CardXrefRepositoryIT},
  * {@code DailyTransactionRepositoryIT}, {@code TransactionRepositoryIT},
  * {@code TransactionCategoryBalanceRepositoryIT}, {@code TransactionRejectRepositoryIT},
- * {@code PostingUnitOfWorkIT} and {@code AccountRepositoryIT}.</p>
+ * {@code PostingUnitOfWorkIT}, {@code AccountRepositoryIT} and
+ * {@code DisclosureGroupRepositoryIT}.</p>
  *
  * <pre>
- * this directory: 10 java files = 9 tests + 1 charter
+ * this directory: 11 java files = 10 tests + 1 charter
  * </pre>
  *
  * <p>Refactoring Rationale: this section counted four files and three tests, and admitted a fourth test
@@ -143,6 +144,32 @@
  * and it holds the number of charters carrying a marker to a floor, so deleting the line to silence a
  * failure is a visible act in review rather than a quiet one.</p>
  *
+ * <p>Refactoring Rationale: this inventory then read ten files and named an eleventh prohibited, and it
+ * is raised to eleven because {@code DisclosureGroupRepositoryIT} closes proofs that were PARTIALLY held
+ * and, in two cases, held nowhere. What was wrong with the previous arrangement is that
+ * {@code reference.disclosure_groups} was reached by a single case inside
+ * {@code CrossSchemaFeedRepositoryIT}, which counts the seeded default rows and spot-checks three of
+ * them. A count cannot show that each of the seventeen type-and-category pairs is INDIVIDUALLY
+ * reachable, and the seed requirement is one row per pair precisely because
+ * {@code app/cbl/CBACT04C.cbl:437} substitutes the group component alone -- so a single absent pair
+ * abends every account presenting it while the count still reads seventeen. Two further properties had no
+ * executable instance anywhere in the package: that the key's COMPONENT ORDER is the record's physical
+ * one rather than the order {@code app/cbl/CBACT04C.cbl:210-212} assigns the components in, which matters
+ * because the seed carries both type {@code 01} with category {@code 0002} and type {@code 02} with
+ * category {@code 0001} at different rates, so a transposed key returns a rate instead of missing and the
+ * defect is silent; and that the padded and bare forms of the default group identifier address one row,
+ * which is what makes the retry's space-filled literal find the row a reader's bare literal seeds. The
+ * prohibition the prose carries moves up a number rather than being dropped, because what a prohibition
+ * must not do is bar a proof the package needs.</p>
+ *
+ * <p>Trade-offs: the count case in {@code CrossSchemaFeedRepositoryIT} is RETAINED rather than removed
+ * now that a dedicated owner exists, on the reasoning this section already records for the reject stream
+ * and the cross-reference. That case reads the seeded total as one of the harness post-state facts its
+ * own subject is, where the new class reads each pair as a precondition of the fallback; deleting it to
+ * tidy the boundary would take a green sibling's assertion out of use without replacing what it
+ * measures. The residual cost is that a reader meets the default rows in two files, recorded here so the
+ * second encounter reads as a boundary rather than as a duplicated proof.</p>
+ *
  * <p>Refactoring Rationale: this section previously described eight entities across FOUR schemas, and the
  * directory had moved past it in both figures. The count is ten entities across five, because
  * {@code CBEXPORT} reads five masters and the export job could reach only three of them, so the customer
@@ -151,14 +178,14 @@
  * beside this one records the same correction from its own side and is the authority for the interface
  * roster; it is cited rather than restated, so the two cannot disagree about a number.</p>
  *
- * <p>Alternatives Considered: one integration class per production interface, which would make this a
- * roster of ten rather than nine and would let each class be named for the interface it covers. Rejected
+ * <p>Alternatives Considered: one integration class per production interface, which would tie this
+ * roster's size to the interface count and would let each class be named for the interface it covers. Rejected
  * on what the classes would then contain. The property worth proving about most of the read-only feeds is
  * identical in each case -- that a mapping resolves against a table this module does not own and walks it
  * in a declared order -- so ten classes would be several near-copies of one another, and a change to the
  * harness would have to be chased through all of them. The property worth proving about posting is not a
  * property of any single interface at all: it spans four of them in one commit, so no per-interface class
- * could hold it without either splitting the proof or duplicating it. The nine classes below are
+ * could hold it without either splitting the proof or duplicating it. The classes below are
  * therefore partitioned by PROPERTY rather than by interface, and between them they reach all ten.</p>
  *
  * <p>Assumptions: none of the three classes named for a single interface is a departure from that
@@ -197,8 +224,8 @@
  * {@code com.carddemo.batch} owns the full derivation of that split and the failure a wrong name
  * produces; what is restated here is only the part that binds a class in this directory.</p>
  *
- * <p>Assumptions: the plan's uniform per-service shape spells the name {@code *RepositoryIT}, and eight
- * of the nine members here follow that spelling while {@code PostingUnitOfWorkIT} does not. The departure
+ * <p>Assumptions: the plan's uniform per-service shape spells the name {@code *RepositoryIT}, and nine
+ * of the ten members here follow that spelling while {@code PostingUnitOfWorkIT} does not. The departure
  * is
  * deliberate and is recorded so it does not read as an oversight: the operative selector is the
  * {@code IT} ending, which that name satisfies, and what the class proves is a unit of work spanning four
@@ -218,7 +245,7 @@
  *
  * <h2>Ruling two: the profile and the connection are declared on the class</h2>
  *
- * <p>Assumptions: each of the nine carries {@code @ActiveProfiles("test")}, which is the whole of how
+ * <p>Assumptions: each of the ten carries {@code @ActiveProfiles("test")}, which is the whole of how
  * {@code src/test/resources/application-test.yml} comes into force. No build plugin activates that
  * profile on any class's behalf, so a class omitting the annotation would resolve the base profile
  * instead and reach for remote configuration sources the container does not serve.</p>
@@ -236,13 +263,13 @@
  * expect a mechanism that cannot resolve here.</p>
  *
  * <p>Alternatives Considered: one shared abstract base class holding the container, the property
- * registration and the schema prerequisite once for all nine. Rejected: a container held in a base class
+ * registration and the schema prerequisite once for all ten. Rejected: a container held in a base class
  * is shared mutable state, so rows one class inserts are rows another reads, and the failure then names
  * whichever class happened to run second. That hazard is concrete rather than hypothetical here, because
- * four of the nine arrange rows in {@code account.card_xref} and each empties it for itself. Each class
- * starts its own container and owns its own schema state, which is what lets any one of the nine be run
+ * four of the ten arrange rows in {@code account.card_xref} and each empties it for itself. Each class
+ * starts its own container and owns its own schema state, which is what lets any one of the ten be run
  * alone and still mean something. Trade-offs: the
- * accepted cost is nine container starts and nine copies of the container declaration, paid every time
+ * accepted cost is ten container starts and ten copies of the container declaration, paid every time
  * that declaration changes.</p>
  *
  * <p>Alternatives Considered: an in-memory engine, rejected more firmly here than anywhere else in the
@@ -530,6 +557,30 @@
  *       and deleting either would leave one of the two readings unowned. The residual cost is that a
  *       reader meets the posting commit in two files; it is recorded here so the second encounter reads
  *       as a boundary rather than as a duplicated proof.</li>
+ *   <li>{@code DisclosureGroupRepositoryIT} across 10 cases -- the interest-rate lookup, which is the one
+ *       table in this package on which this module holds no write privilege at all, the plan scoping the
+ *       batch role's cross-schema writes to {@code ledger} and {@code account} only. It owns the
+ *       COMPILE-TIME reading of that read-only contract in the form ruling four prescribes, reading the
+ *       interface's method set back and asserting the two wider bases are not assignable, because the
+ *       harness creates no role and the superuser connection makes a privilege failure unobservable; and
+ *       it states the limit of that reading rather than overclaiming it -- the repository cannot write,
+ *       which is not the same as the privilege being correctly scoped in a provisioned environment. It
+ *       owns the key's COMPONENT ORDER in both directions: that a key in the record's physical order of
+ *       group, type then category resolves, and that the transposition
+ *       {@code app/cbl/CBACT04C.cbl:210-212} invites does not -- proved not only by a miss but by two
+ *       seeded pairs sharing their digits in swapped positions at different rates, which is the form the
+ *       defect takes when it goes green. It owns the padded-and-bare equivalence of the default group
+ *       identifier, the substitution that replaces the group component ALONE with the type and category
+ *       carried over, the per-pair reachability of all seventeen seeded pairs as a CROSS-SERVICE
+ *       precondition, and the rate's exact scale. One case is the only one in this package to stage a row
+ *       through the persistence context, the interface having no write method to stage through, and it
+ *       rolls that row back rather than committing it so the class never produces the state its central
+ *       claim says it does not.
+ *       Trade-offs: it asserts ROWS and not BYTES, the fifty-byte record and its filler being a mapper
+ *       concern, and it asserts NO arithmetic and no rounding -- the formula, the zero-rate gate and the
+ *       fallback as control flow belong to the tier-one service cases, and job-level golden parity to the
+ *       tier-two interest job. This table supplies the rate; the computation over it is owned
+ *       elsewhere.</li>
  * </ul>
  *
  * <p>Alternatives Considered: no saga, no two-phase commit and no compensating reversal for the posting
@@ -541,7 +592,7 @@
  * engine rather than asserted in prose.</p>
  *
  * <p>Trade-offs: each proof above has exactly ONE owner, and the cost accepted for that is some
- * cross-referencing between the nine classes -- the cross-reference table, for instance, is written by
+ * cross-referencing between the ten classes -- the cross-reference table, for instance, is written by
  * three of them, and only one of them owns its access paths, and the daily-transaction interface is read
  * by more than one, its resolve-and-order question and its driving-loop properties owned separately. The alternative
  * was to let two classes each
@@ -613,7 +664,7 @@
  * one of them with no match-if-missing fallback, so the gate stays closed and no case here needs a
  * transport to be stood up.</p>
  *
- * <p>Assumptions: this package's file set is closed at the nine integration classes and this charter. A
+ * <p>Assumptions: this package's file set is closed at the ten integration classes and this charter. A
  * fixture builder, a shared constant holder or a container base class introduced here would reintroduce
  * the shared state ruling two rejects, and no subdirectory belongs here. The test-tree charter at
  * {@code com.carddemo.batch} owns the boundaries this whole tree does not cross -- that no controller

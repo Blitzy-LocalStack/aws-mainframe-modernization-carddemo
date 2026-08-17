@@ -4,11 +4,11 @@
 # Purpose:
 #   The complete input surface of the CardDemo PRODUCTION environment root. Two
 #   of these inputs configure the root's own aws provider; the others are the
-#   explicit values consumed by the shared topology. The two roots are
-#   infra/envs/dev. That constraint is the point of this file: the two roots are
+#   explicit values consumed by the shared topology. The two roots are this one
+#   and infra/envs/dev. That pairing is the point of this file: the two roots are
 #   required to be identical in topology and to differ only in environment
 #   identity, sizing, retention, protection and production edge certificate
-#   inputs. This file declares the same twenty-nine variable names as dev.
+#   inputs. This file declares the same thirty-six variable names as dev.
 #
 #   A variable present in one root and absent from the other would be a
 #   structural divergence between the environments, so the symmetry is
@@ -18,15 +18,20 @@
 #
 #   Values are supplied by infra/envs/prod/terraform.tfvars and by the deployment
 #   workflow. image_tag, github_repository, github_oidc_provider_arn,
-#   spa_domain_name and spa_acm_certificate_arn are required because no safe
-#   account-independent default exists.
+#   cloudfront_aliases and cloudfront_acm_certificate_arn are required because no
+#   safe account-independent default exists; the full required set is enumerated
+#   under Parameters below.
 #
-# Parameters -- THIRTY-FOUR, ELEVEN required. The eleven with no default are
+# Parameters -- THIRTY-SIX, TWELVE required. The twelve with no default are
 #   `alb_certificate_arn`, `internal_service_domain_name`,
 #   `cloudfront_acm_certificate_arn`, `cloudfront_aliases`,
 #   `cloudfront_api_connect_src_origins`, `image_tag`, `github_repository`,
 #   `github_oidc_provider_arn`, `mask_hmac_secret_arn`,
-#   `permissions_boundary_arn` and `alarm_email_endpoints`.
+#   `mask_hmac_secret_kms_key_arn`, `permissions_boundary_arn` and
+#   `alarm_email_endpoints`. None of the twelve appears in this root's
+#   terraform.tfvars: each names an account-specific credential holder, edge
+#   identity or operator address, so all twelve are supplied out of band by the
+#   deployment workflow or the operator following docs/runbooks/deploy.md.
 #   Assumptions: `alarm_email_endpoints` is required rather than defaulted
 #   because an alarm destination is operator-supplied and no value held in this
 #   repository is a defensible one. The count is stated here rather than left to
@@ -69,8 +74,26 @@
 #   after an apply -- is declared in infra/envs/prod/outputs.tf.
 #
 # Errors / Exceptions:
-#   Every input carries a `validation` block, and each rejects a bad value during
-#   `terraform plan`, before any request leaves the machine, rather than letting
+#   Twenty-eight of the thirty-six inputs carry a `validation` block, and the eight
+#   that do not are two deliberate groups rather than eight oversights. A root-level
+#   block is written here when, and only when, this file can see something the
+#   module receiving the value cannot: an environment policy such as production's
+#   capacity floor, a cross-input rule such as the task memory band, the
+#   INTERSECTION of constraints several modules each impose separately on one
+#   forwarded value as `name_prefix` does, or a value this root PARSES ITSELF, as
+#   `batch_schedule_expression` is parsed to prove the batch window disjoint. The
+#   eight without are, first, `deletion_protection` and `skip_final_snapshot`,
+#   where `bool` admits exactly the two values that mean anything so a block could
+#   only restate the type; and second, the six whose every rule is already enforced
+#   once by the module they are forwarded to --
+#   `aurora_seconds_until_auto_pause`, `aurora_engine_version`,
+#   `aurora_parameter_group_family`, `aurora_backup_retention_period`,
+#   `aurora_preferred_backup_window` and `aurora_preferred_maintenance_window`.
+#   Each of those six carries a comment saying which module holds its rule, because
+#   the reasonable-looking alternative is to restate the rule here and a second
+#   statement of one rule is what drifts. Each block that IS written rejects a bad
+#   value during `terraform plan`, before any
+#   request leaves the machine, rather than letting
 #   the service reject it partway through an apply that has already created other
 #   resources. That matters more in this root than in the other: an apply here
 #   modifies live infrastructure, so a value rejected halfway through leaves the
@@ -81,22 +104,31 @@
 #   that provider and declared nowhere.
 #
 # WHY (non-obvious design decisions):
-#   - Assumptions: this file declares NO `environment` and NO `name_prefix`
-#     variable, and both absences are deliberate. The environment name is what
-#     distinguishes this root's resources from the other root's; making it an
-#     input would let a caller point the production state at development-named
-#     resources, or the reverse, and the plan would be clean. main.tf therefore
-#     carries the literal `prod`. The name prefix is shared by the whole stack
-#     and every module already defaults it to the same value, so a root-level
-#     input would only create a way for the two environments to disagree.
-#   - Trade-offs: every input is defaulted, so this root initialises, validates
-#     and plans with no variable file, which is the only way a non-interactive
-#     pipeline job can check it without credentials. The cost is heavier here
-#     than in development: a defaulted production capacity or retention value is
-#     a decision made by silence. Two things mitigate it -- outputs.tf reports
-#     the values actually used, and every default in this file is chosen to be
-#     the SAFE end of its range rather than the cheap one, so a forgotten
-#     variable file yields a conservative environment rather than an exposed one.
+#   - Assumptions: `environment` and `name_prefix` ARE declared here, because
+#     main.tf composes almost every resource name from them -- it reads
+#     `var.environment` and `var.name_prefix` throughout -- and the two roots are
+#     required to declare the same names. The hazard that argues against making
+#     the environment name an input is real, though: a caller who passed `dev`
+#     here would point the production state at development-named resources and
+#     the plan would look clean. `environment` therefore carries a `validation`
+#     that admits the single value `prod`, which keeps the input surface
+#     symmetrical with dev while making the wrong value unrepresentable rather
+#     than merely unlikely. `name_prefix` needs no such pin: it is deliberately
+#     the SAME in both roots, since the environment name is what separates the
+#     two stacks and the prefix is what identifies them jointly as CardDemo.
+#   - Trade-offs: every SIZING, RETENTION and PROTECTION input is defaulted --
+#     twenty-four of the thirty-six -- so this root initialises and validates with
+#     no variable file and no credentials, which is the only way a non-interactive
+#     pipeline job can check it. The remaining twelve carry no default on purpose
+#     and a `plan` therefore refuses to proceed until each is supplied; that is
+#     the intended asymmetry, because those twelve name account-specific material
+#     no committed value could stand in for. The cost of defaulting the other
+#     twenty-four is heavier here than in development: a defaulted production
+#     capacity or retention value is a decision made by silence. Two things
+#     mitigate it -- outputs.tf reports the values actually used, and every
+#     default in this file is chosen to be the SAFE end of its range rather than
+#     the cheap one, so a forgotten variable file yields a conservative
+#     environment rather than an exposed one.
 #   - Assumptions: NO default here holds a credential, an account identifier, an
 #     ARN, a bucket name or a password. This root's secrets do not exist in
 #     source at any point in their lifetime: the database credential and the seed
@@ -104,6 +136,23 @@
 #     modules and written straight into Secrets Manager. That is what makes the
 #     project's no-secrets-in-source constraint structurally true here rather
 #     than merely observed.
+#   - Alternatives Considered: a `db_password` input -- or any sibling of it, a
+#     master credential, an access key, a credentialed connection string -- so
+#     that an operator could supply the database password the way they supply the
+#     certificate ARNs. REJECTED, and the absence is recorded here rather than
+#     left silent precisely because it is the input a reader most expects to
+#     find. Three things are wrong with it. The value would have to be typed
+#     somewhere to be passed, and the two places available are this root's
+#     terraform.tfvars, which is committed, and a shell history or CI variable,
+#     neither of which the project's constraint admits. A variable's value is
+#     also written to state in clear, so the input would defeat the constraint
+#     even when the file holding it was never committed. And it would duplicate
+#     an authority: `manage_master_user_password` already has RDS create and
+#     rotate the credential into Secrets Manager, so a supplied password would
+#     be the one an operator believed in while the cluster authenticated against
+#     the generated one. infra/modules/aurora-postgresql and infra/modules/secrets
+#     decline the same input for the same reason, so the prohibition is
+#     consistent from this root down to every module it calls.
 #   - Assumptions: this environment does NOT scale its database to zero, so the
 #     auto-pause input below is inert here. It is declared anyway, because the
 #     two roots' input surfaces must match; the AWS provider floor in versions.tf
@@ -205,10 +254,20 @@ variable "tags" {
 # These three are read together. The floor of the capacity range decides whether
 # the cluster may pause at all; the auto-pause interval is meaningful only when
 # that floor is zero, which here it is not; and the ceiling must exceed the floor
-# for the range to be a range. Each is validated on its own and the pair is
-# validated jointly, because a floor above a ceiling is accepted by the type
-# system and rejected by the service only once a cluster modification is
-# attempted.
+# for the range to be a range.
+#
+# WHY : Assumptions: the division of labour between this root and
+#       infra/modules/aurora-postgresql is deliberate, and it is why these three
+#       blocks carry fewer checks than the sizing inputs below. Every rule the
+#       SERVICE imposes -- the 0-to-256 range, the half-unit granularity, the
+#       ceiling not falling below the floor, the auto-pause interval's own range,
+#       and the two conditional rules a zero floor triggers -- is enforced once by
+#       that module, on behalf of every caller, and its main.tf records that
+#       decision from the other side. What this root asserts is only what the
+#       ENVIRONMENT adds: that production's floor is above zero, and that its
+#       ceiling leaves the nightly batch chain room to scale into. The two files
+#       read together give the whole contract, and neither restates a rule the
+#       other could then contradict.
 # -----------------------------------------------------------------------------
 
 variable "aurora_min_capacity" {
@@ -232,13 +291,24 @@ variable "aurora_min_capacity" {
   # comfortably; the constraint is
   # identical in both roots because a single provider version has to satisfy both.
   validation {
-    # WHY : Assumptions: the range and the increment are both the service's.
-    #       Capacity is expressed in half-unit steps from 0 to 256, so a value
-    #       like 1.25 is rejected during an apply that has already begun. The
-    #       half-unit check is written as a multiplication rather than a modulo
-    #       because a modulo on a fractional operand is not exact.
-    condition     = var.aurora_min_capacity >= 0 && var.aurora_min_capacity <= 256 && floor(var.aurora_min_capacity * 2) == var.aurora_min_capacity * 2
-    error_message = "aurora_min_capacity must be between 0 and 256 in half-unit increments, the range and granularity Aurora Serverless capacity accepts."
+    # WHY : ⚠️ Refactoring Rationale: this restated the service's own 0-to-256
+    #       range and half-unit granularity. Both are already asserted on
+    #       `min_capacity` by infra/modules/aurora-postgresql, whose main.tf
+    #       records that the capacity rules "are enforced once, as `validation`
+    #       blocks in variables.tf, and are deliberately not restated here" -- so
+    #       the copy made this the second place one rule lived, and it had ALREADY
+    #       DRIFTED: the companion ceiling check below floored at 0.5 where the
+    #       module floors at 0. A divergent copy is worse than no copy, because a
+    #       reader cannot tell which of the two is the contract. The range and the
+    #       increment are therefore left to the module, which enforces them for
+    #       every caller and reports them at plan time exactly as this did.
+    #       Assumptions: what remains is the one rule the module CANNOT hold --
+    #       that THIS environment's floor is above zero. The module has to keep
+    #       accepting zero, because infra/envs/dev sets it and depends on the
+    #       pause; the same value is correct there and wrong here, which makes
+    #       this an environment policy rather than a service constraint.
+    condition     = var.aurora_min_capacity > 0
+    error_message = "aurora_min_capacity must be above 0 in the production root, because a zero floor lets the cluster pause and the roughly fifteen-second resume delay on the next query would land on a cardholder-facing request. Use 2 unless a larger floor is wanted, and leave 0 to infra/envs/dev. The 0-to-256 range and the half-unit granularity are enforced by infra/modules/aurora-postgresql rather than here."
   }
 }
 
@@ -255,29 +325,32 @@ variable "aurora_max_capacity" {
   # not a saga. A ceiling sized for the online day alone would throttle exactly
   # the window that has the least tolerance for running long.
   validation {
-    # WHY : Assumptions: the floor of this check is 0.5 rather than 0, because
-    #       the service requires a maximum of at least one half unit even when the
-    #       minimum is zero -- a range whose ceiling is also zero describes a
-    #       cluster that can never serve a query.
-    condition     = var.aurora_max_capacity >= 0.5 && var.aurora_max_capacity <= 256 && floor(var.aurora_max_capacity * 2) == var.aurora_max_capacity * 2
-    error_message = "aurora_max_capacity must be between 0.5 and 256 in half-unit increments; a ceiling of 0 would describe a cluster that can never serve a query."
-  }
-
-  validation {
-    # WHY : Trade-offs: this second block cross-checks the pair. A ceiling below
-    #       the floor is accepted by both types and rejected by the service only
-    #       when it attempts the modification, which is partway through an apply
-    #       against live infrastructure. Checking it here costs one extra block
-    #       and names both inputs in the message. Equality is permitted
-    #       deliberately: a fixed capacity, floor equal to ceiling, is a
-    #       legitimate way to run a cluster at a known size.
-    condition     = var.aurora_max_capacity >= var.aurora_min_capacity
-    error_message = "aurora_max_capacity must be greater than or equal to aurora_min_capacity; the two together describe one capacity range."
+    # WHY : ⚠️ Refactoring Rationale: two blocks stood here and between them
+    #       restated three rules infra/modules/aurora-postgresql already owns --
+    #       the 0-to-256 range, the half-unit granularity, and the pair rule that
+    #       the ceiling is not below the floor. The first had drifted from the
+    #       module it copied, flooring at 0.5 against the module's 0, which is
+    #       exactly how a duplicated invariant fails: silently, and in the copy,
+    #       where a reader cannot tell which statement is the contract. Both are
+    #       withdrawn in favour of the module's single enforcement, which runs at
+    #       plan time and names the offending value just as these did.
+    #       Assumptions: what replaces them is a rule the module deliberately does
+    #       NOT impose. The module permits the ceiling to EQUAL the floor, because
+    #       a fixed-size cluster is a legitimate shape for some caller to ask for.
+    #       This environment cannot use it: the nightly chain posts the day's
+    #       transactions, accrues interest and generates statements against the
+    #       same writer the online services are serving from, so a range with no
+    #       headroom leaves the heaviest workload of the day nothing to scale into.
+    #       Requiring the ceiling to exceed the floor is therefore an environment
+    #       policy the shared module has no way to express, and it is what the
+    #       section note above means by the range needing to be a range.
+    condition     = var.aurora_max_capacity > var.aurora_min_capacity
+    error_message = "aurora_max_capacity must be strictly greater than aurora_min_capacity in the production root, because the nightly batch chain runs against the same writer as the online services and a range with no headroom leaves it nothing to scale into. The 0-to-256 range, the half-unit granularity and the not-below-the-floor rule are enforced by infra/modules/aurora-postgresql rather than here."
   }
 }
 
 variable "aurora_seconds_until_auto_pause" {
-  description = "Idle interval before a cluster whose capacity floor is zero pauses. INERT in this environment, because this root's floor is above zero; main.tf forwards it to the database module only on that condition, and it is declared here so the two environment roots' input surfaces match exactly."
+  description = "Idle interval, in seconds, before a cluster whose capacity floor is zero pauses. INERT in this environment, because this root's floor is held above zero and Aurora only pauses a cluster that can scale to zero. main.tf forwards it to the database module unconditionally, so the value must still be one the service accepts; it is declared here so the two environment roots' input surfaces match exactly."
   type        = number
   default     = 300
 
@@ -289,10 +362,22 @@ variable "aurora_seconds_until_auto_pause" {
   # not serve both. The value is kept at the service's shortest accepted interval
   # rather than at something conspicuous, so that if this root's capacity floor is
   # ever lowered to zero the setting it then requires is already valid.
-  validation {
-    condition     = var.aurora_seconds_until_auto_pause >= 300 && var.aurora_seconds_until_auto_pause <= 86400 && floor(var.aurora_seconds_until_auto_pause) == var.aurora_seconds_until_auto_pause
-    error_message = "aurora_seconds_until_auto_pause must be a whole number of seconds from 300 to 86400 inclusive, the configurable range the service accepts."
-  }
+  #
+  # WHY : ⚠️ Refactoring Rationale: a `validation` block stood here asserting the
+  #       300-to-86400 whole-second range. That range is the service's, and
+  #       infra/modules/aurora-postgresql already asserts it on
+  #       `seconds_until_auto_pause` -- so the copy made this the second place one
+  #       rule lived, which is the drift risk the module's own main.tf calls out
+  #       when it records that the capacity rules are enforced once and
+  #       deliberately not restated. It is withdrawn rather than reworded, and
+  #       nothing is lost: main.tf forwards this input to the module
+  #       unconditionally, so the module's block sees every value this root can
+  #       pass and rejects a bad one at plan time.
+  #       Assumptions: unlike the two capacity inputs, this one has NO production
+  #       policy left to assert once the service range is the module's. Auto-pause
+  #       is reachable only from a zero capacity floor, and this root forbids one,
+  #       so there is no value of this input that changes what production does. A
+  #       block invented to keep the count symmetrical would assert nothing.
 }
 
 # -----------------------------------------------------------------------------
@@ -475,20 +560,69 @@ variable "skip_final_snapshot" {
 # the sizing, retention and protection variables declared above.
 # -----------------------------------------------------------------------------
 
+# WHY : Assumptions: this value is deliberately the SAME in both roots, which is
+#       what distinguishes it from `environment` directly below. The environment
+#       name is what separates the production stack from the development one; this
+#       prefix is what identifies both of them jointly as CardDemo, so a reader
+#       grepping either account for the deployment has one string to grep. Making
+#       the two roots differ here would produce two stacks that no single search
+#       finds, which is the opposite of what a name prefix is for.
+# WHY : ⚠️ Refactoring Rationale: this carried no `validation`, while its own
+#       description promised a lower-case value -- a constraint asserted in prose
+#       and enforced by nothing.
+#       Assumptions: a rule here is NOT a duplicate of the fifteen modules that
+#       validate this same input, and that is the whole reason it is worth adding.
+#       Each of those modules checks the prefix against ITS OWN namespace and
+#       cannot see the others, so each accepts values the deployment as a whole
+#       cannot use. The binding constraint is their INTERSECTION, and only this
+#       root -- which forwards one value to all sixteen -- is in a position to
+#       state it: `s3-datasets` caps the prefix at twelve characters, `cognito`
+#       requires at least two, and `cognito`, `s3-datasets`, `aurora-postgresql`
+#       and `secrets` all require it to begin with a letter rather than a digit.
+#       Checked only per module, a thirteen-character prefix passes fourteen
+#       module calls and fails the fifteenth partway through an apply, reporting a
+#       bucket-name constraint rather than naming this input.
+#       Trade-offs: the intersection is stricter than any one module's rule, so a
+#       prefix that would satisfy the module a reader happens to be looking at can
+#       be refused here. That is the intended direction -- refusing it at plan time
+#       costs a re-edit, while accepting it costs a half-created environment. This
+#       is deliberately NOT a production-only policy: both roots forward one prefix
+#       to the same sixteen modules, so the same intersection binds development.
 variable "name_prefix" {
-  description = "Common lower-case prefix used by every module in this environment."
+  description = "Prefix concatenated into the name of every resource this root creates, ahead of the component and the environment, giving the whole deployment one greppable identity. Two to twelve characters of lower-case letters, digits and hyphens, beginning with a letter and ending with a letter or digit -- the intersection of the naming rules the sixteen modules this root calls each impose on their own namespace."
   type        = string
   default     = "carddemo"
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]*[a-z0-9]$", var.name_prefix)) && length(var.name_prefix) >= 2 && length(var.name_prefix) <= 12
+    error_message = "name_prefix must be 2 to 12 characters of lower-case letters, digits and hyphens, must begin with a letter and must not end with a hyphen -- for example carddemo. The twelve-character ceiling is the dataset bucket namespace's, the two-character floor and the leading-letter rule are the user pool's, and this one prefix is composed into names in both."
+  }
 }
 
+# WHY : Assumptions: this is the one input that decides WHICH environment the whole
+#       stack is, so it is both declared and pinned. It is composed into the name of
+#       almost every resource the sixteen modules create, and it is what separates
+#       this deployment's resources from the development root's inside an account
+#       that could hold both.
+#       Alternatives Considered: (1) not declaring it at all and having main.tf carry
+#       the literal `prod`, which removes the wrong-value hazard completely. Rejected
+#       because the two roots are required to declare the same input names and
+#       .github/workflows/infra-ci.yml asserts that equality, so an input dev
+#       declares and this root does not would fail the build. (2) Declaring it and
+#       leaving it free, as dev effectively does. Rejected because a caller who
+#       passed `dev` here would have THIS root's state -- the production state --
+#       adopt development-named resources, and the plan would look entirely clean
+#       while doing it. Pinning keeps the input surface symmetrical and makes the
+#       one dangerous value unrepresentable rather than merely unlikely, which is
+#       the combination neither alternative gives.
 variable "environment" {
-  description = "Environment identity passed to every module; fixed to prod for this root."
+  description = "Environment identity forwarded to every module and composed into the name of nearly every resource this root creates. Pinned to prod: this root's state and resource names are production's, so no other value is admissible here."
   type        = string
   default     = "prod"
 
   validation {
     condition     = var.environment == "prod"
-    error_message = "The production root environment must be prod."
+    error_message = "environment must be prod in this root. Any other value would have the production state adopt another environment's resource names, and the plan would look clean while doing it -- deploy a different environment from its own root under infra/envs instead."
   }
 }
 
@@ -523,40 +657,159 @@ variable "vpc_cidr" {
   }
 }
 
+# WHY : Assumptions: the version is pinned to a MINOR release rather than to a
+#       major line, and the database module supplies no default of its own, so this
+#       is the single file an engine upgrade is an edit to. That is the property
+#       worth having in a production root: the upgrade appears in a plan and in a
+#       review as a named version change, rather than arriving because a default
+#       elsewhere moved.
+#       Trade-offs: a pinned minor is not picked up automatically, so a release
+#       carrying a fix this deployment wants requires an explicit edit here. For a
+#       database engine holding cardholder data that is the trade worth making --
+#       an unreviewed engine change during a nightly batch window is a worse
+#       outcome than a deliberate one made a release later.
+# WHY : ⚠️ Assumptions: the development root's reasoning about this input does NOT
+#       apply here, and the difference is easy to carry over by mistake. There, the
+#       release named has to be one that supports scaling to zero capacity, because
+#       that root sets its capacity floor to zero. This root forbids a zero floor,
+#       so NO scale-to-zero release floor constrains the value chosen here; what
+#       constrains it is that the pinned provider accepts it and that
+#       aurora_parameter_group_family below names the matching major line.
+#       Assumptions: this input carries NO `validation`, and the omission is a
+#       decision rather than an oversight -- the reasonable-looking alternative is
+#       a numeric-shape check, and it is declined because
+#       infra/modules/aurora-postgresql already asserts exactly that shape on the
+#       `engine_version` it receives, and additionally cross-checks that this
+#       version's major line matches the parameter-group family below. Adding the
+#       same regex here would be the second statement of one rule, which is the
+#       drift the capacity inputs above were just repaired for. The two remaining
+#       questions -- which releases exist, and which are still supported -- are
+#       ones no regex can answer, and .github/workflows/infra-ci.yml asserts this
+#       pin against its support review horizon separately.
 variable "aurora_engine_version" {
-  description = "Aurora PostgreSQL engine version used by the production cluster."
+  description = "Aurora PostgreSQL engine version for the production cluster, forwarded to the database module, which requires the value and supplies no default. Must be a numeric version such as 16.8 -- not an engine name and not a parameter-group family -- and its major line must match aurora_parameter_group_family, which that module verifies."
   type        = string
   default     = "16.6"
 }
 
+# WHY : Assumptions: this and aurora_engine_version above are ONE decision made in
+#       two values, and an engine upgrade has to move both together. The database
+#       module refuses a pair whose major lines disagree, comparing the leading
+#       component of the version against this family's trailing digits, so a
+#       half-finished upgrade is rejected at plan time rather than producing a
+#       cluster running one major line under a parameter group written for another.
+#       That cross-check is the reason no `validation` is repeated here: the rule
+#       needs BOTH values to evaluate, the module already holds it, and a copy in
+#       this file could only restate it less completely.
 variable "aurora_parameter_group_family" {
-  description = "Aurora PostgreSQL cluster parameter-group family matching aurora_engine_version."
+  description = "Aurora PostgreSQL cluster parameter-group family whose trailing major must match aurora_engine_version's leading component, for example aurora-postgresql16 against 16.8. Forwarded to the database module, which rejects a mismatched pair."
   type        = string
   default     = "aurora-postgresql16"
 }
 
+# WHY : Assumptions: 35 is the SERVICE MAXIMUM rather than a round number, and
+#       Aurora offers no way to switch automated backups off, so the floor is one
+#       day rather than none. The maximum is taken here for the reason recorded on
+#       skip_final_snapshot above: this cluster's contents are the posted
+#       transactions, accrued interest and updated masters of every night since
+#       cutover, and nothing in this repository can regenerate them.
+#       Trade-offs: retaining the maximum bills for backup storage proportional to
+#       the cluster's size for five weeks. Accepted because the alternative is a
+#       recovery window shorter than the interval at which a statement discrepancy
+#       is noticed and reported, which would make the backups present but useless
+#       for the failure they exist to cover.
+#       ⚠️ Assumptions: this value MATCHES development deliberately and is not an
+#       axis the two roots may differ on. Specification section 0.4.1.6 enumerates a
+#       closed set of per-environment axes and its only retention entry is log
+#       retention days; reading "sizing and retention" as an open licence is what
+#       let this value drift apart from development's once already. No `validation`
+#       is repeated here because the database module already bounds the input it
+#       receives to the service's 1-to-35 range.
 variable "aurora_backup_retention_period" {
-  description = "Days of automated Aurora backups retained in production."
+  description = "Days of automated backups the production cluster retains, forwarded to the database module. Aurora cannot disable automated backups, so 1 is the floor and 35 the service maximum; there is no value here meaning none."
   type        = number
   default     = 35
 }
 
+# WHY : Assumptions: the backup window and the nightly chain act on the SAME
+#       writer, and the chain is what drives this cluster toward its capacity
+#       ceiling. Overlapping them makes the chain's duration depend on how much
+#       data the backup is copying, which is the kind of coupling that stays
+#       invisible until it surfaces as an intermittent timeout on the one workload
+#       with the least room to run long. 07:00 sits clear of the 02:00 chain and of
+#       the window a retried trigger could still start it in.
+#       Alternatives Considered: leaving this unset and letting the service assign
+#       a window, which the database module permits by accepting null. Rejected --
+#       an assigned window is chosen with no reference to the batch schedule, so
+#       the overlap this value exists to prevent would become a matter of luck, and
+#       the disjointness main.tf asserts could not be asserted at all.
+#       Assumptions: no `validation` is repeated here because the database module
+#       already requires the hh:mm-hh:mm shape, with no day-of-week prefix, on the
+#       input this root forwards. main.tf's own window-disjointness check parses
+#       the same string and depends on that shape, so the module's rule is what
+#       keeps that parse well defined.
 variable "aurora_preferred_backup_window" {
-  description = "Daily UTC backup window kept outside the nightly batch schedule."
+  description = "Daily UTC window in which the production cluster's automated backups are taken, of the form hh:mm-hh:mm with no day-of-week prefix. Must stay clear of the window batch_schedule_expression can start the nightly chain in, which terraform_data.batch_window_disjoint in main.tf asserts."
   type        = string
   default     = "07:00-08:00"
 }
 
+# WHY : Assumptions: maintenance is the more consequential of the two windows to
+#       place, because it may fail the cluster over rather than merely competing
+#       for capacity. A failover during the chain aborts in-flight loader tasks and
+#       leaves the online-write bracket engaged until the finalizer clears it, so
+#       this window is kept clear of both the chain's start window and the backup
+#       window, and main.tf asserts the first of those.
+#       Assumptions: no `validation` is repeated here because the database module
+#       already requires the day-prefixed ddd:hh:mm-ddd:hh:mm shape. That prefix is
+#       load-bearing rather than cosmetic: main.tf reads the hour out of this value
+#       at a different index than it uses for the backup window above, precisely
+#       because this form carries a day and that one does not.
 variable "aurora_preferred_maintenance_window" {
-  description = "Weekly UTC maintenance window kept outside batch and backup windows."
+  description = "Weekly UTC maintenance window for the production cluster, of the form ddd:hh:mm-ddd:hh:mm such as sun:09:00-sun:10:00. Kept outside both the nightly batch start window and aurora_preferred_backup_window, because maintenance may fail the cluster over and abort in-flight batch tasks."
   type        = string
   default     = "sun:09:00-sun:10:00"
 }
 
+# WHY : Assumptions: 02:00 is chosen so the chain runs after the business day it
+#       posts and still finishes clear of the 07:00 backup window, and the value is
+#       IDENTICAL to development's on purpose. A trigger that fired at a different
+#       hour in one environment would make the two environments' batch windows
+#       differ, and the disjointness main.tf asserts against the backup and
+#       maintenance windows would then be asserting a different arrangement in each
+#       root -- which is a topology difference rather than the sizing difference the
+#       two roots are permitted.
+#       ⚠️ Refactoring Rationale: this input DOES carry a `validation`, and it is the
+#       one member of this group that needs one even though the scheduler module
+#       already requires the cron form. The reason is that this root parses the
+#       value ITSELF: main.tf recovers the schedule's fields by trimming the cron
+#       wrapper off this string, splitting what remains, and calling `tonumber` on
+#       the hour field to assert the start window is disjoint from the backup and
+#       maintenance windows. Given `rate(1 day)` the trim matches nothing, the
+#       split yields a non-numeric token, and the failure that reaches the operator
+#       is a conversion error naming a `tonumber` parameter -- not the module's
+#       clear message, because the module's block never gets to run. It surfaces
+#       during the graph walk, after the ephemeral password resources have already
+#       been opened, and it names neither this input nor this file.
+#       Assumptions: the guard therefore belongs here rather than being left to the
+#       module, because what it protects is this root's own arithmetic rather than
+#       the module's argument. It is deliberately the WEAKEST check that makes that
+#       parse well defined -- the wrapper and a numeric hour field -- so the cron
+#       grammar itself stays the scheduler's business and this file does not become
+#       a second, partial statement of it.
 variable "batch_schedule_expression" {
-  description = "EventBridge Scheduler cron expression that starts the nightly batch chain."
+  description = "EventBridge Scheduler cron expression that starts the nightly batch chain, of the form cron(...) in UTC; the rate(...) and at(...) forms are rejected. main.tf trims the wrapper and reads the hour field to assert the start window is disjoint from the Aurora backup and maintenance windows, so the wrapper and a numeric hour are required for that check to be evaluable at all."
   type        = string
   default     = "cron(0 2 * * ? *)"
+
+  validation {
+    condition = (
+      startswith(var.batch_schedule_expression, "cron(") &&
+      endswith(var.batch_schedule_expression, ")") &&
+      can(tonumber(split(" ", trimsuffix(trimprefix(var.batch_schedule_expression, "cron("), ")"))[1]))
+    )
+    error_message = "batch_schedule_expression must be a cron(...) expression whose second field is a numeric hour, for example cron(0 2 * * ? *). The rate(...) and at(...) forms are not accepted: main.tf reads the hour out of this expression to prove the batch start window does not overlap the Aurora backup and maintenance windows, and it cannot do that for a schedule with no hour field."
+  }
 }
 
 # WHY : Refactoring Rationale: this input exists so the root can NARROW the scheduler
@@ -599,8 +852,20 @@ variable "batch_schedule_maximum_event_age_seconds" {
   }
 }
 
+# WHY : Trade-offs: the check below refuses the tag `latest` outright, and refusing a
+#       tag that every registry accepts is the non-obvious half of this input. A
+#       mutable tag makes a registered task definition mean something different
+#       tomorrow than it meant when it was reviewed, and it leaves a rollback unable
+#       to name what it is rolling back TO -- both revisions would say `latest`. The
+#       cost is that a hand-run deployment must supply a real tag rather than the
+#       convenient one; the seven-character floor is set so an abbreviated commit SHA
+#       clears it.
+#       Assumptions: the deployment workflow supplies the commit SHA, so the tag is
+#       already unique per revision without anyone choosing one. In this environment
+#       image_digests below is populated as well, and the ECS service module then
+#       deploys by digest -- this input remains the tag those images are PUSHED under.
 variable "image_tag" {
-  description = "Immutable image tag applied to all ten ECR repositories for this deployment, normally the source commit SHA supplied by the OIDC deployment workflow."
+  description = "Immutable image tag applied to all ten ECR repositories for this deployment, normally the source commit SHA supplied by the OIDC deployment workflow. The tag latest is rejected: it cannot identify a revision to roll back to."
   type        = string
   nullable    = false
 
@@ -610,8 +875,15 @@ variable "image_tag" {
   }
 }
 
+# WHY : Assumptions: this string is not descriptive metadata -- it becomes a subject
+#       condition in the publication role's trust policy, so it is the value that
+#       decides WHICH repository may assume that role. The owner/name shape is checked
+#       for that reason: a bare repository name would build a condition matching
+#       nothing and fail closed, which is merely confusing, but a value carrying a
+#       wildcard would build one matching more repositories than intended, which is a
+#       trust widening that an apply reports as success.
 variable "github_repository" {
-  description = "GitHub repository in owner/name form whose protected prod environment may assume the SPA publication role."
+  description = "GitHub repository in owner/name form whose protected prod environment may assume the SPA publication role. Becomes a subject condition in that role's trust policy, so it is what decides which repository can publish to this environment."
   type        = string
   nullable    = false
 
@@ -621,8 +893,18 @@ variable "github_repository" {
   }
 }
 
+# WHY : Alternatives Considered: looking the provider up with a data source instead of
+#       accepting its ARN, which would remove this input. Rejected because an IAM OIDC
+#       provider is account-scoped and single-instance, so a lookup would make this
+#       root fail with a not-found error against a data source rather than naming the
+#       prerequisite an operator has to run first -- and infra/bootstrap is what
+#       creates it, deliberately in a separate root run once per account.
+#       Assumptions: the check pins the provider URL to GitHub's own issuer rather than
+#       accepting any OIDC provider ARN. Passing a provider for a different identity
+#       provider would produce a trust policy that federates a third party into this
+#       account, and every individual field of such an ARN would look well formed.
 variable "github_oidc_provider_arn" {
-  description = "ARN of the account-scoped GitHub Actions OIDC provider created by infra/bootstrap."
+  description = "ARN of the account-scoped GitHub Actions OIDC provider created by infra/bootstrap. Must name the token.actions.githubusercontent.com issuer specifically; any other provider ARN would federate a different identity provider into this account."
   type        = string
   nullable    = false
 
@@ -731,8 +1013,19 @@ variable "cloudfront_acm_certificate_arn" {
   }
 }
 
+# WHY : Assumptions: two of the three rules below are worth stating because they are
+#       not shape checks. Duplicates are refused because CloudFront rejects a repeated
+#       alias when it builds the distribution, and the comparison is done on the
+#       lower-cased name since DNS is case-insensitive while a list is not -- so
+#       `App.example.com` beside `app.example.com` is one alias twice, and only the
+#       normalised comparison sees it. A leading wildcard label IS permitted, because a
+#       wildcard certificate legitimately serves one and refusing it would rule out a
+#       valid deployment for tidiness.
+#       Assumptions: the list must be non-empty. A distribution with no alias is
+#       reachable only at its generated CloudFront domain, which no certificate in
+#       cloudfront_acm_certificate_arn covers, so the pair would be inconsistent.
 variable "cloudfront_aliases" {
-  description = "Non-empty list of bare DNS names the SPA distribution serves. Every entry must be covered by cloudfront_acm_certificate_arn and is forwarded unchanged to cloudfront-spa."
+  description = "Non-empty list of bare DNS names the SPA distribution serves, optionally with a leading wildcard label. Every entry must be covered by cloudfront_acm_certificate_arn and is forwarded unchanged to cloudfront-spa; entries are compared case-insensitively so one name cannot appear twice."
   type        = list(string)
   nullable    = false
 
@@ -853,7 +1146,7 @@ variable "permissions_boundary_arn" {
 
   validation {
     condition     = can(regex("^arn:[a-z0-9-]+:iam::[0-9]{12}:policy/[A-Za-z0-9+=,.@_/-]+$", var.permissions_boundary_arn))
-    error_message = "permissions_boundary_arn must be an anchored customer-managed IAM policy ARN, for example arn:aws:iam::111122223333:policy/CardDemoDeploymentBoundary."
+    error_message = "permissions_boundary_arn must be an anchored customer-managed IAM policy ARN, shaped arn:<partition>:iam::<account-id>:policy/<policy-name>."
   }
 }
 
@@ -874,7 +1167,7 @@ variable "mask_hmac_secret_arn" {
 
   validation {
     condition     = can(regex("^arn:[a-z0-9-]+:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+-[A-Za-z0-9]{6}$", var.mask_hmac_secret_arn))
-    error_message = "mask_hmac_secret_arn must be an anchored Secrets Manager secret ARN including its six-character suffix, for example arn:aws:secretsmanager:eu-west-1:111122223333:secret:carddemo/dev/mask-hmac-AbCdEf."
+    error_message = "mask_hmac_secret_arn must be an anchored Secrets Manager secret ARN including the six-character suffix the service appends, shaped arn:<partition>:secretsmanager:<region>:<account-id>:secret:<secret-name>-<suffix>. Copying the name without that suffix is the usual cause of this failure."
   }
 }
 
@@ -910,7 +1203,7 @@ variable "mask_hmac_secret_kms_key_arn" {
 
   validation {
     condition     = can(regex("^arn:[a-z0-9-]+:kms:[a-z0-9-]+:[0-9]{12}:key/[a-f0-9-]+$", var.mask_hmac_secret_kms_key_arn))
-    error_message = "mask_hmac_secret_kms_key_arn must be an anchored customer-managed KMS key ARN, for example arn:aws:kms:eu-west-1:111122223333:key/<key-id>. The AWS-managed alias alias/aws/secretsmanager is deliberately not accepted: it cannot be granted to one principal."
+    error_message = "mask_hmac_secret_kms_key_arn must be an anchored customer-managed KMS key ARN, shaped arn:<partition>:kms:<region>:<account-id>:key/<key-id>. The AWS-managed alias alias/aws/secretsmanager is deliberately not accepted: it cannot be granted to one principal."
   }
 
   # WHY : Assumptions: a key in another account or another Region cannot decrypt a
@@ -994,8 +1287,16 @@ variable "alb_certificate_arn" {
   }
 }
 
+# WHY : Assumptions: this is the second half of the pair the comment above
+#       alb_certificate_arn reasons about -- the certificate ARN names the listener
+#       credential, and this names the identity API Gateway verifies against it. The
+#       value is required to be BARE for that reason: it is used as a TLS server name
+#       rather than as a URL, so a scheme, a port or a path would produce a name that
+#       can never match the certificate's subject, and the failure would appear as a
+#       handshake error on the private integration rather than as a bad input here.
+#       A wildcard is refused for the same reason -- a server name is one host.
 variable "internal_service_domain_name" {
-  description = "Bare DNS name covered by alb_certificate_arn. Forwarded to the alb module as its certificate identity and to api-gateway-http as the private integration server name to verify."
+  description = "Bare DNS name covered by alb_certificate_arn, with no scheme, port, path or wildcard. Forwarded to the alb module as its certificate identity and to api-gateway-http as the TLS server name the private integration verifies, which is why it must be a host and not a URL."
   type        = string
   nullable    = false
 

@@ -6,24 +6,41 @@
  * This module is the one place the browser environment every component test
  * assumes is assembled. `ui/vitest.config.ts` names it in `setupFiles`, so it
  * runs once per test file, before that file's imports are evaluated, and nothing
- * imports it directly. It does exactly four things and deliberately nothing
- * else: it registers the DOM matchers, it unmounts what a test rendered, it sets
- * the asynchronous wait budget that lazily loaded routes need, and it supplies
- * the one browser API jsdom omits that the design system requires.
+ * imports it directly. It does exactly five things and deliberately nothing
+ * else: it registers the DOM matchers; it unmounts what a test rendered; it sets
+ * the asynchronous wait budget that lazily loaded routes need; and it installs
+ * the two browser APIs jsdom omits that the design system requires,
+ * `matchMedia` and `ResizeObserver`.
  *
  * Why this module exists at all
  * -----------------------------
- * jsdom is not a browser and does not claim to be. Two of its gaps are load
+ * jsdom is not a browser and does not claim to be. Three of its gaps are load
  * bearing for this application specifically. It implements no `matchMedia`, and
  * Ant Design's responsive observer calls that function the first time any
  * responsive component mounts -- which for this SPA means every screen, because
  * the fixed 24x80 character grid was deliberately replaced by a responsive
- * `Layout` with `Row`/`Col`. And it shares one `document` across every test in a
- * file, so anything left mounted stays queryable. Both are addressed here rather
- * than in each test, so a screen test asserts on the screen and not on the
- * environment.
+ * `Layout` with `Row`/`Col`. It implements no `ResizeObserver` either, and antd
+ * wraps the message band's single-line ellipsis text in one without testing for
+ * the constructor first, so its absence throws inside a passive effect and
+ * unmounts the whole tree. And it shares one `document` across every test in a
+ * file, so anything left mounted stays queryable. All three are addressed here
+ * rather than in each test, so a screen test asserts on the screen and not on
+ * the environment.
  *
- * The wait budget below is a third concern of the same kind but not a jsdom gap:
+ * Refactoring Rationale: this summary read "four things", "the one browser API"
+ * and "two gaps" until this revision. Each was accurate when written and each
+ * became wrong the moment `installResizeObserver` landed at the foot of this
+ * file: that shim's own block states it exists "for the same reason the
+ * matchMedia shim above does", but the inventory up here was never carried
+ * forward with it, so the module under-reported its own side effects by one. The
+ * count is restated -- and both APIs are now named rather than totalled -- because
+ * a reader checks a module's inventory against this block before reading three
+ * hundred lines of it, which makes an undercount the one comment in the file
+ * capable of sending someone to write a shim that is already installed twenty
+ * lines below. Naming them also makes the claim falsifiable against the two
+ * `install*` calls at the bottom, where a bare number is not.
+ *
+ * The wait budget below is a fourth concern of the same kind but not a jsdom gap:
  * it is a Testing Library default that is calibrated for a resolved import and is
  * too small for a route this application loads through `React.lazy`. It is set
  * here for the same reason - once, where the environment is assembled, rather

@@ -1110,6 +1110,18 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
      * A sum could be satisfied by one dimension counting zero while another counted two -- the same
      * cancellation at a smaller scale.</p>
      *
+     * <p>Assumptions: the category leg counts ONE COMPONENT of that dimension's composite key rather
+     * than its alias, and the difference is load-bearing rather than stylistic. The other two
+     * dimensions carry a single-attribute identifier, so {@code count(alias)} renders as a count over
+     * that one column and yields zero on a miss as intended. The category dimension carries a
+     * two-attribute embedded identifier, and {@code count(alias)} over it renders as a count over a
+     * ROW constructor of both columns -- {@code count((c.type_cd, c.cat_cd))}. A row constructor whose
+     * every component is null is itself a non-null datum, so that form counts ONE for an unmatched
+     * outer join and the leg can never detect the miss it exists to detect. Counting a single
+     * component restores zero for a miss, one for the expected case and more for a multiple, which is
+     * the mechanism the paragraph above describes. The component chosen is part of the join predicate,
+     * so a matched row can never carry it as null.</p>
+     *
      * <p>Assumptions: the result is bounded by the caller and ordered by identifier, so the row a refusal
      * names is deterministic. This path runs only when a range is being validated, and its purpose is to
      * give a maintainer one place to start rather than to enumerate every defect.</p>
@@ -1131,7 +1143,7 @@ public interface TransactionReportRepository extends Repository<ReportTransactio
                 on c.key.typeCode = t.typeCd and c.key.categoryCode = t.categoryCd
             where t.procTs >= :rangeStart and t.procTs < :rangeEnd
             group by t.transactionId
-            having count(x) <> 1 or count(ty) <> 1 or count(c) <> 1
+            having count(x) <> 1 or count(ty) <> 1 or count(c.key.typeCode) <> 1
             order by t.transactionId asc
             """)
     @Transactional(readOnly = true)

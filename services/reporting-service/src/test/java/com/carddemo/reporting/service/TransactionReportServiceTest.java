@@ -795,7 +795,6 @@ class TransactionReportServiceTest {
         for (byte[] row : fixtureRows("trancatg.txt")) {
             Map<String, Object> fields =
                     FixedWidthCodec.decodeRecord(row, CopybookLayout.layout(TRANCAT_LAYOUT));
-            // WHAT: the category is keyed by the type and the category together.
             // WHY : Assumptions: the reference builds the same composite key at L191 to L194 of
             //       app/cbl/CBTRN03C.cbl before performing its category lookup, so a category code is
             //       only meaningful under a type and keying on the code alone would resolve a

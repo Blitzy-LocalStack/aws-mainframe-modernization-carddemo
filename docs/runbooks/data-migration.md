@@ -1,41 +1,78 @@
 # Data Migration Runbook
 
-> **Purpose.** Validate the CardDemo migration configuration, create database
-> schemas and protected reporting views, and stage immutable source extracts.
->
-> **Source of truth.** Copybook layouts under `app/cpy/**`,
-> `data-migration/sql/**`, `data-migration/src/carddemo_migration/**`, and
-> `docs/architecture/data-model-and-schema-mapping.md`.
+## Document contract
 
-The current Python package implements configuration/trust validation, the
-normative layout catalogue, the twelve fixed-width record readers, the Aurora
-bulk loader, all three verification passes and the combined verification gate, and it
-exposes them as the `stage-dataset`, `refresh-dataset`, `load-dataset`,
-`reconcile-sequences`, `verify-row-counts`, `verify-checksum`, `verify-money-parity`,
-`verify-row-count-report`, `verify-money-total-report` and `verify-all` subcommands used
-below. Every step in this runbook is executable and fails closed. **Eleven records are
-loadable**, covering all eight schemas' seeded tables, and the three conditions a cutover
-still turns on are stated at the gate at the end.
+**Purpose**: Move the CardDemo record data from the exported mainframe flat files into the Aurora
+PostgreSQL schemas, in the order stage, decode, bulk-load, verify, and only then switch traffic. This
+runbook owns the data half of the cutover: the two decoding constraints, the eleven record-length
+contracts, the three mandatory verification passes, idempotent re-loading, and the pre-load recovery
+point that a roll-back returns to.
 
-Refactoring Rationale: this paragraph twice described a narrower package than the
-one that now ships. It first stated that the reader and bulk-loader CLI was absent,
-which was true until those modules landed; it then stated that `CUSTOMER` and
-`CARD` could not be loaded at all, which was true until the loader gained the
-envelope ciphers their `*_encrypted` columns require. It is rewritten rather than
-deleted because an operator who had read either earlier version would otherwise
-conclude that steps below were aspirational, and skip them.
+**Source of truth**: The copybooks under `app/cpy/**` are the normative record layouts. The
+`IDCAMS` load jobs under `app/jcl/**` are the normative key and record-size contracts. The
+implementation is `data-migration/src/carddemo_migration/**` and `data-migration/sql/**`;
+`data-migration/README.md` and `data-migration/src/carddemo_migration/cli.py` are the authority for
+command names and options. Field-by-field column mapping lives in
+[data-model-and-schema-mapping.md](../architecture/data-model-and-schema-mapping.md), and every
+intentional behavioural divergence is registered in
+[cobol-to-service-traceability.md](../architecture/cobol-to-service-traceability.md). The mainframe
+assets under `app/**` are reference-only and are read, never written.
 
-Assumptions: PostgreSQL is reachable only over TLS with a trusted CA, and the
-operator uses a temporary database identity with the privileges required by the
-schema bootstrap. No database password is placed in a command argument or
-committed file.
+| Parameter | Kind | Description |
+|:---|:---|:---|
+| `<env>` | enum | `dev` or `prod`; selects the environment root whose outputs every command below resolves. |
+| `<dataset-bucket>` | S3 bucket name | Versioned dataset bucket. Read from the environment's Terraform output at the point of use; never written into this document. |
+| `<dataset>` | ETL layout token | One of the eleven seed layouts in the record-length contract below, for example `ACCOUNT`. Not the MVS dataset name. |
+| `<encoding>` | enum | `ascii` or `ebcdic`; declares which of the two shipped forms of an extract is being read. Required, never sniffed. |
+| `<generation>` | generation ordinal | The `gen=NNNN` component of a staged object's prefix. Five are retained; a sixth is not recoverable. |
+| `<business-date>` | ISO date | Any date a load or a downstream job needs, supplied as a parameter rather than read from the clock. |
+| `<db-secret-id>` | Secrets Manager secret id | Entry holding a database credential. Resolve at run time; never paste a resolved value into a file or a command history. |
+| `<parameter-prefix>` | Parameter Store prefix | Prefix beneath which the environment publishes its non-secret connection parameters. |
+| `<trust-anchor-path>` | local file path | Certificate bundle used to verify the database server, because every service pins `sslmode=verify-full`. |
+| `<snapshot-id>` | database snapshot identifier | The pre-load recovery point taken before the first load of an environment. |
+| `<manifest-path>` | local file path | Verification manifest declaring which datasets a cutover loaded and where their bytes are. |
+| `<state-machine-arn>` | Step Functions ARN | The nightly chain that invokes these same loaders. Placeholder only; [batch-operations.md](batch-operations.md) owns it. |
+| `<sql-root>` | local directory path | Location of the `sql` tree. Required in the container image, omitted in a source checkout. |
 
-## Validate the Package
+**Expected outcome / success signal**: Every staged object matches the record-length contract; every
+decode produces clean text with no replacement characters; every load reports the row count the
+source file implies; and all three verification passes exit zero for every loaded dataset. A load is
+"verified" only when row counts, record checksums and exact money totals all agree. Any non-zero
+exit is the gate: the switch does not happen.
+
+**Failure modes and handling**: Stop before loading when a file's size is not an exact multiple of
+its record length, when decoded output contains replacement characters, or when the source form of an
+extract cannot be established. Stop before switching when any verification pass reports a difference,
+when the `DEFAULT` disclosure-group row is absent, or when no pre-load recovery point exists. Use the
+failure table near the end of this document, and [teardown.md](teardown.md) for the infrastructure
+half of roll-back.
+
+---
+
+## Scope, prerequisites and the deployment boundary
+
+This runbook supplies operator commands. It is **not** evidence that a live AWS environment exists,
+that any load has been performed, or that any throughput was measured. Executing these commands
+against a real account, and the cost that incurs, remains an operator action outside this scope. No
+figure in this document is a benchmark; the byte counts are file sizes measured in the checkout.
+
+This procedure **assumes [deploy.md](deploy.md) Steps 1-3 have completed**: the remote-state backend
+exists, the container images are published, and the environment is provisioned so that the Aurora
+cluster and the versioned dataset bucket are both present. Provisioning them is not re-owned here.
+Applying each owning service's Flyway migration is [deploy.md](deploy.md) Step 4, and seeding
+reference data is [deploy.md](deploy.md) Step 5; this document verifies the result of both and
+re-owns neither. Destroying infrastructure, and the infrastructure half of roll-back, belong to
+[teardown.md](teardown.md). The nightly batch chain and the `StageSeedDatasets` state that invokes
+these same loaders belong to [batch-operations.md](batch-operations.md).
+
+Validate the package before using it against any database.
 
 ```bash
 # WHAT: install the hash-locked development closure and run the Python gates.
-# WHY : Assumptions: the development manifest includes the runtime closure plus
-#       Ruff and pytest, so one install reproduces the CI toolchain.
+# WHY : Assumptions: the development manifest pins every transitive dependency with a
+#       hash, so the codecs that decode money here behave identically to the ones the
+#       tests validated. An unpinned install can substitute a different decimal or
+#       encoding library and change a rounded cent without failing anything.
 source .venv/bin/activate
 python -m pip install --require-hashes -r data-migration/requirements-dev.txt
 ruff check data-migration
@@ -43,927 +80,877 @@ python -m compileall -q data-migration/src
 python -m pytest -v --tb=short data-migration/tests
 ```
 
-## Stage Source Extracts
-
-The files under `app/data/**` remain reference-only locally; staging copies
-their bytes without transcoding.
-
 ```bash
-# WHAT: copy the baseline source extracts into the dataset bucket's source-extract prefix.
-# WHY : Assumptions: EBCDIC sign and packed bytes must remain opaque until a
-#       field-aware decoder consumes them; text-mode conversion would corrupt them.
-# WHY : Assumptions: sync preserves the SUBDIRECTORY name, so app/data/EBCDIC/ lands at
-#       migration/source/EBCDIC/ -- which is exactly the default of the extract prefix
-#       the nightly refresh reads. Syncing the parent rather than each child is what
-#       keeps that correspondence true without naming it twice.
-# WHY : Refactoring Rationale: the bucket name is read from the `datasets` output object
-#       rather than from a `dataset_bucket_name` root output. There is no such root
-#       output -- each environment root publishes the s3-datasets module whole, under
-#       `datasets` -- so `output -raw dataset_bucket_name` fails with "Output
-#       \"dataset_bucket_name\" not found" and the sync then ran against `s3:///...`.
-ENVIRONMENT=dev
-DATASET_BUCKET="$(terraform -chdir="infra/envs/${ENVIRONMENT}" \
-  output -json datasets | jq -r '.bucket_name')"
-aws s3 sync app/data/ "s3://${DATASET_BUCKET}/migration/source/" \
-  --no-follow-symlinks
+# WHAT: print the entry point's own subcommand list and exit-status contract.
+# WHY : Assumptions: this CLI is the authority for its own verbs, so an operator
+#       reconciles a command in this runbook against --help rather than against prose.
+#       Every verb named below is registered by
+#       data-migration/src/carddemo_migration/cli.py and documented in
+#       data-migration/README.md.
+python -m carddemo_migration.cli --help
 ```
 
-### One prefix, read by the chain and by the operator commands alike
-
-The `aws s3 sync` above is the whole handover, and it populates the **only** landing
-prefix there is. The nightly `StageSeedDatasets` branches read each extract from it
-because the state machine passes `--extract-prefix=<dataset_source_extract_prefix>` to
-every branch, and that input is wired from the `s3-datasets` module's
-`source_extract_prefix` output; the operator-invoked `stage-dataset`, `load-dataset`,
-`decode-record` and `verify-all` commands read the same place because the module composes
-`CARDDEMO_DATASET_STAGING_ROOT` as `s3://<dataset bucket>/<dataset_source_extract_prefix>`
-and passes it to every task. Both resolve `migration/source/EBCDIC/` by default, and the
-extracts sit **flat** beneath it under the exact file names the seed-dataset registry
-records, because every one of those callers joins a dataset's registered source-object
-name to the root. Confirm the two agree with where the sync wrote before the first
-nightly run:
+**Note**: the generic entry-point form is `python -m carddemo_migration.cli <subcommand>`, which is
+the usage string the CLI prints for itself. The container image is built from
+`data-migration/Dockerfile` on `python:3.13.14-slim-trixie`.
 
 ```bash
-# WHAT: print the prefix the orchestrator will read, the root the container receives, and
-#       list what is under it.
-# WHY : Assumptions: both values are read from the roots' AGGREGATE outputs rather than
-#       from scalar ones. Each environment root publishes one output per module -- there is
-#       no `dataset_bucket_name` or `dataset_source_prefix` at the root level to read with
-#       `output -raw` -- so the URI comes out of `datasets` and the resolved container root
-#       out of `batch_orchestration`, which is the module that composes it and is therefore
-#       the authority on what the tasks receive. Reading the outputs rather than restating
-#       the defaults is what keeps a tfvars override from making this runbook silently
-#       wrong.
+# WHAT: build the ETL image.
+# WHY : Assumptions: the interpreter is pinned to the same version the existing COBOL
+#       test suite runs on, so zoned-decimal and packed-decimal behaviour is identical
+#       between this ETL and the harness that validates its output. A different minor
+#       version could round or normalise differently and make a parity difference look
+#       like a load defect.
+docker build -t carddemo-data-migration:local data-migration
+```
+
+---
+
+## The cutover sequence
+
+Cutover is **read, then verify, then switch** — never a big-bang swap. Four movements produce the
+data, and a gate stands between the last of them and the switch.
+
+```mermaid
+graph LR
+    S["1. Stage: extracts to versioned object storage"] --> D["2. Decode: per fixed-width field, cp037"]
+    D --> L["3. Bulk-load: per schema, in dependency order"]
+    L --> V{"4. Verify: row counts, checksums, money totals"}
+    V -->|all three agree| W["5. Switch: enable application writes"]
+    V -->|any difference| R["Re-run idempotently, or restore the pre-load recovery point"]
+    R --> L
+%% Verification is a GATE before the switch, not a report after it. The edge from V to W
+%% exists only when all three passes agree; there is deliberately no edge that reaches W
+%% without passing through V.
+```
+
+Verification sits **before** the switch for a reason worth stating plainly: a load that has not been
+verified is not evidence that the data is correct. Switching first turns verification into a
+post-mortem — it would still find the defect, but only after the application had served it. Placing
+the gate first is the entire point of the procedure, and it is why the three passes are mandatory
+rather than advisory.
+
+---
+
+## The source datasets
+
+Twenty-two extracts ship in the repository under `app/data/**`. They are reference-only inputs: the
+ETL reads them and never writes them.
+
+Nine are in `app/data/ASCII/`, and their sizes carry line terminators, which is why each exceeds an
+exact multiple of its record length by a small amount:
+
+| File | Bytes |
+|:---|---:|
+| `acctdata.txt` | 15050 |
+| `carddata.txt` | 7550 |
+| `cardxref.txt` | 1850 |
+| `custdata.txt` | 25050 |
+| `dailytran.txt` | 105300 |
+| `discgrp.txt` | 2601 |
+| `tcatbal.txt` | 2599 |
+| `trancatg.txt` | 1116 |
+| `trantype.txt` | 433 |
+
+Thirteen are in `app/data/EBCDIC/`, named `AWS.M2.CARDDEMO.<name>.PS`, and they are unterminated
+fixed-length records:
+
+| File | Bytes |
+|:---|---:|
+| `ACCDATA` | 15000 |
+| `ACCTDATA` | 15000 |
+| `CARDDATA` | 7500 |
+| `CARDXREF` | 2500 |
+| `CUSTDATA` | 25000 |
+| `DALYTRAN` | 105000 |
+| `DALYTRAN.PS.INIT` | 350 |
+| `DISCGRP` | 2550 |
+| `EXPORT.DATA` | 250000 |
+| `TCATBALF` | 2500 |
+| `TRANCATG` | 1080 |
+| `TRANTYPE` | 420 |
+| `USRSEC` | 800 |
+
+Because the EBCDIC extracts carry no terminators, their sizes factor exactly into record count times
+record length. That gives an operator a pre-load sanity check that needs no tooling at all:
+
+```text
+# WHAT: the record-count arithmetic for each unterminated EBCDIC extract.
+# WHY : Assumptions: an unterminated fixed-length file has no delimiter, so its size
+#       MUST be an exact multiple of its record length. Any remainder means the file is
+#       not the shape the reader expects, and the arithmetic below is the cheapest
+#       possible way to find that out before a database is involved.
+USRSEC         800 = 10  x 80
+ACCTDATA     15000 = 50  x 300
+CARDDATA      7500 = 50  x 150
+CUSTDATA     25000 = 50  x 500
+CARDXREF      2500 = 50  x 50
+DALYTRAN    105000 = 300 x 350
+DISCGRP       2550 = 51  x 50
+TCATBALF      2500 = 50  x 50
+TRANCATG      1080 = 18  x 60
+TRANTYPE       420 = 7   x 60
+EXPORT.DATA 250000 = 500 x 500
+```
+
+Two details trip operators up, so both are called out.
+
+- **`DISCGRP` holds 51 records, where the other masters hold 50.** Among them are the mandatory
+  `'DEFAULT'` disclosure-group rows. The disclosure-group key is a triple of group identifier,
+  transaction type and transaction category, so `DEFAULT` is not a single row: the shipped extract
+  carries **seventeen** of them, at record ordinals 18 through 34, one per type-and-category
+  combination the reference data uses. Interest calculation falls back to that group when a specific
+  group lookup misses, so their presence is verified explicitly in Step 4.
+- **`EXPORT.DATA` is a different animal from the base masters.** It is the 500-byte export record,
+  and its money fields are packed decimal rather than zoned. It is not one of the eleven seed loads;
+  the export and import round trip belongs to [batch-operations.md](batch-operations.md).
+
+**Note**: `usrsec` **exists only in EBCDIC form**. There is no `usrsec.txt` in `app/data/ASCII/`, so
+it is the one dataset for which the EBCDIC path is not optional. Note also that a populated
+transaction master is not among the twenty-two — the repository ships the daily feed and the masters,
+which is why the `TRAN` load in Step 3 is conditional on a cutover supplying a real extract.
+
+---
+
+## The record-length contract
+
+Every reader offset depends on the table below. Confirm a file is the shape the loader expects
+**before** loading it.
+
+| MVS dataset | ETL layout token | Copybook | Record length (bytes) | Key length |
+|:---|:---|:---|---:|---:|
+| `USRSEC` | `SECUSER` | `CSUSR01Y` | 80 | 8 |
+| `ACCTDATA` | `ACCOUNT` | `CVACT01Y` | 300 | 11 |
+| `CARDDATA` | `CARD` | `CVACT02Y` | 150 | 16 |
+| `CUSTDATA` | `CUSTOMER` | `CVCUS01Y` | 500 | 9 |
+| `CARDXREF` | `XREF` | `CVACT03Y` | 50 | 16 |
+| `DALYTRAN` | `DALYTRAN` | `CVTRA06Y` | 350 | 16 |
+| `TRANSACT` | `TRAN` | `CVTRA05Y` | 350 | 16 |
+| `DISCGRP` | `DISGROUP` | `CVTRA02Y` | 50 | 16 |
+| `TRANCATG` | `TRANCAT` | `CVTRA04Y` | 60 | 6 |
+| `TRANTYPE` | `TRANTYPE` | `CVTRA03Y` | 60 | 2 |
+| `TCATBALF` | `TCATBAL` | `CVTRA01Y` | 50 | 17 |
+
+These eleven values are corroborated five independent ways, which is why they are stated as a
+contract rather than as a configuration: the copybook field widths sum to them, the unterminated
+EBCDIC file sizes factor by them, the `RECORDSIZE(...)` clauses in the `IDCAMS` load jobs declare
+them, the dataset table in the root [README.md](../../README.md) publishes them, and the package
+prints them from its own layout catalogue. Every key length above equals the first operand of the
+corresponding `KEYS(...)` clause in the baseline job listed later in this document.
+
+```bash
+# WHAT: print the layout catalogue the readers actually use -- identifier, copybook,
+#       record length, key length and provenance -- for every registered layout.
+# WHY : Assumptions: this reads the package's own catalogue rather than this table, so
+#       it is the check that matters if the two ever disagree. It also distinguishes the
+#       eleven BASE_MASTER seed layouts from the DERIVED records the batch jobs produce,
+#       which are not cutover inputs and must not be loaded here.
+python -m carddemo_migration.cli list-datasets
+```
+
+**A file whose size is not an exact multiple of its record length is malformed, and the loader must
+refuse it rather than load it.**
+
+Assumptions: these are fixed-length records with no delimiter, so there is no resynchronisation
+point after a framing error. The first wrong offset shifts every field of every subsequent record,
+and because the shifted bytes are still valid characters the result is a table full of plausible
+values rather than an error. Refusing the file is the only point at which the defect is cheap to
+find.
+
+The copybooks under `app/cpy` are the **single normative source** for field offsets, lengths, decimal
+scale and sign semantics. The ETL layout descriptors are derived from them. An operator diagnosing a
+field-level discrepancy reads the copybook, not the loader.
+
+---
+
+## Constraint one: EBCDIC is decoded per fixed-width field, never per record
+
+**This is the single most likely implementation mistake in the entire migration, and it produces data
+that looks almost right.** It deserves to be read before any load is attempted.
+
+The existing test suite deliberately treats the thirteen `app/data/EBCDIC/*.PS` extracts as **opaque
+binary** and never transcodes them. Its own helpers warn that routing binary EBCDIC through a UTF-8
+write mangles it into replacement characters, at `tests/helpers/localstack_setup.py` L729, L741 and
+L1048. The ETL follows the same discipline and decodes at **exactly one place**:
+`data-migration/src/carddemo_migration/copybook/ebcdic_codec.py`, which opens the file in **binary
+mode** and decodes **each fixed-width field individually** using the cp037 family registered by the
+`ebcdic` package.
+
+```text
+# WHAT: the shape of the decision, stated once so it is not rediscovered per reader.
+# WHY : Assumptions: a record is NOT text. Alongside its character fields it carries
+#       zoned-decimal sign overpunch bytes, packed-decimal nibbles and embedded low
+#       values. The fixed-width field layout IS the data format, and it is the only
+#       thing that says which spans are text at all.
+# WHY : Alternatives Considered: whole-record bytes.decode("cp037") was the obvious
+#       approach and is rejected. Applied to a whole record it either raises on the
+#       non-text bytes or, far worse, silently substitutes U+FFFD for them. A
+#       replacement character in a money field is a wrong number, not a visible error,
+#       and it survives every check that does not compare money exactly.
+open(path, "rb")                    -> bytes, never str
+bytes[offset : offset + length]     -> one field, per the copybook
+field.decode("cp037")               -> only for spans the layout calls text
+```
+
+Two consequences follow for an operator.
+
+- **Spot-check a text field after decoding.** Clean output contains no `U+FFFD` replacement
+  characters anywhere. A single replacement character means the decode was applied at record
+  granularity instead of field granularity, and the load must not proceed.
+- **`usrsec` has no ASCII twin**, so the EBCDIC path is mandatory for it. Its password span is read
+  as bytes and discarded rather than decoded, because the target schema declares no column for it.
+
+The equivalent hazard in the other direction is worth one line: nine datasets ship in both
+encodings, so the form being read must be **declared**, never sniffed. An all-ASCII EBCDIC extract
+sniffs as text and decodes to plausible wrong values, which is why `--encoding` is a required
+argument rather than a defaulted one.
+
+---
+
+## Constraint two: money is exact fixed point, and the base masters use zoned decimal
+
+The base master money fields are **zoned decimal with sign overpunch** — not packed. For example
+`ACCT-CURR-BAL PIC S9(10)V99` at `app/cpy/CVACT01Y.cpy` L7. Packed decimal appears in the export
+record and in the authorization segments, and it is decoded at the ETL edge; packed bytes are never
+persisted.
+
+The repository documents the consequence in its own words. `tests/README.md` §5.2 records that the
+reference build uses `cobc -fixed -fsign=EBCDIC --std=ibm-strict -I app/cpy`, and that
+*"`-fsign=EBCDIC` is REQUIRED — the default `-fsign=ASCII` misreads the zoned-decimal sign overpunch
+and silently corrupts negative balances."*
+
+The word **silently** is the whole point. A sign-convention error does not raise. It produces
+plausible numbers with the wrong sign, in a table whose row count is perfect and whose text fields
+are all correct. This is precisely why the money-total parity pass in Step 4 is not optional: it is
+the only check that catches a sign error at all.
+
+Assumptions: the sign of a zoned-decimal field lives in the overpunch of its final byte, and the
+decimal point does not exist in the stored bytes at all. Both facts are properties of the source data
+format that the decoder depends on, and neither is recoverable from the digits alone.
+
+The target invariant holds at every hop:
+
+| Hop | Representation | Forbidden |
+|:---|:---|:---|
+| PostgreSQL column | `NUMERIC(p,2)` | any binary floating-point type |
+| Java service | `BigDecimal`, scale 2, `RoundingMode.HALF_UP` | `float`, `double` |
+| Python ETL | `Decimal` | `float` |
+| JSON on the wire | a **string** | a JSON number |
+
+Money is transported as a JSON string for a concrete reason rather than a stylistic one: a JSON
+**number** is parsed into an IEEE-754 double by most clients, which destroys exactness at the last
+boundary before a human reads the figure. Carrying the digits as a string moves the parse decision to
+the consumer instead of making it silently on the consumer's behalf.
+
+Two offset hazards come straight from the baseline and are easy to reproduce as defects.
+
+- **The implied decimal point.** `app/jcl/PRTCATBL.jcl` declares its fields to DFSORT as `ZD` at
+  L43-L50 — `TRANCAT-ACCT-ID,1,11,ZD`, `TRANCAT-TYPE-CD,12,2,CH`, `TRANCAT-CD,14,4,ZD`,
+  `TRAN-CAT-BAL,18,11,ZD` — and then formats the money field with an explicit edit mask,
+  `TRAN-CAT-BAL,EDIT=(TTTTTTTTT.TT)` at L56. That mask is the only place the decimal point becomes
+  visible: the stored bytes carry none, and the scale lives in the `PICTURE` clause. An ETL that
+  treats the digits as an integer is wrong by a factor of one hundred.
+- **One-based against zero-based.** Offsets in JCL and DFSORT are **one-based**; Python byte slices
+  are **zero-based**. Carrying a declared offset across unadjusted shifts every field by one byte,
+  which for a zoned field moves the sign overpunch out of the span entirely.
+
+```bash
+# WHAT: decode a single record through the layout contract and print its fields, before
+#       any table is written.
+# WHY : Assumptions: this exercises the real codec on the real bytes, so it settles the
+#       encoding, the framing and the decimal scale in one step. Reading the first
+#       record of an extract is the cheapest proof that the three agree.
+# WHY : Alternatives Considered: proving the layout by loading and then inspecting the
+#       table was rejected. It reaches the same conclusion after a write, so a wrong
+#       answer has to be undone with a privilege the loader roles deliberately lack.
+# WHY : Assumptions: the display code page defaults to cp037, so an EBCDIC extract needs
+#       no flag. `--code-page` overrides it, and `--record` selects a ONE-BASED ordinal --
+#       the same one-based convention the JCL uses, and the opposite of a Python slice.
+python -m carddemo_migration.cli decode-record --dataset ACCOUNT --source app/data/EBCDIC/AWS.M2.CARDDEMO.ACCTDATA.PS
+```
+
+Inspect the decoded money fields for a sign that survived and a decimal point in the expected place.
+A balance that should be negative and is not is the signature of the wrong sign convention.
+
+---
+
+
+## Step 1 - Stage the flat files to object storage
+
+Staging copies the extract bytes into the versioned dataset bucket without transcoding them. The
+bucket name is read from the environment's Terraform output; it is never written into this document.
+
+```bash
+# WHAT: resolve the dataset bucket and the extract prefix from the environment root's
+#       own outputs.
+# WHY : Assumptions: the bucket is published inside the aggregate `datasets` output
+#       rather than as a scalar root output, so it is read with `output -json` and a
+#       key selection. Reading the output instead of restating a default is what keeps a
+#       tfvars override from making this runbook silently wrong.
 ENVIRONMENT=dev
-EXTRACT_URI="$(terraform -chdir="infra/envs/${ENVIRONMENT}" \
-  output -json datasets | jq -r '.source_extract_uri')"
-STAGING_ROOT="$(terraform -chdir="infra/envs/${ENVIRONMENT}" \
-  output -json batch_orchestration | jq -r '.dataset_staging_root')"
-test "${EXTRACT_URI%/}" = "${STAGING_ROOT%/}" \
-  || echo "WARNING: the chain reads $EXTRACT_URI but the containers resolve $STAGING_ROOT"
+DATASET_BUCKET="$(terraform -chdir="infra/envs/${ENVIRONMENT}" output -json datasets | jq -r '.bucket_name')"
+EXTRACT_URI="$(terraform -chdir="infra/envs/${ENVIRONMENT}" output -json datasets | jq -r '.source_extract_uri')"
+```
+
+```bash
+# WHAT: copy the reference extracts into the bucket's source-extract prefix.
+# WHY : Assumptions: the copy is byte-preserving. EBCDIC sign bytes and packed nibbles
+#       must stay opaque until a field-aware decoder consumes them, so any text-mode
+#       conversion at this hop corrupts them before the decoder ever sees them.
+# WHY : Assumptions: syncing the parent directory preserves the subdirectory name, so
+#       app/data/EBCDIC/ lands beneath the extract prefix under the exact file names the
+#       layout catalogue records. Syncing each child separately would flatten that
+#       correspondence and the loaders would resolve nothing.
+aws s3 sync app/data/ "s3://${DATASET_BUCKET}/migration/source/" --no-follow-symlinks
+```
+
+```bash
+# WHAT: stage one dataset into the generation prefix the loaders and the nightly chain
+#       both read.
+# WHY : Assumptions: staging records the object's length and digest, so a later load can
+#       prove it is reading the bytes that were staged rather than merely a file with the
+#       right name. That is the property that makes a redriven step safe.
+python -m carddemo_migration.cli stage-dataset --dataset ACCOUNT
+```
+
+Staged objects land under the convention below. The bucket is versioned, with a lifecycle rule
+retaining **five noncurrent versions** — the direct analogue of the baseline's `LIMIT(5) SCRATCH` on
+its generation-dataset bases.
+
+```text
+# WHAT: the generation prefix convention.
+# WHY : Assumptions: retention is five noncurrent versions, so an operator can reach back
+#       exactly FIVE generations and no further. A sixth is not recoverable from this
+#       bucket, which is a real limit on how far a roll-back can reach through staged
+#       data rather than a configuration detail.
+s3://<dataset-bucket>/<domain>/<dataset>/dt=YYYY-MM-DD/gen=NNNN/
+```
+
+Resolving which generation a given run wrote, and reaching an earlier one, is the generation-lookup
+procedure in [batch-operations.md](batch-operations.md), which owns it.
+
+```bash
+# WHAT: list what is actually under the extract prefix.
+# WHY : Assumptions: the loaders compose one key per dataset by joining the layout's
+#       registered source-object name to this prefix, so the extracts must sit flat
+#       beneath it under those exact names. Listing is how a naming mismatch is found
+#       before a load reports a missing object.
 aws s3 ls "$EXTRACT_URI"
 ```
 
-Refactoring Rationale: this step used to instruct an operator to mount the extracts
-on a **filesystem path** inside the data-migration container, supplied as
-`CARDDEMO_DATASET_STAGING_ROOT` from a `dataset_staging_root` module input defaulting
-to `/mnt/carddemo-extracts`. That instruction had no receiver. The module provisions no
-filesystem and no volume, so nothing in the deployable package could satisfy it, and the
-nightly chain therefore depended on an out-of-band action that the migration plan's own
-end-to-end deployability constraint forbids. The filesystem default is withdrawn:
-`dataset_staging_root` survives only as an operator OVERRIDE, both environment roots
-leave it null, and the variable the container receives therefore resolves to
-`s3://<dataset bucket>/<dataset_source_extract_prefix>` — an object-storage location read
-through the same client and credentials the task already uses to write generations. The
-single-read-path property the mount was justified by is preserved: a branch downloads
-the object once to a temporary path, digests it there, and every later step of the
-branch reads that one local copy.
+---
 
-⚠ Refactoring Rationale — **there was briefly a SECOND landing prefix here, and it is
-withdrawn.** This section carried two syncs: the archival one above, and a flat copy of
-`app/data/EBCDIC/` into a separate prefix read only by the operator commands, on the
-grounds that those commands compose one key per dataset as `<prefix>/<source object>` and
-so need the extracts flat. The first half of that is true and is why the sync above lands
-`app/data/EBCDIC/` at `migration/source/EBCDIC/` — a prefix under which the extracts
-already are flat. The second half was not: two inputs for the same location,
-`dataset_source_prefix` (defaulting to `source-extracts`, refusing a trailing slash) and
-`dataset_inbox_prefix` (defaulting to `inbox`), were authored beside
-`dataset_source_extract_prefix` and neither was passed by any environment root, so a
-second sync addressed a prefix the chain never reads while the chain read one the second
-sync never filled. Four spellings of "where the seed extracts are" cannot be kept honest,
-so the duplicates went and the consumer stayed. One sync, one prefix, one root.
+## Step 2 - Decode
 
-⚠ The object-storage form is not a convenience. The staging task runs on Fargate from an
-image that ships no extract -- its Dockerfile copies only `src/` and `sql/`, so no
-baseline data is baked into a published layer -- and its task definition mounts no
-volume, so a filesystem path cannot be satisfied by the step that runs it. The task role
-already reads this bucket for the generations it writes, so the landing prefix needs no
-additional grant.
-
-Assumptions: populating the prefix is an **operator action** and this is the step that
-owns it. Refreshing an extract is therefore not an image rebuild.
-
-Assumptions: the source-extract prefix is deliberately NOT one of the ten generation
-prefixes the `s3-datasets` module provisions, and not one of its three reporting-artifact
-prefixes either. Every prefix in that inventory carries a five-noncurrent-version
-lifecycle rule, which is the `LIMIT(5) SCRATCH` analogue for output this package writes;
-this one holds input the operator writes, whose retention is the operator's decision and
-which is read once per execution. Attaching a generation-retention rule to it would delete
-the source before a rerun could read it, and would raise a prefix count three sibling
-documents publish.
+Decoding is not a separate pass over the data; it is what the readers do as they load. This step
+exists so the decode is **proven on one record before eleven files are committed to a database**.
 
 ```bash
-# WHAT: confirm the eleven registered seed extracts are present at the configured
-#       root, named as the registry expects, and each a whole number of records.
-# WHY : Assumptions: the registry is the authority for BOTH the file name and the
-#       record length, so this check derives every expectation from it rather than
-#       restating a table that could drift. A missing object or a non-zero remainder
-#       here is the same failure the staging branch would report, found before the
-#       nightly window rather than during it.
-# WHY : Assumptions: the root is read through the package's own two-form resolver, so
-#       this check accepts exactly what the commands accept -- an `s3://` prefix for the
-#       deployment, a directory for an operator over a checkout -- and cannot pass
-#       against a layout they would reject. Use the `aws s3 ls` above when what is in
-#       question is the prefix rather than the objects under it.
-export CARDDEMO_DATASET_STAGING_ROOT="${STAGING_ROOT}"
-python <<'PY'
-import os
-import sys
-from pathlib import Path
-
-import boto3
-
-from carddemo_migration import seed_datasets
-
-setting = os.environ["CARDDEMO_DATASET_STAGING_ROOT"]
-client = boto3.client("s3") if seed_datasets.object_store_location(setting) else None
-problems = 0
-for token in seed_datasets.seed_dataset_tokens():
-    descriptor = seed_datasets.seed_dataset(token)
-    located = seed_datasets.extract_location(descriptor, setting)
-    length = seed_datasets.record_length(descriptor)
-    if isinstance(located, Path):
-        path = Path(setting) / located
-        if not path.is_file():
-            print(f"MISSING  {token}: {path}")
-            problems += 1
-            continue
-        size = path.stat().st_size
-    else:
-        try:
-            size = client.head_object(Bucket=located.bucket, Key=located.key)["ContentLength"]
-        except client.exceptions.ClientError:
-            print(f"MISSING  {token}: {located.describe()}")
-            problems += 1
-            continue
-    remainder = size % length
-    status = "ok" if remainder == 0 else f"PARTIAL RECORD ({remainder} trailing bytes)"
-    problems += 1 if remainder else 0
-    print(f"{status:<32} {token} -> {descriptor.source_object} ({length}-byte records)")
-sys.exit(1 if problems else 0)
-PY
+# WHAT: decode one record of each unterminated extract that will be loaded.
+# WHY : Assumptions: this command reads one local file and touches no database, object
+#       store or credential, so it is safe to run before any boundary is crossed. It is
+#       the cheapest proof that the encoding, the framing and the decimal scale agree.
+# WHY : Assumptions: every value is printed as a string, deliberately, so that inspecting
+#       a decode cannot itself re-read a monetary amount as a floating-point number.
+python -m carddemo_migration.cli decode-record --dataset SECUSER --source app/data/EBCDIC/AWS.M2.CARDDEMO.USRSEC.PS
+python -m carddemo_migration.cli decode-record --dataset TRANTYPE --source app/data/EBCDIC/AWS.M2.CARDDEMO.TRANTYPE.PS
 ```
 
-## Create Schemas, Reporting Views, Runtime Delete Grants and Verification Surfaces
+The credential span of the user record decodes to a withheld marker rather than to its bytes, because
+the target schema declares no column for it. That is the intended reach, not a shortfall.
 
-Set `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and `PGPASSWORD` through an
-approved secret-delivery channel. Point `PGSSLROOTCERT` at the pinned CA bundle.
-
-Four SQL artifacts ship here and their order is **not interchangeable**.
-`V0__schemas_and_roles.sql` runs before any table exists, so it can only express
-privileges schema-wide or as default privileges; `V2__runtime_delete_grants.sql`
-names individual tables and `V3__verification_surfaces.sql` creates views over
-them, so neither can run until the owning services' Flyway migrations have created
-those tables. The full sequence is the one recorded in
-[data-model-and-schema-mapping.md](../architecture/data-model-and-schema-mapping.md),
-extended by one step:
-`V0` -> each owning service's Flyway migration -> `V1__reporting_views.sql` ->
-`V2__runtime_delete_grants.sql` -> `V3__verification_surfaces.sql` -> `V0` once
-more.
-
-### The one migration that constrains this order in the other direction
-
-`transaction-service`'s `V3__ledger_bytewise_collation.sql` recollates
-`ledger.transactions.transaction_id` to `"C"`, and PostgreSQL refuses to alter the
-type or collation of a column a view selects. Two of the views created by
-`V1__reporting_views.sql` select that column — `reporting.v_report_transactions` and
-`reporting.v_statement_transactions` — so the sequence above is a **precondition**
-for that migration, not merely a convention: on a first deployment the service's
-Flyway history runs before any view exists and the migration applies cleanly.
-
-On an environment that is already past the view step and has **not** yet applied
-that migration, the service will refuse to start and the migration will report the
-remedy rather than the engine's own message. The remedy is three steps, in this
-order:
+This command frames strictly by record length, which makes it a direct test of the contract above. It
+therefore **refuses the line-terminated ASCII twins**, and the refusal is worth seeing once because it
+is the framing gate doing its job:
 
 ```bash
-# WHAT: drop only the two views that select the ledger key, apply the migration by
-#       starting the service, then recreate the views WITH their grants.
-# WHY : the views are recreated by re-running the script that owns them rather than
-#       by hand, because CREATE VIEW does not restore the grants that script issues
-#       to carddemo_reporting_owner and carddemo_reporting -- a hand-recreated view
-#       would exist and be readable by nobody.
-psql -v ON_ERROR_STOP=1 -c 'DROP VIEW reporting.v_report_transactions, reporting.v_statement_transactions;'
-
-# Start transaction-service so its Flyway history advances; the migration rewrites
-# ledger.transactions and rebuilds pk_transactions under the new collation.
-
-psql -v ON_ERROR_STOP=1 -f data-migration/sql/V1__reporting_views.sql
+# WHAT: attempt the same decode against the line-terminated ASCII form.
+# WHY : Assumptions: the ASCII twins carry line terminators, so their sizes do NOT factor
+#       by the record length -- trantype.txt is 433 bytes against a 60-byte record, leaving
+#       13 over. The command reports the remainder and exits 8 rather than mis-framing, and
+#       the loader's ASCII path is what reads that form. Seeing the refusal here is how an
+#       operator learns to tell a terminated file apart from a corrupt one.
+python -m carddemo_migration.cli decode-record --dataset TRANTYPE --source app/data/ASCII/trantype.txt
 ```
 
-Verify the outcome from the catalogue rather than from the absence of an error,
-because the ordering guarantee is a property of the column and not of the run:
+What to look for, in order:
+
+- **No `U+FFFD` replacement characters in any text field.** Their presence means the decode reached
+  the record rather than the field, per Constraint one. Stop.
+- **Signs survived.** A field whose source value is negative decodes negative. If every value is
+  positive, suspect the sign convention before suspecting the data.
+- **The decimal point sits two digits from the right** on every money field. A value inflated by
+  exactly one hundred is the implied-decimal defect from Constraint two.
+- **Field boundaries are clean.** A name field ending in a digit, or an identifier with a trailing
+  letter, is the signature of a one-byte offset shift.
+
+---
+
+## Step 3 - Bulk-load per schema, in dependency order
+
+### The eight schemas
+
+`data-migration/sql/V0__schemas_and_roles.sql` bootstraps eight schemas and the service roles behind
+them.
+
+| Schema | Owns |
+|:---|:---|
+| `auth` | user identity rows; deliberately **no** password column |
+| `account` | accounts, customers, card cross-reference |
+| `card` | cards |
+| `ledger` | transactions, daily transactions, rejects, category balances |
+| `reference` | transaction types and categories, disclosure groups, lookup data |
+| `batch` | the durable step ledger and the job repository |
+| `authorization` | pending-authorization summary and detail, fraud rows |
+| `reporting` | **no tables at all** — read-only cross-schema views under a `SELECT`-only role |
 
 ```bash
-# WHAT: confirm the ledger key is collated "C" and that its neighbour is untouched.
-# WHY : pg_attribute is read and NOT pg_indexes -- once a column carries a
-#       collation, an index over it stops printing a COLLATE clause of its own, so an
-#       index-text check passes on the wrong schema and fails on the right one.
-psql -v ON_ERROR_STOP=1 -c "SELECT att.attname, coalesce(coll.collname,'default') AS collation
-  FROM pg_attribute att
-  JOIN pg_class rel ON rel.oid = att.attrelid
-  JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
-  LEFT JOIN pg_collation coll ON coll.oid = att.attcollation
- WHERE nsp.nspname = 'ledger' AND rel.relname = 'transactions'
-   AND att.attname IN ('transaction_id','card_num') ORDER BY 1;"
-# Expect: card_num | default   and   transaction_id | C
+# WHAT: apply the schema and role bootstrap.
+# WHY : Assumptions: ON_ERROR_STOP is set so a partially applied security model cannot be
+#       mistaken for a successful boundary. Without it psql continues past a failed GRANT
+#       and exits zero, leaving a role with privileges nobody granted deliberately.
+# WHY : Assumptions: V0 is idempotent by construction, so re-running it is part of the
+#       documented sequence rather than a workaround.
+psql --set ON_ERROR_STOP=on -f data-migration/sql/V0__schemas_and_roles.sql
 ```
 
-### An applied migration whose file has changed: `flyway repair`
+The batch role holds **narrowly scoped** cross-schema write grants on the `ledger` and `account`
+objects and nothing wider. The reason is a single unit of work: transaction posting commits the
+transaction, the category balance and the account together, as `app/cbl/CBTRN02C.cbl` does, and the
+grant is what keeps that one ACID commit.
 
-A service refuses to start with
-`FlywayValidateException: Migration checksum mismatch for migration version <n>` when
-the bytes of a migration it already applied are not the bytes it resolves now. Flyway
-checksums the **whole file**, so this happens for a change to comment text alone —
-which is how it happened here: `services/reference-service/.../V1__reference.sql` was
-rewritten for comment style after it had been applied, with byte-identical executable
-SQL, and every database holding the earlier bytes then refused startup while the
-schema itself was entirely correct.
+Alternatives Considered: a saga with compensating reversals was evaluated and rejected. It would
+replace one atomic commit with a sequence of committed steps, which makes states such as a posted
+transaction with an unposted balance **observable** — states the baseline never exposes. The golden
+masters would correctly flag those as parity failures, so the scoped grant is both the lower-risk and
+the more faithful choice. Do not replace it with schema-wide privileges.
 
-The standing rule is therefore that **an applied migration file is immutable** and a
-further change goes into a new migration; each service's test tree pins the checksum
-of every script it ships so that an edit fails a build rather than a deployment.
-`repair` is the remedy for the environments that already hold superseded bytes, and it
-has one precondition that must be checked first, because `repair` realigns the stored
-checksum **without re-running anything**:
+**Note**: the `authorization` schema consolidates data the baseline split across IMS DL/I segments
+and Db2 tables joined by two-phase commit. In the target these live in one PostgreSQL schema and
+**two-phase commit is eliminated rather than emulated**. Its packed-decimal money is decoded at the
+ETL edge.
+
+### Load order
+
+Referenced tables load before referencing ones. `reference` first, then `account`, then `card`, then
+`ledger`.
 
 ```bash
-# WHAT: prove the executable SQL is unchanged between the applied revision and the
-#       resolved one BEFORE realigning any checksum.
-# WHY : Assumptions: repair rewrites flyway_schema_history to accept the current file
-#       and applies no statement, so if the SQL did change, repair records a schema the
-#       database does not have and every later migration builds on a false premise.
-#       Comments are stripped from both sides because a comment-only difference is the
-#       one case repair is the right answer to; a non-empty diff here means the change
-#       belongs in a NEW migration instead.
-git show "<applied-revision>:<path-to-migration>" | grep -vE '^\s*--' | grep -v '^$' > /tmp/applied.sql
-grep -vE '^\s*--' "<path-to-migration>" | grep -v '^$' > /tmp/resolved.sql
-diff /tmp/applied.sql /tmp/resolved.sql && echo "SQL identical - repair is safe"
+# WHAT: load the seed datasets smallest-reference-first, one command per dataset.
+# WHY : Assumptions: `reference.transaction_categories` carries a foreign key to
+#       `reference.transaction_types` with ON DELETE RESTRICT, and `account.card_xref` is
+#       what every later lookup joins through. A load that violates declared referential
+#       integrity FAILS at the constraint rather than silently producing orphans, which is
+#       the desired behaviour -- so the order is what decides whether a failure names the
+#       missing row or merely the constraint that noticed.
+# WHY : Assumptions: one command per line, never chained. An operator has to be able to
+#       see which load failed, and a chained one-liner hides that.
+# WHY : Assumptions: SECUSER names the EBCDIC tree because that is its only form. Its
+#       password span is read as bytes and discarded -- `auth.users` declares no column
+#       for it -- so no credential is loaded from it.
+python -m carddemo_migration.cli load-dataset --dataset TRANTYPE --encoding ascii
+python -m carddemo_migration.cli load-dataset --dataset TRANCAT --encoding ascii
+python -m carddemo_migration.cli load-dataset --dataset DISGROUP --encoding ebcdic
+python -m carddemo_migration.cli load-dataset --dataset SECUSER --encoding ebcdic
+python -m carddemo_migration.cli load-dataset --dataset CUSTOMER --encoding ascii
+python -m carddemo_migration.cli load-dataset --dataset ACCOUNT --encoding ebcdic
+python -m carddemo_migration.cli load-dataset --dataset XREF --encoding ascii
+python -m carddemo_migration.cli load-dataset --dataset CARD --encoding ascii
+python -m carddemo_migration.cli load-dataset --dataset TCATBAL --encoding ascii
+python -m carddemo_migration.cli load-dataset --dataset DALYTRAN --encoding ascii
+```
+
+**Note**: where a dataset ships in both encodings the two conversions are not always byte-equal.
+`data-migration/README.md` records that the nine dual-form datasets agree field for field at every
+value except two, one of which is the disclosure-group interest rate that decides interest. Load and
+verify from the **same** form, and prefer the form the package treats as authoritative for that
+dataset.
+
+The eleventh layout, `TRAN`, is loaded only on a cutover that supplies a real transaction master,
+because the repository ships no populated one.
+
+```bash
+# WHAT: load the transaction master, ONLY when a cutover supplies an extract for it.
+# WHY : Assumptions: `ledger.transactions` has a second writer -- the posting job inserts
+#       into it -- so this load merges on `transaction_id` rather than failing on the
+#       primary key. That is what lets a redriven staging step re-enter without
+#       duplicating rows.
+python -m carddemo_migration.cli load-dataset --dataset TRAN --source "<extract-location>" --encoding ebcdic
 ```
 
 ```bash
-# WHAT: realign the stored checksums for one context's history, as that context's
-#       migrator principal, then start the service so it validates and proceeds.
-# WHY : Assumptions: the migrator credential is used and not the runtime one -- the
-#       runtime role holds no privilege on flyway_schema_history at all, which is
-#       deliberate and is why repair is an operator step rather than something the
-#       service can do for itself at startup. Trade-offs: an automatic
-#       repair-before-migrate in the service would remove this step and is NOT adopted:
-#       it would accept a genuine SQL change as silently as a comment change, and the
-#       diff above is the only thing that tells the two apart.
-export PGSSLMODE=verify-full
-export PGSSLROOTCERT=/opt/carddemo-pg-certs/ca.pem
-flyway -url="jdbc:postgresql://${PGHOST}:${PGPORT}/${PGDATABASE}" \
-       -user="carddemo_<context>_migrator" -password="${MIGRATOR_PASSWORD}" \
-       -schemas=<context> -defaultSchema=<context> \
-       -locations="filesystem:services/<context>-service/src/main/resources/db/migration" \
-       repair
-```
-
-```bash
-# WHAT: confirm the realignment from the history table, not from the absence of an
-#       error, then start the service.
-# WHY : Assumptions: the stored checksum is what startup compares, so it is the value
-#       to read back; a successful repair run says nothing about which rows it touched.
-psql -v ON_ERROR_STOP=1 -c "SELECT version, script, checksum, success
-  FROM <context>.flyway_schema_history ORDER BY installed_rank;"
-```
-
-`V3` is what makes the two whole-schema verification queries below runnable by the
-least-privilege read-only role. It publishes the row counts and the money totals as
-aggregate-only views owned by the schema owners, and grants `SELECT` on those views
-alone to `carddemo_reporting`. Refactoring Rationale: before it existed, those two
-queries read eleven base tables directly, so running them required a principal
-holding row-level read access to every balance, card number and identity record in
-the system — and `money_totals.sql` named the **write-capable** `carddemo_batch` as
-the role to use. A verification step must not be able to modify what it verifies,
-and its execution must not itself be a disclosure.
-
-```bash
-# WHAT: apply the role/schema bootstrap, then -- only after every owning service has
-#       run its Flyway migration -- the masked reporting views and the table-specific
-#       runtime DELETE grants.
-# WHY : Assumptions: ON_ERROR_STOP prevents a partially applied security model
-#       from being mistaken for a successful load boundary.
-export PGSSLMODE=verify-full
-export PGSSLROOTCERT=/opt/carddemo-pg-certs/ca.pem
-psql -v ON_ERROR_STOP=1 -f data-migration/sql/V0__schemas_and_roles.sql
-
-# Each owning service now applies its own Flyway migration under its
-# carddemo_<context>_migrator credential -- see Step 4 of deploy.md. Both files
-# below resolve object names at execution time and fail loudly, not silently, if
-# that step has not happened.
-psql -v ON_ERROR_STOP=1 -f data-migration/sql/V1__reporting_views.sql
-psql -v ON_ERROR_STOP=1 -f data-migration/sql/V2__runtime_delete_grants.sql
-
-# WHY : Assumptions: V3 must run as a principal able to SET ROLE to BOTH
-#       carddemo_auth_owner and carddemo_reporting_owner -- it creates one view under
-#       each, and each half asserts its own owner before creating anything. A view
-#       created under the wrong owner reads its base tables with that owner's
-#       privileges, which would silently widen the boundary the views exist to narrow.
-psql -v ON_ERROR_STOP=1 -f data-migration/sql/V3__verification_surfaces.sql
-
-# WHY : Assumptions: V0 is idempotent by construction, so the closing pass is part of
-#       the documented sequence rather than a workaround -- its to_regclass-guarded
-#       conditional grants take their IF branch once the tables exist.
-psql -v ON_ERROR_STOP=1 -f data-migration/sql/V0__schemas_and_roles.sql
-```
-
-## Verify Security Contracts
-
-```bash
-# WHAT: verify alternate loader identities, masked reporting-view privileges, and
-#       that DELETE is held on exactly the three tables that have a contracted
-#       delete operation and on no other table in any of the eight schemas.
-# WHY : Assumptions: successful connection by name is insufficient; the checks
-#       prove role attributes, membership, source-table denial, and view masking.
-psql -v ON_ERROR_STOP=1 \
-  -f data-migration/sql/verify/alternate_database_users.sql
-psql -v ON_ERROR_STOP=1 \
-  -f data-migration/sql/verify/reporting_view_privileges.sql
-# WHY : Trade-offs: this check returns rows ONLY on failure, matching the two
-#       sibling checks, so an empty result set is the pass and a non-empty one names
-#       both the role and the table it either cannot reach or should not reach. The
-#       alternative -- a boolean pass/fail -- was rejected because it would not say
-#       WHICH grant drifted, which is the only thing an operator can act on.
-psql -v ON_ERROR_STOP=1 \
-  -f data-migration/sql/verify/runtime_delete_grants.sql
-```
-
-## Load Source Records
-
-Each invocation loads **one** dataset into the one schema that owns it, as a
-single committed unit of work. `--dataset` accepts either spelling of the dataset --
-the record-layout identifier `list-datasets` reports, or the orchestrator token the
-Terraform `seed_datasets` list carries -- and this sequence uses the layout identifier
-because it names a local extract from `app/data` alongside it. `--encoding` is required
-and is never inferred.
-
-Assumptions: `--source` is named EXPLICITLY at every line below, and that is a property
-of this procedure rather than of the command. The flag is optional: omitted, it resolves
-to the dataset's newest STAGED generation, which is what the nightly chain relies on and
-what a cutover from staged extracts should use. It is named here because this sequence
-loads from the reference corpus in `app/data`, which has never been staged and carries no
-generation to resolve.
-
-Refactoring Rationale: this section and the verification section beneath it each
-appeared **three times**, byte-identically, between here and the cutover gate. The
-repetition carried no distinction — not a per-environment pass, not a retry, not a
-dry run — so the only thing it could tell an operator was that the same commands
-were to be issued three times, which is wrong for a load that is not idempotent:
-`load-dataset` commits per dataset, and a second run of `ACCOUNT` against a loaded
-schema fails on the primary key rather than reloading. One sequence and one gate is
-therefore the corrected procedure, not merely the shorter one.
-
-Refactoring Rationale: this sequence loaded FIVE datasets and now loads TEN. It was
-written when the loader declared five targets and was not revised as the loader grew
-to eleven, so an operator following it verbatim migrated the reference tables, the
-cross-reference and the account master and left the card master, the customer master,
-the security users, the daily feed and the category balances empty — while every
-verification pass below reported green, because a pass compares a source it was pointed
-at against a table and cannot know a dataset was never named. The count is stated in the
-comment so the list and its description cannot drift apart again.
-
-```bash
-# WHAT: load ten of the eleven records, smallest reference data first. The eleventh,
-#       TRAN, is handled separately below because no seed extract ships for it.
-# WHY : Assumptions: the reference tables are loaded before the account tables
-#       because `reference.transaction_categories` carries a foreign key to
-#       `reference.transaction_types` with ON DELETE RESTRICT, and
-#       `account.card_xref` is what every later lookup joins through. Loading in
-#       this order means a referential failure names the row that is missing
-#       rather than the constraint that noticed.
-# WHY : Trade-offs: `--encoding ascii` is used for the nine with an ASCII twin because
-#       that tree is the authoritative form for them; the EBCDIC twin is loadable by
-#       naming the other path and encoding, which is why the flag is required
-#       rather than defaulted. A sniffed encoding would read an all-ASCII EBCDIC
-#       extract as text and decode plausible wrong values.
-# WHY : Assumptions: SECUSER is the one master with no ASCII counterpart, so it is the
-#       one line here that names the EBCDIC tree. Its password span is read as bytes and
-#       discarded — `auth.users` declares no column for it — so no credential is loaded.
-python -m carddemo_migration.cli load-dataset \
-  --dataset TRANTYPE --source app/data/ASCII/trantype.txt --encoding ascii
-python -m carddemo_migration.cli load-dataset \
-  --dataset TRANCAT  --source app/data/ASCII/trancatg.txt --encoding ascii
-python -m carddemo_migration.cli load-dataset \
-  --dataset DISGROUP --source app/data/ASCII/discgrp.txt  --encoding ascii
-python -m carddemo_migration.cli load-dataset \
-  --dataset CUSTOMER --source app/data/ASCII/custdata.txt --encoding ascii
-python -m carddemo_migration.cli load-dataset \
-  --dataset ACCOUNT  --source app/data/ASCII/acctdata.txt --encoding ascii
-python -m carddemo_migration.cli load-dataset \
-  --dataset XREF     --source app/data/ASCII/cardxref.txt --encoding ascii
-python -m carddemo_migration.cli load-dataset \
-  --dataset CARD     --source app/data/ASCII/carddata.txt --encoding ascii
-python -m carddemo_migration.cli load-dataset \
-  --dataset DALYTRAN --source app/data/ASCII/dailytran.txt --encoding ascii
-python -m carddemo_migration.cli load-dataset \
-  --dataset TCATBAL  --source app/data/ASCII/tcatbal.txt  --encoding ascii
-python -m carddemo_migration.cli load-dataset \
-  --dataset SECUSER  --source app/data/EBCDIC/AWS.M2.CARDDEMO.USRSEC.PS --encoding ebcdic
-```
-
-```bash
-# WHAT: the same ten loads on a deployment, driven by the staged generations.
-# WHY : Assumptions: this is the form the nightly chain issues -- one dataset token and
-#       an encoding, with no path anywhere -- so an operator reproducing a chain failure
-#       by hand issues exactly what the failing state issued. Each load reads the newest
-#       generation the staging step wrote for that dataset and verifies it against the
-#       digest recorded on that object, so it is provably reading what was staged.
-# WHY : Assumptions: the corpus is EBCDIC here where the sequence above is mostly ASCII,
-#       because every staged generation holds an `AWS.M2.CARDDEMO.*.PS` extract; the
-#       ASCII twins exist only in the checkout.
-for dataset in accounts cards customers card_xref daily_transactions \
-               disclosure_groups transaction_category_balances \
-               transaction_types transaction_categories users; do
-  python -m carddemo_migration.cli load-dataset --dataset "$dataset" --encoding ebcdic
-done
-```
-
-**The eleventh record, `TRAN`, only when a real extract exists.** No `TRANSACT`
-dataset ships in either tree, so there is nothing for `--source` to name on a
-corpus-only run and the command below is skipped entirely; `ledger.transactions` is
-then filled by the posting job from `ledger.daily_transactions`, and
-`sql/verify/row_counts.sql` reports it against a NULL baseline rather than a count. On a
-cutover from a production extract, run it with the path the extract was staged to.
-
-```bash
-# WHAT: load the transaction master, ONLY on a cutover that supplies a real extract.
-# WHY : Assumptions: this load is safe to re-run as well as to skip. `ledger.transactions`
-#       has a second writer -- the posting job inserts into it -- so the loader merges on
-#       `transaction_id` instead of failing on the primary key, which is what lets a
-#       redriven staging step re-enter without duplicating rows.
-# WHY : Refactoring Rationale: this note used to end "every other master above is
-#       single-writer and a second run there is expected to FAIL on its key rather than
-#       silently do nothing", and that is no longer what happens. The seven single-writer
-#       masters are now guarded by a row count taken in the same transaction as the COPY: a
-#       second run finds the table populated, DECLINES, prints `declined <DATASET> ...`
-#       naming the count already there, and exits 0. The change was made because a commit
-#       can be AMBIGUOUS -- committed on the server, unacknowledged to the client -- so a
-#       retry is the normal case rather than an operator error, and two of the seven
-#       behaved badly on it: a primary-key violation reads as a decode fault, and
-#       `ledger.daily_transactions`, whose key is generated and whose source carries no
-#       natural key, would have accepted the rows and DOUBLED the daily feed. `declined` is
-#       therefore a success to read as "already loaded", never as "loaded now".
-# WHY : Assumptions: the source is named explicitly here for two independent reasons, and
-#       both are measured. Omitting it resolves the newest staged generation of the
-#       `transactions` family, whose registered extract is
-#       AWS.M2.CARDDEMO.DALYTRAN.PS.INIT -- the single 350-byte record
-#       app/jcl/TRANFILE.jcl primes the cluster from, whose unpopulated category code is
-#       four NUL bytes and which therefore does not decode as a whole transaction. And
-#       `AWS.M2.CARDDEMO.TRANSACT.PS` is NOT one of the thirteen extracts in
-#       `app/data/EBCDIC` -- the repository ships the daily feed and the masters, not a
-#       populated transaction master -- which is why this step is conditional at all.
-# WHY : Assumptions: `EXTRACT_LOCATION` accepts either form `--source` accepts, so one
-#       command serves both callers: a directory for an operator over a checkout, or an
-#       `s3://` URI for a cutover extract delivered into the dataset bucket, which the
-#       command fetches and checks against the object's own recorded length and digest
-#       before decoding a record. It defaults to the repository's own EBCDIC directory,
-#       which every other command in this section reads by its literal path, so the two
-#       cannot disagree about where the corpus is.
-EXTRACT_LOCATION="${EXTRACT_LOCATION:-app/data/EBCDIC}"
-python -m carddemo_migration.cli load-dataset \
-  --dataset TRAN --source "${EXTRACT_LOCATION%/}/AWS.M2.CARDDEMO.TRANSACT.PS" --encoding ebcdic
-```
-
-## Reconcile the Transaction-Identifier Allocator
-
-Run this after the **last** load into `ledger.transactions` and **before** writes are
-enabled. It is not optional on a cutover, and it is a no-op on a corpus-only
-deployment, so it belongs in the sequence unconditionally rather than in a
-decision.
-
-```bash
-# WHAT: advance ledger.transaction_id_seq past every sequence-format identifier the
-#       transaction master now holds, and report both allocator positions.
-# WHY : Assumptions: the allocator's STARTING position is derived by its own migration,
-#       services/transaction-service/src/main/resources/db/migration/
-#       V2__ledger_transaction_id_allocator.sql, from max(transaction_id) over
-#       ledger.transactions -- and on a cutover that migration runs BEFORE this runbook
-#       loads the extract, against an empty table, so it positions the allocator at 1.
-#       The load then writes the real master with its own identifiers. The first
-#       interactive transaction add or bill payment after writes are enabled therefore
-#       allocates an identifier the table already holds and fails on pk_transactions --
-#       and so does the next, for as many allocations as the loaded range is wide.
-# WHY : Trade-offs: this runs as the ledger MIGRATION login, not the service login. V0
-#       grants each service role USAGE, SELECT on its schema's sequences, which is
-#       nextval and currval; setval needs UPDATE, which only the NOLOGIN owner holds.
-#       Granting the service role UPDATE was rejected: it is a permanent privilege on a
-#       long-lived principal for a one-time step, and it is the dangerous direction --
-#       a role that can setval can REWIND the allocator and make the service reissue
-#       identifiers it has already stored.
-# WHY : Assumptions: the step only ever ADVANCES the allocator, so it is safe to re-run
-#       and safe to leave in a script. If writes have already been enabled, allocations
-#       have happened, and a rewind would reissue every identifier allocated since; a
-#       run against an allocator already past the data prints "nothing to reconcile" and
-#       issues no setval at all.
+# WHAT: advance the transaction-identifier allocator past every identifier the loaded
+#       master already holds.
+# WHY : Assumptions: the allocator is positioned by its own migration from the maximum
+#       identifier present, and on a cutover that migration runs BEFORE this load, against
+#       an empty table. Without this step the first interactive transaction add allocates
+#       an identifier the table already holds and fails on the primary key -- and so does
+#       the next, for as many allocations as the loaded range is wide.
+# WHY : Assumptions: the step only ever ADVANCES the allocator, so it is safe to re-run.
+#       A rewind would make the service reissue identifiers it has already stored.
 python -m carddemo_migration.cli reconcile-sequences
 ```
 
-Read the printed line before enabling writes. `advanced from 1 to 683581 past a
-largest stored identifier of 683580` means the hazard was present and is now closed;
-`already issues 900001 ... nothing to reconcile` means it was not present. A non-zero
-exit means the allocator could **not** be reconciled — do not enable writes, because
-the first interactive write will fail on the primary key.
+---
 
-## Run All Three Verification Passes
+## Step 4 - Verify, three ways
 
-```bash
-# WHAT: run every pass for every loaded dataset. All three are mandatory.
-# WHY : Assumptions: the three catch different defects and none subsumes another.
-#       Row counts catch a load that stopped early or ran twice; the checksum
-#       catches a corrupted field where the counts agree; money parity catches a
-#       sign overpunch or a misplaced decimal point where both the counts and the
-#       field bytes agree. A load reported as verified on fewer than three is not
-#       verified.
-# WHY : Assumptions: a non-zero exit is the gate. Each pass exits 8 on a
-#       difference and prints the comparison line, so `set -e` stops at the first
-#       failing dataset with the evidence on standard output.
-# WHY : Refactoring Rationale: ⚠️ this step is now ONE invocation of `verify-all`, and it
-#       has been wrong twice before. It first covered the same FIVE datasets the load
-#       sequence did, so five arrived unverified. It was then corrected into loops that ran
-#       all three passes over the three reference records and only two passes over the
-#       other seven, because the checksum pass could not digest a `BIGINT`, `DATE`,
-#       `SMALLINT`, `TIMESTAMP` or `UUID` column -- it raised rather than reporting a
-#       difference. That gap is closed: the pass canonicalises by value class, so all three
-#       passes now serve every seeded record, and the scoping that existed only to route
-#       around it is withdrawn with it.
-# WHY : Assumptions: the pass also pairs the two sides by the target's own key rather than by
-#       position, so a sequential extract such as DALYTRAN is no longer reported as wholly
-#       different for arriving in a different order from the read-back. That is what makes a
-#       single aggregate invocation safe over a population mixing keyed and sequential
-#       targets.
-# WHY : Trade-offs: the aggregate command is used rather than a shell loop over the three
-#       verbs. A loop is what this step was, and its failure mode is that "verified" comes
-#       to mean whatever the loop happened to contain -- which is exactly how both earlier
-#       forms of this step went wrong. A `set -e` that stops mid-group leaves a subset
-#       verified and no record of which subset. `verify-all` runs the three in the fixed
-#       order 1, 2, 3 per dataset, stops at the first failure, and has no option that can
-#       skip a pass or continue past one, so a zero exit means every covered dataset was
-#       verified three ways.
-# WHY : Assumptions: the checksum pass over CUSTOMER and CARD needs the SAME key-management
-#       grant their loads needed, and nothing more. The source side is projected through the
-#       loader's own `prepare_record`, which projects every mapped column including the two
-#       sealed ones, so preparing either record without a cipher is refused -- even though the
-#       sealed columns are excluded from the digest and no ciphertext is ever compared. The
-#       grant is already exported at this point in the runbook because those two datasets were
-#       loaded above; if the loads ran in a different session, re-export
-#       CARDDEMO_SECURITY_CUSTOMER_IDENTIFIER_KEY_ID and CARDDEMO_SECURITY_CVV_KEY_ID before
-#       this command. ⚠️ Those are the two names `config.py` reads; a draft of this note named
-#       them CARDDEMO_CUSTOMER_IDENTIFIER_KEY_ID and CARDDEMO_CARD_VERIFICATION_VALUE_KEY_ID,
-#       which nothing reads, so exporting those two leaves the refusal in place and reads as a
-#       package defect rather than a missing grant.
-set -e
-python -m carddemo_migration.cli verify-all --source-root app/data/EBCDIC
-```
+Verification is a first-class step, not a formality. A load that "succeeded" without a money-total
+check is not evidence of anything.
 
-`verify-all` takes its coverage from one of two sources, and which one was used is
-what an operator has to be able to state afterwards.
-
-- **The registry form**, above. Given no `--manifest`, the gate covers the whole
-  seed-dataset registry minus the layouts that ship no committed extract — ten of the
-  eleven records, every one except `TRAN`. It takes no `--dataset`, so it **cannot** be
-  narrowed. This is the **cutover** gate rather than a nightly one, and the distinction
-  matters when reproducing a failure. The nightly chain no longer runs `verify-all`: it
-  verifies **per dataset**, inside each `StageSeedDatasets` branch, where
-  `refresh-dataset` runs the same three passes over the one dataset it just loaded. So an
-  operator reproducing a *chain* failure narrows to the dataset the failing branch names,
-  whereas this whole-corpus form is what proves a cutover before the first nightly run.
-  Assumptions: a whole-corpus gate belongs here and not mid-chain because its two
-  committed queries compare **across** datasets, and the chain refreshes datasets
-  independently and concurrently — a cross-dataset assertion inside the `Map` would
-  depend on branch ordering. `--source-root` is named here and omitted in the deployment, where the task
-  definition already carries `CARDDEMO_DATASET_STAGING_ROOT`; pointing it at the
-  checked-out corpus is what lets a source-tree operator run the gate at all, and the
-  extracts it reads are the EBCDIC images, because those are the ones whose names the
-  registry knows.
-- **The manifest form**, below. A delivery whose bytes are not laid out under one root,
-  or which mixes the two corpora, is declared explicitly instead. Coverage is then
-  exactly what the manifest declares — which is why gate condition 2 asks an operator who
-  used this form to confirm the manifest carried every dataset the cutover loaded.
+| Check | Module | What it catches that the others do not |
+|:---|:---|:---|
+| **Row counts per dataset** | `verify/row_counts.py` with `sql/verify/row_counts.sql` | Truncated input, a skipped file, a partially committed load, a load that ran twice |
+| **Record checksums** | `verify/checksum.py` | Field-level corruption in rows that are all present and correctly counted |
+| **Money-total parity against the source** | `verify/money_parity.py` with `sql/verify/money_totals.sql` | Sign-convention errors, implied-decimal scale errors, and packed-against-zoned confusion — **none of which change the row count, and none of which a checksum over decoded text will necessarily flag** |
 
 ```bash
-# WHAT: the same gate, over an explicitly declared population.
-# WHY : Assumptions: the manifest is written HERE rather than shipped in the distribution,
-#       because it declares where a delivery's bytes are and that is an operator fact --
-#       the package holds no dataset-to-path mapping, deliberately. A relative source
-#       resolves against the manifest's own directory, so this one is written beside the
-#       repository root it names paths from.
-# WHY : Assumptions: SECUSER is declared from the EBCDIC tree because that is its only
-#       form -- `app/data/ASCII/usrsec.txt` does not exist -- and the manifest carries the
-#       seed form per entry precisely so one invocation can span both trees, which the
-#       loops this replaces could not.
-# WHY : Assumptions: DISGROUP and ACCOUNT are ALSO declared from the EBCDIC tree, and those
-#       two specifically. `data-migration/README.md` records that the nine datasets shipping
-#       in both encodings agree field for field at every value except exactly two -- DISCGRP
-#       record 34's `DIS-INT-RATE` (15.00 against 0.00, the `DEFAULT` fallback rate that
-#       decides interest) and ACCTDATA record 49's `ACCT-ADDR-ZIP` -- and that this package
-#       treats EBCDIC as authoritative wherever both forms exist. The load above reads
-#       `app/data/EBCDIC`, so declaring those two from the ASCII twins made this example
-#       report a checksum DIFFER on a corpus divergence, which reads as a failed load rather
-#       than as the difference between two conversions of one extract. The other eight stay
-#       ASCII, so the example still demonstrates one manifest spanning both trees.
-# WHY : Trade-offs: the checksum pass over SECUSER digests the loaded columns only, and the
-#       credential is not among them -- the target schema has no column for it, by design. So
-#       this verifies the identity rows and says nothing about a secret, which is the intended
-#       reach rather than a shortfall.
-set -e
-
-cat > carddemo-verification-manifest.json <<'MANIFEST'
-{
-  "datasets": [
-    {"dataset": "TRANTYPE", "source": "app/data/ASCII/trantype.txt",  "encoding": "ascii"},
-    {"dataset": "TRANCAT",  "source": "app/data/ASCII/trancatg.txt",  "encoding": "ascii"},
-    {"dataset": "DISGROUP", "source": "app/data/EBCDIC/AWS.M2.CARDDEMO.DISCGRP.PS",
-     "encoding": "ebcdic"},
-    {"dataset": "CUSTOMER", "source": "app/data/ASCII/custdata.txt",  "encoding": "ascii"},
-    {"dataset": "ACCOUNT",  "source": "app/data/EBCDIC/AWS.M2.CARDDEMO.ACCTDATA.PS",
-     "encoding": "ebcdic"},
-    {"dataset": "XREF",     "source": "app/data/ASCII/cardxref.txt",  "encoding": "ascii"},
-    {"dataset": "CARD",     "source": "app/data/ASCII/carddata.txt",  "encoding": "ascii"},
-    {"dataset": "DALYTRAN", "source": "app/data/ASCII/dailytran.txt", "encoding": "ascii"},
-    {"dataset": "TCATBAL",  "source": "app/data/ASCII/tcatbal.txt",   "encoding": "ascii"},
-    {"dataset": "SECUSER",  "source": "app/data/EBCDIC/AWS.M2.CARDDEMO.USRSEC.PS",
-     "encoding": "ebcdic"}
-  ]
-}
-MANIFEST
-
-python -m carddemo_migration.cli verify-all \
-  --manifest carddemo-verification-manifest.json
+# WHAT: run all three passes over every manifested dataset, in fixed order, as one gate.
+# WHY : Trade-offs: three passes cost more cutover work than one, and that cost buys the
+#       only evidence that the data is correct rather than merely present. Row counts
+#       alone certify a table that is full of the wrong numbers.
+# WHY : Alternatives Considered: a shell loop over the three individual verbs was
+#       rejected. With a loop, "verified" comes to mean whatever the loop happened to
+#       contain, and a `set -e` that stops mid-group leaves a subset verified with no
+#       record of which subset. The aggregate command has no option that skips a pass, so
+#       a zero exit means every covered dataset was verified three ways.
+# WHY : Assumptions: a non-zero exit is the gate, not the log output. Each pass exits
+#       non-zero on a difference and prints the comparison, so the first disagreement
+#       stops the run with the evidence on standard output.
+python -m carddemo_migration.cli verify-all --manifest "<manifest-path>"
 ```
 
-Read the three numbered pass headings and the verdict line beneath them. The gate exits
-0 only when all three ran and all three verified; a pass that never ran because an
-earlier one failed is printed as not run rather than omitted, so the report distinguishes
-"passed" from "not reached". Pass 2 additionally prints one `sealed columns` line per
-sealed column -- how many envelopes were expected, how many are stored, how many are
-malformed -- which is the only check that looks at the three ciphertext columns no digest
-can compare.
+Alternatives Considered for accepting row counts alone: this repository already has the precedent
+that settles it. `tests/README.md` §6 records that a bare marker-selected run with no emulator
+*"used to exit 0 with all three AWS tests merely SKIPPED -- a misleading 'green' that proved
+nothing."* That is the identical failure shape — a check that passes without having checked anything
+— and it is why "it exited zero" is treated here as insufficient on its own.
 
-Two properties of the checksum pass are worth reading before its output is
-interpreted, because both are deliberate and neither is a gap:
-
-- **A column the loader enciphers is excluded from the digest, not compared.** Three
-  are: `account.customers.ssn_encrypted`, `account.customers.govt_issued_id_encrypted`
-  and `card.cards.cvv_encrypted`. An envelope draws a fresh initialisation vector per
-  value, so the same identifier enciphered twice differs byte for byte — comparing one
-  would report a difference on every run of a correct load. Each digest line reports the
-  number of fields it covered as `fields=N`, so an exclusion is visible as a field count
-  below the record's field total rather than as a silent omission; the `sealed columns`
-  line is what certifies those three, and gate condition 1 below is what covers whether
-  they can be deciphered at all.
-- **Both sides are rendered through the column's declared type, so a difference in
-  REPRESENTATION is not reported as a difference in DATA.** `00000000011` in the extract
-  and `11` in a `BIGINT` are the same account identifier and compare equal;
-  `2022-07-18` in the extract and a `DATE` compare equal; the extract's zoned
-  `0000000000{`, which the reader decodes to an exact zero before anything is digested,
-  and a `NUMERIC(12,2)` zero compare equal; and a 26-blank processing stamp compares
-  equal to the null the load stores for it. What still reports a difference is a value
-  that differs — a wrong digit, a dropped sign, a truncated name.
-
-Each pass remains separately invocable for diagnosis, and that is the only thing to reach
-for them individually for:
+Narrow to one dataset when the gate fails and the question is which one:
 
 ```bash
-# WHAT: the three passes for one dataset, for diagnosing a gate failure.
-# WHY : Assumptions: these narrow the question to one dataset and claim nothing more,
-#       which is why they exist alongside the gate rather than instead of it. `--source`
-#       is omitted, so each reads the dataset's newest staged generation -- the same bytes
-#       the load read.
-python -m carddemo_migration.cli verify-row-counts   --dataset accounts --encoding ebcdic
-python -m carddemo_migration.cli verify-checksum     --dataset accounts --encoding ebcdic
-python -m carddemo_migration.cli verify-money-parity --dataset accounts --encoding ebcdic
+# WHAT: the three passes for a single dataset, for diagnosing a gate failure.
+# WHY : Assumptions: these claim nothing beyond the dataset named, which is why they exist
+#       alongside the aggregate gate rather than instead of it.
+python -m carddemo_migration.cli verify-row-counts --dataset ACCOUNT
+python -m carddemo_migration.cli verify-checksum --dataset ACCOUNT
+python -m carddemo_migration.cli verify-money-parity --dataset ACCOUNT
 ```
 
-Finally, run the two whole-schema SQL reports. They read every declared table
-including `ledger.transactions`, which no per-dataset pass and no gate covers because no
-extract seeds it:
+Run the two whole-migration reports last, because they are the only pass that reports a table no
+single dataset was named for.
 
 ```bash
-# WHAT: the schema-wide row-count and money-total reports.
-# WHY : Assumptions: these are run LAST and separately from the per-dataset passes above
-#       because they are the only pass that reports a table no dataset was named for.
-#       `ledger.transactions` has no `--source` to point a per-dataset pass at, so a
-#       corpus-only run reports it here against a NULL baseline and nowhere else.
-psql "$CARDDEMO_ADMIN_URL" -v ON_ERROR_STOP=1 \
-  -f data-migration/sql/verify/row_counts.sql
-psql "$CARDDEMO_ADMIN_URL" -v ON_ERROR_STOP=1 \
-  -f data-migration/sql/verify/money_totals.sql
+# WHAT: the whole-migration row-count and money-total reports, reduced to an exit status.
+# WHY : Assumptions: these read only the aggregate views, as the read-only reporting role,
+#       and each proves its session really is that role before running anything. A pass
+#       that cannot alter its own subject is the property being bought.
+# WHY : Alternatives Considered: running the same SQL with psql was rejected for an
+#       orchestrated step. psql exits 0 for a report full of mismatches, so a state
+#       machine branching on it would treat a failed verification as a success. These
+#       commands exit non-zero when any line did not verify.
+# WHY : Assumptions: `--sql-root` is required in the container image and must be omitted
+#       in a source checkout, because the sql tree ships beside the installed package
+#       rather than inside it. Passing the wrong one fails closed and names the path.
+python -m carddemo_migration.cli verify-row-count-report
+python -m carddemo_migration.cli verify-money-total-report --extract "ACCOUNT=app/data/EBCDIC/AWS.M2.CARDDEMO.ACCTDATA.PS"
 ```
+
+### The mandatory `DEFAULT` disclosure-group rows
 
 ```bash
-# WHAT: the two whole-schema queries, run once after every dataset is loaded, AS
-#       carddemo_reporting.
-# WHY : Assumptions: these cover tables no single dataset load touches -- the
-#       ledger tables the batch jobs populate, and `auth.users` -- so they are the
-#       only check that the database as a whole is in the state a cutover assumes.
-# WHY : Assumptions: the role is carddemo_reporting and not the operator principal.
-#       Both files read only the aggregate views V3 creates, so this role is
-#       sufficient -- and it is the right choice rather than merely a possible one,
-#       because it can read nine aggregates and eleven counts and cannot read one
-#       base-table row or write anything anywhere. A pass that cannot alter its own
-#       subject is the property being bought.
-PGUSER=carddemo_reporting psql -v ON_ERROR_STOP=1 \
-  -f data-migration/sql/verify/row_counts.sql
-PGUSER=carddemo_reporting psql -v ON_ERROR_STOP=1 \
-  -f data-migration/sql/verify/money_totals.sql
+# WHAT: count the DEFAULT disclosure-group rows in the reference schema.
+# WHY : Assumptions: interest calculation falls back to the DEFAULT group when a specific
+#       group lookup misses. With the group absent the fallback resolves to nothing and
+#       interest accrual is wrong for every account whose own group is missing -- and no
+#       row-count or checksum pass notices, because an absent row is the defect itself.
+psql --set ON_ERROR_STOP=on -c "SELECT count(*) FROM reference.disclosure_groups WHERE group_id = 'DEFAULT';"
 ```
 
-BOTH halves of that pair are ALSO reachable as subcommands, and those are the forms a
-batch step should use:
+Expect a **non-zero** count. Because the disclosure-group key is a triple of group identifier,
+transaction type and transaction category, `DEFAULT` is a set of rows rather than one row: the shipped
+`DISCGRP` extract carries seventeen, so a load from that seed should report seventeen. Do not assert
+exactly one. Seeding this data is [deploy.md](deploy.md) Step 5; this step verifies the result and
+does not re-own the seeding.
 
 ```bash
-# WHAT: the whole-migration row-count report, judged rather than printed.
-# WHY : Assumptions: this is the same file the psql invocation above runs, executed
-#       verbatim -- the package reads the text and refuses one that is not a single
-#       pure-SQL statement rather than rewriting it, so the report an operator reads
-#       with psql and the report this judges are the same bytes.
-# WHY : Assumptions: prefer this form in an orchestrated step and the psql form at a
-#       terminal. This one opens its own session for carddemo_reporting, CHECKS with
-#       the server that the session really is that role before it runs anything, and
-#       reduces the report to a process exit status -- 0 when every line verified, 8
-#       when any did not. psql exits 0 for a report full of mismatches, so a state
-#       machine branching on it would treat a failed verification as a success.
-# WHY : Assumptions: `--sql-root .` is required in the container image and must be
-#       omitted in a source checkout. The `sql` tree ships BESIDE the installed
-#       package rather than inside it, so the image copies it to the working
-#       directory /opt/carddemo, while a checkout resolves it from the package's own
-#       location. Passing the wrong one fails closed, naming the path it looked at.
-python -m carddemo_migration.cli verify-row-count-report          # source checkout
-python -m carddemo_migration.cli verify-row-count-report --sql-root .   # in the image
+# WHAT: read the DEFAULT rows straight out of the source extract, for comparison.
+# WHY : Assumptions: the extract is the baseline the loaded table is judged against, so the
+#       expected count is derived from the bytes rather than from this document. If the two
+#       disagree, the extract wins and the load is what is wrong.
+python -m carddemo_migration.cli decode-record --dataset DISGROUP --source app/data/EBCDIC/AWS.M2.CARDDEMO.DISCGRP.PS --record 18
 ```
+
+---
+
+## Step 5 - Switch
+
+The switch happens **only after all three verification passes have agreed for every loaded dataset**.
+That ordering is the point of this entire procedure: before the switch a difference is a load to
+re-run, and after it a difference is an incident.
+
+Confirm all of the following before enabling application writes.
+
+- **All three passes exit zero** for every dataset the cutover loaded, and the manifest declared every
+  one of them. A pass that was not run is not a pass.
+- **The two whole-migration reports exit zero**, covering the tables no single dataset load touches.
+- **The `DEFAULT` disclosure-group row exists.**
+- **A pre-load recovery point exists and is approved as the roll-back target**, per the next section.
+- **The environment whose parameters the load resolved is the environment the application will run
+  in.** Protected columns are enciphered under the key the owning service resolves at run time, so a
+  load performed against a different environment's key produces rows that count, digest and total
+  cleanly and then fail to decrypt in the application later.
+
+Assumptions: that last condition is a gate item rather than a check because no verification pass can
+catch it. The row counts agree, the money totals agree and the ciphertext is well formed either way;
+the authentication failure is deferred to first read. It is therefore confirmed by an operator at the
+gate or not at all.
+
+Enabling writes is the online-write lease that [batch-operations.md](batch-operations.md) owns, and
+rolling the services out is [deploy.md](deploy.md) Step 6.
+
+---
+
+
+## The baseline load jobs this replaces
+
+The `IDCAMS` jobs below are the baseline load steps, and they are the source of the key and
+record-size contracts stated earlier. Every value here was read from the JCL itself.
+
+| Baseline job | Key | Record size | Alternate index |
+|:---|:---|:---|:---|
+| `ACCTFILE.jcl` | `KEYS(11 0)` | `RECORDSIZE(300 300)` | — |
+| `CARDFILE.jcl` | `KEYS(16 0)` | `RECORDSIZE(150 150)` | `KEYS(11 16)` to `CARDAIX` |
+| `XREFFILE.jcl` | `KEYS(16 0)` | `RECORDSIZE(50 50)` | `KEYS(11,25)` to `CXACAIX` |
+| `CUSTFILE.jcl` | `KEYS(9 0)` | `RECORDSIZE(500 500)` | — |
+| `DISCGRP.jcl` | `KEYS(16 0)` | `RECORDSIZE(50 50)` | — |
+| `TCATBALF.jcl` | `KEYS(17 0)` | `RECORDSIZE(50 50)` | — |
+| `TRANTYPE.jcl` | `KEYS(2 0)` | `RECORDSIZE(60 60)` | — |
+| `TRANCATG.jcl` | `KEYS(6 0)` | `RECORDSIZE(60 60)` | — |
+| `DUSRSECJ.jcl` | `KEYS(8,0)` | `RECORDSIZE(80,80)` | — |
+| `TRANFILE.jcl` | `KEYS(16 0)` | `RECORDSIZE(350 350)` | `KEYS(26 304)` to `TRANSACT.VSAM.AIX` |
+
+Two transformations apply.
+
+- **`IDCAMS REPRO` becomes an ETL load step.** `app/jcl/ACCTFILE.jcl` shows the form at L61:
+  `REPRO INFILE(ACCTDATA) OUTFILE(ACCTVSAM)`. The `load-dataset` command in Step 3 is its
+  equivalent, reading the same extract and writing the schema that owns the record.
+- **`IDCAMS BLDINDEX` is retired**, because PostgreSQL maintains indexes transactionally. It appears
+  in exactly the three jobs that define an alternate index, and it has no counterpart in this
+  procedure.
+
+Refactoring Rationale: in the baseline, an index over a bulk-loaded cluster had to be rebuilt by a
+separate job step after the load, and that step could fail on its own, leaving a populated cluster
+with an unusable access path. In the target the equivalent index is maintained by the same
+transaction that inserts the row, so the step is not merely automated away — it is unnecessary, and
+there is no window in which the data is loaded but the access path is not.
+
+The three alternate indexes survive as real secondary indexes, so every browse and lookup path the
+baseline offered still exists:
+
+| Baseline alternate index | Target index |
+|:---|:---|
+| `CARDAIX` (cards by account) | `idx_cards_account_id` |
+| `CXACAIX` (cross-reference by account) | `idx_card_xref_account_id` |
+| `TRANSACT.VSAM.AIX` (batch path) | `idx_transactions_proc_ts` |
 
 ```bash
-# WHAT: the whole-migration MONEY-TOTAL report, judged rather than printed.
-# WHY : Refactoring Rationale: this command exists because the pass behind it did and its
-#       entry point did not. `verify/money_parity.py` shipped `read_source_totals` and
-#       `verify_money_totals` -- the whole-migration half of the money pass, the one that
-#       reads `money_totals.sql` as carddemo_reporting and judges every table's exact
-#       total against the source extracts -- with nothing anywhere invoking either, so the
-#       only reachable money check was the per-dataset `verify-money-parity` above and the
-#       schema-wide half could be run only by hand with psql, which exits 0 on a report
-#       full of mismatches. An orchestrated step branching on that exit status would have
-#       treated a money mismatch as a success.
-# WHY : Assumptions: one `--extract` per money-bearing record, each `LAYOUT=PATH` and
-#       optionally `LAYOUT=PATH=ENCODING` when a record's form differs from `--encoding`.
-#       Four records carry money columns that a shipped extract can total -- ACCOUNT's
-#       five, DALYTRAN's one, TCATBAL's one and DISGROUP's one. TRAN carries the same
-#       amount column and ships NO extract, so its total is reported against no source and
-#       reads as unsourced rather than as a mismatch, which is the same situation the
-#       row-count report describes for `ledger.transactions`.
-# WHY : Assumptions: the session's role is CHECKED with the server before the query runs,
-#       exactly as the row-count report checks it, so a pass that could write cannot
-#       certify the totals. The exit status is the gate -- 0 when every line verified, 8
-#       when any did not.
-# WHY : Assumptions: this is the ONLY pass that compares the count of strictly-negative rows
-#       as well as the totals, and that comparison is a reason to run it even after
-#       `verify-money-parity` has passed every dataset. Exchange the signs of two records and
-#       every total is unchanged, so a total-only comparison reports agreement; the signature
-#       that remains is the negative-row count, which no other pass reads. Each discrepancy of
-#       that kind is logged on its own line, because a count that differs while the total
-#       agrees sends an operator to the overpunch convention rather than to one record.
-# WHY : Assumptions: a short invocation fails CLOSED and names the column it is missing, so
-#       forgetting an `--extract` cannot certify part of the load as though it were all of it.
-# WHY : ⚠️ Assumptions: use the form the database was loaded FROM, because the two seed forms of
-#       the disclosure-group extract do not agree. Measured with the package's own
-#       `read_source_totals` over the shipped files: `app/data/ASCII/discgrp.txt` totals 375.00
-#       and `app/data/EBCDIC/AWS.M2.CARDDEMO.DISCGRP.PS` totals 390.00 over the same 51 records.
-#       Totalling one against a database loaded from the other reports a real 15.00 difference
-#       that is an artefact of the source form and not a load defect.
-python -m carddemo_migration.cli verify-money-total-report \
-  --encoding ascii \
-  --extract ACCOUNT=app/data/ASCII/acctdata.txt \
-  --extract DALYTRAN=app/data/ASCII/dailytran.txt \
-  --extract TCATBAL=app/data/ASCII/tcatbal.txt \
-  --extract DISGROUP=app/data/ASCII/discgrp.txt          # source checkout
-
-python -m carddemo_migration.cli verify-money-total-report \
-  --encoding ascii \
-  --extract ACCOUNT=app/data/ASCII/acctdata.txt \
-  --extract DALYTRAN=app/data/ASCII/dailytran.txt \
-  --extract TCATBAL=app/data/ASCII/tcatbal.txt \
-  --extract DISGROUP=app/data/ASCII/discgrp.txt \
-  --sql-root .                                           # in the image
+# WHAT: update planner statistics after the bulk loads.
+# WHY : Assumptions: the indexes are already populated by the loading transactions, so
+#       this analyses rather than builds. It is the counterpart of the baseline's index
+#       step only in placement, not in function -- skipping it costs query plans, not
+#       correctness.
+psql --set ON_ERROR_STOP=on -c "VACUUM ANALYZE;"
 ```
 
-## Cutover Gate
+---
 
-Do not switch application traffic based only on schema success. A production
-cutover requires every command above to have succeeded, plus an approved rollback
-snapshot, plus a deliberate decision on the three items below.
+## Re-running a load, and roll-back
 
-Refactoring Rationale: this gate previously stood on `CUSTOMER` and `CARD` being
-unloadable — `account.customers` declares `ssn_encrypted` and
-`govt_issued_id_encrypted`, `card.cards` declares `cvv_encrypted`, and this package
-held no way to produce the ciphertext they require, so the gate stayed closed by
-construction. It produces that ciphertext now, under the same envelope framing the
-owning service reads and the same key the owning service resolves, so that
-exception is withdrawn and the gate rests on the three real conditions instead.
+Three recovery paths exist and they are genuinely different operations. Choose by deciding which
+question is being answered.
 
-**1. The protected columns are enciphered, so confirm the keys were the right ones.**
-Three columns are written as ciphertext and never in the clear. Each is sealed under
-the key that the service owning the column reads at run time, resolved from the same
-parameter the service resolves it from, so a load performed against a different
-environment's key produces rows that store and verify cleanly and then fail to
-decrypt in the application days later. Confirm before cutover that the environment
-whose parameters the load resolved is the environment the application will run in.
+### 1. Re-run the load
 
-Assumptions: this is stated as a gate condition because no verification pass can
-catch it. The row counts agree, the money totals agree, and the ciphertext is
-well-formed either way — the key identifier is not recoverable from the envelope by
-anything in this package, and the authentication failure is deferred to first read.
+Each load is keyed, so a re-run converges rather than duplicating. A single-writer table that is
+already populated is **declined** with the count already present and a zero exit, which is a success
+to read as "already loaded" and never as "loaded now". The one multi-writer table merges on its
+identifier instead.
 
-⚠️ Refactoring Rationale — **a load of `account.customers` performed before the
-customer envelope was aligned must be discarded, not topped up.** Until that
-alignment, this package framed the two customer identifier columns with no marker
-and no version byte, reproducing a second Java writer that `account-service` has
-since deleted; the writer that remains frames a four-byte `CDCI` marker and a
-version byte first. Rows written under the earlier framing are five bytes short of
-what the service parses and will fail before decryption is attempted. **A re-run of
-`load-dataset CUSTOMER` does not repair them:** no role this package uses holds
-`DELETE` or `TRUNCATE` — [`sql/V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql)
-withholds both from every service role — so a populated table is refused rather
-than replaced. Repairing is an operator action on the cluster, taken with the
-account owner role: drop and recreate the schema from its Flyway baseline, or
-delete the affected rows, then re-run the load. Confirm at the gate either that
-`account.customers` has never been loaded by this package, or that it has been
-emptied since.
+```bash
+# WHAT: re-run a load after an interruption, then re-run the gate.
+# WHY : Assumptions: a commit can be ambiguous -- committed on the server, unacknowledged
+#       to the client -- so a retry is the normal case rather than an operator error. That
+#       is why convergence is by construction rather than something the operator arranges.
+# WHY : Alternatives Considered: truncate-and-reload was rejected. No role this package
+#       uses holds DELETE or TRUNCATE, deliberately, so a destructive reload would require
+#       granting a standing privilege that also permits erasing a verified load by
+#       accident. Re-running and re-verifying reaches the same state without it.
+python -m carddemo_migration.cli load-dataset --dataset ACCOUNT --encoding ebcdic
+python -m carddemo_migration.cli verify-all --manifest "<manifest-path>"
+```
 
-Assumptions: this is a gate condition rather than a code change for the same reason
-as the key check above — nothing in the loader can tell a pre-alignment envelope
-from a post-alignment one without deciphering it, which this package deliberately
-cannot do. Teaching the account service to accept both framings was rejected: it
-would keep two formats alive in one column permanently, which is precisely the state
-the alignment ended.
+Refactoring Rationale: the baseline achieved re-runnability by hand, per job, inconsistently — four
+different behaviours across the load decks, one of which was "fails".
 
-**2. The gate covers ten of the eleven records, three columns are covered by condition 1
-rather than by a digest, and when a manifest is supplied the manifest is what fixes the
-population -- so confirm it declared every record the cutover loaded.**
-Row counts and per-record checksums cover all ten datasets the gate reads. Money parity
-covers the four of those ten that carry a money column; the declared money inventory is
-nine columns over five tables, and the fifth table is `ledger.transactions`, which no
-extract seeds and which the whole-schema money-total report covers instead. The eleventh
-record, `TRAN`, is outside the gate for that same reason, and condition 3 below is how it
-is accounted for.
+| Baseline device | Where | Behaviour on re-run |
+|:---|:---|:---|
+| `IF LASTCC=12 THEN SET MAXCC=0` | `app/jcl/DEFGDGB.jcl` L29, L35, L41, L47, L53, L59 | Tolerates the existing definition |
+| `IEFBR14` delete-if-exists with `DISP=(MOD,DELETE)` | `app/jcl/PRTCATBL.jcl` L21-L25 | Deletes first, then recreates |
+| A comment instructing the operator to uncomment a `DELETE` | `app/jcl/CBADMCDJ.jcl` L38 and L42 | Requires **editing the deck** by hand |
+| No guard at all | `app/jcl/DALYREJS.jcl` L21-L28 | **Fails** on re-run |
 
-⚠️ Refactoring Rationale: this condition read "the checksum pass covers three of the
-eleven records", and asked for an explicit decision about whether row counts and money
-parity were acceptable evidence for the other eight. The measured reason it gave has been
-removed rather than accepted: the pass could not digest the `BIGINT`, `DATE`, `SMALLINT`,
-`TIMESTAMP` and `UUID` values a driver returns, and it now canonicalises by value class,
-so no seeded record is outside its reach and an identifier read back as a number is
-rendered into the digit width the reader publishes. It is corrected rather than deleted,
-because an operator who had read the earlier version would otherwise still be scoping the
-checksum pass by hand.
+Uniform, by-construction idempotency replaces all four. The point is not that the baseline was
+careless — each deck solved its own case — but that a property implemented four ways cannot be relied
+on generically, and an operator had to know which of the four applied before re-running anything.
 
-What remains at the gate is what can still make coverage partial, and one half of it is an
-operator fact rather than a package limit. The registry form cannot be narrowed — it takes
-no `--dataset`, and its population is the registry minus the layouts that ship no
-committed extract — but the manifest form verifies exactly the datasets its manifest
-declares. So when the run was manifested, confirm the manifest carried every dataset the
-cutover loaded.
+### 2. Restore the pre-load recovery point
 
-Two further boundaries of that coverage are structural, and are stated rather than left to
-inference:
+```bash
+# WHAT: take the recovery point BEFORE the first load of an environment.
+# WHY : Assumptions: taken after a load, a snapshot no longer represents the pre-cutover
+#       state, which is the only state a data roll-back has any reason to return to. The
+#       ordering is the whole value of the snapshot; a later one is not a substitute.
+aws rds create-db-cluster-snapshot \
+  --db-cluster-identifier "<cluster-identifier>" \
+  --db-cluster-snapshot-identifier "<snapshot-id>"
+```
 
-- `ledger.transactions` ships no extract, so no per-dataset pass and no gate can be
-  pointed at it. It is covered by `verify-row-count-report` and
-  `verify-money-total-report`, and condition 3 below is what an operator reads its result
-  against.
-- The three enciphered columns are excluded from the digest by design, for the
-  initialisation-vector reason given above. Pass 2 audits them instead — one
-  `sealed columns` line per column, reporting how many envelopes were expected, how many
-  are stored and how many are malformed — and condition 1 is what covers whether they can
-  be deciphered at all. No digest can.
+Restoring it is the infrastructure half of the operation and belongs to
+[teardown.md](teardown.md); this document owns only the requirement that the point exists and is
+approved before the switch. A `prod` teardown's **final snapshot** is also a roll-back asset, and
+[teardown.md](teardown.md) covers that too.
 
-Assumptions: this stays a gate condition rather than being dropped, because the failure it
-guards against survived the fix in a new form. A manifest silently short of a dataset
-produces a green run over the datasets it does declare, which reads as "the migration was
-verified" -- the same misreading the earlier scoping produced, reached a different way. A
-gate that overstates its own coverage is worse than one that names what bounds it, and
-naming what the three passes do and do not reach is what makes the alternative -- letting a
-reader infer from "all passes green" exactly how much was compared -- unnecessary.
+### 3. Return to the mainframe path
 
-Assumptions: coverage and execution are different questions, and a zero exit answers only the
-second. Confirm the run actually emitted its verdicts rather than reading the exit code alone:
-**ten** row-count verdicts, **ten** per-record checksum verdicts, **four** money-parity verdicts
--- `accounts`, `daily_transactions`, `disclosure_groups` and `transaction_category_balances` are
-the four covered datasets carrying a money column -- and one `sealed columns` line per enciphered
-column. The whole-schema money-total report is separate and publishes **nine** columns over
-**five** tables, the fifth being the `ledger.transactions` that no per-dataset pass reaches. A
-run that fails those two datasets for a missing cipher grant fails them rather than skipping
-them, so a short verdict count is a real gap and not a quieter form of success.
+Assumptions: `app/data/**` is reference-only. The ETL reads the extracts and never writes them, so
+the nine ASCII and thirteen EBCDIC datasets remain byte-identical and available for **any number of
+re-runs**. This property exists *because* the baseline is never modified — it is a consequence of the
+migration being additive, not a feature that was added. Reverting to the mainframe path therefore
+requires no un-migration at all: the programs, the data and the jobs are still exactly where they
+were.
 
-**3. `ledger.transactions` loading zero rows is a NORMAL result, not a skipped step.**
-The transaction master is the eleventh loadable record and the only one for which no
-seed extract ships, so a corpus-only run loads it successfully with zero rows and
-`sql/verify/row_counts.sql` reports it against a NULL baseline rather than a count.
-Confirm which of the two situations applies before reading the result: on a corpus-only
-run zero is correct and the table is filled later by the posting job, whereas on a
-cutover from a real extract zero means the extract was not supplied and the largest
-table in the system has not moved.
+---
 
-Assumptions: this is a gate condition because the two cases are indistinguishable from
-the pass output alone — both report a committed load and a NULL-baseline row. Naming it
-here is what stops "row counts green" being read as "every master arrived".
+## Verifying parity against the COBOL baseline
+
+The existing COBOL suite is the parity oracle. Run it from the repository root.
+
+```bash
+# WHAT: run the three-layer COBOL suite and aggregate one return code.
+# WHY : Assumptions: the runner sources scripts/test_env.sh internally, so no prior
+#       sourcing is needed -- and sourcing it by hand into a different shell would not
+#       reach the runner anyway.
+# WHY : Assumptions: the pins are hash-verified because the suite's golden comparisons are
+#       byte-deterministic. A floating dependency can change a formatted figure and turn a
+#       correct migration into an apparent parity failure.
+source .venv/bin/activate
+pip install --require-hashes -r tests/requirements-test.txt
+bash scripts/run_tests.sh
+```
+
+The return code follows the mainframe condition-code convention:
+
+| RC | Meaning |
+|:---|:---|
+| **0** | Pass |
+| **2** | Usage error — a runner was invoked incorrectly. Deliberately never aggregated, so a command-line mistake cannot masquerade as a warn |
+| **4** | Warn / soft reject |
+| **8** | Fail |
+| **16** | Fatal — an abend or unrecoverable error |
+
+**The warn-level 4 is the current green state.** It is caused by a pre-existing compile defect in the
+immutable baseline export and import pair, which no compiler flag can fix and which the reference-only
+policy forbids editing; `scripts/run_tests.sh` L210 calls the result *"honestly non-green"*. The Java
+implementation supplies correct behaviour and the divergence is registered in
+[cobol-to-service-traceability.md](../architecture/cobol-to-service-traceability.md), but **no COBOL
+is edited**, and an aggregate 4 must not be read as a regression introduced by this migration.
+
+Where this document and a script disagree, `tests/README.md` L3-L6 settles it: *"if a script and this
+README ever disagree, the script is authoritative."* The same applies here — `scripts/run_tests.sh`
+and `data-migration/src/carddemo_migration/cli.py` outrank this prose.
+
+Two suite facts bear directly on data verification. The suite's own flat-to-indexed loader
+(`tests/helpers/load_indexed.sh` and `vsam_loader.py`) is explicitly an `IDCAMS REPRO` analogue — the
+same operation this ETL performs, which is why its fixture widths match the record lengths in the
+contract above. And the suite normalises processing timestamps before golden comparison and injects
+business dates as parameters rather than reading the wall clock, so reruns produce identical output.
+The same discipline applies here: any date a load needs is a parameter, never a clock read.
+
+Detailed parity operation, including running the migrated batch chain against loaded data, belongs to
+[batch-operations.md](batch-operations.md).
+
+---
+
+## Failure handling
+
+| Symptom | Most likely cause | Operator response |
+|:---|:---|:---|
+| File size is not an exact multiple of its record length | Malformed or truncated input | Do **not** load. There is no resynchronisation point in an unterminated fixed-length file, so the first bad offset corrupts every record after it. Obtain the extract again |
+| Replacement characters in decoded output | The decode was applied per record instead of per field | Stop before loading. See Constraint one; the decoder must open in binary mode and decode each field span individually |
+| Row counts match but money totals disagree | Sign convention, or implied-decimal scale | Suspect the zoned-decimal overpunch or the missing decimal point, not the row loader. A row count cannot see either. See Constraint two |
+| Money totals differ by a small fixed amount on one dataset | The database was loaded from one encoding and totalled against the other | Total against the form the load actually read; the two shipped conversions of some datasets differ at a small number of values |
+| Every decoded value is positive | The sign convention was misread | Re-check the decode before re-loading. The baseline documents that the wrong convention corrupts negative balances silently |
+| A money value is inflated by exactly one hundred | Digits treated as an integer | The scale lives in the `PICTURE` clause, not in the bytes. See the implied-decimal note in Constraint two |
+| Foreign-key violation on load | The load order was wrong | Load referenced tables first: `reference`, then `account`, then `card`, then `ledger`. See Step 3 |
+| A load was interrupted part-way | Ambiguous commit or a cancelled step | Re-run it — the loads are idempotent — then re-run the three-way gate to confirm. Do not truncate |
+| `declined` printed with a row count | The table was already loaded | This is a success meaning "already loaded". Verify rather than re-load |
+| Interest accrual wrong after cutover | The `DEFAULT` disclosure-group row is missing | Confirm the row exists per Step 4; the fallback has nothing to resolve to without it |
+| Credentials rejected | Wrong secret id or Parameter Store path | Resolve the credential from Secrets Manager and the connection parameters from Parameter Store. Never substitute a hard-coded value |
+| Database connection refused on TLS | Missing or untrusted certificate bundle | Supply the trust anchor; every service pins `sslmode=verify-full`, so an untrusted server is refused by design |
+| A verification pass reports an unsourced table | The table has no seed extract | Expected for the transaction master, which ships no populated extract. It reads as unsourced, not as a mismatch |
+| A needed generation is not in the bucket | More than five generations have elapsed | Five noncurrent versions are retained and a sixth is not recoverable. Re-stage from `app/data/**`, which is unchanged |
+
+---
+
+## Out of scope
+
+An operator looking for any of the following will not find it here, because it is outside the
+migration's scope rather than missing from this document.
+
+- **Read replicas.** There are none, and none is promoted or demoted during a cutover. Reporting reads
+  go to the writer through read-only cross-schema views under a `SELECT`-only role. A data-migration
+  reader is the most likely person to go looking for a replica, which is why it is named first.
+- **Multi-region topology and disaster-recovery failover.** The design is single-region across three
+  availability zones, so there is no failover to perform or reverse.
+- **Blue-green and canary deployment.** Service roll-out is a rolling deployment; there is no traffic
+  split to shift as part of a data cutover.
+- **Streaming platforms.** No Kafka and no Kinesis. The messaging requirement is request and reply.
+- **Application-level caching.** No Redis and no ElastiCache, so there is no cache to warm or
+  invalidate after a load.
+- **The Db2 rewards extension, IMS DC, and SFTP integration.** These are listed as future work by the
+  baseline itself and have no target here.
+- **Exposing distributed transactions.** The one place the baseline used two-phase commit is
+  consolidated into a single schema and a single local transaction, so there is no distributed
+  transaction to enlist in.
+- **The export and import round trip.** `EXPORT.DATA` is not one of the eleven seed loads; that round
+  trip belongs to [batch-operations.md](batch-operations.md).
+
+---
+
+## The mainframe path is unaffected
+
+The migration **adds** a path; it does not remove one. Nothing in this procedure writes to `app/**`.
+
+- `app/data/ASCII/**` and `app/data/EBCDIC/**` are inputs, read byte-for-byte and never modified. That
+  is what keeps them available for an unlimited number of re-runs.
+- The `IDCAMS` load jobs in `app/jcl/**` are untouched and remain fully operable. They and the ETL
+  read the same extracts and populate different destinations, so running one does not disturb the
+  other.
+- The copybooks in `app/cpy/**` remain the single normative source of every layout, which is precisely
+  why they are read rather than copied.
+- `tests/**` and `scripts/**` are likewise reference-only, and the COBOL suite continues to run
+  exactly as it does today. That is what qualifies it to serve as the parity oracle.
+
+---
+
+## Related documents
+
+- [Deploy](deploy.md) — provisioning, image publication, Flyway migrations, reference seeding, service roll-out
+- [Teardown](teardown.md) — destroying an environment, and the infrastructure half of roll-back
+- [Batch operations](batch-operations.md) — the nightly chain, generation lookup, and the export/import round trip
+- [Code documentation standard](../CODE_DOCUMENTATION_STANDARD.md) — the `# WHAT:` / `# WHY :` idiom this runbook is written to
+- [Data model and schema mapping](../architecture/data-model-and-schema-mapping.md) — field-by-field copybook-to-column mapping
+- [COBOL-to-service traceability](../architecture/cobol-to-service-traceability.md) — the register of intentional behavioural divergences
+- [Migration README](../../MIGRATION_README.md) — build, deploy, run, migrate, validate, roll back
+- [Repository README](../../README.md) — the mainframe application overview and its dataset inventory
