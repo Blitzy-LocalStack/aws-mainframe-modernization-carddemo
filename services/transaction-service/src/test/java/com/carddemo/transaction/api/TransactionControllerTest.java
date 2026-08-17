@@ -66,6 +66,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -199,6 +200,15 @@ class TransactionControllerTest {
 
     /** A well-formed identifier, used wherever the identifier is not itself what is under assertion. */
     private static final String PRESENT_ID = "0000000000000001";
+
+    /**
+     * An identifier of the shape the interest job composes, carrying the two date separators.
+     *
+     * <p>Assumptions: written in the exact form {@code app/cbl/CBACT04C.cbl} lines 473 to 480 produce --
+     * the ten-character business date followed by a six-digit suffix -- rather than as an arbitrary
+     * hyphenated value, so a reader can see which producer it stands for.</p>
+     */
+    private static final String ACCRUAL_ID = "2022-07-18000050";
 
     /** The identifier a capture is answered with, one above {@link #PRESENT_ID}. */
     private static final String ASSIGNED_ID = "0000000000000002";
@@ -556,6 +566,68 @@ class TransactionControllerTest {
         verifyNoInteractions(this.listService);
     }
 
+    // WHY : Assumptions: the browse is a mock here, so this case asserts the RENDERING of the refusal
+    //       and not the decision to raise it -- the decision is asserted over the real service by
+    //       TransactionListServiceTest, and the whole chain is exercised at run time. The rendering is
+    //       worth its own case because the shared advice publishes a refusal's own sentence only when it
+    //       has this repository's catalogue shape and substitutes a generic one otherwise, so a sentence
+    //       that failed that gate would reach no client and no service-level assertion would notice.
+    /**
+     * A cursor supplied with a starting identifier is refused at the wire, naming both parameters.
+     *
+     * <p>Purpose: the published description of {@code transactionIdFilter} states that it cannot be
+     * combined with a cursor and that supplying both is a 400 rather than being silently resolved in
+     * favour of one. This asserts the answer a client actually receives: the status, both per-field
+     * entries, their state, and the sentence carried verbatim rather than degraded to the generic one.
+     * The divergence is registered as {@code D-LIST-POSITION-EXCLUSIVE} in
+     * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+     *
+     * @throws Exception if the request could not be performed
+     */
+    @Test
+    @DisplayName("browse: refuse a cursor supplied with a filter, naming both parameters verbatim")
+    void browseRefusesACursorSuppliedWithAFilter() throws Exception {
+        this.callerIn("carddemo-user");
+        when(this.listService.listTransactions(any(), any(), any()))
+                .thenThrow(new ClientInputException(ApiError.CODE_VALIDATION,
+                        List.of(TransactionListService.FIELD_TRANSACTION_ID_FILTER,
+                                TransactionListService.FIELD_CURSOR),
+                        FieldValidationFlag.NOT_OK,
+                        TransactionListService.MESSAGE_CURSOR_AND_FILTER));
+
+        this.mockMvc.perform(get(TransactionController.BASE_PATH)
+                        .param(TransactionController.PARAM_TRANSACTION_ID_FILTER, PRESENT_ID)
+                        .param(TransactionController.PARAM_CURSOR, this.sealed(PRESENT_ID))
+                        .header(AUTHORIZATION_HEADER, BEARER_TOKEN))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.message")
+                        .value(TransactionListService.MESSAGE_CURSOR_AND_FILTER))
+                .andExpect(jsonPath("$.fieldErrors[*].field", containsInAnyOrder(
+                        TransactionController.PARAM_TRANSACTION_ID_FILTER,
+                        TransactionController.PARAM_CURSOR)))
+                .andExpect(jsonPath("$.fieldErrors[*].state", hasItems(
+                        FieldValidationFlag.NOT_OK.name(), FieldValidationFlag.NOT_OK.name())));
+    }
+
+    /**
+     * The two parameters the adapter binds are the two members the refusal names.
+     *
+     * <p>Assumptions: asserted as an identity rather than assumed, because the two spellings are
+     * declared in two files -- the adapter names the query parameters and the browse names the members
+     * its refusal reports -- and a per-field entry keyed by a name no parameter carries is invisible to
+     * a form. This case is what makes a rename of either one fail the build instead of quietly
+     * un-marking a control.</p>
+     */
+    @Test
+    @DisplayName("browse: the parameter names the adapter binds are the member names the refusal reports")
+    void browseParameterNamesAreTheRefusalsMemberNames() {
+        assertThat(TransactionController.PARAM_TRANSACTION_ID_FILTER)
+                .isEqualTo(TransactionListService.FIELD_TRANSACTION_ID_FILTER);
+        assertThat(TransactionController.PARAM_CURSOR)
+                .isEqualTo(TransactionListService.FIELD_CURSOR);
+    }
+
     /**
      * The five boundary sentences of the browse are five values, and no two of them are the same value.
      *
@@ -665,6 +737,104 @@ class TransactionControllerTest {
         assertThat(invalidSelection).doesNotEndWith("...");
         assertThat(notNumeric).endsWith(" ...");
         assertThat(notNumeric).isNotEqualTo(notNumeric.replace(" ...", "..."));
+    }
+
+    // WHY : Assumptions: these three cases sit together because they are one rule seen from three
+    //       sides -- the member path admits every identifier the ledger holds, the browse's positioning
+    //       field admits only the digits its own reference edit admits, and neither admits anything
+    //       else. Asserting only the first would let a widening leak into the search field, and
+    //       asserting only the second would leave the accrual rows unaddressable again.
+    /**
+     * An accrual identifier is addressable on the member path, as the baseline's drill-down addresses it.
+     *
+     * <p>Purpose: {@code app/cbl/CBACT04C.cbl} lines 473 to 480 compose an interest-accrual identifier by
+     * concatenating the injected business date with a six-digit suffix, producing sixteen characters two
+     * of which are the date's separators. Those rows are returned by the browse, and the baseline opens
+     * one when it is selected: {@code PROCESS-ENTER-KEY} at {@code app/cbl/COTRN01C.cbl} lines 145 to 172
+     * applies a blank check and no numeric edit before its read. This asserts the target does the
+     * same.</p>
+     *
+     * <p>⚠️ Assumptions: the identifier reaches the READ rather than merely producing a 200, which is
+     * asserted through the stub being satisfied with that exact value. A case that only read the status
+     * would pass against an adapter that refused the value and answered from some other row.</p>
+     *
+     * @throws Exception if the request could not be performed
+     */
+    @Test
+    @DisplayName("view: address an accrual identifier, whose two hyphens the record's domain admits")
+    void viewAddressesAnAccrualIdentifier() throws Exception {
+        this.callerIn("carddemo-user");
+        when(this.viewService.viewTransaction(ACCRUAL_ID)).thenReturn(this.accrualDetail());
+
+        this.mockMvc.perform(get(TransactionController.BASE_PATH + "/" + ACCRUAL_ID)
+                        .header(AUTHORIZATION_HEADER, BEARER_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.transactionId").value(ACCRUAL_ID));
+
+        verify(this.viewService).viewTransaction(ACCRUAL_ID);
+    }
+
+    /**
+     * The browse's positioning field still refuses an accrual identifier, as its own edit does.
+     *
+     * <p>Purpose: the two identifier domains are deliberately different, and this is the half that must
+     * NOT widen. {@code app/cbl/COTRN00C.cbl} line 209 tests {@code IF TRNIDINI IS NUMERIC} before using
+     * the search field as a start key and answers line 214's {@code 'Tran ID must be Numeric ...'} when it
+     * is not, so an accrual identifier is a valid stored identifier and an invalid positioning value at
+     * the same time. That asymmetry is the baseline's.</p>
+     *
+     * @throws Exception if the request could not be performed
+     */
+    @Test
+    @DisplayName("browse: refuse an accrual identifier as a positioning value, per line 209")
+    void browseRefusesAnAccrualIdentifierAsAPositioningValue() throws Exception {
+        this.callerIn("carddemo-user");
+
+        this.mockMvc.perform(get(TransactionController.BASE_PATH)
+                        .param(TransactionController.PARAM_TRANSACTION_ID_FILTER, ACCRUAL_ID)
+                        .header(AUTHORIZATION_HEADER, BEARER_TOKEN))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors[*].field",
+                        hasItem(TransactionController.PARAM_TRANSACTION_ID_FILTER)));
+
+        verifyNoInteractions(this.listService);
+    }
+
+    /**
+     * The widened member path admits no character a producer of an identifier could not have written.
+     *
+     * <p>Purpose: widening the addressing domain is only safe if it widened by exactly the hyphen, so this
+     * walks the characters a hostile caller would reach for -- a quote, a space, a semicolon, a letter, a
+     * percent-encoded quote and a path separator -- each padded to the declared width so that the width
+     * check cannot be what refuses them. Each must be refused before the read, which is asserted as well
+     * as the status: the parameterised reads beneath are what make injection impossible, and this is the
+     * layer that makes it unreachable.</p>
+     *
+     * @param payload the sixteen-character value to address, of type {@code String}
+     * @param why the property that makes it inadmissible, of type {@code String}, carried so a failure
+     *     names the case rather than only the value
+     * @throws Exception if the request could not be performed
+     */
+    @ParameterizedTest(name = "[{0}] refused: {1}")
+    @CsvSource({
+        "0000000000000'01,a single quote, which no allocator and no accrual run writes",
+        "0000000000000;01,a statement separator",
+        "00000000000 0001,an embedded space",
+        "000000000000000a,a letter",
+        "0000000000%27001,a percent-encoded quote",
+        "0000000000000.01,a full stop",
+    })
+    @DisplayName("view: refuse every character the record's domain does not hold, before the read")
+    void viewRefusesEveryCharacterOutsideTheRecordDomain(String payload, String why)
+            throws Exception {
+
+        this.callerIn("carddemo-user");
+
+        this.mockMvc.perform(get(TransactionController.BASE_PATH + "/" + payload)
+                        .header(AUTHORIZATION_HEADER, BEARER_TOKEN))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(this.viewService);
     }
 
     /**
@@ -1949,6 +2119,21 @@ class TransactionControllerTest {
         return new TransactionDetailResponse(PRESENT_ID, "01", "0001", "POS TERM", "GROCERY PURCHASE",
                 Money.of("-125.50"), "123456789", "CORNER STORE", "SEATTLE", "98101",
                 MASKED_CARD_NUMBER, PINNED_TIMESTAMP, "2022-07-19 12:00:00.000000", closingSentence);
+    }
+
+    /**
+     * Builds the detail shape of an accrual row, whose identifier carries the date separators.
+     *
+     * <p>Assumptions: the money value is POSITIVE and small, matching what an interest accrual writes --
+     * {@code app/cbl/CBACT04C.cbl} computes it as a monthly share of a category balance -- so the fixture
+     * reads as the row it stands for rather than as the grocery purchase beside it.</p>
+     *
+     * @return the detail response of an accrual row, never {@code null}
+     */
+    private TransactionDetailResponse accrualDetail() {
+        return new TransactionDetailResponse(ACCRUAL_ID, "01", "05", "System", "Interest",
+                Money.of("12.34"), "0", "", "", "",
+                MASKED_CARD_NUMBER, PINNED_TIMESTAMP, "2022-07-19 12:00:00.000000", null);
     }
 
     /**

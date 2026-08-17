@@ -2,12 +2,16 @@ package com.carddemo.transaction.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.money.Money;
+import com.carddemo.common.validation.FieldValidationFlag;
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
 import com.carddemo.transaction.domain.Transaction;
@@ -28,6 +32,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.domain.Limit;
@@ -1507,6 +1513,86 @@ class TransactionListServiceTest {
                 .as("the page is required")
                 .isInstanceOf(NullPointerException.class);
         verifyNoInteractions(repository);
+    }
+
+    // WHY : Assumptions: these two cases sit beside the collaborator checks rather than among the
+    //       paging arithmetic, because what they assert is a property of the REQUEST rather than of a
+    //       page. They are the first cases in this class that assert a refusal of the request shape
+    //       itself, and they exist because the shape was accepted before: the direction chose a paging
+    //       paragraph, the paragraph positioned from the cursor, and a supplied identifier was silently
+    //       discarded -- the one outcome the published contract for transactionIdFilter forbids.
+    /**
+     * A request naming a cursor and a starting identifier is refused, in both directions.
+     *
+     * <p>Assumptions: both directions are asserted rather than one, because the discard happened in
+     * both paging paragraphs and each positions from the cursor independently -- so a guard placed in
+     * one of the two would leave the other silently resolving the conflict. Neither case reaches a read,
+     * which is asserted as well as the refusal: the refusal is only correct if it happens before the
+     * position is used.
+     *
+     * <p>Assumptions: the cursor supplied is a genuinely sealed one, so the case cannot pass because the
+     * token was rejected for some other reason. A refusal naming an unopenable cursor would be a
+     * different outcome with a different sentence.
+     *
+     * @param direction the direction to submit alongside the conflicting pair, of type
+     *     {@code TransactionListRequest.Direction}, so that both paging paragraphs are covered
+     */
+    @ParameterizedTest(name = "direction={0}")
+    @EnumSource(TransactionListRequest.Direction.class)
+    @DisplayName("a cursor and a starting identifier together are refused, whichever direction is asked")
+    void aCursorAndAStartingIdentifierTogetherAreRefused(TransactionListRequest.Direction direction) {
+        String cursor = seal("0000000000000010");
+
+        assertThatThrownBy(() -> list(request("0000000000000001", cursor, direction)))
+                .as("the published contract refuses the combination rather than resolving it")
+                .isInstanceOf(ClientInputException.class)
+                .hasMessage(TransactionListService.MESSAGE_CURSOR_AND_FILTER)
+                .satisfies(failure -> {
+                    ClientInputException refusal = (ClientInputException) failure;
+                    assertThat(refusal.fields())
+                            .as("both members are named, because the request cannot say which was meant")
+                            .containsExactly(TransactionListService.FIELD_TRANSACTION_ID_FILTER,
+                                    TransactionListService.FIELD_CURSOR);
+                    assertThat(refusal.state())
+                            .as("both members carry values, so neither is in the blank state")
+                            .isEqualTo(FieldValidationFlag.NOT_OK);
+                });
+
+        verifyNoInteractions(repository);
+    }
+
+    /**
+     * Either positioning means alone is still accepted, so the refusal is of the pair and not of one.
+     *
+     * <p>Assumptions: this is asserted in the same class as the refusal above because a guard that
+     * refused too much would satisfy that case perfectly. An identifier alone is the reference's own
+     * branch at lines 206 to 210 of {@code app/cbl/COTRN00C.cbl}, and a cursor alone is what the two
+     * paging paragraphs at lines 234 and 257 do, so both have to keep working.
+     *
+     * <p>Assumptions: an EMPTY cursor parameter alongside an identifier is accepted rather than refused,
+     * which is the boundary of the rule. The record's own accessor treats a blank cursor as no cursor,
+     * and the guard asks the same accessor, so the guard and the code that opens a token cannot disagree
+     * about what was supplied.
+     */
+    @Test
+    @DisplayName("either positioning means alone is accepted, and an empty cursor is not one")
+    void eitherPositioningMeansAloneIsAccepted() {
+        // WHY : Assumptions: the positioned read answers empty, which is the reference's not-found arm
+        //       at lines 605 to 611 and is a page boundary rather than a failure. An empty answer is
+        //       enough for these cases, whose subject is which requests are ADMITTED rather than what a
+        //       page contains -- the page arithmetic is asserted by the families above over real rows.
+        when(repository.findById(anyString())).thenReturn(Optional.empty());
+        when(repository.findAllByOrderByTranIdAsc(any(Limit.class))).thenReturn(List.of());
+
+        assertThat(list(request("0000000000000001", null, null)).items())
+                .as("a starting identifier alone positions the browse, per lines 206 to 210")
+                .isEmpty();
+        assertThat(list(request("0000000000000001", "", null)).items())
+                .as("a blank cursor is not a supplied position, so the pair is not named")
+                .isEmpty();
+        assertThat(list(request("   ", "", null)).items())
+                .as("nor is a blank identifier, which begins the browse at the start of the key space")
+                .isEmpty();
     }
 
     /**

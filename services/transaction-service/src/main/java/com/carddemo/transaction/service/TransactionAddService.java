@@ -901,9 +901,17 @@ public class TransactionAddService {
         //       single-turn behaviour at line 495; a copy that is previewed receives a token in its
         //       answer and presents it through the ordinary capture operation, which is the route this
         //       operation's own answer directs a client to.
+        // WHY : Assumptions: the stored amount is RENDERED back into the wire form rather than passed as
+        //       a money value, because the request now carries the characters a producer would have sent
+        //       and this submission has to look exactly like one that arrived over the wire -- it goes
+        //       through the same validation chain, and a chain that measured characters on one path and a
+        //       parsed value on the other would be two chains. The shared type's plain rendering is that
+        //       form by contract: never exponent notation, always two decimal places, a leading minus for
+        //       a negative value -- which is what the published pattern admits, and it is the form
+        //       Money.of reads back identically.
         return new TransactionAddRequest(request.accountId(), latest.getTranTypeCd(),
                 latest.getTranCatCd(), latest.getTranSource(), latest.getTranDesc(),
-                Money.of(latest.getTranAmt()),
+                Money.of(latest.getTranAmt()).toPlainString(),
                 zeroPadded(merchantId, TransactionAddRequest.MERCHANT_ID_WIDTH),
                 latest.getMerchantName(), latest.getMerchantCity(), latest.getMerchantZip(),
                 request.cardNumber(), latest.getOrigTs().toLocalDate().toString(),
@@ -1126,9 +1134,15 @@ public class TransactionAddService {
      * city at 308 and the merchant postal code at 314.</p>
      *
      * <p>Assumptions: absence covers both spellings the reference tests for, spaces and low values, which
-     * the shared validation kernel treats as one state because the reference's own comparison does. The
-     * amount is the one field tested for a null reference instead, because it arrives as the shared money
-     * type rather than as characters and that type has no blank spelling.</p>
+     * the shared validation kernel treats as one state because the reference's own comparison does.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the amount is now checked by the SAME presence test as the other ten
+     * fields, where an earlier revision tested it for a null reference alone. It could only test for
+     * null while the request carried it as the shared money type, which has no blank spelling; the
+     * request now carries the submitted characters, so the field has the blank spelling the reference's
+     * own test at line 278 refuses -- {@code TRNAMTI = SPACES OR LOW-VALUES} -- and an empty amount
+     * therefore draws this sentence with the blank state instead of falling through to the shape test
+     * and drawing the format sentence.</p>
      *
      * @param request the submitted capture; must not be {@code null}
      * @throws ClientInputException naming the FIRST absent field in the order above and carrying that
@@ -1142,11 +1156,7 @@ public class TransactionAddService {
         requirePresent(request.description(), FIELD_DESCRIPTION,
                 TransactionAddRequest.DESCRIPTION_REQUIRED);
 
-        if (request.amount() == null) {
-            throw new ClientInputException(ApiError.CODE_VALIDATION, FIELD_AMOUNT,
-                    FieldValidationFlag.BLANK, TransactionAddRequest.AMOUNT_REQUIRED);
-        }
-
+        requirePresent(request.amount(), FIELD_AMOUNT, TransactionAddRequest.AMOUNT_REQUIRED);
         requirePresent(request.originDate(), FIELD_ORIGIN_DATE,
                 TransactionAddRequest.ORIGIN_DATE_REQUIRED);
         requirePresent(request.processDate(), FIELD_PROCESS_DATE,
@@ -1245,19 +1255,28 @@ public class TransactionAddService {
      * at line 343. All four share one action block, so however many of them hold the reference emits the
      * single sentence at line 345.</p>
      *
-     * <p>Assumptions: the test is applied to the edited RENDERING of the amount rather than to the
-     * characters the client sent, because by the time a request reaches this class those characters have
-     * already been parsed into the shared money type at the wire boundary. Rendering the value back
-     * through an edited picture and testing the four positions on that string is what keeps the test
-     * positional; the alternative of replacing it with a numeric range comparison was rejected because a
-     * range test states a conclusion the reference reaches by inspecting bytes, and it would silently
-     * accept a scale the fixed-width shape cannot hold.</p>
+     * <p>⚠️ Refactoring Rationale: the test now runs TWICE over two different strings, and the first of
+     * the two is new. The submitted characters are measured first, against
+     * {@link TransactionAddRequest#AMOUNT_WIRE_FORM}, because the request carries them now -- it did not
+     * when this method was written, and an earlier revision could therefore only inspect the edited
+     * RENDERING of a value the wire boundary had already parsed and normalised. That rendering is
+     * canonical by construction, so the positional test on it could only ever fail on magnitude and
+     * every lexical defect reached it silently rewritten. Measuring the characters first is what makes
+     * this layer refuse the same forms the published contract refuses.</p>
+     *
+     * <p>Assumptions: the positional test on the rendering is KEPT rather than replaced by the lexical
+     * one, and both raise the same sentence for the same field. It is what states the shape the way the
+     * reference states it -- four positions over a fixed-width edited field -- and it is the test that
+     * still holds when a submission was assembled inside this service rather than bound from a body,
+     * which is the copy-last path. The alternative of replacing it with a numeric range comparison was
+     * rejected because a range test states a conclusion the reference reaches by inspecting bytes, and it
+     * would silently accept a scale the fixed-width shape cannot hold.</p>
      *
      * <p>Refactoring Rationale: the width the positions are measured against is the RECORD's, from
      * {@link #RECORD_AMOUNT_INTEGER_DIGITS}, and not the eight-digit SCREEN picture at line 59 that the
      * four alternatives literally address. Registered divergence D-AMOUNT-RECORD-WIDTH in
      * {@code docs/architecture/cobol-to-service-traceability.md} admits the record's nine integer digits
-     * at the boundary and {@link TransactionAddRequest#AMOUNT_MAGNITUDE_LIMIT_CENTS} enforces exactly
+     * at the boundary and {@link TransactionAddRequest#AMOUNT_WIRE_FORM} enforces exactly
      * that; measuring the screen's eight here made the two authorities disagree, so a nine-digit amount
      * cleared the boundary and was then refused by this method with a format sentence. Two widths cannot
      * both be authoritative on one field, and the record's is the one the divergence register publishes,
@@ -1278,7 +1297,21 @@ public class TransactionAddService {
      *     the format sentence the reference emits
      */
     private static void requireEditedAmountShape(TransactionAddRequest request) {
-        String edited = editedAmount(request.amount());
+        // WHY : Assumptions: the SUBMITTED characters are measured before anything parses them, which is
+        //       the only order in which a lexical defect is still observable -- the shared money type
+        //       normalises an under-padded fractional part, a leading plus and grouping separators by
+        //       design, so a parse first would answer a canonical string and hide the defect. The
+        //       predicate is the request's own, so this layer and the boundary constraint measure one
+        //       expression rather than two that could drift.
+        if (!TransactionAddRequest.isAmountWireForm(request.amount())) {
+            throw new ClientInputException(ApiError.CODE_VALIDATION, FIELD_AMOUNT,
+                    FieldValidationFlag.NOT_OK, TransactionAddRequest.AMOUNT_FORMAT);
+        }
+
+        // WHY : Assumptions: the parse cannot fail here, because the test above has already refused every
+        //       string the shared money type could not read. That is what makes reading the parsed value
+        //       safe at this point and unsafe before it.
+        String edited = editedAmount(request.amountValue());
 
         boolean malformed = edited.length() != RECORD_AMOUNT_LENGTH
                 || (edited.charAt(0) != EDITED_AMOUNT_NEGATIVE_SIGN
@@ -1324,7 +1357,7 @@ public class TransactionAddService {
         //       reference's edited picture, and reading it back out of the rendering demonstrates that
         //       instead of asserting it. The shape test above has already refused every value the
         //       picture cannot hold, so the parse here cannot fail.
-        String edited = editedAmount(request.amount());
+        String edited = editedAmount(request.amountValue());
         BigDecimal magnitude = new BigDecimal(edited.substring(1));
 
         return Money.of(edited.charAt(0) == EDITED_AMOUNT_NEGATIVE_SIGN
@@ -1679,6 +1712,17 @@ public class TransactionAddService {
      * <p>Assumptions: the conflict rides the shared kernel's existing conflict mapping rather than a
      * handler added here, so the status, the code, the subsystem and the correlation entry are composed
      * in the one place every other conflict in this migration is composed.</p>
+     *
+     * <p>⚠️ Assumptions: the save beneath is an INSERT, and it is an insert because
+     * {@link Transaction} declares its own unwritten state through {@code Persistable}. That is a
+     * property of the entity rather than of this statement, and it is named here because the
+     * difference decides whether this method can refuse anything at all: while the entity declared no
+     * such state, its assigned identifier made the save a MERGE, so a row carrying a key the table
+     * already held UPDATED that row and raised nothing. This method reported success while a stored
+     * transaction was overwritten, and the catch below was unreachable. The entity's own notes carry
+     * the reversal and the alternatives weighed against it; what matters at this call site is that the
+     * duplicate condition the reference reports at lines 735 and 736 is now reachable here, which is
+     * what the published conflict answer depends on.</p>
      *
      * @param row the row to append, already carrying its derived identifier; must not be {@code null}
      * @return the appended row as the store holds it, never {@code null}

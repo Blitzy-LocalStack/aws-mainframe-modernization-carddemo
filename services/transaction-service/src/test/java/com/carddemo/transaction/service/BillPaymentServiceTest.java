@@ -13,6 +13,8 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.carddemo.common.error.ClientInputException;
+import com.carddemo.common.error.GlobalExceptionHandler;
+import com.carddemo.common.error.RecordConflictException;
 import com.carddemo.common.money.Money;
 import com.carddemo.common.time.TimestampFormatter;
 import com.carddemo.transaction.domain.Transaction;
@@ -1059,24 +1061,171 @@ class BillPaymentServiceTest {
      * than at the column, where the complaint would name no field. The condition is latent at balances
      * the seed data does not reach.</p>
      *
-     * <p>Assumptions: the refusal arrives BEFORE anything is written, and that is asserted as well as
-     * the refusal itself. The row is composed before it is stored, so the bound is reached first, which
-     * is what keeps a rejected payment from leaving a balance change behind it.</p>
+     * <p>⚠️ Purpose: the SENTENCE and the exact thrown type are the finding, and an earlier revision of
+     * this case asserted neither. It expected the arithmetic failure the entity's own bound raises, which
+     * the shared advice does not classify -- so what an operator actually received was a generic critical
+     * 500 carrying no sentence at all, and the case passed anyway because the type it named was the one
+     * being raised. The type asserted here is EXACT rather than an instance test, because the advice
+     * publishes a carried sentence only when the thrown class is precisely the bare illegal-state one: a
+     * subclass would satisfy an instance assertion and still be answered with the generic wording.</p>
+     *
+     * <p>⚠️ Assumptions: the refusal arrives before anything is SPENT, not merely before anything is
+     * written, and the two collaborators it must not have reached are asserted untouched. The earlier
+     * revision arranged BOTH of them -- the cross-reference read and the identifier allocation -- which is
+     * exactly what a refusal reached this late looks like, and the divergence register claimed the
+     * opposite. Neither is arranged now: the cross-reference read crosses the seam to the account context,
+     * and the allocation advances a database sequence whose consumed value no rollback returns. The
+     * assertions are explicit rather than left to strict stubbing because an unstubbed cross-reference read
+     * answers empty, which would fail this case with the not-found sentence instead of proving the point.
+     * </p>
      */
     @Test
-    @DisplayName("a ten-integer-digit balance is refused, not truncated into the nine-digit amount")
+    @DisplayName("a ten-integer-digit balance is refused with line 543's sentence, nothing spent")
     void aTenIntegerDigitBalanceIsRefusedRatherThanTruncated() {
         stubLockedBalanceRead(Money.of("1234567890.99"));
-        stubCardResolution();
-        when(this.transactions.allocateTransactionId()).thenReturn(ALLOCATED_NUMBER);
 
         assertThatThrownBy(
                 () -> this.service.payBalanceInFull(new BillPaymentRequest(ACCOUNT_ID, "Y")))
-                .as("the narrower picture of CVTRA05Y.cpy line 10 bounds the assignment")
-                .isInstanceOf(ArithmeticException.class);
+                .as("line 543's sentence, which the shared advice publishes only for this exact type")
+                .isExactlyInstanceOf(IllegalStateException.class)
+                .hasMessage(BillPaymentService.MESSAGE_PAYMENT_ADD_FAILED)
+                .as("the arithmetic failure is carried as the cause, so the bound stays diagnosable")
+                .hasCauseInstanceOf(ArithmeticException.class);
+
+        verifyNoInteractions(this.accounts);
+        verify(this.transactions, never()).allocateTransactionId();
+        verify(this.transactions, never()).saveAndFlush(any(Transaction.class));
+        verify(this.accountBalances, never()).reduceCurrentBalance(anyLong(), any(Money.class));
+    }
+
+    /**
+     * The unconfirmed turn is refused on the same condition, so a doomed payment is never invited.
+     *
+     * <p>Purpose: the width refusal sits before the preview-and-pay split of
+     * {@code payBalanceInFull}, so the turn that only REPORTS is refused too. Without this the screen
+     * would answer line 237's prompt beside a balance it can never settle, and an operator who confirmed
+     * it would be refused on the following turn for a reason the first turn already knew.</p>
+     *
+     * <p>Assumptions: the read this turn performs is the UNLOCKED one, so the specimen is stubbed through
+     * that helper. Stubbing the locking read instead would leave the unlocked one unstubbed, the balance
+     * would read as absent and the case would pass on the not-found sentence rather than on the width.</p>
+     *
+     * <p>Assumptions: the specimen is the widest value the money contract admits at all,
+     * {@code MAX_MAGNITUDE} being {@code ACCT-CURR-BAL}'s own ten-digit picture expressed as a bound, so
+     * this case also states that the whole of the balance column's published domain is refusable rather
+     * than only a value near the ledger bound.</p>
+     */
+    @Test
+    @DisplayName("the unconfirmed turn is refused on the same width, not invited to confirm")
+    void aTenIntegerDigitBalanceIsRefusedOnTheReportingTurnToo() {
+        stubUnlockedBalanceRead(Money.of("9999999999.99"));
+
+        assertThatThrownBy(
+                () -> this.service.payBalanceInFull(new BillPaymentRequest(ACCOUNT_ID, "")))
+                .as("the reporting turn refuses rather than prompting for a payment it cannot make")
+                .isExactlyInstanceOf(IllegalStateException.class)
+                .hasMessage(BillPaymentService.MESSAGE_PAYMENT_ADD_FAILED);
+
+        verifyNoInteractions(this.accounts);
+        verify(this.transactions, never()).allocateTransactionId();
+        verify(this.transactions, never()).saveAndFlush(any(Transaction.class));
+    }
+
+    /**
+     * The width this screen publishes is the record's, and it agrees with the capture screen's.
+     *
+     * <p>Purpose: two services now publish an integer-digit count for one copybook field --
+     * {@code TRAN-AMT PIC S9(09)V99} at line 10 of {@code app/cpy/CVTRA05Y.cpy} -- and each declares its
+     * own rather than reading the other's, so that neither screen's published domain moves when the other
+     * changes. That deliberate duplication is only safe while something proves the two agree, and this is
+     * that proof.</p>
+     *
+     * <p>Assumptions: the sentence is asserted verbatim in the same case, because the width and the
+     * wording are the two halves of one divergence and a reworded sentence would defeat the refusal just
+     * as completely as a wrong width. Transformation rule T8 carries it from line 543 of
+     * {@code app/cbl/COBIL00C.cbl} character for character, and the capture screen's own wording at line
+     * 745 of {@code app/cbl/COTRN02C.cbl} differs, so the two are asserted UNEQUAL as well.</p>
+     */
+    @Test
+    @DisplayName("the published width is the record's nine, and the capture screen publishes the same")
+    void theLedgerAmountWidthIsTheRecordPictureAndAgreesWithTheCaptureScreen() {
+        assertThat(BillPaymentService.LEDGER_AMOUNT_INTEGER_DIGITS)
+                .as("TRAN-AMT PIC S9(09)V99 at line 10 of app/cpy/CVTRA05Y.cpy declares nine")
+                .isEqualTo(9)
+                .as("two screens publishing one copybook fact must not drift apart")
+                .isEqualTo(TransactionAddService.RECORD_AMOUNT_INTEGER_DIGITS);
+
+        assertThat(BillPaymentService.MESSAGE_PAYMENT_ADD_FAILED)
+                .as("line 543 of app/cbl/COBIL00C.cbl, carried character for character")
+                .isEqualTo("Unable to Add Bill pay Transaction...")
+                .as("line 745 of app/cbl/COTRN02C.cbl words the same class of failure differently")
+                .isNotEqualTo("Unable to Add Transaction...");
+    }
+
+    /**
+     * A derived identifier that is already taken is refused as a CONFLICT, not as a server failure.
+     *
+     * <p>⚠️ Purpose: this pins the type the refusal is raised as, and the type is the whole finding.
+     * The reference answers a taken identifier with its duplicate-key and duplicate-record branches at
+     * lines 533 and 534 of {@code app/cbl/COBIL00C.cbl}, both of which emit line 536, and the published
+     * contract for this operation declares that as an HTTP 409. An earlier revision raised the
+     * framework's data-integrity failure constructed here with that sentence as its message, and the
+     * shared advice does not classify such an exception: it narrows its integrity branch to a failure
+     * whose cause chain reports an integrity-constraint SQL state, and an exception built with a message
+     * and no cause reports none. A retryable conflict was therefore answered as a generic HTTP 500 and
+     * the reference's wording never reached the caller.
+     *
+     * <p>Assumptions: the kind is asserted as well as the type, because the shared advice selects the
+     * sentence from the kind -- a conflict of the wrong kind would answer 409 with another screen's
+     * wording, which is the same class of defect one level down.
+     *
+     * <p>Assumptions: no write and no balance change may be attempted, which is asserted rather than
+     * assumed, because the refusal sits between the identifier derivation and the write.
+     *
+     * <p>This case takes no parameter and yields no value.
+     */
+    @Test
+    @DisplayName("a taken identifier is refused as a duplicate-key conflict, not as a server failure")
+    void aTakenIdentifierIsRefusedAsADuplicateKeyConflict() {
+        stubLockedBalanceRead(Money.of("222.22"));
+        stubCardResolution();
+        when(this.transactions.allocateTransactionId()).thenReturn(ALLOCATED_NUMBER);
+        when(this.transactions.existsById(DERIVED_ID)).thenReturn(true);
+
+        assertThatThrownBy(
+                () -> this.service.payBalanceInFull(new BillPaymentRequest(ACCOUNT_ID, "Y")))
+                .as("line 536 is a refusal a caller can act on, so it is a conflict and not a fault")
+                .isInstanceOf(RecordConflictException.class)
+                .satisfies(failure -> assertThat(((RecordConflictException) failure).kind())
+                        .isEqualTo(RecordConflictException.Kind.DUPLICATE_KEY));
 
         verify(this.transactions, never()).saveAndFlush(any(Transaction.class));
         verify(this.accountBalances, never()).reduceCurrentBalance(anyLong(), any(Money.class));
+    }
+
+    /**
+     * The sentence this screen's refusal carries is the one the shared conflict rendering emits.
+     *
+     * <p>Purpose: the refusal above names a kind rather than a sentence, so the sentence a caller reads
+     * is composed by the shared error advice. This case is the drift guard between the two: the
+     * constant this class's subject publishes for line 536 of {@code app/cbl/COBIL00C.cbl} and the
+     * constant the advice renders for the duplicate-key kind must be the same string, or the refusal
+     * would answer with wording this screen does not emit.
+     *
+     * <p>Assumptions: the two constants are deliberately NOT collapsed into one. The capture screen
+     * declares the identical sentence at line 738 of {@code app/cbl/COTRN02C.cbl}, and each screen owns
+     * its own constant so that a future divergence in one baseline program cannot silently retitle the
+     * other. What must not drift is the RENDERING, which is what this asserts.
+     *
+     * <p>This case takes no parameter and yields no value.
+     */
+    @Test
+    @DisplayName("the duplicate-key rendering is byte-identical to this screen's line 536 sentence")
+    void theDuplicateKeyRenderingIsThisScreensSentence() {
+        assertThat(GlobalExceptionHandler.MESSAGE_DUPLICATE_KEY)
+                .as("app/cbl/COBIL00C.cbl line 536")
+                .isEqualTo(BillPaymentService.MESSAGE_TRANSACTION_ID_EXISTS)
+                .isEqualTo("Tran ID already exist...");
     }
 
     /**

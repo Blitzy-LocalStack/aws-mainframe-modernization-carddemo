@@ -701,7 +701,7 @@ public class TransactionMapper {
                 request.categoryCode(),
                 request.source(),
                 request.description(),
-                requiredScalarAmount(request.amount(), "amount"),
+                requiredScalarAmount(request.amountValue(), "amount"),
                 parseMerchantId(request.merchantId()),
                 request.merchantName(),
                 request.merchantCity(),

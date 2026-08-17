@@ -4,12 +4,16 @@ import com.carddemo.common.money.Money;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
+import jakarta.persistence.PostLoad;
+import jakarta.persistence.PostPersist;
 import jakarta.persistence.Table;
+import jakarta.persistence.Transient;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.Objects;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
+import org.springframework.data.domain.Persistable;
 
 /**
  * A posted transaction, mapping one row of {@code ledger.transactions} to one migrated
@@ -99,6 +103,40 @@ import org.hibernate.type.SqlTypes;
  * would map to a column the migration does not create and would fail when a query ran rather than
  * degrade to unversioned behaviour. The absence is stated because an entity with no version
  * attribute looks identical whether the omission was reasoned or overlooked.
+ *
+ * <h2>⚠️ A new-state marker IS carried, and the reversal is recorded</h2>
+ *
+ * <p>⚠️ Refactoring Rationale: this type implements {@link Persistable} and carries the transient
+ * marker {@link #unwritten} beneath, and an earlier revision of this file deliberately carried
+ * neither. That earlier decision was wrong, and it was wrong in the one direction that destroys
+ * data. The identifier above is ASSIGNED rather than generated, so the repository's save classifies
+ * a row carrying one as already persisted and issues a MERGE -- a select followed by an update.
+ * Against a key the table already holds, that merge OVERWRITES the stored row with the new one and
+ * raises nothing: an append reported success while a stored financial record was replaced, and the
+ * row count did not move. The reference has no such outcome anywhere. Its three online appends are
+ * {@code EXEC CICS WRITE} against a keyed dataset, which fails the duplicate-key and
+ * duplicate-record conditions instead -- {@code app/cbl/COTRN02C.cbl} names them at lines 735 and
+ * 736 and answers with one sentence at line 738, and {@code app/cbl/COBIL00C.cbl} does the same at
+ * lines 533, 534 and 536 -- and {@code app/cbl/CBTRN02C.cbl} appends with a plain {@code WRITE} at
+ * line 564 whose status the next statement inspects. Declaring the row new makes the save issue an
+ * INSERT, so the primary key refuses the duplicate and the refusal reaches a caller as the
+ * reference's own conflict.
+ *
+ * <p>Alternatives Considered: leaving this type untouched and having each writing service either
+ * pre-read the key or issue its insert through a custom repository fragment, as the sibling
+ * {@code TransactionCategoryBalanceWriter} does for its own record. Rejected on two grounds. A
+ * pre-read leaves a window between the read and the write in which a concurrent append still
+ * merges, so it narrows the defect rather than removing it. And both variants fix the CALL SITES
+ * that exist today while leaving the repository's save available to the next writer of this table
+ * with its merge semantics intact -- the hazard would sit dormant, in a type whose own notes above
+ * state that every reference path is insert-only. Declaring the state on the ENTITY protects every
+ * writer, present and future, from one place.
+ *
+ * <p>Trade-offs: the marker is a persistence concern living on a domain type, which is a purity
+ * cost this file pays knowingly. It is accepted because the alternative is not a purer domain type
+ * but a silently destructive one, and because the marker is {@code @Transient} -- it maps to no
+ * column, so it neither widens the storage contract the record copybook fixes nor requires anything
+ * of the migration that owns the physical shape.
  *
  * <h2>Who writes this table</h2>
  *
@@ -196,7 +234,7 @@ import org.hibernate.type.SqlTypes;
 //       together, and the reporting context reads these rows through cross-schema views. Naming
 //       the schema here means this type resolves to one table whichever connection loads it.
 @Table(name = "transactions", schema = "ledger")
-public class Transaction {
+public class Transaction implements Persistable<String> {
 
     /**
      * The transaction identifier, which is this row's whole primary key.
@@ -232,6 +270,32 @@ public class Transaction {
     @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "transaction_id", length = 16, nullable = false, updatable = false)
     private String tranId;
+
+    /**
+     * Whether this instance still has to be written, which is what makes a save an insert.
+     *
+     * <p>Assumptions: the field defaults to {@code true}, so EVERY instance a writer constructs is
+     * an append until the provider says otherwise. That default is the whole mechanism: the
+     * identifier above is assigned rather than generated, so its presence cannot distinguish a row
+     * that has been stored from one that is about to be, and this field is the distinction. The two
+     * callbacks beneath clear it -- one when the provider hydrates an instance from a row, the other
+     * when it writes one -- so an instance that genuinely represents a stored row reports itself as
+     * such and a later save of it updates rather than re-inserting.</p>
+     */
+    // WHY : Assumptions: the field is @Transient and maps to no column, which is what keeps this
+    //       marker out of the storage contract. app/cpy/CVTRA05Y.cpy declares thirteen data members
+    //       and one FILLER and nothing else, and transformation rule T1 makes that copybook
+    //       normative, so a persisted marker would be a fourteenth value the record contract does
+    //       not have. It is also why the marker costs the migration nothing: db/migration/V1__ledger.sql
+    //       creates no column for it and ddl-auto validation has nothing to disagree with.
+    // WHY : Trade-offs: a detached instance reconstructed by a caller -- deserialised, or copied
+    //       field by field rather than loaded -- reports itself as unwritten, so saving it attempts
+    //       an insert and is refused by the primary key rather than updating the stored row. That is
+    //       the safe direction of the two and it is the direction this table wants: every reference
+    //       path appends, none rewrites, and a refusal names a mistake where an update would hide
+    //       one. No path in this context reconstructs a row that way.
+    @Transient
+    private boolean unwritten = true;
 
     /**
      * The two-character transaction type code.
@@ -848,6 +912,67 @@ public class Transaction {
      */
     public void setProcTs(LocalDateTime procTs) {
         this.procTs = procTs;
+    }
+
+    /**
+     * Returns the primary key this row is stored under, as {@link Persistable} declares it.
+     *
+     * <p>Purpose: the repository reads the identity through this method rather than through the
+     * annotated member, so it is the transaction identifier and nothing else -- the same value
+     * {@link #getTranId()} returns, spelled as the interface names it.</p>
+     *
+     * @return the sixteen-character transaction identifier, or {@code null} on an instance the
+     *     provider has not yet hydrated and no writer has populated
+     */
+    @Override
+    public String getId() {
+        return this.tranId;
+    }
+
+    /**
+     * Reports whether saving this instance must append a row rather than update one.
+     *
+     * <p>Purpose: the repository's save consults this method for a type implementing
+     * {@link Persistable} and issues {@code persist} when it answers true, so a true answer is what
+     * turns the save into the {@code EXEC CICS WRITE} the reference performs. The rulings behind the
+     * mechanism, and the merge it replaces, are recorded on this type's own notes.</p>
+     *
+     * @return {@code true} while this instance still has to be written, {@code false} once the
+     *     provider has hydrated it from a row or has written it
+     */
+    @Override
+    public boolean isNew() {
+        return this.unwritten;
+    }
+
+    /**
+     * Records that this instance now represents a stored row, after the provider hydrated it.
+     *
+     * <p>Purpose: an instance loaded from the database is not an append, so the marker is cleared
+     * before any caller can see it. Without this the repository would attempt an insert for every
+     * row it had just read, and a save of a loaded instance would be refused by its own primary
+     * key.</p>
+     */
+    // WHY : Assumptions: the callback is declared on this type rather than on an entity listener,
+    //       because it reads and writes only this instance's own state and a listener class would
+    //       place two lines of state management in a second file for no gain. The provider invokes
+    //       it after every load of this entity, including a load that populates a subset of columns.
+    @PostLoad
+    void markLoaded() {
+        this.unwritten = false;
+    }
+
+    /**
+     * Records that this instance now represents a stored row, after the provider wrote it.
+     *
+     * <p>Purpose: once the insert has been issued the instance is no longer an append, so a second
+     * save of the same instance updates it instead of being refused by the primary key. This is what
+     * keeps the marker from turning a legitimate re-save of a just-written row into a duplicate-key
+     * refusal.</p>
+     */
+    @PostPersist
+    void markWritten() {
+        this.unwritten = false;
     }
 
     /**

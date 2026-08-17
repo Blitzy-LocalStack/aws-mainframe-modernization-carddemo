@@ -2,6 +2,7 @@ package com.carddemo.transaction.service;
 
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
+import com.carddemo.common.error.RecordConflictException;
 import com.carddemo.common.money.Money;
 import com.carddemo.common.time.TimestampFormatter;
 import com.carddemo.common.validation.FieldValidationFlag;
@@ -196,6 +197,35 @@ public class BillPaymentService {
      */
     public static final String MESSAGE_PAYMENT_ADD_FAILED = "Unable to Add Bill pay Transaction...";
 
+    /**
+     * Integer digit positions the ledger amount's picture declares, which bounds the balance a payment
+     * may settle.
+     *
+     * <p>Assumptions: nine, from {@code TRAN-AMT PIC S9(09)V99} at line 10 of
+     * {@code app/cpy/CVTRA05Y.cpy}, which transformation rule T1 derives {@code amount NUMERIC(11,2)}
+     * from in {@code db/migration/V1__ledger.sql}. The balance a payment is derived from is WIDER --
+     * {@code ACCT-CURR-BAL PIC S9(10)V99} at line 7 of {@code app/cpy/CVACT01Y.cpy} declares ten -- so
+     * the two pictures genuinely disagree rather than describing one number two ways, and the
+     * disagreement is the baseline's own. Line 224 of {@code app/cbl/COBIL00C.cbl} moves the wider field
+     * into the narrower one, and a COBOL move into a narrower numeric field discards high-order digits
+     * with nothing signalled. This count is what {@link #requireBalanceFitsLedgerAmount(Money)} measures
+     * a balance against, and the resulting refusal is registered as
+     * {@code D-BILLPAY-AMOUNT-WIDTH-REFUSED} in
+     * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+     *
+     * <p>Alternatives Considered: reading {@link TransactionAddService#RECORD_AMOUNT_INTEGER_DIGITS},
+     * which is the same nine for the same picture and would leave one declaration instead of two.
+     * Rejected because it would couple this screen's service to the capture screen's for a fact that
+     * neither of them owns -- the copybook does -- so a reader would have to visit the other screen to
+     * learn what this one admits, and a later change to the capture screen's published domain would move
+     * this screen's storage bound with it silently. {@code Transaction.AMOUNT_INTEGER_DIGITS} was
+     * considered on the same grounds and rejected because it is the entity's own bound and deliberately
+     * private: widening it so this class could read it would publish a persistence detail as service
+     * API. Each screen therefore declares what it admits, and {@code BillPaymentServiceTest} asserts the
+     * two counts are equal so the duplication cannot drift apart unnoticed.</p>
+     */
+    public static final int LEDGER_AMOUNT_INTEGER_DIGITS = 9;
+
     /** The rows this service writes the payment transaction into and allocates its key from. */
     private final TransactionRepository transactions;
 
@@ -302,6 +332,16 @@ public class BillPaymentService {
      * reached only on the confirmed path, so a submission refused on its confirmation or its balance
      * never crosses the network at all.</p>
      *
+     * <p>Assumptions: one step of the order is this migration's and not the reference's, and it is
+     * marked as such where it stands. Between the balance test and the preview-or-pay split the balance's
+     * WIDTH is judged against {@link #LEDGER_AMOUNT_INTEGER_DIGITS}, because the record the payment is
+     * written into declares a narrower amount than the master the balance is read from and the reference
+     * resolves that by discarding a digit at line 224. The refusal is registered as
+     * {@code D-BILLPAY-AMOUNT-WIDTH-REFUSED} in
+     * {@code docs/architecture/cobol-to-service-traceability.md}, and it is placed there rather than
+     * inside the paying branch so that the turn which only reports cannot invite a payment the turn that
+     * follows it would refuse.</p>
+     *
      * @param request the submitted payment, already bean-validated by the API layer, carrying the
      *     account identifier and the one-character confirmation and no amount; must not be {@code null}
      * @return {@link BillPaymentResponse} when the payment was made, and otherwise
@@ -313,11 +353,13 @@ public class BillPaymentService {
      *     lines 187 and 188
      * @throws NoSuchElementException if the account identifier names no account, answered with line 361,
      *     or the account has no cross-reference entry, answered with line 425
-     * @throws DataIntegrityViolationException if the derived identifier is already taken, which is the
-     *     duplicate-key and duplicate-record branches at lines 533 and 534
-     * @throws IllegalStateException if a read failed, answered with line 368 or line 432, if the payment
-     *     row could not be written, answered with line 543, or if the balance change was refused,
-     *     answered with line 399
+     * @throws RecordConflictException carrying {@link RecordConflictException.Kind#DUPLICATE_KEY} if the
+     *     derived identifier is already taken, which is the duplicate-key and duplicate-record branches
+     *     at lines 533 and 534, answered with line 536
+     * @throws IllegalStateException if a read failed, answered with line 368 or line 432, if the balance
+     *     needs more integer digits than {@link #LEDGER_AMOUNT_INTEGER_DIGITS} so no row can carry it,
+     *     answered with line 543, if the payment row could not be written, answered with the same line,
+     *     or if the balance change was refused, answered with line 399
      */
     @Transactional
     public BillPaymentOutcome payBalanceInFull(BillPaymentRequest request) {
@@ -419,6 +461,32 @@ public class BillPaymentService {
                     BillPaymentMapper.MESSAGE_NOTHING_TO_PAY);
         }
 
+        // WHY : ⚠️ Refactoring Rationale: this refusal is NEW, and what it replaces is an unmapped
+        //       failure rather than a working branch. The amount's width was bounded only where the row
+        //       was COMPOSED -- the entity canonicalises its amount against the record picture -- so a
+        //       balance needing ten integer digits travelled all the way to the converter and raised an
+        //       arithmetic failure that the shared advice does not classify, which reached the operator
+        //       as a generic critical 500 carrying no sentence at all. The reference has its own wording
+        //       for a payment that could not be written, at line 543, and transformation rule T8 requires
+        //       that to be the sentence an operator sees.
+        // WHY : Assumptions: this is as early as the judgement can be made, and no earlier. The balance
+        //       IS the amount -- line 224 moves it verbatim and this screen carries no amount field of
+        //       its own -- so the value being judged does not exist until the read above answers. What
+        //       the position buys is everything AFTER it: the cross-reference read crosses the seam to
+        //       the account context and the identifier allocation advances a database sequence, and both
+        //       live in the paying method below. So a refused payment crosses no network and consumes no
+        //       value from the identifier sequence, which matters because a sequence value is not
+        //       recoverable by the rollback this failure triggers -- the next payment would be numbered
+        //       past a gap for a row that was never written.
+        // WHY : Trade-offs: it sits BEFORE the preview and pay split, so the unconfirmed turn is refused
+        //       as well as the confirmed one. Refusing only the confirmed turn was the alternative and is
+        //       rejected: the preview would report the balance beside line 237's prompt and invite a
+        //       confirmation that cannot succeed, which is a worse answer than refusing the turn that
+        //       asked. It sits AFTER the nothing-to-pay branch for the opposite reason: a credit balance
+        //       of ten integer digits is negative in this record's sign convention, so no payment will be
+        //       attempted on it at all and line 201's advisory is the reference's own answer for it.
+        requireBalanceFitsLedgerAmount(payableBalance);
+
         if (!affirmative) {
             // WHY : Assumptions: reaching here means the confirmation was withheld, since the refusal
             //       returned above and an out-of-domain value raised. The reference reads the account on
@@ -451,8 +519,17 @@ public class BillPaymentService {
      * high-order digit in the reference. The screen field {@code CURBALI PIC X(14)} at line 66 of
      * {@code app/cpy-bms/COBIL00.CPY} is sized for the wider picture, which corroborates the asymmetry
      * rather than resolving it. This is latent behaviour of the baseline at balances the seed data does
-     * not reach; the migrated path carries the full value through the exact-decimal money type and the
-     * difference is recorded here rather than reproduced.</p>
+     * not reach.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: what the migrated path does with such a balance is REFUSE it, and an
+     * earlier revision of this note said it "carries the full value through the exact-decimal money
+     * type", which was not true of any path. It cannot be: the amount column this method's row is stored
+     * in is {@code NUMERIC(11,2)}, derived from the narrower picture by transformation rule T1, so
+     * carrying ten integer digits through the money type only moved the failure from the assignment to
+     * the engine, where it arrived as a numeric-field-overflow with no field name in it. The refusal is
+     * now taken by {@link #requireBalanceFitsLedgerAmount(Money)} before this method is entered, so this
+     * method neither truncates such a balance nor carries it, and the divergence is registered as
+     * {@code D-BILLPAY-AMOUNT-WIDTH-REFUSED} rather than described here.</p>
      *
      * <p>Trade-offs: the order is write, then compute, then update -- lines 233, 234 and 235 -- and it
      * is deliberately NOT normalised against the nightly posting job, which orders the same three
@@ -471,8 +548,8 @@ public class BillPaymentService {
      * @return the posted acknowledgement carrying the assigned identifier, the pre-payment balance and
      *     the confirmation sentence; never {@code null}
      * @throws NoSuchElementException if the account has no cross-reference entry, answered with line 425
-     * @throws DataIntegrityViolationException if the derived identifier is already taken, lines 533 to
-     *     536
+     * @throws RecordConflictException carrying {@link RecordConflictException.Kind#DUPLICATE_KEY} if the
+     *     derived identifier is already taken, lines 533 to 536
      * @throws IllegalStateException if the identifier could not be derived, if the row could not be
      *     written, answered with line 543, or if the balance change was refused, answered with line 399
      */
@@ -575,6 +652,54 @@ public class BillPaymentService {
             //       instead would miss the translated form, which is the form that actually arrives.
             throw new IllegalStateException(BillPaymentMapper.MESSAGE_ACCOUNT_LOOKUP_FAILED,
                     unreadable);
+        }
+    }
+
+    /**
+     * Refuses a balance whose magnitude the ledger amount's picture cannot hold.
+     *
+     * <p>Purpose: this is the divergence registered as {@code D-BILLPAY-AMOUNT-WIDTH-REFUSED} in
+     * {@code docs/architecture/cobol-to-service-traceability.md}, expressed as a guard. Line 224 of
+     * {@code app/cbl/COBIL00C.cbl} moves a ten-integer-digit balance into the nine-integer-digit
+     * transaction amount and loses the high-order digit with nothing signalled; line 233 then writes that
+     * row and line 234 subtracts the TRUNCATED amount from the balance, so an operator told at line 527
+     * that the payment succeeded is left owing the digit that was discarded, and the row beside it records
+     * a figure smaller than the balance it was derived from. Neither write is wrong on its own and the two
+     * disagree with what was asked for, which is why this refuses the payment instead of reproducing it.
+     * </p>
+     *
+     * <p>Assumptions: the measurement is {@link Money#ofPicture(java.math.BigDecimal, int)} rather than a
+     * comparison against a limit composed here. That factory is the shared kernel's own statement of what
+     * a declared picture admits, so a change to how a picture bound is enforced reaches this path with it,
+     * and the reporting context bounds its report and statement totals through the same factory for the
+     * same reason. A local comparison would be a second, drifting statement of one copybook fact.</p>
+     *
+     * <p>Trade-offs: the canonicalised amount the factory answers with is DISCARDED and the caller keeps
+     * the balance it read. The two are equal for every value that passes -- the balance was read through
+     * the money contract, so it already carries that contract's scale -- so returning the factory's copy
+     * would suggest this method narrows the value it is handed, which it does not. The row is composed
+     * from the caller's balance by the converter, and only the JUDGEMENT is made here.</p>
+     *
+     * @param payableBalance the balance a payment would settle, as the read above answered it; must not
+     *     be {@code null}
+     * @throws IllegalStateException if the magnitude needs more than
+     *     {@link #LEDGER_AMOUNT_INTEGER_DIGITS} integer positions, carrying line 543's sentence and the
+     *     arithmetic failure as its cause
+     */
+    private static void requireBalanceFitsLedgerAmount(Money payableBalance) {
+        try {
+            Money.ofPicture(payableBalance.amount(), LEDGER_AMOUNT_INTEGER_DIGITS);
+        } catch (ArithmeticException tooWide) {
+            // WHY : Assumptions: the thrown type is the BARE illegal-state one and the arithmetic failure
+            //       is carried as its cause. The shared advice publishes a carried sentence only when the
+            //       thrown type is exactly that one, so a subclass -- or the arithmetic failure allowed to
+            //       propagate as it previously did -- is answered with the generic internal wording
+            //       instead of line 543's, which is the whole condition being fixed here. The cause is
+            //       kept because it names the picture and the bound that were exceeded, which is what an
+            //       operator reading the log needs and what the sentence itself deliberately withholds:
+            //       the amount is a cardholder's balance, and the observability contract names a monetary
+            //       amount as a value that is omitted from a message rather than abbreviated.
+            throw new IllegalStateException(MESSAGE_PAYMENT_ADD_FAILED, tooWide);
         }
     }
 
@@ -854,40 +979,49 @@ public class BillPaymentService {
      * sentence at lines 527 to 530; the duplicate-key and duplicate-record statuses at lines 533 and 534
      * both answer with line 536; and any other status answers with line 543.</p>
      *
-     * <p>Alternatives Considered: calling the repository's save alone and treating whatever it raises as
-     * a write failure. Rejected because it would lose the duplicate answer entirely, and lose it
-     * silently. The entity's identifier is assigned rather than generated, so a save with a non-null
-     * identifier is a merge, and a merge against a key that already exists UPDATES that row instead of
-     * refusing it -- overwriting a stranger's payment where the reference rejects. The entity carries
-     * neither a version nor a new-state marker, both deliberately per its own notes, so nothing about it
-     * turns the merge back into an insert. Establishing that the key is free is therefore what preserves
-     * the reference's rejection.</p>
+     * <p>⚠️ Refactoring Rationale: the duplicate is now raised as this migration's declared conflict
+     * type, {@link RecordConflictException} carrying {@link RecordConflictException.Kind#DUPLICATE_KEY},
+     * where it used to be raised as an integrity-violation constructed here with the reference's
+     * sentence as its message. The note that argued for the old shape said the shared advice "already
+     * maps it to a refusal status", and that was not true of an exception built here. The advice
+     * narrows its integrity-violation branch to a failure whose cause chain reports a SQL state in the
+     * integrity-constraint class, deliberately, so that a translated schema fault is not answered as a
+     * caller error -- and an exception constructed with a message and NO cause reports no state at all.
+     * A taken identifier therefore fell through to the generic internal answer: a retryable conflict was
+     * reported as HTTP 500 with the shared internal sentence, and the reference's own wording at line
+     * 536 never reached the caller. The declared conflict type is classified by the advice on its own
+     * type, so both the status and the sentence are now the ones this operation publishes.</p>
      *
-     * <p>Alternatives Considered: raising this module's declared conflict type for the duplicate.
-     * Rejected because that type carries a fixed set of contention conditions, each rendered with the
-     * shared kernel's own wording, and none of them is this program's line 536. The integrity-violation
-     * type is raised instead: the shared advice already maps it to a refusal status, so the duplicate
-     * rides the existing handler exactly as it should and no handler is added here for it. The verbatim
-     * sentence travels as the failure's own message so the reference's wording is carried and logged
-     * rather than lost.</p>
+     * <p>Assumptions: the sentence a caller reads is unchanged by that switch, because the kind's own
+     * rendering is this program's line 536 character for character -- the shared kernel's duplicate-key
+     * wording and {@link #MESSAGE_TRANSACTION_ID_EXISTS} are the same string, which
+     * {@code BillPaymentServiceTest} asserts so the two cannot drift apart. The kind covers both of the
+     * reference's duplicate statuses at lines 533 and 534, which the reference itself answers with one
+     * arm.</p>
      *
-     * <p>Trade-offs: establishing that the key is free and then writing is two steps rather than one, so
-     * two payments interleaving between them can still collide. The residual case is answered by the
-     * table's own primary key and is reported here as the same refusal, so both routes reach one answer.
-     * A narrower window is not available from this side without an allocator the baseline has no analogue
-     * for, which the identifier note above records the reasoning for.</p>
+     * <p>Assumptions: the guard is retained even though the insert beneath now refuses a duplicate on
+     * its own. {@link Transaction} declares its unwritten state, so the save issues an INSERT and the
+     * primary key answers a collision -- but that answer arrives through a FAILED FLUSH, which marks the
+     * unit of work for rollback and leaves the persistence context unusable. Reading first means the
+     * ordinary collision is answered without either, and the read costs nothing the write would not have
+     * cost anyway.</p>
+     *
+     * <p>Trade-offs: reading and then writing is two steps, so two payments interleaving between them can
+     * still collide. The residual case is answered by the table's own primary key and is translated to the
+     * same conflict below, so both routes reach one answer with one sentence.</p>
      *
      * @param row the composed payment row, carrying the derived identifier as its key; must not be
      *     {@code null}
      * @return the stored row, read back so the response reports the key as persisted; never {@code null}
-     * @throws DataIntegrityViolationException if the identifier is already taken, carrying the sentence
-     *     the reference emits at line 536
+     * @throws RecordConflictException carrying {@link RecordConflictException.Kind#DUPLICATE_KEY} if the
+     *     identifier is already taken, which the shared advice renders as the refusal the reference emits
+     *     at line 536
      * @throws IllegalStateException if the row could not be written for any other reason, carrying the
      *     sentence the reference emits at line 543
      */
     private Transaction persist(Transaction row) {
         if (this.transactions.existsById(row.getTranId())) {
-            throw new DataIntegrityViolationException(MESSAGE_TRANSACTION_ID_EXISTS);
+            throw new RecordConflictException(RecordConflictException.Kind.DUPLICATE_KEY);
         }
 
         try {
@@ -901,11 +1035,17 @@ public class BillPaymentService {
             //       the reference issues them.
             return this.transactions.saveAndFlush(row);
         } catch (DataIntegrityViolationException duplicate) {
-            // WHY : Assumptions: this is re-raised unchanged rather than wrapped, which is the whole
-            //       point of catching it separately. Wrapping it would present a key collision as an
-            //       unclassified failure, and the shared advice would then answer with the generic
-            //       internal sentence instead of the refusal the reference reports at line 536.
-            throw duplicate;
+            // WHY : ⚠️ Refactoring Rationale: the caught violation is TRANSLATED to the declared
+            //       conflict type rather than re-raised as itself, which the note this replaces argued
+            //       for on the ground that the shared advice maps it to a refusal. It does so only for
+            //       a violation whose cause chain reports an integrity-constraint SQL state. A
+            //       violation the provider raised for this row's primary key does carry that state, so
+            //       re-raising it would in fact have been answered 409 -- but with the shared
+            //       dependent-row sentence, which tells a caller to delete child records that do not
+            //       exist. Translating names the condition the caller can act on and reaches line 536's
+            //       wording, the same wording the guard above reaches, so the interleaved collision and
+            //       the ordinary one are answered identically.
+            throw new RecordConflictException(RecordConflictException.Kind.DUPLICATE_KEY);
         } catch (RuntimeException writeFailure) {
             // WHY : Assumptions: the write failure is re-raised as the standard illegal-state type
             //       carrying this program's own sentence, because the shared advice renders a carried

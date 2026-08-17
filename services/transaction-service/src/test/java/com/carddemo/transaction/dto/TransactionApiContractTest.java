@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import com.carddemo.common.money.Money;
 import com.carddemo.common.money.MoneyModule;
 import com.carddemo.common.web.CorrelationIdFilter;
+import com.carddemo.transaction.api.TransactionController;
 import com.carddemo.transaction.service.TransactionAddService;
 import jakarta.validation.constraints.Pattern;
 import java.io.InputStream;
@@ -448,6 +449,69 @@ class TransactionApiContractTest {
                 .as("the balance field declares ten integer digits, so the two domains differ by one"
                         + " digit and must not be described by one schema")
                 .isTrue();
+    }
+
+    // WHY : Refactoring Rationale: the two IDENTIFIER schemas are compared to the two adapter constants
+    //       here rather than through the table above, because that table pairs a schema with a component
+    //       of the capture request and neither identifier is one -- the identifier is never submitted in a
+    //       body. Both are read in one case because the whole point of there being two is that they
+    //       DIFFER, and a case reading one of them could not see them collapse back into each other.
+    /**
+     * Asserts the two published identifier domains are the two the adapter applies, and that they differ.
+     *
+     * <p>Assumptions: the record domain admits the hyphen and the search domain does not, which is the
+     * asymmetry {@code app/cbl/COTRN00C.cbl} line 209 and {@code app/cbl/COTRN01C.cbl} lines 145 to 172
+     * establish between a positioning field and a drill-down. Registered as
+     * {@code D-TRAN-ID-RECORD-DOMAIN} in {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+     */
+    @Test
+    @DisplayName("the two published identifier domains are the two the adapter applies, and they differ")
+    void thePublishedIdentifierDomainsAreTheAppliedOnes() {
+        assertThat(unanchored(String.valueOf(schema("TransactionId").get("pattern"))))
+                .as("the member path and every response member carry the RECORD's domain")
+                .isEqualTo(TransactionController.TRANSACTION_ID_RECORD_PATTERN);
+        assertThat(unanchored(String.valueOf(schema("TransactionIdSearchKey").get("pattern"))))
+                .as("the browse's positioning field carries the narrower numeric domain")
+                .isEqualTo(TransactionController.TRANSACTION_ID_SEARCH_PATTERN.replace("\\d", "[0-9]"));
+        assertThat(TransactionController.TRANSACTION_ID_RECORD_PATTERN)
+                .as("two domains that were equal would be one domain, which is the defect this split"
+                        + " removed: an accrual identifier the browse returns has to be addressable"
+                        + " while remaining an invalid positioning value")
+                .isNotEqualTo(TransactionController.TRANSACTION_ID_SEARCH_PATTERN);
+        assertThat(java.util.regex.Pattern.compile(
+                TransactionController.TRANSACTION_ID_RECORD_PATTERN)
+                .matcher("2022-07-18000050").matches())
+                .as("the accrual form app/cbl/CBACT04C.cbl L473-L480 composes is addressable")
+                .isTrue();
+        assertThat(java.util.regex.Pattern.compile(
+                TransactionController.TRANSACTION_ID_SEARCH_PATTERN)
+                .matcher("2022-07-18000050").matches())
+                .as("and is not a positioning value, per the numeric edit at line 209")
+                .isFalse();
+    }
+
+    // WHY : Refactoring Rationale: the request record's own expression is compared to the published one
+    //       CHARACTER FOR CHARACTER, which is a stronger claim than the digit-count comparison below and
+    //       became possible only when the amount was bound as characters. While the member was bound as
+    //       the shared money type its lexical gate lived in a deserialiser, whose refusal a client saw as
+    //       an unreadable body with no field named; the gate is a constraint now, and a constraint's
+    //       expression is a constant this test can read. Two expressions for one field is how a contract
+    //       and its implementation come to disagree, so they are asserted equal rather than compatible.
+    /**
+     * Asserts that the expression the request applies to the amount is the published pattern itself.
+     *
+     * <p>Assumptions: the published pattern carries its own anchors and the constant deliberately does
+     * not -- Bean Validation matches the whole string, so anchors in the constant would be redundant --
+     * so the comparison adds them rather than stripping them, which is the direction that cannot pass by
+     * accident.</p>
+     */
+    @Test
+    @DisplayName("the expression the request applies to the amount is the published pattern")
+    void theRequestsAmountExpressionIsThePublishedPattern() {
+        assertThat("^" + TransactionAddRequest.AMOUNT_WIRE_FORM + "$")
+                .as("the constraint on the amount component and the TransactionAmount schema must be"
+                        + " one expression, so a body one calls valid the other cannot call malformed")
+                .isEqualTo(String.valueOf(schema("TransactionAmount").get("pattern")));
     }
 
     // WHY : Refactoring Rationale: the amount domain has THREE authorities and the case above compares
@@ -943,6 +1007,14 @@ class TransactionApiContractTest {
 
     /**
      * Asserts that the browse filter is published and bounded exactly as the request type bounds it.
+     *
+     * <p>⚠️ Refactoring Rationale: the schema compared against is the one the PARAMETER REFERENCES,
+     * read out of the document, where an earlier form of this case named {@code TransactionId} as a
+     * literal. That literal was load-bearing in the wrong direction: it asserted that the positioning
+     * field and every stored identifier share one domain, which is what made 50 accrual rows the browse
+     * returns unaddressable and made the list response violate its own declared member shape. Reading
+     * the reference instead means this case follows the document rather than pinning one reading of it,
+     * and it still fails if the parameter is pointed at a schema the request type does not enforce.</p>
      */
     @Test
     @DisplayName("the browse filter is published and bounded as the request type bounds it")
@@ -951,10 +1023,35 @@ class TransactionApiContractTest {
         assertThat(filter.get("name")).isEqualTo("transactionIdFilter");
         assertThat(filter.get("in")).isEqualTo("query");
         assertThat(declaresComponent(TransactionListRequest.class, "transactionIdFilter")).isTrue();
+
+        String referencedSchema = referencedSchemaName(filter);
+        assertThat(referencedSchema)
+                .as("the positioning field carries the narrower numeric domain, per the numeric edit at"
+                        + " app/cbl/COTRN00C.cbl line 209, and not the record's own domain")
+                .isEqualTo("TransactionIdSearchKey");
         assertThat(withoutEmptyAlternative(
                 appliedPattern(TransactionListRequest.class, "transactionIdFilter")))
-                .as("the filter and the published identifier must describe one shape")
-                .isEqualTo(unanchored(String.valueOf(schema("TransactionId").get("pattern"))));
+                .as("the filter and the schema it references must describe one shape")
+                .isEqualTo(unanchored(String.valueOf(schema(referencedSchema).get("pattern"))));
+    }
+
+    /**
+     * Reads the schema name a parameter references, so a case follows the document rather than a literal.
+     *
+     * <p>Assumptions: the reference is resolved by taking the final segment of the pointer, which is
+     * enough because every schema this document declares sits directly under
+     * {@code components/schemas}. A nested pointer would need a full resolver, and there is none to
+     * resolve.</p>
+     *
+     * @param parameterNode the parsed parameter node, of type {@code Map<String, Object>}; must not be
+     *     {@code null}
+     * @return the referenced schema's name, never {@code null}
+     */
+    @SuppressWarnings("unchecked")
+    private static String referencedSchemaName(Map<String, Object> parameterNode) {
+        Map<String, Object> schemaNode = (Map<String, Object>) parameterNode.get("schema");
+        String pointer = String.valueOf(schemaNode.get("$ref"));
+        return pointer.substring(pointer.lastIndexOf('/') + 1);
     }
 
     // WHY : Assumptions: the detail body is asserted to reference the MASKED schema rather than the

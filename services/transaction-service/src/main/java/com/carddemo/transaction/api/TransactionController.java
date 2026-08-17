@@ -152,8 +152,9 @@ public class TransactionController {
      *
      * <p>Assumptions: a literal segment rather than a variable, and it cannot collide with
      * {@link #ITEM_PATH} even though both sit one level below the collection. That path admits exactly
-     * sixteen decimal digits through {@link #TRANSACTION_ID_PATTERN}, which no letter satisfies, and the
-     * two mappings answer different methods besides -- a GET for the member and a POST here.</p>
+     * sixteen characters over {@link #TRANSACTION_ID_RECORD_PATTERN}, whose class holds digits and the
+     * hyphen and so admits no letter, and the two mappings answer different methods besides -- a GET for
+     * the member and a POST here.</p>
      *
      * <p>Assumptions: the segment is hyphenated rather than camel-cased, matching every other multi-word
      * path segment this deployment publishes -- {@code /card-xrefs/lookup-by-account} and
@@ -177,8 +178,44 @@ public class TransactionController {
     /** The declared width of a transaction identifier, from {@code TRAN-ID PIC X(16)}. */
     public static final int TRANSACTION_ID_WIDTH = 16;
 
-    /** The character class a transaction identifier is admitted over: exactly sixteen decimal digits. */
-    public static final String TRANSACTION_ID_PATTERN = "\\d{16}";
+    /**
+     * The character class a STORED transaction identifier is admitted over.
+     *
+     * <p>Assumptions: sixteen characters, each a digit or a hyphen, which is the union of the two
+     * producers this system has and is the {@code TransactionId} schema of
+     * {@code openapi/transaction-api.yaml}. The capture path allocates sixteen zero-padded digits, and
+     * {@code app/cbl/CBACT04C.cbl} lines 473 to 480 compose an accrual identifier by concatenating the
+     * injected business date with a six-digit suffix, producing a value such as
+     * {@code 2022-07-18000050}. Both are values {@code TRAN-ID PIC X(16)} at
+     * {@code app/cpy/CVTRA05Y.cpy} line 5 holds, so both have to be addressable.
+     *
+     * <p>⚠️ Refactoring Rationale: this admits the hyphen where an earlier single constant admitted only
+     * digits, and the earlier form made rows that the browse RETURNS unaddressable -- the member path
+     * answered 400 for an identifier the list had just published, for every accrual row in the ledger.
+     * The baseline has no such gap: {@code PROCESS-ENTER-KEY} at {@code app/cbl/COTRN01C.cbl} lines 145
+     * to 172 applies a blank check and no numeric edit before its read, so a row selected from the list
+     * opens. Registered as {@code D-TRAN-ID-RECORD-DOMAIN} in
+     * {@code docs/architecture/cobol-to-service-traceability.md}.
+     *
+     * <p>Assumptions: the class stays as narrow as the data allows rather than mirroring
+     * {@code PIC X(16)} literally, which would admit every character in the code page. A quote, a space
+     * or a semicolon in a path segment has no producer here, and refusing them keeps this adapter's
+     * addressing surface minimal -- the parameterised reads beneath are what make injection impossible,
+     * and this is the layer that makes it unreachable.
+     */
+    public static final String TRANSACTION_ID_RECORD_PATTERN = "[0-9-]{16}";
+
+    /**
+     * The character class the browse's POSITIONING identifier is admitted over.
+     *
+     * <p>Assumptions: exactly sixteen decimal digits, which is the {@code TransactionIdSearchKey} schema
+     * and is narrower than {@link #TRANSACTION_ID_RECORD_PATTERN} on purpose. The baseline applies two
+     * different edits to the two uses of one field: {@code app/cbl/COTRN00C.cbl} line 209 tests
+     * {@code IF TRNIDINI IS NUMERIC} before using the search field as a start key, answering line 214's
+     * {@code 'Tran ID must be Numeric ...'} when it is not, while the drill-down applies only a blank
+     * check. Two constants are what let this adapter reproduce both rather than averaging them.
+     */
+    public static final String TRANSACTION_ID_SEARCH_PATTERN = "\\d{16}";
 
     /**
      * The two wire tokens a read direction is admitted over, mirroring the contract's direction
@@ -342,6 +379,11 @@ public class TransactionController {
      *     this query and this caller, or was issued longer ago than its lifetime; the shared advice
      *     renders it as 400 because the type derives from
      *     {@code com.carddemo.common.error.ClientInputException}
+     * @throws com.carddemo.common.error.ClientInputException if {@code cursor} and
+     *     {@code transactionIdFilter} are supplied together, which names two browse positions in one
+     *     request; the browse refuses the combination rather than resolving it silently in favour of
+     *     one, and the 400 it raises names both parameters, exactly as this operation's published
+     *     parameter description states
      * @throws IllegalStateException if an ordered read answers abnormally, carrying the lower-case
      *     sentence {@code app/cbl/COTRN00C.cbl} emits at {@code :615}, {@code :649} and {@code :683}
      */
@@ -349,7 +391,7 @@ public class TransactionController {
     public ResponseEntity<PageResponse<TransactionListItemResponse>> listTransactions(
             @RequestParam(name = PARAM_TRANSACTION_ID_FILTER, required = false)
             @Size(min = TRANSACTION_ID_WIDTH, max = TRANSACTION_ID_WIDTH)
-            @Pattern(regexp = TRANSACTION_ID_PATTERN) String transactionIdFilter,
+            @Pattern(regexp = TRANSACTION_ID_SEARCH_PATTERN) String transactionIdFilter,
             @RequestParam(name = PARAM_CURSOR, required = false) String cursor,
             @RequestParam(name = PARAM_DIRECTION, required = false)
             @Pattern(regexp = DIRECTION_PATTERN) String direction,
@@ -491,7 +533,7 @@ public class TransactionController {
     public ResponseEntity<TransactionDetailResponse> viewTransaction(
             @PathVariable(name = PATH_TRANSACTION_ID)
             @Size(min = TRANSACTION_ID_WIDTH, max = TRANSACTION_ID_WIDTH)
-            @Pattern(regexp = TRANSACTION_ID_PATTERN) String transactionId) {
+            @Pattern(regexp = TRANSACTION_ID_RECORD_PATTERN) String transactionId) {
 
         // WHY : Assumptions: the identifier is handed on untouched. The baseline moves its keyed-in
         //       field into the record key unchanged, and the stored key is a declared-width character

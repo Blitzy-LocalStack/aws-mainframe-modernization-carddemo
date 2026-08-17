@@ -11,6 +11,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.carddemo.common.CardDemoCommonAutoConfiguration;
+import com.carddemo.common.error.AbendDetail;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.money.Money;
@@ -864,6 +865,49 @@ class BillPaymentControllerTest {
                 .andExpect(jsonPath("$.status").value(500))
                 .andExpect(jsonPath("$.message")
                         .value(BillPaymentMapper.MESSAGE_ACCOUNT_UPDATE_FAILED));
+    }
+
+    /**
+     * A balance too wide for the ledger amount reaches the wire as line 543's own sentence.
+     *
+     * <p>Purpose: pins the WIRE rendering of the width refusal registered as
+     * {@code D-BILLPAY-AMOUNT-WIDTH-REFUSED}, which the service raises when a balance needs more integer
+     * digits than {@link BillPaymentService#LEDGER_AMOUNT_INTEGER_DIGITS}. What the service raises and what
+     * an operator reads are different questions, and only this one answers the second.</p>
+     *
+     * <p>Assumptions: the shared advice filters the sentence it publishes at 500 rather than passing any
+     * message through, so a sentence a service raises can be replaced by the generic internal wording
+     * before it reaches a caller -- and that is what an earlier revision of this path actually did, from
+     * one step further along, by letting an unclassified arithmetic failure propagate. Asserting the
+     * sentence HERE is therefore not a duplicate of the service-level case: it is the only assertion that
+     * proves the filter admits this particular string.</p>
+     *
+     * <p>Assumptions: the abend block's own message is asserted in the same case, because the two are
+     * separately sourced and a reader would reasonably expect them to agree. The aggregate message is the
+     * sentence the failure carried; the abend block carries {@link AbendDetail#EXTERNAL_ABEND_MSG}, which
+     * is deliberately identical for every abend so that two failures with different internal causes are
+     * indistinguishable to the caller that provoked them, standing where the reference's own
+     * {@code ABEND-MSG PIC X(72)} at line 28 of {@code app/cpy/CSMSG02Y.cpy} stands. Asserting both keeps
+     * a later change from collapsing the screen's sentence and the fixed prose into one.</p>
+     *
+     * @throws Exception if the submission could not be performed
+     */
+    @Test
+    @DisplayName("amount width: a balance the ledger cannot hold is reported with line 543's sentence")
+    void aBalanceTooWideForTheLedgerAmountIsReportedWithItsOwnSentence() throws Exception {
+        when(this.billPaymentService.payBalanceInFull(any())).thenThrow(new IllegalStateException(
+                BillPaymentService.MESSAGE_PAYMENT_ADD_FAILED,
+                new ArithmeticException("an amount declaring 10 integer digits exceeds the"
+                        + " 9-integer-digit picture domain of 999999999.99")));
+
+        this.submitAs(JwtRoleConverter.USER_AUTHORITY,
+                        submission(ACCOUNT_ID, BillPaymentService.CONFIRM_YES_UPPER))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.status").value(500))
+                .andExpect(jsonPath("$.message")
+                        .value(BillPaymentService.MESSAGE_PAYMENT_ADD_FAILED))
+                .andExpect(jsonPath("$.abend.abendMsg")
+                        .value(AbendDetail.EXTERNAL_ABEND_MSG));
     }
 
     /**

@@ -2,7 +2,6 @@ package com.carddemo.transaction.dto;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.carddemo.common.money.Money;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
@@ -13,6 +12,9 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Verifies that the rendering of a submission carries no value the migration's logging contract
@@ -29,6 +31,14 @@ import org.junit.jupiter.api.Test;
  * <p>Assumptions: the sixteen-digit value is assembled from a repeated digit rather than written as a
  * literal, so that no test fixture in this repository is a card-number-shaped constant a scanner has
  * to triage.</p>
+ *
+ * <p>⚠️ Assumptions: the class carries THREE subjects and not one -- the rendering, the key pairing rule
+ * and the amount's own constraints -- and the amount cases are here rather than only at the HTTP boundary
+ * for a reason. What they assert is that a malformed amount produces a CONSTRAINT VIOLATION naming the
+ * {@code amount} property at all, which is the property a boundary response's per-field entry is keyed
+ * by; a boundary case reads the rendered entry and would pass just as well if the entry were synthesised
+ * somewhere other than from a constraint. Both levels are asserted, and this is the level at which the
+ * mechanism itself is visible.</p>
  */
 class TransactionAddRequestTest {
 
@@ -232,6 +242,144 @@ class TransactionAddRequestTest {
                 .isNotEmpty();
     }
 
+    // WHY : Assumptions: these cases exist because a malformed amount used to reach no constraint at
+    //       all. The component was declared as the shared money type, so every value the published
+    //       TransactionAmount pattern refuses failed inside a DESERIALISER -- before an object existed
+    //       to validate -- and the framework answered an unreadable body with an EMPTY per-field array.
+    //       A form could not mark the amount input, because no entry named it. The component carries
+    //       the submitted characters now, so binding always succeeds and the two constraints below are
+    //       what refuse a value.
+    /**
+     * Every lexical form the published amount pattern excludes raises the format sentence on the field.
+     *
+     * <p>Assumptions: the specimens are the forms an operator actually keys, and each fails a different
+     * alternative of the disjunction at lines 339 to 351 of {@code app/cbl/COTRN02C.cbl} -- whose four
+     * alternatives share one action, so all of them answer with the single sentence at line 345. A JSON
+     * number cannot be spelled at this level, which receives a bound object rather than a document; the
+     * wire-level case for it is in {@code TransactionCaptureWireContractTest}.</p>
+     *
+     * @param submitted the characters to place in the amount, of type {@code String}
+     * @param why the reason the published pattern excludes them, of type {@code String}, carried so a
+     *     failure names the form rather than only the value
+     */
+    @ParameterizedTest(name = "[{0}] refused: {1}")
+    @CsvSource({
+        "125.5,one fractional digit where the pattern requires exactly two",
+        "125.456,three fractional digits where the pattern requires exactly two",
+        "+125.50,a leading plus where the pattern admits only a minus",
+        "'1,234.50',a grouping separator the pattern does not admit",
+        "' 125.50 ',surrounding whitespace the pattern does not admit",
+        "1000000000.99,a tenth integer digit the record cannot hold",
+        "abc,text carrying no numeric position at all",
+        "1e5,an exponent no position in the record's picture admits",
+        "-0.005,a third fractional digit the record's scale cannot hold",
+    })
+    @DisplayName("refuse each lexical form the published amount pattern excludes")
+    void everyExcludedAmountFormRaisesTheFormatSentenceOnTheField(String submitted, String why) {
+        assertThat(amountViolations(withAmount(submitted)))
+                .as("[%s] must be refused: %s", submitted, why)
+                .containsExactly(TransactionAddRequest.AMOUNT_FORMAT);
+    }
+
+    /**
+     * Every form the record holds is admitted, at both signs and at both ends of the domain.
+     *
+     * <p>Assumptions: the bounds are submitted as well as an ordinary value, because a constraint that
+     * admitted nothing at all would satisfy the refusal cases above on its own. Nine integer digits is
+     * the record's domain, from {@code TRAN-AMT PIC S9(09)V99} at line 10 of
+     * {@code app/cpy/CVTRA05Y.cpy}.</p>
+     *
+     * @param submitted the characters to place in the amount, of type {@code String}
+     */
+    @ParameterizedTest(name = "[{0}] admitted")
+    @ValueSource(strings = {"0.00", "125.50", "-125.50", "999999999.99", "-999999999.99", "-0.00"})
+    @DisplayName("admit every form the record can hold, at both signs and at the domain's edge")
+    void everyFormTheRecordHoldsIsAdmitted(String submitted) {
+        assertThat(amountViolations(withAmount(submitted)))
+                .as("[%s] is within the record's own domain and must be admitted", submitted)
+                .isEmpty();
+    }
+
+    /**
+     * An empty or absent amount draws the presence sentence, and the format sentence is not raised.
+     *
+     * <p>Assumptions: both spellings are asserted because the reference tests for both at line 278 of
+     * {@code app/cbl/COTRN02C.cbl}, {@code TRNAMTI = SPACES OR LOW-VALUES}: an empty string is the
+     * first and an absent member is the second. Both are the blank case rather than a malformed one.</p>
+     *
+     * <p>Assumptions: the assertion is that EXACTLY ONE sentence is raised, not merely that the presence
+     * sentence is among them. A shape constraint that also fired on a blank value would put two entries
+     * on one input and a form would show two messages for one empty field, which the reference never
+     * does -- its presence chain sends the screen before the shape alternatives are reached.</p>
+     */
+    @Test
+    @DisplayName("an empty or absent amount draws the presence sentence alone")
+    void anEmptyOrAbsentAmountDrawsThePresenceSentenceAlone() {
+        assertThat(amountViolations(withAmount("")))
+                .as("an empty field is the SPACES half of line 278")
+                .containsExactly(TransactionAddRequest.AMOUNT_REQUIRED);
+        assertThat(amountViolations(withAmount("   ")))
+                .as("an all-space field is the same half of line 278")
+                .containsExactly(TransactionAddRequest.AMOUNT_REQUIRED);
+        assertThat(amountViolations(withAmount(null)))
+                .as("an absent member is the LOW-VALUES half of line 278")
+                .containsExactly(TransactionAddRequest.AMOUNT_REQUIRED);
+    }
+
+    /**
+     * The parsed accessor answers the submitted value, and answers nothing for the blank spellings.
+     *
+     * <p>Assumptions: the accessor is read here rather than only through the service, because it is the
+     * single place the submitted characters become the shared money type and every consumer downstream
+     * depends on it. Its scale is asserted as well as its value, since the record's picture fixes two
+     * fractional positions and a consumer comparing scales would see the difference.</p>
+     */
+    @Test
+    @DisplayName("the parsed accessor answers the submitted amount and nothing for the blank spellings")
+    void theParsedAccessorAnswersTheSubmittedAmount() {
+        assertThat(withAmount("-125.50").amountValue().toPlainString())
+                .as("the characters submitted, read through the shared money type")
+                .isEqualTo("-125.50");
+        assertThat(withAmount("125.50").amountValue().amount().scale())
+                .as("two fractional positions, as TRAN-AMT PIC S9(09)V99 declares")
+                .isEqualTo(2);
+        assertThat(withAmount("").amountValue())
+                .as("a blank amount is not a value to parse, so nothing is answered")
+                .isNull();
+        assertThat(withAmount(null).amountValue())
+                .as("nor is an absent one")
+                .isNull();
+    }
+
+    /**
+     * Builds a submission whose only variable is the amount, valid in every other respect.
+     *
+     * @param amount the characters to place in the amount, or {@code null} to omit the member
+     * @return a submission valid in every other respect, never {@code null}
+     */
+    private static TransactionAddRequest withAmount(String amount) {
+        return new TransactionAddRequest(ACCOUNT_ID, "01", "0001", "POS", "GROCERY PURCHASE",
+                amount, "000000000", "CORNER STORE", "SEATTLE", "98101", null,
+                "2026-01-15", "2026-01-16", "Y", null);
+    }
+
+    /**
+     * Returns the sentences the amount's own constraints raised, ignoring every other component.
+     *
+     * <p>Assumptions: filtered by PROPERTY PATH rather than by message, which is the opposite of the
+     * pairing rule's helper below and is deliberate: what these cases assert is which member a client is
+     * told to correct, so the property is the subject and the message is the value under test.</p>
+     *
+     * @param request the submission to validate; must not be {@code null}
+     * @return the sentences raised against the {@code amount} property, never {@code null}
+     */
+    private static List<String> amountViolations(TransactionAddRequest request) {
+        return validator.validate(request).stream()
+                .filter(violation -> "amount".equals(violation.getPropertyPath().toString()))
+                .map(ConstraintViolation::getMessage)
+                .toList();
+    }
+
     /**
      * Returns the property names the pairing rule raised a violation against.
      *
@@ -263,7 +411,7 @@ class TransactionAddRequestTest {
         //       alternatives and the token is not one of them. A submission carrying none is the
         //       single-turn arm the contract admits, so omitting it keeps every case here on its subject.
         return new TransactionAddRequest(accountId, "01", "0001", "POS", "GROCERY PURCHASE",
-                Money.of("125.50"), "000000000", "CORNER STORE", "SEATTLE", "98101", cardNumber,
+                "125.50", "000000000", "CORNER STORE", "SEATTLE", "98101", cardNumber,
                 "2026-01-15", "2026-01-16", "Y", null);
     }
 
@@ -276,7 +424,7 @@ class TransactionAddRequestTest {
      */
     private static TransactionAddRequest request(String cardNumber) {
         return new TransactionAddRequest(ACCOUNT_ID, "01", "0001", "POS", "GROCERY PURCHASE",
-                Money.of("125.50"), "000000000", "CORNER STORE", "SEATTLE", "98101", cardNumber,
+                "125.50", "000000000", "CORNER STORE", "SEATTLE", "98101", cardNumber,
                 "2026-01-15", "2026-01-16", "Y", null);
     }
 }

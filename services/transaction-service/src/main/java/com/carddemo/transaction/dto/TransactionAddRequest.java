@@ -8,7 +8,6 @@ import jakarta.validation.ConstraintValidator;
 import jakarta.validation.ConstraintValidatorContext;
 import jakarta.validation.Payload;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import java.lang.annotation.Documented;
@@ -291,8 +290,18 @@ import tools.jackson.databind.annotation.JsonDeserialize;
  *
  * <p>Assumptions: that module is registered by this module's own configuration, outside this
  * package, because component scanning rooted at {@code com.carddemo.transaction} reaches nothing
- * beneath {@code com.carddemo.common}. This record does not register it, does not annotate around
- * it and needs no serialisation annotation of its own.
+ * beneath {@code com.carddemo.common}. This record does not register it and does not annotate
+ * around it.
+ *
+ * <p>⚠️ Assumptions: the {@code amount} component is nonetheless declared as CHARACTERS and carries
+ * its own reader, which does not contradict the paragraphs above -- it is the same rule applied one
+ * step earlier. What travels on the wire is still exactly a JSON string of two-place decimal text,
+ * and a JSON number is still refused; the difference is only that the refusal now happens in a
+ * CONSTRAINT that can name the field rather than in a reader that cannot. The parsed value is
+ * reached through {@link #amountValue()}, so every consumer downstream still works in the shared
+ * money type and no arithmetic anywhere in this service sees a bare decimal or a floating-point
+ * value. The sibling responses declare the money type directly, because a response is composed by
+ * this service and has no submitted characters to preserve.
  *
  * <h2>Identifiers are digits-validated strings, never numeric types</h2>
  *
@@ -346,8 +355,9 @@ import tools.jackson.databind.annotation.JsonDeserialize;
  * the bound. It admits ten integer digits, because it also carries account balances, so a
  * ten-digit amount would be constructed successfully and would then not fit the nine-digit record.
  * {@link AmountWithinRecordDomain} below closes that gap on the {@code amount} component itself, and
- * its validator is expressed in whole cents so that no arbitrary-precision decimal appears anywhere in
- * this file.
+ * its validator measures the SUBMITTED CHARACTERS against {@link #AMOUNT_WIRE_FORM} so that no
+ * arbitrary-precision decimal appears anywhere in this file and no normalising parse runs ahead of
+ * the measurement.
  *
  * <p>Trade-offs: the message that reports an over-wide amount names the eight-digit specimen while
  * this record accepts nine, and the mismatch is accepted rather than edited away. The reference
@@ -575,39 +585,53 @@ public record TransactionAddRequest(
     @NotBlank(message = DESCRIPTION_REQUIRED)
     @Size(max = DESCRIPTION_WIDTH)
     String description,
-    // WHY : Assumptions: MoneyModule binds its serialiser and deserialiser to this exact type, so
-    //       the declared type is what selects the quoted-string wire form. Substituting a bare
-    //       decimal here compiles and runs and silently reads and writes a JSON number instead.
-    // WHY : Refactoring Rationale: the nine-integer-digit bound is declared HERE, on the component,
-    //       through a constraint of this file's own rather than through a predicate over the whole
-    //       record. The framework's digit constraint has no validator for this type, which is why a
-    //       constraint had to be written; an earlier revision wrote it as a boolean predicate named
-    //       isAmountWithinRecordDomain(), and a violation of it was then reported against a property
-    //       called amountWithinRecordDomain that no submitted field is named after. A client cannot
-    //       attach that to an input, so the bound now reports against amount.
-    // WHY : ⚠️ Refactoring Rationale: the RAW wire text is validated before it is parsed, and this
-    //       annotation is what preserves it long enough to be looked at. The reference validates the
-    //       twelve characters the operator keyed, position by position, at app/cbl/COTRN02C.cbl lines
-    //       339 to 351. The service layer's own shape test runs on the value AFTER the wire boundary
-    //       has parsed it into the shared money type and then re-renders it through the edited picture,
-    //       so the string it inspects is canonical by construction and the test can only ever fail on
-    //       magnitude. An under-padded form such as "1234.5", or an unsigned or grouped form, therefore
-    //       passed validation and was silently rewritten to "1234.50" -- while the published
-    //       TransactionAmount schema refuses all three outright, so the service accepted bodies its own
-    //       contract calls malformed. Once the parse has happened the original characters are gone, and
-    //       a deserialiser is the only place they still exist.
-    //       Alternatives Considered: a second String component carrying the submitted text. Rejected
-    //       because the published request schema closes its object, so an extra property would be
-    //       refused by any strict client, and because two members describing one value can disagree.
-    //       Alternatives Considered: tightening the shared money type's own grammar in common-lib.
-    //       Rejected because that grammar is deliberately lenient for a reason its own note records --
-    //       a value read back from a report's edit mask carries a leading plus that the reference itself
-    //       wrote -- so narrowing it would break the codec paths that depend on the leniency. The
-    //       narrowing belongs to this one request, which is where the contract narrows it.
-    @NotNull(message = AMOUNT_REQUIRED)
+    // WHY : ⚠️ Refactoring Rationale: this component carries the SUBMITTED CHARACTERS and no longer
+    //       the parsed money type, and the change is what makes a malformed amount reportable AS a
+    //       field at all. The reference validates the twelve characters the operator keyed, position
+    //       by position, at app/cbl/COTRN02C.cbl lines 339 to 351 and answers with one sentence at
+    //       line 345. When this component was declared as the money type, every value the published
+    //       TransactionAmount pattern refuses failed inside a DESERIALISER -- before any object
+    //       existed to validate -- so the framework raised an unreadable-body failure and the answer
+    //       was the shared malformed-request sentence with an EMPTY per-field array. A client was told
+    //       its body could not be read and never told which member was wrong, which breaks
+    //       transformation rule T7's per-field array and rule T8's verbatim sentence together, and a
+    //       form could not draw its marker on the amount input because no entry named it. Binding the
+    //       characters cannot fail, so the two constraints below run and each reports against amount.
+    //       Alternatives Considered: recognising the deserialiser's mismatch in the shared advice and
+    //       synthesising the entry there. Rejected because the sentence belongs to this service's
+    //       catalogue and the shared kernel cannot know it, and because the advice's own message gate
+    //       admits no digit run longer than four -- so "Amount should be in format -99999999.99"
+    //       cannot travel that route and degrades to the generic sentence.
+    //       Alternatives Considered: a second String component carrying the submitted text beside the
+    //       parsed one. Rejected because the published request schema closes its object, so a
+    //       fourteenth property would be refused by any strict client, and because two members
+    //       describing one value can disagree.
+    //       Alternatives Considered: tightening the shared money type's own grammar in common-lib so
+    //       that every consumer inherits the strict form. Rejected because that grammar is
+    //       deliberately lenient for a reason its own note records -- a value read back from a
+    //       report's edit mask carries a leading plus that the reference itself wrote -- so narrowing
+    //       it would break the codec paths that depend on the leniency. The narrowing belongs to this
+    //       one request, which is where the contract narrows it.
+    // WHY : Assumptions: the published contract declares this member a STRING with a pattern, so
+    //       carrying it as characters is what the contract already describes rather than a relaxation
+    //       of it. The parsed value is available from amountValue() below, which is what every
+    //       consumer of the validated request reads, so no caller works with the raw text.
+    // WHY : Refactoring Rationale: presence is asserted with the blank-intolerant constraint where
+    //       the money type needed the null-intolerant one, because characters have a blank spelling
+    //       and the reference tests for it: line 278 refuses SPACES as well as LOW-VALUES. An empty
+    //       or all-space amount is therefore the reference's blank case and draws its own sentence
+    //       with the blank state, which is the marker app/cpy/CSSETATY.cpy line 19 writes -- where a
+    //       null-intolerant constraint would have passed it to the shape test and answered with the
+    //       format sentence instead.
+    // WHY : Assumptions: the shape constraint below accepts a blank value and leaves it to the
+    //       presence constraint above, so exactly ONE violation is reported for one defect. Both
+    //       firing would put two entries on one input, which the reference never does -- its eleven
+    //       presence tests and its four shape alternatives are separate EVALUATE TRUE constructs, and
+    //       each emits a single sentence.
+    @NotBlank(message = AMOUNT_REQUIRED)
     @AmountWithinRecordDomain
     @JsonDeserialize(using = WireFormAmountDeserializer.class)
-    Money amount,
+    String amount,
     @NotBlank(message = MERCHANT_ID_REQUIRED)
     @Size(max = MERCHANT_ID_WIDTH)
     @Pattern(regexp = MERCHANT_ID_DIGITS, message = MERCHANT_ID_NOT_NUMERIC)
@@ -754,19 +778,47 @@ public record TransactionAddRequest(
   public static final int CONFIRM_WIDTH = 1;
 
   /**
-   * The greatest magnitude the submitted amount may carry, in whole cents.
+   * The exact lexical form a submitted amount must occupy, as the published contract declares it.
    *
-   * <p>Assumptions: {@code TRAN-AMT PIC S9(09)V99} at line 10 of {@code app/cpy/CVTRA05Y.cpy} holds
-   * nine integer digits and two decimal places, so the widest value the record can hold is
-   * 999999999.99, which is this many cents. The bound is expressed in cents rather than as a
-   * decimal so that no arbitrary-precision decimal type appears anywhere in this file.
+   * <p>Assumptions: this is the {@code TransactionAmount} pattern of
+   * {@code openapi/transaction-api.yaml} -- an optional minus sign, one to nine integer digits, one
+   * decimal point and exactly two fractional digits -- written out here because a request shape
+   * cannot read its own contract document at bind time. {@code TransactionApiContractTest} asserts
+   * that the published pattern is this expression between anchors, so the two cannot drift silently.
    *
-   * <p>Assumptions: this bound is narrower than the shared money type's own domain, which admits
-   * ten integer digits because it also carries account balances such as
-   * {@code WS-CURR-BAL PIC +9999999999.99} at line 56 of {@code app/cbl/COBIL00C.cbl}. A ten-digit
-   * amount is therefore constructed successfully and has to be rejected here.
+   * <p>Assumptions: the nine integer digits are the RECORD's domain, from
+   * {@code TRAN-AMT PIC S9(09)V99} at line 10 of {@code app/cpy/CVTRA05Y.cpy}, so this one
+   * expression bounds the MAGNITUDE as well as the shape: no string it admits exceeds 999999999.99,
+   * and none carries a scale other than two. The bound is narrower than the shared money type's own
+   * domain, which admits ten integer digits because that type also carries account balances such as
+   * {@code WS-CURR-BAL PIC +9999999999.99} at line 56 of {@code app/cbl/COBIL00C.cbl}.
+   *
+   * <p>⚠️ Refactoring Rationale: this expression REPLACES a magnitude bound in whole cents that an
+   * earlier revision declared here and applied to the PARSED amount. The bound had to move from the
+   * parsed value onto the submitted characters because a parse normalises: the shared money type
+   * deliberately admits an under-padded fractional part, a leading plus and grouping separators, so
+   * {@code "1234.5"} was accepted, rewritten to {@code 1234.50} and only then measured -- and any
+   * arithmetic bound applied after that sees a value canonical by construction. Measuring the
+   * characters SUBSUMES the cents bound rather than sitting beside it, which is why the cents bound
+   * is gone rather than kept: two authorities on one field are what let the two disagree.
+   *
+   * <p>Assumptions: no anchor is written into the expression, because both places that apply it
+   * match the whole string -- Bean Validation's pattern semantics and
+   * {@link java.util.regex.Matcher#matches()} both do. Writing anchors in would also make it unequal
+   * to the published pattern, which carries its own.
    */
-  public static final long AMOUNT_MAGNITUDE_LIMIT_CENTS = 99_999_999_999L;
+  public static final String AMOUNT_WIRE_FORM = "-?[0-9]{1,9}\\.[0-9]{2}";
+
+  /**
+   * The compiled form of {@link #AMOUNT_WIRE_FORM}, held once for every request the service receives.
+   *
+   * <p>Assumptions: compiled from that constant rather than restated, so the expression this record
+   * applies and the expression the contract test compares against the published schema are the same
+   * characters and cannot diverge. It is compiled once as a class constant rather than per call
+   * because a validator instance and a service call together apply it on every submission.
+   */
+  private static final java.util.regex.Pattern AMOUNT_WIRE_FORM_PATTERN =
+      java.util.regex.Pattern.compile(AMOUNT_WIRE_FORM);
 
   /**
    * The expression an exactly-eleven-digit account identifier is held to, admitting absence.
@@ -1034,6 +1086,81 @@ public record TransactionAddRequest(
       "Card Number changed. Review the transaction and confirm again...";
 
   /**
+   * Reports whether submitted amount characters are exactly the wire form the contract publishes.
+   *
+   * <p><b>Purpose.</b> This is the one statement of the amount's lexical domain, so the boundary
+   * constraint and the service layer's own transcription of {@code app/cbl/COTRN02C.cbl} lines 339 to
+   * 351 apply the same expression instead of each carrying a copy. Two copies of one shape rule on one
+   * field is how a contract and its implementation come to disagree.
+   *
+   * <p>Assumptions: declared as a predicate ALONGSIDE {@link AmountWithinRecordDomain} rather than
+   * instead of it, which is the distinction an earlier revision of this file got wrong. A predicate
+   * used AS a class-level constraint reports its violation against a synthetic property name no
+   * submitted field carries; a predicate a component-level constraint delegates to reports against the
+   * component. The constraint is still what the framework sees, and this is only where its rule is
+   * written down.
+   *
+   * @param submitted the characters a producer sent, which may be {@code null}
+   * @return {@code true} when the characters are an optional minus sign, one to nine digits, a decimal
+   *     point and exactly two further digits; {@code false} for {@code null} and for every other value
+   */
+  public static boolean isAmountWireForm(String submitted) {
+    // WHY : Assumptions: null answers false rather than true, because this predicate states one thing
+    //       -- that these characters ARE the published form -- and an absent value is not. The two
+    //       callers each decide what absence means for them: the constraint accepts it and leaves it to
+    //       the presence constraint, while the service reaches its own presence check first.
+    if (submitted == null) {
+      return false;
+    }
+
+    Matcher shape = AMOUNT_WIRE_FORM_PATTERN.matcher(submitted);
+    return shape.matches();
+  }
+
+  /**
+   * Parses the submitted amount into the shared money type, once its characters have been validated.
+   *
+   * <p><b>Purpose.</b> {@link #amount()} carries the characters a producer sent, because the reference
+   * edits those characters position by position at {@code app/cbl/COTRN02C.cbl} lines 339 to 351 and a
+   * parse would have normalised them first. Every consumer of a VALIDATED request wants the value
+   * rather than the characters, and this is the one place the conversion happens -- so no consumer
+   * chooses its own parse and no two consumers can choose differently.
+   *
+   * <p>Assumptions: the parse goes through the shared money type rather than through
+   * {@code new BigDecimal(String)}, which is the same decision {@code TransactionAddService} records
+   * for the reference's currency-tolerant conversion at lines 383 and 456: the shared type fixes the
+   * scale at two with half-up rounding, which is what {@code TRAN-AMT PIC S9(09)V99} at line 10 of
+   * {@code app/cpy/CVTRA05Y.cpy} declares, whereas the bare constructor keeps whatever scale the text
+   * happened to carry.
+   *
+   * <p>Assumptions: an absent or blank amount answers {@code null} rather than raising, so a caller's
+   * own presence check reads the same as it did when this component was the money type. That matters
+   * because the service layer re-checks presence in the reference's own priority order and reports the
+   * fifth field's sentence for it; raising here would make that check unreachable.
+   *
+   * <p>Trade-offs: a value that is neither blank nor the published wire form raises rather than
+   * answering {@code null}, and the raise is deliberate. Such a value cannot reach this method through
+   * the API -- {@link AmountWithinRecordDomain} refuses it at the boundary and the service refuses it
+   * again before parsing -- so reaching here means a caller constructed the record directly and
+   * skipped both, and answering {@code null} would let an unvalidated request be captured with no
+   * amount at all. Failing loudly at the point of construction is the safer of the two.
+   *
+   * @return the submitted amount at a scale of two, or {@code null} when the member was absent or
+   *     blank
+   * @throws IllegalArgumentException if the characters are neither blank nor a value the shared money
+   *     type can read, which the component's own constraints make unreachable through the API
+   */
+  public Money amountValue() {
+    // WHY : Assumptions: blank and null are folded together here for the reason the presence
+    //       constraint on the component states -- the reference's line 278 refuses SPACES as well as
+    //       LOW-VALUES, so both spellings are one absent state and neither is a value to parse.
+    if (this.amount == null || this.amount.isBlank()) {
+      return null;
+    }
+    return Money.of(this.amount);
+  }
+
+  /**
    * Requires at least one of the two key alternatives, reporting against both of them.
    *
    * <p><b>Purpose.</b> This is the pairing rule of the transaction-add screen expressed as a
@@ -1110,17 +1237,25 @@ public record TransactionAddRequest(
   }
 
   /**
-   * Bounds the submitted amount to the nine integer digits the reference record holds.
+   * Holds the submitted amount to the exact wire form the record's nine integer digits admit.
    *
    * <p><b>Purpose.</b> {@code TRAN-AMT} is {@code PIC S9(09)V99} at line 10 of
-   * {@code app/cpy/CVTRA05Y.cpy}, so nine integer digits is the widest amount the record can hold.
-   * The framework's own digit constraint has no validator for the shared money type, so annotating
-   * the component with it would raise at validation time instead of rejecting the value, which is why
-   * this constraint exists at all.
+   * {@code app/cpy/CVTRA05Y.cpy}, so nine integer digits is the widest amount the record can hold,
+   * and {@link #AMOUNT_WIRE_FORM} is the lexical statement of that domain. The framework's own
+   * pattern constraint would report a second violation for a blank value that the presence
+   * constraint already reports, which is why this constraint exists rather than a bare
+   * {@code @Pattern}: it admits the blank state and leaves it to the constraint that names it.
    *
    * <p>Refactoring Rationale: declared as a component constraint so a violation reports against
    * {@code amount}, the member a client submitted, rather than against the synthetic property name a
    * boolean predicate would have produced.
+   *
+   * <p>⚠️ Refactoring Rationale: it constrains CHARACTERS where an earlier revision constrained the
+   * parsed money type in whole cents. The parsed value is normalised by construction -- see
+   * {@link #AMOUNT_WIRE_FORM} -- so measuring it could only ever fail on magnitude, and every
+   * lexical defect was left to a deserialiser whose failure is rendered as an unreadable body with no
+   * per-field entry at all. One constraint over the characters decides both the shape and the
+   * magnitude, and it decides them where a violation can still name the field.
    *
    * <p>An annotation type declares no parameters, returns no value and raises nothing, so no
    * parameter, return or exception at-clause appears on this block; the three members below carry
@@ -1156,122 +1291,103 @@ public record TransactionAddRequest(
   }
 
   /**
-   * Refuses an amount whose submitted characters are not the exact wire form the contract publishes,
-   * before those characters are parsed.
+   * Reads the amount as the characters a producer submitted, so a constraint can measure them.
    *
    * <p><b>Purpose.</b> {@code app/cbl/COTRN02C.cbl} validates the amount POSITIONALLY at lines 339 to
    * 351, over the twelve characters the operator keyed: the first must be a sign at line 340, eight
    * characters from the second must be numeric at line 341, the tenth must be a decimal point at line
    * 342 and two characters from the eleventh must be numeric at line 343. All four alternatives share
    * one action block, so however many of them hold the reference emits the single sentence at line 345.
-   * This class is that test, applied at the only point in the target where the submitted characters
-   * still exist.</p>
+   * Reproducing that needs the submitted characters, and this class is what makes them survive the
+   * wire boundary intact: it copies a JSON string through verbatim, normalising nothing.</p>
    *
-   * <p>Assumptions: the shape enforced here is the {@code TransactionAmount} schema's own pattern from
-   * {@code openapi/transaction-api.yaml} rather than the reference's twelve-character edit, and the two
-   * differ in two respects that are both deliberate. The published form admits one to nine integer
-   * digits where the reference's edit fixes eight and zero-pads, because the RECORD holds nine --
-   * {@code TRAN-AMT PIC S9(09)V99} at line 10 of {@code app/cpy/CVTRA05Y.cpy} -- and the eight-digit
-   * display picture is a screen artefact the migration does not carry onto the wire. The published form
-   * admits no leading plus where the reference's edit requires a sign, because a JSON decimal string is
-   * not a fixed-width display field and an unsigned value is unambiguously positive. Both divergences
-   * are the contract's, not this class's, and enforcing the contract is what makes the service and its
-   * own document agree.</p>
+   * <p>⚠️ Refactoring Rationale: this class no longer REFUSES anything, where an earlier revision
+   * matched the published pattern here and reported a mismatch through the deserialisation context. A
+   * deserialiser failure is rendered as an unreadable-body 400 carrying the shared malformed-request
+   * sentence and an EMPTY per-field array, so every lexically malformed amount produced a response
+   * that named no member and carried neither of this screen's two sentences. The measurement moved to
+   * {@link AmountWithinRecordDomain}, which runs after binding and reports against {@code amount};
+   * all this class now owns is the requirement that binding SUCCEED, because a constraint cannot run
+   * on a body that never became an object.</p>
    *
-   * <p>Assumptions: the magnitude bound is NOT enforced here and is left where it already is. The
-   * component's own {@code AmountWithinRecordDomain} constraint bounds the value to the record's nine
-   * integer digits and reports against {@code amount} with the reference's own sentence, and the
-   * service's shape test bounds it again through the edited picture. A third bound here would report the
-   * same condition through a third mechanism, and a deserialiser failure is rendered as a malformed-body
-   * 400 rather than as the per-field array a client can attach to an input -- so the narrower failure is
-   * deliberately left to the constraint that can name the field.</p>
+   * <p>Assumptions: a token that is not a JSON string is bound to {@link #NON_TEXTUAL_AMOUNT} rather
+   * than refused here, which is what keeps a JSON number out of the money path while still answering
+   * with a per-field entry. The marker names the token KIND and never carries the value, so nothing
+   * monetary reaches a log through it, and it matches no string {@link #AMOUNT_WIRE_FORM} admits --
+   * so the constraint refuses it with this screen's format sentence. Rule T3 requires money on the
+   * wire to be a JSON string, and the published request schema declares this member a string, so a
+   * producer emitting {@code "amount": 1.00} is refused rather than coerced -- which is what Jackson's
+   * own scalar-to-text coercion would otherwise do silently.</p>
    *
-   * <p>Alternatives Considered: replacing the shared money deserialiser for this whole service rather
-   * than for this one component. Rejected because the same type carries the account balance on the
-   * bill-payment responses, whose published pattern admits TEN integer digits, and the report and
-   * statement paths read values back from edit masks that carry a leading plus. A service-wide narrowing
-   * would refuse values those paths legitimately produce.</p>
+   * <p>Alternatives Considered: leaving the member with no deserialiser at all. Rejected because the
+   * default text handling ACCEPTS a JSON number by coercing it, so {@code 1.00} and {@code "1.00"}
+   * would behave identically and the one rule this migration states about money on the wire would be
+   * unenforced at the one boundary that receives it.</p>
    *
-   * <p>Alternatives Considered: duplicating the shared deserialiser's token handling here -- its numeric-
-   * token branch, its non-string branch, its empty-string branch and its two failure branches. Rejected
-   * because those five diagnostics are carefully worded and one of them exists specifically to stop a
-   * producer emitting JSON numbers; a second copy would drift from the first. This class adds one gate
-   * and delegates everything else to the module-registered handler, so a token that is not a string
-   * still receives the shared message.</p>
+   * <p>Alternatives Considered: binding the raw token text for a non-string token, so the constraint
+   * could report the offending characters. Rejected on two counts: a JSON number's text often matches
+   * the wire form exactly -- {@code 1.00} does -- so the number would be ACCEPTED, and an amount is
+   * monetary data that must not travel into a diagnostic.</p>
    */
-  public static final class WireFormAmountDeserializer extends ValueDeserializer<Money> {
+  public static final class WireFormAmountDeserializer extends ValueDeserializer<String> {
 
     /**
-     * The exact lexical form the published {@code TransactionAmount} schema admits.
+     * The value bound in place of an amount that arrived as something other than a JSON string.
      *
-     * <p>Assumptions: the expression is written out here rather than derived from the schema file,
-     * because a request handler cannot read its own contract document at bind time. It is asserted
-     * against that document by {@code TransactionApiContractTest}, so the two cannot drift silently.
-     * </p>
-     *
-     * <p>Assumptions: anchored at both ends and with no whitespace tolerance at all, which is stricter
-     * than the shared deserialiser's own handling. That handler strips surrounding whitespace on the
-     * ground that a producer copying a fixed-width field can carry padding; this component's contract
-     * publishes a JSON string with a fixed pattern, so padding here is a malformed value rather than an
-     * artefact of a field width.</p>
+     * <p>Assumptions: it is deliberately NOT blank, because a blank value is the reference's
+     * never-supplied state and would draw {@link TransactionAddRequest#AMOUNT_REQUIRED} -- the wrong
+     * sentence for a value that was supplied in the wrong shape. It is also deliberately not a
+     * candidate the wire form could admit, so the shape constraint refuses it without exception.
      */
-    private static final java.util.regex.Pattern WIRE_FORM =
-        java.util.regex.Pattern.compile("-?[0-9]{1,9}\\.[0-9]{2}");
+    static final String NON_TEXTUAL_AMOUNT = "(non-textual amount token)";
 
     /**
-     * Reads one amount, refusing any string that is not the published wire form.
+     * Reads one amount as text, preserving a JSON string exactly and marking anything else.
      *
      * @param parser the parser positioned on the value to read; never {@code null}
-     * @param ctxt the context a mismatch is reported through; never {@code null}
-     * @return the amount, at a scale of two and never {@code null}
-     * @throws JacksonException if the current token is a string that does not match the published
-     *     pattern, or if the shared handler this method delegates to refuses the value for any of the
-     *     reasons its own contract states -- a numeric token, a non-string token, an empty string,
-     *     unparseable text, or a magnitude outside the reference money picture
+     * @param ctxt the deserialisation context, unused because this method reports no mismatch of its
+     *     own and leaves every refusal to the component's constraints; never {@code null}
+     * @return the submitted characters verbatim for a JSON string, otherwise
+     *     {@link #NON_TEXTUAL_AMOUNT}; never {@code null}
+     * @throws JacksonException if the underlying parser fails while reading the token, which is a
+     *     transport-level failure rather than a rejected value
      */
     @Override
-    public Money deserialize(JsonParser parser, DeserializationContext ctxt) throws JacksonException {
-      // WHY : Assumptions: the gate runs only for a string token and every other token falls straight
-      //       through to the shared handler, which owns the diagnostics for them. Reporting a pattern
-      //       mismatch for a JSON number would replace the shared message that tells a producer WHY a
-      //       number is refused on purpose, which is the message that actually changes producer
-      //       behaviour.
-      if (parser.currentToken() == JsonToken.VALUE_STRING) {
-        String submitted = parser.getString();
-        Matcher shape = WIRE_FORM.matcher(submitted);
-        if (!shape.matches()) {
-          // WHY : Assumptions: the submitted characters are NOT quoted in the diagnostic, for the
-          //       reason the shared handler's own note records at length: the value is a monetary
-          //       amount, and a message travelling to a caller's logs is the one destination the
-          //       masking applied at the API edge does not reach. The expected form is stated instead,
-          //       which is what a producer needs in order to correct the request, and the document
-          //       location the context attaches already names where the value was.
-          return ctxt.reportInputMismatch(this,
-              "Cannot read a transaction amount: the value is not the published wire form. An amount"
-                  + " is carried as a JSON string of one to nine digits, a single decimal point and"
-                  + " exactly two further digits, optionally preceded by a minus sign, such as"
-                  + " \"-2065.00\". A shorter fractional part, a leading plus, a grouping separator or"
-                  + " surrounding whitespace are refused rather than normalised, because"
-                  + " app/cbl/COTRN02C.cbl lines 339 to 345 refuse the keyed characters positionally"
-                  + " and answer with \"Amount should be in format -99999999.99\".");
-        }
+    public String deserialize(JsonParser parser, DeserializationContext ctxt)
+        throws JacksonException {
+
+      JsonToken token = parser.currentToken();
+      // WHY : Assumptions: the text is taken verbatim with no trimming at all, which is stricter than
+      //       the shared money handler's own reading. That handler strips surrounding whitespace on the
+      //       ground that a producer copying a fixed-width field can carry padding; this component's
+      //       contract publishes a JSON string with a fixed pattern, so padding here is a malformed
+      //       value rather than an artefact of a field width, and trimming it would accept a form the
+      //       published pattern refuses.
+      if (token == JsonToken.VALUE_STRING) {
+        return parser.getString();
       }
 
-      // WHY : Assumptions: the parser is still positioned on the same token after getString, so the
-      //       shared handler re-reads the value it was going to read anyway. Delegating by type rather
-      //       than by calling the handler directly is what keeps this class from holding a reference to
-      //       a package-private type in another module.
-      return ctxt.readValue(parser, Money.class);
+      // WHY : Assumptions: a structured token is skipped WHOLE before the marker is returned, because
+      //       leaving a parser positioned inside an object or an array it will not read would make the
+      //       remaining members of the body unreadable -- turning one rejected field into an
+      //       unreadable body, which is the outcome this class exists to prevent. A scalar token needs
+      //       no skip: the parser advances past it on its own.
+      if (token == JsonToken.START_OBJECT || token == JsonToken.START_ARRAY) {
+        parser.skipChildren();
+      }
+
+      return NON_TEXTUAL_AMOUNT;
     }
 
     /**
      * Reports the value type this deserialiser handles.
      *
-     * @return the {@link Money} class, never {@code null}
+     * @return the {@link String} class, because this component now carries the submitted characters,
+     *     never {@code null}
      */
     @Override
     public Class<?> handledType() {
-      return Money.class;
+      return String.class;
     }
   }
 
@@ -1340,36 +1456,44 @@ public record TransactionAddRequest(
   }
 
   /**
-   * Enforces {@link AmountWithinRecordDomain} against the shared money type.
+   * Enforces {@link AmountWithinRecordDomain} against the characters a producer submitted.
    *
    * <p>Assumptions: the validator holds no state and reads nothing outside the value handed to it, so
-   * a single instance is safe for the framework to share across requests.
+   * a single instance is safe for the framework to share across requests. The compiled expression is
+   * held once as a class constant rather than compiled per call, because a validator instance serves
+   * every request the service receives.
    */
   public static final class AmountDomainValidator
-      implements ConstraintValidator<AmountWithinRecordDomain, Money> {
+      implements ConstraintValidator<AmountWithinRecordDomain, String> {
 
     /**
-     * Reports whether an amount fits the nine integer digits the reference record holds.
+     * Reports whether the submitted amount occupies the record's published wire form.
      *
-     * @param amount the submitted amount, which is {@code null} when none was supplied
-     * @param context the context a violation would be raised through; never {@code null}
-     * @return {@code true} when no amount was supplied or when the amount fits nine integer digits at
-     *     a scale of two, and {@code false} when its magnitude is wider than the record can hold
+     * @param amount the submitted characters, which are {@code null} when the member was absent and
+     *     blank when it was submitted empty
+     * @param context the context a violation would be raised through, unused because the default
+     *     violation this constraint declares already names the component; never {@code null}
+     * @return {@code true} when the member was absent or blank, or when its characters are exactly the
+     *     published wire form; {@code false} for every other value, including one whose magnitude
+     *     needs a tenth integer digit
      */
     @Override
-    public boolean isValid(Money amount, ConstraintValidatorContext context) {
-      // WHY : Assumptions: an absent amount is reported once, by the presence constraint on the
-      //       component, so this validator accepts null rather than reporting a second violation for
-      //       the same defect -- and rather than dereferencing it.
-      if (amount == null) {
+    public boolean isValid(String amount, ConstraintValidatorContext context) {
+      // WHY : Assumptions: an absent or blank amount is reported once, by the presence constraint on
+      //       the component, so this validator accepts both rather than reporting a second violation
+      //       for one defect. The reference does the same: line 278 of app/cbl/COTRN02C.cbl refuses an
+      //       empty field in the presence chain and sends the screen from there, so the shape
+      //       alternatives at lines 339 to 343 are never reached for it.
+      if (amount == null || amount.isBlank()) {
         return true;
       }
-      // WHY : Assumptions: whole cents are exact and lossless here, because the shared type fixes the
-      //       scale at two and bounds the magnitude, so the unscaled value is at most twelve digits
-      //       and fits the comparison type. Comparing against both signed limits rather than an
-      //       absolute value keeps the negative extreme from needing a special case of its own.
-      long cents = amount.unscaledCents();
-      return cents >= -AMOUNT_MAGNITUDE_LIMIT_CENTS && cents <= AMOUNT_MAGNITUDE_LIMIT_CENTS;
+
+      // WHY : Assumptions: the shared predicate is applied rather than a comparison of this validator's
+      //       own, so the boundary and the service layer refuse exactly the same strings. Matching it
+      //       also bounds the MAGNITUDE, because the expression admits at most nine integer digits --
+      //       which is why no arithmetic comparison follows it and no arbitrary-precision decimal
+      //       appears in this file.
+      return isAmountWireForm(amount);
     }
   }
 

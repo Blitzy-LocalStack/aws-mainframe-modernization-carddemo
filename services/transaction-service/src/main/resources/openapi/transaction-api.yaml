@@ -1185,17 +1185,23 @@ components:
         decimal digits when supplied. Omit it to begin at the start of the
         ordering. It cannot be combined with a cursor: a cursor already states a
         position, so supplying both is a 400 rather than being silently resolved
-        in favour of one.
+        in favour of one. A refused combination names both this parameter and
+        cursor, and carries `Tran ID can NOT be combined with paging. Clear one
+        and try again...`.
       schema:
-        $ref: "#/components/schemas/TransactionId"
+        $ref: "#/components/schemas/TransactionIdSearchKey"
 
     TransactionId:
       name: transactionId
       in: path
       required: true
       description: >-
-        The sixteen-digit identifier of the transaction to address, as it appears
-        in the transactionId member of a list row.
+        The sixteen-character identifier of the transaction to address, exactly as
+        it appears in the transactionId member of a list row. Every identifier the
+        ledger holds is addressable, which includes the accrual form the interest
+        job writes; the narrower digits-only rule applies to the browse's
+        transactionIdFilter and not here, because the baseline applies a numeric
+        edit to its search field and only a blank check on the drill-down.
       schema:
         $ref: "#/components/schemas/TransactionId"
 
@@ -1541,14 +1547,75 @@ components:
     #       example 0000000000683580, 0000000001774260 and 0000000006292564. An
     #       integer or number type would discard leading zeros on every single
     #       record and no round trip would survive.
+    # WHY : ⚠️ Refactoring Rationale: this schema admits the RECORD's domain and an
+    #       earlier revision of it admitted only sixteen DIGITS, which made 50 of
+    #       the ledger's own rows unrepresentable in the contract that describes
+    #       them. app/cbl/CBACT04C.cbl L473 to L480 composes an accrual identifier
+    #       by STRINGing the injected business date and a six-digit suffix, so an
+    #       interest run writes identifiers of the form 2022-07-18000050: sixteen
+    #       characters, two of them the date's separators. Those rows are returned
+    #       by the browse, so a strict generated client REJECTED the page it was
+    #       served, and the member path refused to address them at all -- a row that
+    #       exists, is listed, and cannot be read. The baseline has no such gap: its
+    #       drill-down paragraph PROCESS-ENTER-KEY at app/cbl/COTRN01C.cbl L145 to
+    #       L172 applies a blank check and no numeric edit before reading the file,
+    #       so selecting an accrual row from the list opens it.
+    # WHY : Assumptions: the character class is digits and the hyphen, which is the
+    #       UNION of the two producers this system has and nothing wider. The online
+    #       allocator writes sixteen zero-padded digits and the interest job writes
+    #       an ISO date and a suffix, and the stored corpus agrees: replacing every
+    #       digit in transaction_id across the whole table leaves only the empty
+    #       string and a pair of hyphens. TRAN-ID PIC X(16) at app/cpy/CVTRA05Y.cpy
+    #       L5 would admit any character in the code page, and publishing that
+    #       instead was rejected: a quote, a space or a semicolon in a path segment
+    #       has no producer and no purpose, and refusing them keeps the addressing
+    #       surface as narrow as the data allows.
+    # WHY : Alternatives Considered: enumerating the two producer shapes as a
+    #       disjunction -- sixteen digits OR a date and a suffix. Rejected because it
+    #       re-creates the defect this widening removes for any identifier shape not
+    #       listed: a future producer, or a corpus loaded from an extract, would
+    #       again be listed and not addressable, and the failure would be a 400 on a
+    #       row that exists. A character class states the domain without enumerating
+    #       its inhabitants.
+    # WHY : Assumptions: the digits-only rule is NOT abandoned; it moves to
+    #       TransactionIdSearchKey below, which is where the baseline puts it.
     TransactionId:
       type: string
       description: >-
-        A transaction identifier: exactly sixteen decimal digits, zero-padded on
-        the left. Declared TRAN-ID PIC X(16) at app/cpy/CVTRA05Y.cpy L5, stored
-        as transaction_id CHAR(16) at
+        A transaction identifier as the ledger holds it: exactly sixteen
+        characters, each a decimal digit or a hyphen. Declared TRAN-ID PIC X(16)
+        at app/cpy/CVTRA05Y.cpy L5, stored as transaction_id CHAR(16) at
         services/transaction-service/src/main/resources/db/migration/V1__ledger.sql
-        L126, and assigned by the service rather than supplied by a caller.
+        L126, and assigned by the service rather than supplied by a caller. The
+        online capture allocates sixteen zero-padded digits; the interest job
+        composes the accrual form at app/cbl/CBACT04C.cbl L473 to L480 from the
+        business date and a six-digit suffix.
+      minLength: 16
+      maxLength: 16
+      pattern: "^[0-9-]{16}$"
+      examples:
+        - "0000000000683580"
+        - "2022-07-18000050"
+
+    # WHY : Assumptions: a SECOND identifier schema exists because the baseline
+    #       applies two different edits to one field's two uses, and collapsing
+    #       them is what produced the defect recorded above. app/cbl/COTRN00C.cbl
+    #       L209 tests IF TRNIDINI IS NUMERIC before using the search field as a
+    #       start key and answers L214's 'Tran ID must be Numeric ...' when it is
+    #       not, whereas app/cbl/COTRN01C.cbl L145 to L172 applies only a blank
+    #       check on the drill-down. One schema cannot hold both rules, so the
+    #       browse's positioning parameter references this one and everything that
+    #       carries or addresses a stored identifier references TransactionId.
+    TransactionIdSearchKey:
+      type: string
+      description: >-
+        A transaction identifier as the browse's positioning field admits it:
+        exactly sixteen decimal digits. This is the narrower of the two identifier
+        domains and applies only to transactionIdFilter, transcribing the numeric
+        edit at app/cbl/COTRN00C.cbl L209 whose refusal is L214's
+        `Tran ID must be Numeric ...`. An accrual identifier is therefore not a
+        valid positioning value even though it is a valid stored identifier, which
+        is the baseline's own asymmetry rather than an inconsistency here.
       minLength: 16
       maxLength: 16
       pattern: "^[0-9]{16}$"

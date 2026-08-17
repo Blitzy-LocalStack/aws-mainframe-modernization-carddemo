@@ -1,5 +1,8 @@
 package com.carddemo.transaction.service;
 
+import com.carddemo.common.error.ApiError;
+import com.carddemo.common.error.ClientInputException;
+import com.carddemo.common.validation.FieldValidationFlag;
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.common.web.PageResponse;
 import com.carddemo.transaction.domain.Transaction;
@@ -249,6 +252,52 @@ public class TransactionListService {
     public static final String CURSOR_QUERY_NAME = "transaction-list";
 
     /**
+     * The request member naming the identifier a browse is to begin at.
+     *
+     * <p>Assumptions: the value is the record component's own name and therefore the query
+     * parameter's, because the adapter binds the parameter of that spelling straight into the
+     * component. A per-field entry keyed by anything else names no input a client sent, so a form
+     * could not mark the control the operator has to correct.
+     */
+    public static final String FIELD_TRANSACTION_ID_FILTER = "transactionIdFilter";
+
+    /**
+     * The request member naming the sealed paging position a browse is to continue from.
+     *
+     * <p>Assumptions: the same reasoning as {@link #FIELD_TRANSACTION_ID_FILTER} -- the component's
+     * name is the parameter's name, and a rejection has to name what was sent.
+     */
+    public static final String FIELD_CURSOR = "cursor";
+
+    /**
+     * The message reported when one request names two browse positions at once.
+     *
+     * <p>⚠️ Assumptions: the sentence is AUTHORED rather than transcribed, because the baseline has
+     * none to transcribe: {@code app/cbl/COTRN00C.cbl} holds its browse position in the communication
+     * area and reads the screen's own identifier field only on an entry that pressed no paging key --
+     * the filter test at lines 206 to 210 is reached from line 121, while the paging paragraphs at
+     * lines 234 and 257 position from the stored keys and never consult that field. A terminal
+     * therefore cannot express the combination at all, so no reference message exists for it. The
+     * divergence is registered as {@code D-LIST-POSITION-EXCLUSIVE} in
+     * {@code docs/architecture/cobol-to-service-traceability.md}.
+     *
+     * <p>Assumptions: it is written in the reference catalogue's own voice and shape -- a short
+     * imperative clause naming the field the operator keyed, closing with the three dots every
+     * message in {@code app/cpy/CSMSG01Y.cpy} and this class's five page-boundary sentences close
+     * with -- and it is inside the seventy-five characters the reference's message line holds. Both
+     * properties matter beyond style: the shared advice publishes a refusal's own sentence only when
+     * it has this repository's catalogue shape, and substitutes a generic one otherwise, so a sentence
+     * written in another voice would never reach a client at all.
+     *
+     * <p>Trade-offs: it names the remedy rather than the rule. A client holding a cursor while an
+     * operator types an identifier has two values and only the operator knows which was meant, so the
+     * message asks for one to be cleared instead of announcing a precedence the contract deliberately
+     * refuses to have.
+     */
+    public static final String MESSAGE_CURSOR_AND_FILTER =
+            "Tran ID can NOT be combined with paging. Clear one and try again...";
+
+    /**
      * The message a backward step reports when there is no earlier page to reach.
      *
      * <p>Assumptions: reproduced character for character from line 248 of
@@ -429,6 +478,9 @@ public class TransactionListService {
      *     page follows; an empty envelope naming no boundary when the position yields no rows
      * @throws NullPointerException if {@code request}, {@code cursorToken} or {@code subject} is
      *     {@code null}
+     * @throws ClientInputException if the request names two browse positions at once -- a cursor and a
+     *     starting identifier together -- which the published contract refuses rather than resolving
+     *     silently in favour of one; see {@link #requireOnePositioningMeans(TransactionListRequest)}
      * @throws IllegalArgumentException if {@code subject} is blank, because a cursor bound to no
      *     subject is redeemable by any authorized caller
      * @throws com.carddemo.common.web.CursorToken.InvalidCursorException if a supplied cursor is not
@@ -445,6 +497,7 @@ public class TransactionListService {
         Objects.requireNonNull(request, "request must not be null");
         Objects.requireNonNull(cursorToken, "cursorToken must not be null");
         Objects.requireNonNull(subject, "subject must not be null");
+        requireOnePositioningMeans(request);
 
         String binding = cursorBinding(subject);
         TransactionListRequest.Direction direction = request.effectiveDirection();
@@ -461,6 +514,74 @@ public class TransactionListService {
                         : processPf8Key(request, cursorKey);
 
         return assemblePage(scanned, direction, cursorToken, binding);
+    }
+
+    /**
+     * Refuses a request that names two browse positions, naming both members it named them with.
+     *
+     * <p><b>Purpose.</b> {@code TransactionListRequest} states that a browse is positioned from
+     * exactly one of three places -- the start of the key space, a supplied identifier, or a cursor --
+     * and a request carrying both a cursor and an identifier names two of them. This is the check that
+     * makes that shape's own stated domain enforced rather than described, and the published contract
+     * declares the outcome: the {@code transactionIdFilter} parameter of
+     * {@code openapi/transaction-api.yaml} states that it cannot be combined with a cursor, and that
+     * supplying both is a 400 rather than being silently resolved in favour of one.
+     *
+     * <p>⚠️ Refactoring Rationale: nothing enforced this before, and what happened instead was the
+     * exact outcome the contract forbids. The direction selects one of the two paging paragraphs and
+     * each positions from the cursor alone -- neither consults
+     * {@link TransactionListRequest#hasTransactionIdFilter()} -- so a request naming both answered 200
+     * from the cursor and DISCARDED the identifier with nothing in the response to say so. An operator
+     * who typed an identifier while their client still held a cursor was shown a different page from
+     * the one they asked for, and no client could detect the substitution: the page it received is
+     * indistinguishable from the page it asked for.
+     *
+     * <p>Alternatives Considered: resolving the conflict in favour of the identifier, on the ground
+     * that it is the value the operator typed most recently. Rejected because the contract publishes a
+     * refusal, and because a precedence rule is still a silent resolution -- the client that sent both
+     * would receive a page it did not ask for either way, and only the direction of the surprise would
+     * change.
+     *
+     * <p>Alternatives Considered: declaring the rule on the request record as a class-level
+     * constraint. Rejected because it would never run: the adapter builds this record itself from three
+     * query parameters rather than having the framework bind and validate a body, so no validator is
+     * invoked on it. The record's own documentation additionally rejects imperative checks in a compact
+     * constructor, for three reasons it states, so the check belongs in the first component that holds
+     * the assembled request -- which is this one.
+     *
+     * <p>Assumptions: the two presence questions are asked through the record's own accessors, so this
+     * guard and the positioning code cannot disagree about what "supplied" means. Each accessor follows
+     * the contract of the type that owns its component -- the identifier follows the reference
+     * program's two figurative constants and the cursor follows the envelope's own normalisation -- so
+     * an empty cursor parameter is not a supplied cursor here for exactly the reason it is not one when
+     * the token is opened.
+     *
+     * <p>Assumptions: the refusal is raised BEFORE the cursor is opened, so a request carrying both an
+     * unopenable cursor and an identifier reports the combination rather than the seal failure. The
+     * combination is the condition the client can act on, and the reference's own discipline is to edit
+     * the submitted input before acting on any of it.
+     *
+     * @param request the assembled list request, of type {@code TransactionListRequest}; must not be
+     *     {@code null}
+     * @throws ClientInputException if the request carries both a cursor and a starting identifier,
+     *     naming both members with the not-acceptable-value state and carrying
+     *     {@link #MESSAGE_CURSOR_AND_FILTER}
+     */
+    private static void requireOnePositioningMeans(TransactionListRequest request) {
+        if (request.hasCursor() && request.hasTransactionIdFilter()) {
+            // WHY : Assumptions: BOTH members are named rather than one, because the whole content of
+            //       the refusal is that two of them disagree and the request alone cannot say which the
+            //       operator meant. Naming one would ask a client to correct a field that may be the
+            //       one it should keep.
+            // WHY : Assumptions: the identifier is named first, matching the order the adapter declares
+            //       its parameters in, which is the order the shared advice treats as a body's declared
+            //       check order. The state is the not-acceptable-value one and not the blank one,
+            //       because both members carry values and a blank state would ask a form to draw the
+            //       reference's asterisk against a populated control.
+            throw new ClientInputException(ApiError.CODE_VALIDATION,
+                    List.of(FIELD_TRANSACTION_ID_FILTER, FIELD_CURSOR),
+                    FieldValidationFlag.NOT_OK, MESSAGE_CURSOR_AND_FILTER);
+        }
     }
 
     /**

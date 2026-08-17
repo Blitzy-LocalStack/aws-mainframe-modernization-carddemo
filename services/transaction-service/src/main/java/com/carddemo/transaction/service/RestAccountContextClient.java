@@ -3,12 +3,14 @@ package com.carddemo.transaction.service;
 import com.carddemo.common.security.ApprovedOriginPolicy;
 import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.common.security.InternalServiceToken;
+import com.carddemo.common.web.CorrelationIdFilter;
 import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
@@ -38,7 +40,10 @@ import org.springframework.web.client.RestClientException;
  * client or server status, every transport failure and every unusable body becomes
  * {@link AccountContextClient.AccountContextUnavailableException}. The reference draws the same line: its
  * file status 23 selects the not-found sentence and any other status selects the failed-read sentence,
- * for instance at lines 361 and 366 of {@code app/cbl/COBIL00C.cbl}.</p>
+ * for instance at lines 361 and 366 of {@code app/cbl/COBIL00C.cbl}. ⚠️ The last of the three -- the
+ * unusable body -- is enforced by the two {@code requireUsable} overloads rather than by the status
+ * handling, and it was the clause this class stated and did not honour: a 2xx whose body bound to nothing
+ * was answered as an absence, so a broken callee reached the operator as a missing account or card.</p>
  *
  * <p>Assumptions: both timeouts are explicit and both are configurable, and the defaults are the ones the
  * authorization context already runs with. An unbounded read on this seam would let one slow account-side
@@ -207,6 +212,7 @@ public class RestAccountContextClient implements AccountContextClient {
         this.client = builder.baseUrl(baseUrl)
                 .requestFactory(factory)
                 .requestInterceptor(bearerTokenInterceptor(machineIdentity))
+                .requestInterceptor(correlationIdInterceptor())
                 .build();
     }
 
@@ -226,10 +232,12 @@ public class RestAccountContextClient implements AccountContextClient {
      * and therefore the two timeouts, which are a property of the transport rather than of this class's
      * contract; asserting on them would require a request that actually stalled.</p>
      *
-     * <p>Assumptions: the credential interceptor IS installed here, unlike the request factory, because
-     * only the factory conflicts with a bound mock transport. Leaving the interceptor out would make every
-     * test exercise a client presenting no credential -- the one state the account context refuses on every
-     * one of these addresses.</p>
+     * <p>Assumptions: BOTH interceptors are installed here, unlike the request factory, because only the
+     * factory conflicts with a bound mock transport. Leaving the credential one out would make every test
+     * exercise a client presenting no credential -- the one state the account context refuses on every one
+     * of these addresses -- and leaving the correlation one out would make the header this seam propagates
+     * unobservable from any test, which is the state the propagation was missing from in the first place.
+     * </p>
      *
      * <p>Alternatives Considered: extracting the factory construction into a configuration class and
      * injecting a {@code ClientHttpRequestFactory}. That is the better long-term shape and is deliberately
@@ -255,6 +263,7 @@ public class RestAccountContextClient implements AccountContextClient {
         requireApprovedOrigin(baseUrl, approvedOrigin);
         this.client = builder.baseUrl(baseUrl)
                 .requestInterceptor(bearerTokenInterceptor(machineIdentity))
+                .requestInterceptor(correlationIdInterceptor())
                 .build();
     }
 
@@ -304,6 +313,49 @@ public class RestAccountContextClient implements AccountContextClient {
             request.getHeaders().setBearerAuth(machineIdentity.mint(
                     InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
                     scopeFor(request.getURI().getPath())));
+            return execution.execute(request, body);
+        };
+    }
+
+    /**
+     * Builds the interceptor that carries this request's correlation identity onto the outbound call.
+     *
+     * <p>⚠️ Purpose: without this the identity STOPPED at this service. Every {@code ApiError} body this
+     * migration renders instructs the caller to quote the correlation identifier, and
+     * {@code docs/architecture/observability.md} rests the whole design on every service reading and
+     * writing the same header name -- but the only interceptor on this client set a credential, so the
+     * callee's own filter found no header, minted an identifier of its own, and logged the far side of the
+     * call under a value the caller was never told. An operator handed one identifier could therefore find
+     * this side's lines and none of the account context's.</p>
+     *
+     * <p>Assumptions: the value is read from the MDC rather than threaded through the call, because the
+     * shared kernel's {@link CorrelationIdFilter} is what establishes it and the MDC is the mechanism it
+     * publishes it through -- the same read four sibling services already perform through
+     * {@link CorrelationIdFilter#CORRELATION_ID_MDC_KEY}. Threading it would mean adding a parameter to
+     * both reads on this seam, and to every read added later, for a value that is a property of the request
+     * rather than of the operation.</p>
+     *
+     * <p>Assumptions: the header is set only when the MDC actually carries a value, and both the name and
+     * the key are the kernel's constants rather than literals so the two ends of the hop cannot come to
+     * disagree about the spelling. An outbound call can legitimately run on a thread no inbound request
+     * established -- a scheduled or message-driven path -- and sending an empty header there would be worse
+     * than sending none: the callee's filter treats a blank value as absent and mints its own anyway, so the
+     * empty header would only add a field to every log line that never resolves to anything.</p>
+     *
+     * <p>Alternatives Considered: folding this into the credential interceptor, which would leave one
+     * lambda instead of two. Rejected because the two have different reasons to change and one of them can
+     * fail: minting is a security concern that raises when an audience or a scope is unavailable, and a
+     * change there must not be able to drop a diagnostic header as a side effect. Keeping them separate
+     * also lets each carry its own test case, which is how the missing one was proved missing.</p>
+     *
+     * @return the interceptor, never {@code null}
+     */
+    private static ClientHttpRequestInterceptor correlationIdInterceptor() {
+        return (request, body, execution) -> {
+            String correlationId = MDC.get(CorrelationIdFilter.CORRELATION_ID_MDC_KEY);
+            if (correlationId != null && !correlationId.isBlank()) {
+                request.getHeaders().set(CorrelationIdFilter.CORRELATION_ID_HEADER, correlationId);
+            }
             return execution.execute(request, body);
         };
     }
@@ -384,7 +436,15 @@ public class RestAccountContextClient implements AccountContextClient {
             //       cardNumber member off this response; the member does not exist in the published schema,
             //       so it arrived null on every successful call and the value written into the ledger row
             //       would have been absent.
-            return Optional.ofNullable(view).map(read -> read.toCardXref(cardNumber));
+            // WHY : ⚠️ Refactoring Rationale: an answer that binds to NOTHING is a failed read and not an
+            //       absence, and this line used to make it an absence. It wrapped the bound value in an
+            //       optional-of-nullable, so a 2xx with a zero-length body -- which the transport binds to
+            //       null -- produced the same empty optional a 404 produces, and the caller reported a
+            //       broken callee to the operator as a missing card. This class's own contract draws the
+            //       line the other way: a 404 is absence and every unusable body is a failure. The
+            //       distinction matters because the two lead an operator to different work -- one to the
+            //       data, the other to the account context.
+            return Optional.of(requireUsable(view).toCardXref(cardNumber));
         } catch (HttpClientErrorException.NotFound absent) {
             return Optional.empty();
         } catch (RestClientException failure) {
@@ -407,13 +467,94 @@ public class RestAccountContextClient implements AccountContextClient {
                     .body(Map.of(FIELD_ACCOUNT_ID, accountId))
                     .retrieve()
                     .body(CardXrefByAccountView.class);
-            return Optional.ofNullable(view).map(CardXrefByAccountView::toCardXref);
+            // WHY : ⚠️ Refactoring Rationale: as on the card-keyed read above, an unusable body was reported
+            //       as an absent row. On THIS read the consequence reached further: the payment screen
+            //       resolves the card it records a payment against through here, so a callee answering
+            //       unusably was reported as 'Account ID NOT found...' on a payment for an account that
+            //       exists.
+            return Optional.of(requireUsable(view).toCardXref());
         } catch (HttpClientErrorException.NotFound absent) {
             return Optional.empty();
         } catch (RestClientException failure) {
             throw new AccountContextUnavailableException(
                     "card cross-reference lookup by account identifier did not answer", failure);
         }
+    }
+
+    /**
+     * Refuses a card-keyed answer this side cannot read, so only a 404 signals absence.
+     *
+     * <p>Purpose: this is the class contract's "every unusable body" clause, applied to the card-keyed
+     * shape. Two forms of unusable answer reach here and both used to be mishandled, differently: a body the
+     * transport binds to {@code null} -- a zero-length or literal-null payload on a 2xx -- became an empty
+     * optional and was reported as an absent card; and a body that binds but carries no account identifier
+     * -- an empty JSON object, or one naming only the customer -- reached the conversion below, where
+     * unboxing the absent identifier raised a null-pointer failure that no arm of this method catches and
+     * the shared advice answers with its generic internal wording.</p>
+     *
+     * <p>Assumptions: the customer identifier is deliberately NOT required, and the asymmetry is the
+     * published contract rather than an oversight. This context reads no customer record; the component is
+     * declared on the wire shape only so the strict deserialiser admits the member the callee sends, so an
+     * answer omitting it is still an answer this side can use in full.</p>
+     *
+     * <p>Trade-offs: the detail names the missing MEMBER and never a value, because a detail on this seam
+     * reaches a log line and the two identifiers are values {@code docs/architecture/observability.md}
+     * withholds. Naming the member is what lets an operator tell a callee that answered with nothing from a
+     * callee whose published shape has changed, which is the one distinction a repeat of the call cannot
+     * make for them.</p>
+     *
+     * @param view the bound answer, or {@code null} when the body bound to nothing
+     * @return {@code view} unchanged, so the call reads as a pass-through at its use site
+     * @throws AccountContextClient.AccountContextUnavailableException if the body bound to nothing or
+     *     carries no account identifier, both of which are failed reads rather than absences
+     */
+    private static CardXrefView requireUsable(CardXrefView view) {
+        if (view == null) {
+            throw new AccountContextUnavailableException(
+                    "card cross-reference lookup by card number answered with no body", null);
+        }
+        if (view.accountId() == null) {
+            throw new AccountContextUnavailableException(
+                    "card cross-reference lookup by card number answered without an account identifier",
+                    null);
+        }
+        return view;
+    }
+
+    /**
+     * Refuses an account-keyed answer this side cannot read, so only a 404 signals absence.
+     *
+     * <p>Purpose: the same clause of the class contract applied to the account-keyed shape, which requires
+     * one member MORE than its sibling. This operation exists to resolve the card number, and that value is
+     * written into the ledger row as the row's card key -- so an answer omitting it is unusable even though
+     * it names the account the caller already knew.</p>
+     *
+     * <p>Assumptions: a blank card number is refused alongside an absent one, because the member is a
+     * fixed-width character field on this side and a blank value would travel into the ledger row as
+     * padding. An absent member and a member present but empty are the same defect in the answer, so they
+     * are answered the same way rather than distinguished for the caller.</p>
+     *
+     * @param view the bound answer, or {@code null} when the body bound to nothing
+     * @return {@code view} unchanged, so the call reads as a pass-through at its use site
+     * @throws AccountContextClient.AccountContextUnavailableException if the body bound to nothing, carries
+     *     no account identifier, or carries no card number for this operation to resolve
+     */
+    private static CardXrefByAccountView requireUsable(CardXrefByAccountView view) {
+        if (view == null) {
+            throw new AccountContextUnavailableException(
+                    "card cross-reference lookup by account identifier answered with no body", null);
+        }
+        if (view.accountId() == null) {
+            throw new AccountContextUnavailableException(
+                    "card cross-reference lookup by account identifier answered without an account"
+                            + " identifier", null);
+        }
+        if (view.cardNumber() == null || view.cardNumber().isBlank()) {
+            throw new AccountContextUnavailableException(
+                    "card cross-reference lookup by account identifier answered without the card number it"
+                            + " exists to resolve", null);
+        }
+        return view;
     }
 
     /**

@@ -565,23 +565,36 @@ class TransactionAddServiceTest {
      * different alternative, and each is expected to answer with the same sentence, which is what makes
      * the disjunction observable from outside.</p>
      *
-     * <p>Refactoring Rationale: these values carry TEN integer digits where they previously carried
-     * nine. Nine is what the record holds -- {@code TRAN-AMT PIC S9(09)V99} at line 10 of
+     * <p>Refactoring Rationale: the over-wide values carry TEN integer digits where they previously
+     * carried nine. Nine is what the record holds -- {@code TRAN-AMT PIC S9(09)V99} at line 10 of
      * {@code app/cpy/CVTRA05Y.cpy} -- and is what the published contract and the request record both
-     * admit under divergence D-AMOUNT-RECORD-WIDTH, so a nine-digit value is now accepted and can no
-     * longer be a specimen for this family. Leaving nine-digit values here would have been the very
-     * defect this change removes, restated as a test: the service refusing a value the boundary calls
-     * valid. Ten integer digits is the narrowest width the record genuinely cannot hold, and the shared
-     * money type admits ten, so the specimens are constructible.</p>
+     * admit under divergence D-AMOUNT-RECORD-WIDTH, so a nine-digit value is accepted and cannot be a
+     * specimen for this family. Leaving nine-digit values here would have been the very defect that
+     * change removed, restated as a test: the service refusing a value the boundary calls valid.</p>
      *
-     * @return one argument per value, each carrying the amount and a label naming the alternative it
-     *     fails, in the order the alternatives are written
+     * <p>⚠️ Refactoring Rationale: the specimens are SUBMITTED CHARACTERS and the family has grown from
+     * three magnitudes to nine forms, because the request carries the characters now. When the amount
+     * arrived as the shared money type, every lexical defect had been parsed away before this family
+     * could name it -- {@code "125.5"} was already {@code 125.50}, {@code "+125.50"} had lost its plus
+     * and {@code "1,234.50"} its separator -- so magnitude was the only axis a specimen could vary, and
+     * the four positional alternatives at lines 340 to 343 were exercised by one of the four. The six
+     * lexical forms added here are the ones an operator actually keys, and each fails a different
+     * alternative of the same disjunction, so all four are now reached.</p>
+     *
+     * @return one argument per value, each carrying the submitted characters and a label naming the
+     *     alternative it fails, in the order the alternatives are written
      */
     private static Stream<Arguments> amountsTheEditedPictureCannotHold() {
         return Stream.of(
-                Arguments.of(Money.of("1000000000.00"), "ten integer digits, line 341"),
-                Arguments.of(Money.of("-1000000000.00"), "ten integer digits and a sign, line 341"),
-                Arguments.of(Money.of("9999999999.99"), "the widest value the type admits, line 341"));
+                Arguments.of("1000000000.00", "ten integer digits, line 341"),
+                Arguments.of("-1000000000.00", "ten integer digits and a sign, line 341"),
+                Arguments.of("9999999999.99", "the widest value the money type admits, line 341"),
+                Arguments.of("125.5", "one fractional digit where line 343 tests two"),
+                Arguments.of("125.456", "three fractional digits where line 343 tests two"),
+                Arguments.of("+125.50", "a leading plus, which line 340's sign position excludes"),
+                Arguments.of("12,34", "a grouping separator, which line 341 refuses as non-numeric"),
+                Arguments.of("abc", "no numeric position at all, line 341"),
+                Arguments.of("1e5", "an exponent, which no position in the picture admits"));
     }
 
 
@@ -616,7 +629,7 @@ class TransactionAddServiceTest {
     private static TransactionAddRequest submission(String accountId, String cardNumber,
             String confirmation) {
         return new TransactionAddRequest(accountId, "01", "0001", "POS TERM", "GROCERY PURCHASE",
-                Money.of("125.50"), "123456789", "CORNER STORE", "SEATTLE", "98101", cardNumber,
+                "125.50", "123456789", "CORNER STORE", "SEATTLE", "98101", cardNumber,
                 ORIGIN_DATE, PROCESS_DATE, confirmation, null);
     }
 
@@ -645,18 +658,18 @@ class TransactionAddServiceTest {
     /**
      * Builds a submission differing from the original in exactly one text component.
      *
-     * <p>Assumptions: the field key must be one of the ten text components a validation block
+     * <p>Assumptions: the field key must be one of the eleven text components a validation block
      * guards, and the guard below makes a mistyped key fail at the call site rather than silently
      * returning the original unchanged. A helper that ignored an unknown key would turn a typo into a
      * case that exercised nothing while still passing.</p>
      *
-     * <p>Alternatives Considered: ten separate single-purpose helpers, one per component. Rejected
+     * <p>Alternatives Considered: eleven separate single-purpose helpers, one per component. Rejected
      * because the parameterized families below choose their component at run time from the arm they
      * were handed, so a set of compile-time helpers could not be reached from them at all.</p>
      *
      * @param original the submission to derive from; must not be {@code null}
      * @param field the field key naming the component to replace, of type {@code String}, one of the
-     *     ten text components the service's own field keys name
+     *     eleven text components the service's own field keys name
      * @param value the value to place in that component, of type {@code String}, empty for the
      *     never-supplied spelling
      * @return a {@link TransactionAddRequest} identical to {@code original} but for that one
@@ -676,7 +689,12 @@ class TransactionAddServiceTest {
                 TransactionAddService.FIELD_SOURCE.equals(field) ? value : original.source(),
                 TransactionAddService.FIELD_DESCRIPTION.equals(field)
                         ? value : original.description(),
-                original.amount(),
+                // WHY : ⚠️ Assumptions: the amount is substitutable HERE now, where this helper used to
+                //       pass it through untouched. It became a text component, so the reference's own
+                //       blank spelling -- SPACES at line 278 -- is expressible for it, and the eleven
+                //       mandatory arms can therefore be walked by one uniform path instead of ten
+                //       through this helper and one through a second.
+                TransactionAddService.FIELD_AMOUNT.equals(field) ? value : original.amount(),
                 TransactionAddService.FIELD_MERCHANT_ID.equals(field)
                         ? value : original.merchantId(),
                 TransactionAddService.FIELD_MERCHANT_NAME.equals(field)
@@ -694,20 +712,26 @@ class TransactionAddServiceTest {
     }
 
     /**
-     * Lists the ten text components {@link #replacing(TransactionAddRequest, String, String)} knows.
+     * Lists the eleven text components {@link #replacing(TransactionAddRequest, String, String)} knows.
      *
-     * <p>Assumptions: the amount is absent from this list on purpose. It is the one guarded component
-     * that is not text, so it is replaced through {@link #withAmount(TransactionAddRequest, Money)}
-     * instead, which keeps the money path in the money type rather than routing a value through a
-     * string on its way to an assertion.</p>
+     * <p>⚠️ Refactoring Rationale: the amount is PRESENT in this list now, and the note it replaces
+     * said it was "absent from this list on purpose" because it was "the one guarded component that is
+     * not text". It is text as of the change that made a malformed amount reportable as a field, so the
+     * exception it was granted no longer has a reason, and the eleven arms of the mandatory construct
+     * are walked by one path.</p>
      *
-     * @return the ten field keys, in the order the mandatory construct guards them
+     * <p>Assumptions: the key sits fifth, which is where line 278 of {@code app/cbl/COTRN02C.cbl}
+     * guards it -- after the description at line 272 and before the origination date at line 284 --
+     * because the short-circuit case below reads this order as the priority order.</p>
+     *
+     * @return the eleven field keys, in the order the mandatory construct guards them
      */
     private static List<String> replaceableFields() {
         return List.of(TransactionAddService.FIELD_TYPE_CODE,
                 TransactionAddService.FIELD_CATEGORY_CODE,
                 TransactionAddService.FIELD_SOURCE,
                 TransactionAddService.FIELD_DESCRIPTION,
+                TransactionAddService.FIELD_AMOUNT,
                 TransactionAddService.FIELD_ORIGIN_DATE,
                 TransactionAddService.FIELD_PROCESS_DATE,
                 TransactionAddService.FIELD_MERCHANT_ID,
@@ -719,20 +743,26 @@ class TransactionAddServiceTest {
     /**
      * Builds a submission differing from the original only in its amount.
      *
-     * <p>Alternatives Considered: routing the amount through
-     * {@link #replacing(TransactionAddRequest, String, String)} alongside the ten text components.
-     * Rejected because that helper substitutes one {@code String} component and the amount is the one
-     * component declared as {@link Money}, so the generic form cannot express it. Handing
-     * {@code null} here is also the only way to spell a never-supplied amount, a {@link Money}
-     * having no blank spelling the way a text component does.</p>
+     * <p>⚠️ Refactoring Rationale: the amount is handed over as CHARACTERS where this helper used to
+     * take the shared money type, because the request carries the submitted characters now. That is what
+     * lets a case name a LEXICAL specimen -- an under-padded fractional part, a leading plus, a grouping
+     * separator -- which the money type could not express at all: it would have parsed and normalised
+     * every one of them before this helper was even called, so the family below could only ever vary
+     * magnitude.</p>
+     *
+     * <p>Assumptions: this helper survives alongside
+     * {@link #replacing(TransactionAddRequest, String, String)} even though the amount is now a text
+     * component that helper could also substitute. It is kept because it reads at the call site as a
+     * case about the AMOUNT rather than as a case about a field key, and because the families below
+     * choose their specimen from a value rather than from a field name.</p>
      *
      * @param original the submission to derive from; must not be {@code null}
-     * @param amount the amount to submit, of type {@link Money}, or {@code null} for the
-     *     never-supplied spelling of a component that has no blank string
+     * @param amount the characters to submit, of type {@code String}, empty for the blank spelling the
+     *     reference's line 278 refuses or {@code null} for the never-supplied one
      * @return a {@link TransactionAddRequest} identical to {@code original} but for the amount, never
      *     {@code null}
      */
-    private static TransactionAddRequest withAmount(TransactionAddRequest original, Money amount) {
+    private static TransactionAddRequest withAmount(TransactionAddRequest original, String amount) {
         return new TransactionAddRequest(original.accountId(), original.typeCode(),
                 original.categoryCode(), original.source(), original.description(), amount,
                 original.merchantId(), original.merchantName(), original.merchantCity(),
@@ -1526,10 +1556,12 @@ class TransactionAddServiceTest {
      * be that component's. Leaving two unsupplied would report the earlier arm and say nothing about
      * the later one, which is precisely what the short-circuit case below asserts instead.</p>
      *
-     * <p>Assumptions: the amount is withheld as an absent value rather than as an empty string,
-     * because it is the one guarded component carried as an exact-decimal type and that type has no
-     * blank spelling. The reference's screen field is text and its arm at line 276 tests it for spaces,
-     * so absence is the target's representation of the same state.</p>
+     * <p>⚠️ Refactoring Rationale: the amount is withheld as an EMPTY STRING like the other ten, and
+     * the note replaced here explained that it had to be withheld as an absent value instead because it
+     * was "carried as an exact-decimal type" with "no blank spelling". It carries the submitted
+     * characters now, so the reference's own spelling is available: line 278 refuses
+     * {@code TRNAMTI = SPACES OR LOW-VALUES}, and an empty string is the first of those two rather than
+     * a stand-in for them.</p>
      *
      * @param arm the arm under test, carrying the field it guards, the reference line that declares its
      *     sentence, the sentence itself and the validation state it publishes
@@ -1539,9 +1571,7 @@ class TransactionAddServiceTest {
     void eachMandatoryArmPublishesItsOwnSentence(ValidationArm arm) {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
         TransactionAddRequest accepted = submission(ACCOUNT_ID, "", "Y");
-        TransactionAddRequest deficient = TransactionAddService.FIELD_AMOUNT.equals(arm.field())
-                ? withAmount(accepted, null)
-                : replacing(accepted, arm.field(), "");
+        TransactionAddRequest deficient = replacing(accepted, arm.field(), "");
 
         assertThatThrownBy(() -> this.add(deficient))
                 .isInstanceOf(ClientInputException.class)
@@ -1576,7 +1606,7 @@ class TransactionAddServiceTest {
      * have, so this case asserts the opposite -- that the second complaint is unreachable while the
      * first stands.</p>
      *
-     * <p>Assumptions: the eleven components are emptied in one submission rather than two, so the
+     * <p>Assumptions: all eleven components are emptied in one submission, so the
      * comparison is against a request that offends every arm at once. That is the strongest form of the
      * claim: even with every arm satisfied, only one publishes.</p>
      */
@@ -1584,7 +1614,7 @@ class TransactionAddServiceTest {
     @DisplayName("many unsupplied components: only the first arm publishes, and it publishes once")
     void severalUnsuppliedComponentsPublishOnlyTheFirstArmsSentence() {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
-        TransactionAddRequest allUnsupplied = withAmount(submission(ACCOUNT_ID, "", "Y"), null);
+        TransactionAddRequest allUnsupplied = submission(ACCOUNT_ID, "", "Y");
         for (String field : replaceableFields()) {
             allUnsupplied = replacing(allUnsupplied, field, "");
         }
@@ -1656,14 +1686,14 @@ class TransactionAddServiceTest {
      * D-AMOUNT-RECORD-WIDTH; what is preserved is the positional FORM of the test and the single
      * sentence it publishes, not the digit count.</p>
      *
-     * @param amount the amount to submit, of type {@link Money}, chosen so that its rendering at the
-     *     record's edited width fails one of the four alternatives
+     * @param amount the characters to submit, of type {@code String}, chosen so that they fail one of
+     *     the four alternatives -- either lexically or once rendered at the record's edited width
      * @param failedAlternative a label naming the alternative that value fails, of type
      *     {@code String}, so a failing case reads as the claim it makes
      */
     @ParameterizedTest(name = "{1}")
     @MethodSource("amountsTheEditedPictureCannotHold")
-    void everyMalformationOfTheAmountPublishesTheOneFormatSentence(Money amount,
+    void everyMalformationOfTheAmountPublishesTheOneFormatSentence(String amount,
             String failedAlternative) {
 
         accountResolvesTo(RESOLVED_CARD_NUMBER);
@@ -1721,8 +1751,12 @@ class TransactionAddServiceTest {
         theAllocatorIssuesTheFirstIdentifier();
         theAppendEchoesTheRow();
         writeSpanRunsInline();
+        // WHY : Assumptions: the specimen is declared as the money type and RENDERED for submission, so
+        //       the value the assertions compare against and the value submitted cannot drift apart. The
+        //       rendering is the wire form by contract -- never exponent notation, always two decimal
+        //       places -- which is what the published pattern admits.
         TransactionAddRequest widest =
-                withAmount(submission(ACCOUNT_ID, "", "Y"), nineIntegerDigits);
+                withAmount(submission(ACCOUNT_ID, "", "Y"), nineIntegerDigits.toPlainString());
 
         TransactionAddResponse answer = appended(this.add(widest));
 
@@ -1896,27 +1930,37 @@ class TransactionAddServiceTest {
      *
      * <p>Assumptions: the value travels as the shared exact-decimal type at the scale that type
      * declares, and never as a binary approximation. The reference's own carrier is a display picture
-     * with two fractional positions, so a submitted value of one fractional digit comes back with two,
-     * and a comparison that passed on a binary reading would not distinguish the two.</p>
+     * with two fractional positions, so the value comes back with two, and a comparison that passed on a
+     * binary reading would not distinguish the two.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the specimen is a NEGATIVE ZERO where it used to be a value carrying
+     * one fractional digit, and the reason is that the earlier specimen is no longer submittable. An
+     * under-padded fractional part is refused at the boundary and refused again by the shape test -- the
+     * published pattern requires exactly two -- so it is now a case in the refusal family above, and
+     * submitting it here would assert a refusal rather than a normalisation. A negative zero is the
+     * remaining specimen the CANONICAL FORM CHANGES: it is exactly the published wire form, so it is
+     * accepted, and the edited picture at line 385 renders it through an unsigned magnitude and drops
+     * the sign the operator keyed. Line 386's write-back is therefore still observable, which is the
+     * whole subject of this case.</p>
      */
     @Test
     @DisplayName("the answer carries the amount that survived the edited picture, per line 386")
     void theAnswerCarriesTheAmountThatSurvivedTheEditedPicture() {
         accountResolvesTo(RESOLVED_CARD_NUMBER);
-        TransactionAddRequest oneFractionalDigit =
-                withAmount(submission(ACCOUNT_ID, "", "N"), Money.of("125.5"));
+        TransactionAddRequest signedZero =
+                withAmount(submission(ACCOUNT_ID, "", "N"), "-0.00");
 
-        TransactionAddPreview answer = prompted(this.add(oneFractionalDigit));
+        TransactionAddPreview answer = prompted(this.add(signedZero));
 
         assertThat(answer.amount())
                 .as("the value that survives lines 383 to 386, not the characters submitted")
-                .isEqualTo(Money.of("125.50"));
+                .isEqualTo(Money.of("0.00"));
         assertThat(answer.amount().amount().scale())
                 .as("two fractional positions, as the picture at line 59 declares")
                 .isEqualTo(Money.SCALE);
         assertThat(answer.amount().toPlainString())
-                .as("rendered without an exponent, so no client has to re-derive the scale")
-                .isEqualTo("125.50");
+                .as("the sign the operator keyed is gone, because line 385's picture renders a magnitude")
+                .isEqualTo("0.00");
         assertThat(answer.written())
                 .as("no row was appended, so the amount cannot have come from one")
                 .isFalse();
@@ -1942,8 +1986,7 @@ class TransactionAddServiceTest {
         theAllocatorAnswersWith(ALLOCATED_FIRST);
         theAppendEchoesTheRow();
         writeSpanRunsInline();
-        TransactionAddRequest refund =
-                withAmount(submission(ACCOUNT_ID, "", "Y"), Money.of("-125.50"));
+        TransactionAddRequest refund = withAmount(submission(ACCOUNT_ID, "", "Y"), "-125.50");
 
         TransactionAddResponse answer = appended(this.add(refund));
 

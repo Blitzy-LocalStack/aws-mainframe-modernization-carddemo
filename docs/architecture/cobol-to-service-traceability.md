@@ -3011,6 +3011,104 @@ a register of this size stays true.
   `services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java`,
   `services/transaction-service/src/main/java/com/carddemo/transaction/service/TransactionListService.java`.
 
+#### D-TRAN-ID-RECORD-DOMAIN — the identifier domain is the record's, and the numeric edit stays on the search field
+
+* **Baseline behaviour.** `TRAN-ID` is declared **`PIC X(16)`** at
+  [`app/cpy/CVTRA05Y.cpy`](../../app/cpy/CVTRA05Y.cpy) **L5** — sixteen CHARACTERS, not
+  sixteen digits — and the baseline has two producers that use that width differently. The
+  online capture allocates a zero-padded numeric key: `COTRN02C.cbl` reads the last record
+  at **L448-L449** and adds one. The interest run composes a dated key:
+  [`CBACT04C.cbl`](../../app/cbl/CBACT04C.cbl) **L473-L480** `STRING`s the injected
+  `PARM-DATE` together with a six-digit `WS-TRANID-SUFFIX`, so an accrual identifier reads
+  `2022-07-18000050` — sixteen characters, two of them the date's separators.
+* **Baseline behaviour, second half — the two uses of the field are edited differently.**
+  `COTRN00C.cbl` **L209** tests `IF TRNIDINI OF COTRN0AI IS NUMERIC` before using its search
+  field as a start key and answers **L214**'s `'Tran ID must be Numeric ...'` when it is not.
+  The drill-down applies no such edit: `COTRN01C.cbl` `PROCESS-ENTER-KEY` at **L145-L172**
+  applies a blank check alone before reading the file, and `COTRN00C.cbl` **L149-L193** moves
+  the SELECTED row's identifier into that field and performs it — so selecting an accrual row
+  from the list opens its detail on the mainframe.
+* **Target behaviour.** Two published schemas rather than one. `TransactionId` is the
+  **record's** domain — sixteen characters over digits and the hyphen — and is referenced by
+  the member path parameter and by every response member that carries a stored identifier
+  (the list row, the detail, the copy-last source, the capture acknowledgement and the
+  bill-payment acknowledgement). `TransactionIdSearchKey` is the **narrower numeric** domain
+  and is referenced only by `transactionIdFilter`. The adapter applies the two as
+  `TRANSACTION_ID_RECORD_PATTERN` and `TRANSACTION_ID_SEARCH_PATTERN`.
+* **Category.** Documented divergence — published domain widened to the record's own.
+* **Why the difference is accepted.** The single numeric schema was not a narrowing of the
+  baseline, it was a defect against it, and it was visible from two directions at once: the
+  member path answered **400** for an identifier the browse had just published, so a row that
+  exists and is listed could not be read; and the list response CARRIED those identifiers in a
+  member the same document declared to be sixteen digits, so a strict generated client rejected
+  a page the service considers valid. Both halves follow from one cause — one schema serving a
+  positioning input and a stored value — and the fix is to stop conflating them, which also
+  restores the baseline's own asymmetry rather than inventing one.
+* **Why the class is digits and the hyphen rather than `PIC X(16)` literally.** The character
+  class is the UNION of the two producers and nothing wider, and the stored corpus agrees:
+  removing every digit from `transaction_id` across the whole table leaves only the empty
+  string and a pair of hyphens. Publishing the copybook's full domain would admit a quote, a
+  space or a semicolon in a path segment, which no producer writes and no caller needs;
+  refusing them keeps the addressing surface as narrow as the data allows, on top of the
+  parameterised reads that make injection impossible regardless. Enumerating the two producer
+  shapes as a disjunction was also considered and rejected: it re-creates this very defect for
+  any identifier shape not listed, and the failure would again be a 400 on a row that exists.
+* **Where it is verified.** `TransactionApiContractTest` asserts each published domain equals
+  the adapter constant that applies it, that the two are NOT equal, and that the accrual form
+  matches the record domain and not the search domain; `TransactionControllerTest` addresses an
+  accrual identifier on the member path and asserts the read receives that exact value, refuses
+  the same value as a positioning parameter, and refuses a quote, a semicolon, an embedded
+  space, a letter, a percent-encoded quote and a full stop on the member path before any read.
+* **Files.** `services/transaction-service/src/main/resources/openapi/transaction-api.yaml`,
+  `services/transaction-service/src/main/java/com/carddemo/transaction/api/TransactionController.java`.
+
+#### D-LIST-POSITION-EXCLUSIVE — a request naming two browse positions is refused
+
+* **Baseline behaviour.** [`COTRN00C.cbl`](../../app/cbl/COTRN00C.cbl) cannot express the
+  combination at all, and the reason is structural rather than a rule it enforces. The
+  browse position lives in the communication area, and which of the two sources is read is
+  decided by the attention identifier: the dispatch at **L121-L128** sends an entry that
+  pressed no paging key to `PROCESS-ENTER-KEY`, which reads the screen's own identifier
+  field at **L206-L210**, and sends the seventh and eighth function keys to
+  `PROCESS-PF7-KEY` at **L234** and `PROCESS-PF8-KEY` at **L257**, which position from the
+  stored leading key at **L239** and the stored trailing key at **L262** and never consult
+  that field. A turn therefore reads exactly one position, whatever the operator typed, and
+  no message exists for a turn that named two.
+* **Target behaviour.** The two positions arrive as two independent query parameters that a
+  caller can send together, so the combination becomes expressible for the first time. It is
+  **refused with 400**, naming both `transactionIdFilter` and `cursor` in the per-field
+  array with the not-acceptable-value state, and carrying the authored sentence
+  `Tran ID can NOT be combined with paging. Clear one and try again...`. The refusal is
+  raised before the cursor is opened, so a request carrying both an unopenable cursor and an
+  identifier reports the combination rather than the seal failure.
+* **Category.** Documented divergence — authored refusal with no baseline counterpart.
+* **Why the difference is accepted.** The alternative is a silent precedence, which is what
+  the delivered code did before this entry existed: the direction selected a paging paragraph,
+  the paragraph positioned from the cursor, and the identifier was discarded with nothing in
+  the response to say so. An operator who typed an identifier while their client still held a
+  cursor was shown a different page from the one they asked for, and no client could detect
+  the substitution, because the page returned is indistinguishable from the page requested.
+  `openapi/transaction-api.yaml` already published the refusal on the `transactionIdFilter`
+  parameter — *"It cannot be combined with a cursor: a cursor already states a position, so
+  supplying both is a 400 rather than being silently resolved in favour of one"* — so the
+  refusal makes the service and its own contract agree, and only the sentence is new.
+  Resolving in favour of the identifier instead was rejected: a precedence rule is still a
+  silent resolution, and only the direction of the surprise would change.
+* **Why the sentence is authored.** There is no reference sentence to transcribe, because the
+  condition is unreachable on a terminal. The wording follows the reference catalogue's own
+  voice and shape — a short imperative clause closing with three dots, inside the
+  seventy-five characters the reference message line holds — which is also what the shared
+  advice's message gate admits, so an out-of-voice sentence would have degraded to the
+  generic one and reached no client.
+* **Where it is verified.** `TransactionListServiceTest` asserts the refusal in both
+  directions, that both members are named, that the sentence is carried verbatim and that the
+  repository is never read; `TransactionControllerTest` asserts the wire answer is a 400
+  carrying both per-field entries and that the browse is never reached, and asserts that the
+  adapter's two parameter names are the two member names the refusal reports.
+* **Files.** `services/transaction-service/src/main/java/com/carddemo/transaction/service/TransactionListService.java`,
+  `services/transaction-service/src/main/java/com/carddemo/transaction/api/TransactionController.java`,
+  `services/transaction-service/src/main/resources/openapi/transaction-api.yaml`.
+
 #### D-PASSWORD-CHALLENGE — the credential-change exchange has no baseline counterpart
 
 * **Baseline behaviour.** [`COSGN00C.cbl`](../../app/cbl/COSGN00C.cbl) compares a
@@ -6018,17 +6116,54 @@ this register for the identifier learns why it is absent rather than concluding 
   [`app/cpy/CVTRA05Y.cpy`](../../app/cpy/CVTRA05Y.cpy) — **nine**.
   [`app/cbl/COBIL00C.cbl`](../../app/cbl/COBIL00C.cbl) **L224** moves the wider field into
   the narrower one, so a balance needing ten integer digits loses its high-order digit
-  there. **L233** then writes that row and **L234** subtracts the FULL, untruncated balance
-  from the account, so the two writes of one unit of work disagree: the account is settled
-  to zero while the row beside it records an amount smaller than the payment. Nothing
-  signals it — a COBOL `MOVE` into a narrower numeric field discards high-order digits
-  silently.
-* **Target behaviour.** `BillPaymentService` refuses the request before any work is done. The
-  bound is published as `LEDGER_AMOUNT_INTEGER_DIGITS`, measured against the balance's
-  integer digits alone, and the refusal is the **first** statement of the payment method, so
-  it spends no cross-context read and consumes no value from the identifier sequence. The
+  there. **L233** then writes that row and **L234** computes
+  `ACCT-CURR-BAL = ACCT-CURR-BAL - TRAN-AMT`, subtracting the **truncated** amount rather
+  than the balance it came from — so the account is left holding exactly the digit that was
+  discarded while the row beside it records the remainder, and **L527** tells the operator
+  the payment succeeded. A balance of `9999999999.99` therefore settles to `9000000000.00`
+  against a row for `999999999.99`. Nothing signals it — a COBOL `MOVE` into a narrower
+  numeric field discards high-order digits silently. *This description corrects an earlier
+  draft of this entry, which said L234 subtracts the full untruncated balance and settles
+  the account to zero; L234 subtracts `TRAN-AMT`, which by then holds the truncated value.
+  The two writes of one unit of work still disagree with what was asked for, which is what
+  this entry turns on, but they disagree in the other direction.*
+* **Target behaviour.** `BillPaymentService.payBalanceInFull` refuses the turn as soon as the
+  balance is known and before anything is spent on it. The bound is published as
+  `BillPaymentService.LEDGER_AMOUNT_INTEGER_DIGITS`, and `requireBalanceFitsLedgerAmount`
+  measures the balance against it through `Money.ofPicture`, which is the shared kernel's own
+  statement of what a declared picture admits rather than a limit composed locally. The
   failure carries the reference's own sentence for a payment that could not be written,
-  `'Unable to Add Bill pay Transaction...'` from **L543**, and is rendered as 500.
+  `'Unable to Add Bill pay Transaction...'` from **L543**, and is rendered as **500** — the
+  shared advice publishes a carried sentence at that status only for the bare
+  `IllegalStateException`, so that is the type raised and the arithmetic failure is kept as
+  its cause.
+* **Where the refusal sits, and what it therefore costs.** It is the statement **between**
+  L198's balance test and the preview-or-pay split, and each of those two boundaries is
+  deliberate. It cannot come earlier than the balance read, because on this screen the balance
+  **is** the amount — L224 moves it verbatim and the screen carries no amount field of its own
+  — so the value being judged does not exist until the read answers, and the row lock the
+  paying turn's read takes is therefore taken before the refusal and released by the rollback
+  it triggers. What the position does buy is everything after it: the cross-reference read
+  crosses the seam to the account context and the identifier allocation advances
+  `ledger.transaction_id_seq`, and both live in the paying method beyond the split — so a
+  refused payment **crosses no network and consumes no value from the identifier sequence**,
+  which matters because a consumed sequence value is not returned by a rollback and the next
+  payment would be numbered past a gap for a row that was never written. It sits **before** the
+  split rather than inside the paying branch so that the reporting turn is refused too: the
+  alternative is a preview that reports the balance beside L237's prompt and invites a
+  confirmation which cannot succeed. It sits **after** L198's test for the opposite reason — a
+  ten-integer-digit *credit* balance is negative in this record's sign convention, so no
+  payment is attempted on it at all and L201's advisory is the reference's own answer.
+* **What an earlier draft of this entry claimed, and what was delivered.** This entry described
+  the refusal as "the **first** statement of the payment method" and as spending nothing at
+  all, and the code it described did not exist: no width bound was declared anywhere, the only
+  bound in the path was the entity's own amount canonicalisation, and the arithmetic failure it
+  raised is not a type the shared advice classifies — so the delivered behaviour was a generic
+  critical 500 carrying no sentence, raised after the row lock had been taken and after a
+  sequence value had been consumed. The guard now exists and the two claims that survive
+  verbatim are the ones that are checkable: no cross-context read and no identifier-sequence
+  value. The literal "first statement" claim is withdrawn as unimplementable rather than
+  quietly reinterpreted, for the reason the bullet above gives.
 * **Category.** Documented divergence — refusal in place of silent truncation.
 * **Why the difference is accepted.** Truncating would reproduce the baseline byte for byte
   and would also reproduce a ledger that does not balance, which no downstream reader of the
@@ -6041,9 +6176,23 @@ this register for the identifier learns why it is absent rather than concluding 
   user-visible text. **The condition is unreachable on the seed corpus** — no account in
   `app/data/ASCII/acctdata.txt` carries a balance of ten integer digits — so this refusal
   changes no observable outcome for any data the baseline was exercised on.
-* **Where it is verified.** `BillPaymentServiceTest` asserts that a ten-integer-digit balance
-  raises with that sentence, and arranges **neither** a card resolution **nor** an identifier
-  allocation, so Mockito's strict stubbing proves the refusal is reached before either.
+* **Where it is verified.** Four cases, because the refusal has four separable claims.
+  `BillPaymentServiceTest.aTenIntegerDigitBalanceIsRefusedRatherThanTruncated` asserts the
+  **exact** thrown type, the sentence and the carried cause, and arranges **neither** a card
+  resolution **nor** an identifier allocation — asserting both untouched explicitly, since an
+  unstubbed cross-reference read answers empty and would otherwise fail the case on the
+  not-found sentence instead of proving the point. Its sibling
+  `aTenIntegerDigitBalanceIsRefusedOnTheReportingTurnToo` asserts the same refusal on the
+  **unconfirmed** turn, through the unlocked read. `theLedgerAmountWidthIsTheRecordPictureAndAgreesWithTheCaptureScreen`
+  asserts the published count is the record's nine, that it equals
+  `TransactionAddService.RECORD_AMOUNT_INTEGER_DIGITS` so the two screens' declarations cannot
+  drift, and that the sentence is L543's verbatim and is **not** the capture screen's differently
+  worded L745. `BillPaymentEvaluationOrderTest` pins the position from both sides — one case
+  proves the refusal precedes the seam read and the allocator, the other proves a ten-digit
+  credit balance takes L201's advisory instead. `BillPaymentControllerTest.aBalanceTooWideForTheLedgerAmountIsReportedWithItsOwnSentence`
+  is the only one that proves the **wire** rendering: the shared advice filters the sentence it
+  publishes at 500, so that case asserts the filter admits this string and that the abend block's
+  own message stays the generic one.
 * **Files.**
   `services/transaction-service/src/main/java/com/carddemo/transaction/service/BillPaymentService.java`.
 

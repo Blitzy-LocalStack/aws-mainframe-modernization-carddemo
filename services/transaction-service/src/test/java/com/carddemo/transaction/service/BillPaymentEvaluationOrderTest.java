@@ -191,6 +191,62 @@ class BillPaymentEvaluationOrderTest {
         verify(this.accountBalances, never()).reduceCurrentBalance(anyLong(), any());
     }
 
+    /**
+     * A balance too wide for the ledger amount is refused before the seam and before the allocator.
+     *
+     * <p>Purpose: this is the position of the width refusal registered as
+     * {@code D-BILLPAY-AMOUNT-WIDTH-REFUSED}, and position is the whole of what this case asserts. The
+     * refusal cannot precede the balance read, because the balance IS the amount being judged -- line 224
+     * of {@code app/cbl/COBIL00C.cbl} moves it verbatim and this screen carries no amount field. What it
+     * must precede is everything that SPENDS something: the cross-reference read crosses the seam to the
+     * account context, and the identifier allocation advances a database sequence whose consumed value no
+     * rollback returns, so a refused payment that reached either would leave a cost behind it.</p>
+     *
+     * <p>Assumptions: the two collaborators are asserted untouched rather than merely left unstubbed,
+     * because this class builds plain mocks with no strict-stubbing check -- an unstubbed call here answers
+     * a default and passes silently, so absence of interaction has to be asserted to be proved.</p>
+     */
+    @Test
+    @DisplayName("refuse a too-wide balance before the cross-reference read and the allocator")
+    void aTooWideBalanceIsRefusedBeforeTheSeamAndTheAllocator() {
+        when(this.accountBalances.lockCurrentBalance(ACCOUNT_KEY))
+                .thenReturn(Optional.of(Money.of("9999999999.99")));
+
+        assertThatThrownBy(() -> this.service.payBalanceInFull(new BillPaymentRequest(ACCOUNT_ID, "Y")))
+                .isExactlyInstanceOf(IllegalStateException.class)
+                .hasMessage(BillPaymentService.MESSAGE_PAYMENT_ADD_FAILED);
+
+        verifyNoInteractions(this.accounts);
+        verify(this.transactions, never()).allocateTransactionId();
+        verify(this.transactions, never()).saveAndFlush(any());
+        verify(this.accountBalances, never()).reduceCurrentBalance(anyLong(), any());
+    }
+
+    /**
+     * A ten-integer-digit CREDIT balance takes the nothing-to-pay branch, not the width refusal.
+     *
+     * <p>Purpose: this pins the width refusal as sitting AFTER line 198's balance test rather than before
+     * it, which is the one ordering decision the case above cannot show. A credit balance is negative in
+     * this record's sign convention, so line 198's inclusive test claims it and no payment is attempted on
+     * it at all -- which makes line 201's advisory the reference's own answer, and a width complaint about
+     * an amount that was never going to be written a sentence the baseline never emits.</p>
+     */
+    @Test
+    @DisplayName("answer a ten-digit credit balance with the advisory, not the width refusal")
+    void aTooWideCreditBalanceTakesTheNothingToPayBranch() {
+        when(this.accountBalances.lockCurrentBalance(ACCOUNT_KEY))
+                .thenReturn(Optional.of(Money.of("-9999999999.99")));
+
+        BillPaymentOutcome answer =
+                this.service.payBalanceInFull(new BillPaymentRequest(ACCOUNT_ID, "Y"));
+
+        assertThat(answer).isInstanceOf(BillPaymentPreview.class);
+        assertThat(((BillPaymentPreview) answer).returnMessage())
+                .isEqualTo(BillPaymentMapper.MESSAGE_NOTHING_TO_PAY);
+        verifyNoInteractions(this.accounts);
+        verify(this.transactions, never()).allocateTransactionId();
+    }
+
     /** An unknown account is reported with the reference's own not-found sentence. */
     @Test
     @DisplayName("report an unknown account with the reference's not-found sentence")

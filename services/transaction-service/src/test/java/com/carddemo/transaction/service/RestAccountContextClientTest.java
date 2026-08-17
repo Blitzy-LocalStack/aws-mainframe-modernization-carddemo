@@ -3,6 +3,7 @@ package com.carddemo.transaction.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.header;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.headerDoesNotExist;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
@@ -11,14 +12,17 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
 
 import com.carddemo.common.security.InternalServiceToken;
+import com.carddemo.common.web.CorrelationIdFilter;
 import com.carddemo.transaction.service.AccountContextClient.AccountContextUnavailableException;
 import com.carddemo.transaction.service.AccountContextClient.CardXref;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Optional;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.slf4j.MDC;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -85,6 +89,15 @@ class RestAccountContextClientTest {
      * this data and not an edge one.</p>
      */
     private static final String FIRST_ACCOUNT = "00000000001";
+
+    /**
+     * A correlation identity of the shape the shared filter admits.
+     *
+     * <p>Assumptions: the value is within the width and character domain {@code CorrelationIdFilter}
+     * accepts on an inbound request, so this case exercises an identity the far side would also accept
+     * rather than one that only this side's propagation could carry.</p>
+     */
+    private static final String CORRELATION_ID = "qa-seam-join";
 
     /**
      * The minter every client in this class presents its credential from.
@@ -283,6 +296,160 @@ class RestAccountContextClientTest {
         assertThat(rendered)
                 .doesNotContain(FIRST_ACCOUNT)
                 .doesNotContain(CARD_NUMBER);
+        harness.server().verify();
+    }
+
+    /**
+     * Clears the diagnostic context, so a correlation identity set by one case cannot reach another.
+     *
+     * <p>Assumptions: the mapped diagnostic context is thread-local and this class's cases run on the same
+     * thread, so a value left behind by the propagation case below would be picked up by every later case
+     * and by any test in this module that shares the thread. Clearing after each case rather than before
+     * each one is deliberate: it also protects tests OUTSIDE this class, which a before-hook could not.</p>
+     */
+    @AfterEach
+    void clearDiagnosticContext() {
+        MDC.clear();
+    }
+
+    /**
+     * Verifies the correlation identity travels with the outbound call.
+     *
+     * <p>⚠️ Purpose: this is the finding. The only interceptor on this client set a credential, so the
+     * account context's own filter found no correlation header, minted an identifier of its own and logged
+     * the far side of the call under a value the caller was never given -- while every {@code ApiError} body
+     * this migration renders instructs that caller to quote the identifier it WAS given. The hops remained
+     * joinable by the W3C trace header, which the transport propagates on its own, but that is
+     * diagnosability by a different identity than the one published to the operator.</p>
+     *
+     * <p>Assumptions: the header NAME asserted is the shared kernel's constant rather than a literal, which
+     * is the whole property being protected -- {@code docs/architecture/observability.md} rests the design
+     * on every service reading and writing the same header name, so a case naming the string itself would
+     * still pass if the two ends came to spell it differently.</p>
+     */
+    @Test
+    @DisplayName("carries this request's correlation identity onto the outbound call")
+    void theCorrelationIdentityTravelsWithTheCall() {
+        MDC.put(CorrelationIdFilter.CORRELATION_ID_MDC_KEY, CORRELATION_ID);
+        Harness harness = harness();
+        harness.server()
+                .expect(requestTo(ORIGIN + RestAccountContextClient.PATH_CARD_XREF_LOOKUP))
+                .andExpect(header(CorrelationIdFilter.CORRELATION_ID_HEADER, CORRELATION_ID))
+                .andRespond(withSuccess("{\"accountId\":1,\"customerId\":1}",
+                        MediaType.APPLICATION_JSON));
+
+        harness.client().findCardXrefByCardNumber(CARD_NUMBER);
+
+        harness.server().verify();
+    }
+
+    /**
+     * Verifies no header is sent when the calling thread carries no correlation identity.
+     *
+     * <p>Assumptions: an outbound call can legitimately run on a thread no inbound request established --
+     * a scheduled or message-driven path -- and this case states what happens there. Sending the header
+     * empty would be worse than sending none, because the callee's filter treats a blank value as absent and
+     * mints its own regardless: the empty header would only add a field to every log line on the far side
+     * that never resolves to anything.</p>
+     *
+     * <p>Assumptions: the diagnostic context is cleared explicitly at the start rather than assumed empty,
+     * because it is thread-local and this class's own propagation case populates it. Relying on the
+     * after-hook alone would make this case's outcome depend on execution order.</p>
+     */
+    @Test
+    @DisplayName("sends no correlation header when the thread carries no identity")
+    void noCorrelationHeaderIsSentWhenTheThreadCarriesNone() {
+        MDC.clear();
+        Harness harness = harness();
+        harness.server()
+                .expect(requestTo(ORIGIN + RestAccountContextClient.PATH_CARD_XREF_LOOKUP))
+                .andExpect(headerDoesNotExist(CorrelationIdFilter.CORRELATION_ID_HEADER))
+                .andRespond(withSuccess("{\"accountId\":1,\"customerId\":1}",
+                        MediaType.APPLICATION_JSON));
+
+        harness.client().findCardXrefByCardNumber(CARD_NUMBER);
+
+        harness.server().verify();
+    }
+
+    /**
+     * Verifies a 2xx whose body binds to nothing is a failed read and not an absence.
+     *
+     * <p>⚠️ Purpose: this is the second finding on this seam. The bound value used to be wrapped in an
+     * optional-of-nullable, so a zero-length body on a 200 produced exactly the empty optional a 404
+     * produces and the caller reported a broken callee to the operator as a missing card. The class contract
+     * has always drawn the line the other way -- a 404 is absence, every unusable body is a failure -- and
+     * the two answers send an operator to different work, one to the data and one to the dependency.</p>
+     *
+     * <p>Assumptions: the DETAIL is asserted and not only the type, because both the empty body and a
+     * transport failure raise the same type here. Asserting the type alone would pass if the empty body
+     * merely provoked a converter failure that the existing catch arm re-raised, which is a different branch
+     * with a different meaning for a reader of the log.</p>
+     */
+    @Test
+    @DisplayName("reports a 2xx with no body as a failed read, not as an absent row")
+    void anEmptyBodyIsAFailedReadAndNotAnAbsence() {
+        Harness harness = harness();
+        harness.server()
+                .expect(requestTo(ORIGIN + RestAccountContextClient.PATH_CARD_XREF_LOOKUP))
+                .andRespond(withSuccess("", MediaType.APPLICATION_JSON));
+
+        assertThatThrownBy(() -> harness.client().findCardXrefByCardNumber(CARD_NUMBER))
+                .isInstanceOf(AccountContextUnavailableException.class)
+                .hasMessageContaining("answered with no body");
+        harness.server().verify();
+    }
+
+    /**
+     * Verifies a body that binds without the account identifier is a failed read too.
+     *
+     * <p>Purpose: the same contract clause, one step further along. A body of an empty JSON object, or one
+     * naming only the customer, binds to a value that is not {@code null} and then reaches the conversion --
+     * where unboxing the absent identifier raised a null-pointer failure that no arm of the read catches, so
+     * the shared advice answered it with its generic internal wording instead of this seam's own.</p>
+     *
+     * <p>Assumptions: the customer member is deliberately not required and this case proves the asymmetry is
+     * intended rather than accidental, by omitting the account identifier while supplying the customer -- the
+     * exact shape that would pass a naive presence check over all members.</p>
+     */
+    @Test
+    @DisplayName("reports a body missing the account identifier as a failed read")
+    void aBodyWithoutTheAccountIdentifierIsAFailedRead() {
+        Harness harness = harness();
+        harness.server()
+                .expect(requestTo(ORIGIN + RestAccountContextClient.PATH_CARD_XREF_LOOKUP))
+                .andRespond(withSuccess("{\"customerId\":1}", MediaType.APPLICATION_JSON));
+
+        assertThatThrownBy(() -> harness.client().findCardXrefByCardNumber(CARD_NUMBER))
+                .isInstanceOf(AccountContextUnavailableException.class)
+                .hasMessageContaining("without an account identifier");
+        harness.server().verify();
+    }
+
+    /**
+     * Verifies the account-keyed read refuses an answer carrying no card number.
+     *
+     * <p>Purpose: this operation exists to resolve the card number, and that value becomes the ledger row's
+     * card key -- so an answer omitting it is unusable even though it names the account the caller already
+     * knew. The account-keyed shape therefore requires one member more than its card-keyed sibling, and this
+     * case is what states that difference.</p>
+     *
+     * <p>Assumptions: the read is exercised on the account-keyed address rather than trusting the sibling
+     * case above to cover both, because the two reads bind DIFFERENT wire shapes and each has its own
+     * usability rule; a single case would leave one of the two shapes unchecked.</p>
+     */
+    @Test
+    @DisplayName("reports an account-keyed answer with no card number as a failed read")
+    void anAccountKeyedAnswerWithoutACardNumberIsAFailedRead() {
+        Harness harness = harness();
+        harness.server()
+                .expect(requestTo(ORIGIN + RestAccountContextClient.PATH_CARD_XREF_BY_ACCOUNT))
+                .andRespond(withSuccess("{\"accountId\":1,\"customerId\":1}",
+                        MediaType.APPLICATION_JSON));
+
+        assertThatThrownBy(() -> harness.client().findCardXrefByAccountId(FIRST_ACCOUNT))
+                .isInstanceOf(AccountContextUnavailableException.class)
+                .hasMessageContaining("without the card number it exists to resolve");
         harness.server().verify();
     }
 }

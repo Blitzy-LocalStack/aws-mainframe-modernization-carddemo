@@ -1532,6 +1532,87 @@ class TransactionRepositoryIT {
     }
 
     /**
+     * Confirms a save at an occupied identifier is REFUSED and leaves the stored row untouched.
+     *
+     * <p>⚠️ Purpose: this pins the outcome that {@link Transaction}'s unwritten-state declaration
+     * exists for. The identifier of that entity is assigned rather than generated, so before it
+     * declared its own state the repository classified a row carrying one as already persisted and
+     * issued a MERGE -- and a merge against an occupied key silently REPLACED the stored row and
+     * raised nothing, so an append reported success while a stored financial record was destroyed and
+     * the row count did not move. Every assertion below is one half of that outcome: the refusal, and
+     * the survival of the row that was there.
+     *
+     * <p>Assumptions: the refusal is asserted as the framework's translated data-integrity failure
+     * rather than as the provider's own constraint exception, because that translated type is what the
+     * two writing services catch and what the shared error advice classifies. Asserting the provider
+     * type would pin a layer neither of them names.
+     *
+     * <p>Assumptions: the surviving row is re-read through the repository AFTER the failed save, and
+     * the amount and description are both compared, so an update that changed the row while leaving
+     * its key intact cannot pass. Comparing the row count alone would not have caught the defect at
+     * all -- the merge left the count exactly as it found it, which is precisely why the defect was
+     * invisible.
+     *
+     * <p>Assumptions: the failed save is issued in its own transaction template, separate from the
+     * one that seeded the row, because a failed flush marks its unit of work for rollback and leaves
+     * the persistence context unusable; the re-read has to happen outside it.
+     *
+     * <p>This case takes no parameter and yields no value.
+     */
+    @Test
+    void aSaveAtAnOccupiedIdentifierIsRefusedAndTheStoredRowSurvives() {
+        this.persistAndDetach(
+                this.posted(TRAN_ID_FIRST, SEED_CARD, SEED_AMOUNT_POSITIVE, RANGE_START));
+        Transaction collidingRow = this.posted(
+                TRAN_ID_FIRST, SEED_CARD, new BigDecimal("-4242.42"), RANGE_START);
+        collidingRow.setTranDesc("SECOND WRITER AT AN OCCUPIED KEY");
+
+        assertThatExceptionOfType(DataIntegrityViolationException.class)
+                .isThrownBy(() -> this.transactionTemplate.executeWithoutResult(
+                        status -> this.transactions.saveAndFlush(collidingRow)))
+                .withFailMessage("a save at an occupied primary key must be refused; if it is not,"
+                        + " Transaction has stopped declaring its unwritten state and the save is a"
+                        + " merge that overwrites the stored row");
+
+        Transaction survivor = this.transactions.findById(TRAN_ID_FIRST).orElseThrow();
+
+        assertThat(survivor.getTranAmt()).isEqualByComparingTo(SEED_AMOUNT_POSITIVE);
+        assertThat(survivor.getTranDesc()).isEqualTo("Purchase at Abshire-Lowe");
+        assertThat(this.transactions.count()).isEqualTo(1L);
+    }
+
+    /**
+     * Confirms a save of a row the provider LOADED updates it rather than being refused.
+     *
+     * <p>Purpose: this is the other side of the unwritten-state declaration, and without it the
+     * declaration could be satisfied by a marker that never clears -- which would refuse every save
+     * of a loaded row and would be caught by nothing else in this class. The entity clears the marker
+     * on load and after a write, so a re-save of a row that genuinely exists is an update.
+     *
+     * <p>Assumptions: the row is fetched inside the same transaction the save is issued in, so the
+     * instance is managed and the callback that clears the marker has run against it. Saving a
+     * detached copy would exercise a different path, which the case above already covers.
+     *
+     * <p>This case takes no parameter and yields no value.
+     */
+    @Test
+    void aSaveOfALoadedRowUpdatesItRatherThanBeingRefused() {
+        this.persistAndDetach(
+                this.posted(TRAN_ID_FIRST, SEED_CARD, SEED_AMOUNT_POSITIVE, RANGE_START));
+
+        this.transactionTemplate.executeWithoutResult(status -> {
+            Transaction loaded = this.transactions.findById(TRAN_ID_FIRST).orElseThrow();
+            loaded.setTranDesc("Amended by the owning writer");
+            this.transactions.saveAndFlush(loaded);
+        });
+
+        Transaction amended = this.transactions.findById(TRAN_ID_FIRST).orElseThrow();
+
+        assertThat(amended.getTranDesc()).isEqualTo("Amended by the owning writer");
+        assertThat(this.transactions.count()).isEqualTo(1L);
+    }
+
+    /**
      * Writes the supplied rows inside one transaction, flushes them, and detaches them.
      *
      * <p>Assumptions: this is the only write path in this class, and every access-path assertion is

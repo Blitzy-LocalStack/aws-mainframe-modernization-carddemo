@@ -7,6 +7,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -406,15 +407,15 @@ class TransactionCaptureWireContractTest {
      * {@code app/cbl/COTRN02C.cbl} lines 339 to 345, where the keyed characters are edited position by
      * position and answered with {@code 'Amount should be in format -99999999.99'}.</p>
      *
-     * <p>⚠️ Refactoring Rationale: all four were previously ACCEPTED and silently rewritten, and the
+     * <p>⚠️ Refactoring Rationale: all of them were once ACCEPTED and silently rewritten, and the
      * mechanism is worth stating because nothing in the service could have caught it. The shared money
      * type's own grammar is deliberately lenient -- it admits an optional sign, one to twenty integer
      * digits and an optional fractional part of up to its maximum input scale, then normalises to scale
      * two with half-up rounding -- because that leniency is load-bearing where a report edit mask is read
      * back. So a body carrying {@code "1234.5"} was parsed, rounded to {@code 1234.50} and captured, and
      * the service's own shape check then inspected the RE-RENDERED value, which by construction always
-     * matches. The gate therefore has to run on the raw token, inside a deserialiser bound to the amount
-     * component, which is the only point at which the submitted characters still exist.</p>
+     * matches. The gate therefore has to run on the raw token, which is the only point at which the
+     * submitted characters still exist.</p>
      *
      * <p>Alternatives Considered: tightening the shared money type's grammar in {@code common-lib} so that
      * every consumer inherits the strict form. Rejected because the leniency has a caller that needs it --
@@ -424,12 +425,20 @@ class TransactionCaptureWireContractTest {
      * beside the parsed one. Rejected because the published request schema closes its object, so a
      * fourteenth property would break the contract for every producer.</p>
      *
-     * <p>Assumptions: the response shape asserted is the UNREADABLE-body one and not the validation one,
-     * carrying the shared malformed-request sentence and an empty field array. A deserialiser refuses
-     * before an object exists, so no bean-validation report can be produced for it, and the submitted
-     * characters are deliberately absent from the rendered body -- an amount is monetary data, and a
-     * message echoed to a caller's logs is the one destination the masking applied at the API edge does
-     * not reach.</p>
+     * <p>⚠️ Refactoring Rationale: the response shape asserted is the VALIDATION one and no longer the
+     * unreadable-body one, and the note replaced here argued the opposite -- that "a deserialiser refuses
+     * before an object exists, so no bean-validation report can be produced for it". That was true of the
+     * arrangement it described and was the defect: a client was told its body could not be read, with an
+     * EMPTY per-field array, so nothing named the member to correct and neither of this screen's two
+     * sentences was ever delivered. Transformation rule T7 makes the per-field array the way a rejection
+     * is expressed and rule T8 requires the reference's own sentence, so both were unmet for the field an
+     * operator most often mistypes. The amount is bound as CHARACTERS now, which cannot fail to bind, and
+     * its constraints report against {@code amount} with the sentence line 345 emits.</p>
+     *
+     * <p>Assumptions: the submitted characters are still deliberately absent from the rendered body -- an
+     * amount is monetary data, and a message echoed to a caller's logs is the one destination the masking
+     * applied at the API edge does not reach. The entry carries the field, the state and the catalogue
+     * sentence, and never the value.</p>
      *
      * @param rawAmount the amount token to send verbatim, of type {@link String}
      * @param why the reason the published pattern refuses it, of type {@link String}, carried so a
@@ -439,9 +448,14 @@ class TransactionCaptureWireContractTest {
     @ParameterizedTest(name = "[{0}] refused: {1}")
     @CsvSource({
         "1234.5,a single fractional digit where the pattern requires exactly two",
+        "1234.567,three fractional digits where the pattern requires exactly two",
         "+1234.50,a leading plus where the pattern admits only a minus",
         "'1,234.50',a grouping separator the pattern does not admit",
         "' 1234.50 ',surrounding whitespace the pattern does not admit",
+        "1000000000.00,a tenth integer digit the record cannot hold",
+        "abc,text carrying no numeric position at all",
+        "1e5,an exponent no position in the record's picture admits",
+        "-0.005,a third fractional digit the record's scale cannot hold",
     })
     @DisplayName("refuse each lexical form the published amount pattern excludes")
     void refusesEachExcludedAmountForm(String rawAmount, String why) throws Exception {
@@ -460,9 +474,12 @@ class TransactionCaptureWireContractTest {
                 .as("[%s] must be refused: %s", rawAmount, why)
                 .isEqualTo(HttpStatus.BAD_REQUEST.value());
         assertThat(refused.getResponse().getContentAsString())
-                .as("a deserialiser refuses before an object exists, so the body is the unreadable one")
+                .as("the body carries the per-field array rule T7 requires, keyed by the member the"
+                        + " operator mistyped, with the sentence line 345 emits")
                 .contains(ApiError.CODE_VALIDATION)
-                .contains(GlobalExceptionHandler.MESSAGE_MALFORMED_REQUEST)
+                .contains("\"field\":\"amount\"")
+                .contains("\"state\":\"NOT_OK\"")
+                .contains(TransactionAddRequest.AMOUNT_FORMAT)
                 // WHY : Assumptions: the submitted characters are asserted ABSENT from the body as well
                 //       as the sentence asserted present. An amount is monetary data and a message
                 //       echoed to a caller's logs is the one destination the masking applied at the API
@@ -487,6 +504,18 @@ class TransactionCaptureWireContractTest {
      * <p>Assumptions: the value chosen is one a double represents exactly, so the case cannot pass merely
      * because the number happened to round. What is being refused is the TOKEN TYPE, not the value.</p>
      *
+     * <p>⚠️ Refactoring Rationale: the answer asserted is the per-field one and no longer the
+     * unreadable-body one. The member binds as characters now, so a number is bound to a marker naming
+     * the TOKEN KIND rather than failing to bind, and the shape constraint refuses that marker with this
+     * screen's format sentence -- which means a producer sending a number learns which member to correct
+     * instead of being told only that the body could not be read. The refusal itself is unchanged, and
+     * the case still asserts that the service was never reached.</p>
+     *
+     * <p>Assumptions: the number's own characters are asserted ABSENT from the body, which is what proves
+     * the marker carries the token kind and not the value. Binding the raw token text would have been the
+     * obvious alternative and would have ACCEPTED this body, because {@code 1234.50} matches the
+     * published pattern exactly once it is read as text.</p>
+     *
      * @throws Exception if the request could not be performed
      */
     @Test
@@ -500,8 +529,11 @@ class TransactionCaptureWireContractTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(numericAmount))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.message")
-                        .value(GlobalExceptionHandler.MESSAGE_MALFORMED_REQUEST));
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("amount"))
+                .andExpect(jsonPath("$.fieldErrors[0].message")
+                        .value(TransactionAddRequest.AMOUNT_FORMAT))
+                .andExpect(content().string(org.hamcrest.Matchers.not(
+                        org.hamcrest.Matchers.containsString("1234.50"))));
 
         verify(this.addService, never()).addTransaction(any(), any(), any());
     }

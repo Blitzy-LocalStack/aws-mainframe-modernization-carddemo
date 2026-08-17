@@ -223,14 +223,15 @@ class TransactionMapperTest {
      * account-keyed cross-reference and then overwrite whatever the client typed. A submission
      * naming both keys is a shape the request type refuses, so it is not built here.
      *
-     * @param amount the amount submitted, which the conversion reads into the stored row
+     * @param amount the amount as the characters a producer submits, of type {@code String}, which this
+     *     shape carries verbatim so that the mapper's own normalisation is observable
      * @param originDate the origination date as ten characters in the form {@code YYYY-MM-DD}
      * @param processDate the processing date in the same form, supplied separately so that a case
      *     can prove the two are read independently
      * @return a submission carrying an account identifier, the eleven record-derived fields and an
      *     affirmative confirmation
      */
-    private static TransactionAddRequest submission(Money amount, String originDate,
+    private static TransactionAddRequest submission(String amount, String originDate,
             String processDate) {
         return new TransactionAddRequest("00000000011", "01", SEED_CATEGORY_CODE, "POS TERM  ",
                 "Purchase at Abshire-Lowe", amount, SEED_MERCHANT_ID, "Merchant Name",
@@ -561,7 +562,7 @@ class TransactionMapperTest {
         }
 
         Transaction appended = this.mapper.toEntity(
-                submission(Money.of(SEED_AMOUNT), "2022-06-10", "2022-06-11"), SEED_TRAN_ID,
+                submission(SEED_AMOUNT.toPlainString(), "2022-06-10", "2022-06-11"), SEED_TRAN_ID,
                 SEED_CARD_NUMBER);
 
         assertThat(appended.getTranAmt()).isEqualByComparingTo(SEED_AMOUNT);
@@ -743,7 +744,7 @@ class TransactionMapperTest {
                 .matches("[0-9]{9}");
 
         Transaction appended = this.mapper.toEntity(
-                submission(Money.of(SEED_AMOUNT), "2022-06-10", "2022-06-11"), SEED_TRAN_ID,
+                submission(SEED_AMOUNT.toPlainString(), "2022-06-10", "2022-06-11"), SEED_TRAN_ID,
                 SEED_CARD_NUMBER);
 
         assertThat(appended.getMerchantId()).isEqualTo(Long.valueOf(SEED_MERCHANT_ID));
@@ -772,7 +773,7 @@ class TransactionMapperTest {
     @DisplayName("the card number keeps its leading zero through the appended row")
     void theCardNumberKeepsItsLeadingZeroThroughTheAppendedRow() {
         Transaction appended = this.mapper.toEntity(
-                submission(Money.of(SEED_AMOUNT), "2022-06-10", "2022-06-11"), SEED_TRAN_ID,
+                submission(SEED_AMOUNT.toPlainString(), "2022-06-10", "2022-06-11"), SEED_TRAN_ID,
                 SEED_CARD_NUMBER_LEADING_ZERO);
 
         assertThat(appended.getCardNum())
@@ -784,7 +785,7 @@ class TransactionMapperTest {
                 .hasSize(TransactionMapper.CARD_NUMBER_WIDTH - 1);
 
         assertThat(this.mapper.toEntity(
-                submission(Money.of(SEED_AMOUNT), "2022-06-10", "2022-06-11"), "683580", "6232")
+                submission(SEED_AMOUNT.toPlainString(), "2022-06-10", "2022-06-11"), "683580", "6232")
                 .getCardNum())
                 .as("COTRN02C lines 218 to 221 left-pad a numeric value onto a character field of"
                         + " matching width")
@@ -941,7 +942,7 @@ class TransactionMapperTest {
     @DisplayName("a submission through the add screen carries a date and no time component")
     void theAddScreenPathCarriesADateWithNoTimeComponent() {
         Transaction appended = this.mapper.toEntity(
-                submission(Money.of(SEED_AMOUNT), "2022-06-10", "2022-06-11"), SEED_TRAN_ID,
+                submission(SEED_AMOUNT.toPlainString(), "2022-06-10", "2022-06-11"), SEED_TRAN_ID,
                 SEED_CARD_NUMBER);
 
         assertThat(appended.getOrigTs().toLocalTime()).isEqualTo(LocalTime.MIDNIGHT);
@@ -979,7 +980,7 @@ class TransactionMapperTest {
     @DisplayName("a well-shaped date naming no calendar day is refused")
     void aWellShapedDateThatNamesNoCalendarDayIsRefused() {
         assertThatThrownBy(() -> this.mapper.toEntity(
-                submission(Money.of(SEED_AMOUNT), "2022-02-31", "2022-06-11"), SEED_TRAN_ID,
+                submission(SEED_AMOUNT.toPlainString(), "2022-02-31", "2022-06-11"), SEED_TRAN_ID,
                 SEED_CARD_NUMBER))
                 .isInstanceOf(DateTimeParseException.class);
     }
@@ -1003,8 +1004,14 @@ class TransactionMapperTest {
     @Test
     @DisplayName("the acknowledgement echoes the normalised amount the row stores")
     void theAcknowledgementEchoesTheNormalisedAmount() {
+        // WHY : Assumptions: the specimen is submitted as CHARACTERS carrying one decimal place, which
+        //       is a form the API boundary refuses and this mapper legitimately receives. The boundary's
+        //       pattern requires exactly two fractional digits, so a request never reaches production
+        //       code with this text; the mapper's contract is nonetheless to normalise whatever it is
+        //       handed, and that is what this case reads -- calling it directly is the only way to
+        //       observe a normalisation the layer above would have refused outright.
         Transaction appended = this.mapper.toEntity(
-                submission(Money.of(new BigDecimal("1250.7")), "2022-06-10", "2022-06-11"),
+                submission("1250.7", "2022-06-10", "2022-06-11"),
                 SEED_TRAN_ID, SEED_CARD_NUMBER);
         TransactionAddResponse acknowledgement = this.mapper.toAddResponse(appended, null);
 
