@@ -316,10 +316,41 @@ class ReportingFixtureContractTest {
      * assertions. That was rejected for the reason the paragraph above gives: a fixture this
      * directory holds but this class does not name is a fixture whose length, round trip and pad
      * character nobody checks, and it is the largest and most offset-dependent record here.</p>
+     *
+     * <p>Assumptions: {@code trnxfile.txt} is the fourth such admission and the second whose name is
+     * a data-definition name rather than a seed-dataset name. It is the statement path's driving
+     * record, and it is DERIVED rather than seeded: {@code app/jcl/CREASTMT.JCL} STEP010 at line 44
+     * sorts the transaction master by card then identifier and its {@code OUTREC} at line 54 rewrites
+     * each record so the card leads, so no extract of it exists to borrow a name from and the DD name
+     * {@code TRNXFILE} that line 83 supplies is what the file is called. Its layout is
+     * {@code app/cpy/COSTM01.CPY}, registered as {@code TRNX}, 350 bytes over a 32-byte key, and the
+     * 318-byte remainder is corroborated twice in the baseline: line 230 of
+     * {@code app/cbl/CBSTM03A.CBL} declares {@code WS-TRAN-REST PIC X(318)}, and lines 59 to 63 of
+     * {@code app/cbl/CBSTM03B.CBL} split its own FD as X(16) plus X(16) plus X(318).</p>
+     *
+     * <p>Alternatives Considered: sizing this fixture to stay under the two table bounds of
+     * {@code app/cbl/CBSTM03A.CBL}, which is what the house COBOL statement scenarios under
+     * {@code tests/fixtures/statement} deliberately do. Rejected because the two suites are different
+     * oracles with opposite obligations. That program indexes fixed-arity tables, so a fixture must
+     * stay under them or it crashes the program rather than testing it; this module reads a streaming
+     * projection with no fixed arity, so a fixture that stayed under them would prove nothing about
+     * the property that actually matters here. Its 700 rows therefore put 600 transactions on one
+     * card, past the 512 that the inner same-card table absorbs before the 513th overruns it, and
+     * spread 88 distinct cards past the 51 of {@code WS-CARD-TBL} at line 226. Those are three
+     * distinct numbers -- the declared inner arity of 10, the measured inner overrun at 512 and the
+     * declared outer limit of 51 -- and section 1.1 of {@code tests/README.md} records that merging
+     * the last two into one figure is a documented misreading.</p>
+     *
+     * <p>Trade-offs: the row count of 700 is stated in the argument source below as well as being
+     * readable from the file, because the count is load-bearing in a way a length check cannot see.
+     * A fixture that quietly fell to 512 rows on its largest card, or to 51 cards, would still leave
+     * every surviving row exactly 350 bytes and would still pass every other case in this class while
+     * silently ceasing to exercise the two overruns it exists for.</p>
      */
     private static final List<String> EXPECTED_RESOURCES =
             List.of("README.md", "acctfile.txt", "carddata.txt", "cardxref.txt", "custfile.txt",
-                    "tcatbal.txt", "trancatg.txt", "tranfile.txt", "trantype.txt", "xreffile.txt");
+                    "tcatbal.txt", "trancatg.txt", "tranfile.txt", "trantype.txt", "trnxfile.txt",
+                    "xreffile.txt");
 
     /**
      * Resolves the fixture directory on the test classpath.
@@ -465,7 +496,23 @@ class ReportingFixtureContractTest {
                 //       fixture that quietly fell to 20 in-range rows or fewer would stop
                 //       distinguishing that chain from a plain sum while every surviving row remained
                 //       exactly 350 bytes.
-                Arguments.of("tranfile.txt", "TRAN", 350, 31));
+                Arguments.of("tranfile.txt", "TRAN", 350, 31),
+
+                // WHY : Assumptions: this record and the one above BOTH sum to 350 bytes and that is
+                //       a coincidence rather than a relationship, so they are registered against two
+                //       descriptors and never one. TRAN keys on TRAN-ID over bytes 0 to 15 and holds
+                //       its amount at zero-based 132 and its card number at 262; TRNX keys on a
+                //       32-byte composite whose leading component is the card number at 0 and holds
+                //       its amount at 148. Reading either file at the other's offsets yields a wrong
+                //       value in every field while leaving every row exactly 350 bytes, which is why
+                //       the pairing is asserted here rather than left to a length check.
+                //       Trade-offs: the row count of 700 is stated here as well as being readable
+                //       from the file. 600 of those rows sit on card 0500024453765740 to carry more
+                //       same-card transactions than the 512 the inner table of
+                //       app/cbl/CBSTM03A.CBL absorbs, and the 88 distinct cards carry more than the
+                //       51 of WS-CARD-TBL at its line 226, so a silently dropped block would erode
+                //       one of those two margins while every surviving row stayed 350 bytes.
+                Arguments.of("trnxfile.txt", "TRNX", 350, 700));
     }
 
     /**
@@ -629,6 +676,22 @@ class ReportingFixtureContractTest {
                 //       everyFixturePadIsSuppliedByTheCodecOnlyWhenItIsBlank, turning a pad the
                 //       descriptor can rebuild into content the file has to carry.
                 Arguments.of("tranfile.txt", "TRAN", ' '),
+
+                // WHY : Assumptions: the statement path's driving record pads with a BLANK, and it is
+                //       the one fixture here whose pad is settled by a committed file of its OWN
+                //       record type rather than by a neighbour's extract. The live house scenario at
+                //       tests/fixtures/statement/happy_path/trnxfile.txt writes its FILLER span at
+                //       columns 331 to 350 as 20 blanks in all three of its records, and the trailing
+                //       FILLER that app/cpy/COSTM01.CPY declares at line 36 occupies exactly those
+                //       columns.
+                //       Alternatives Considered: padding it with ASCII zeroes to match the three
+                //       zero-padded reference records. Rejected on that measurement, and rejected a
+                //       second time because a zero pad is content the file has to carry: it would
+                //       move this fixture out of the codec-suppliable half of the rule asserted by
+                //       everyFixturePadIsSuppliedByTheCodecOnlyWhenItIsBlank, and this is the largest
+                //       and most offset-dependent record in the directory, so the mechanical rebuild
+                //       of its 20 trailing bytes is worth more here than anywhere else.
+                Arguments.of("trnxfile.txt", "TRNX", ' '),
                 Arguments.of("tcatbal.txt", "TCATBAL", '0'),
                 Arguments.of("trantype.txt", "TRANTYPE", '0'),
                 Arguments.of("trancatg.txt", "TRANCAT", '0'));

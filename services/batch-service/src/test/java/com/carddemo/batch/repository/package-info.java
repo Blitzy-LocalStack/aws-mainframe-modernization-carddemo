@@ -51,14 +51,14 @@
  *
  * <h2>The closed inventory</h2>
  *
- * <p>This directory holds nine files and a tenth is prohibited: this charter, together with
+ * <p>This directory holds ten files and an eleventh is prohibited: this charter, together with
  * {@code BatchRunRepositoryIT}, {@code CrossSchemaFeedRepositoryIT}, {@code CardXrefRepositoryIT},
  * {@code DailyTransactionRepositoryIT}, {@code TransactionRepositoryIT},
- * {@code TransactionCategoryBalanceRepositoryIT}, {@code TransactionRejectRepositoryIT}
- * and {@code PostingUnitOfWorkIT}.</p>
+ * {@code TransactionCategoryBalanceRepositoryIT}, {@code TransactionRejectRepositoryIT},
+ * {@code PostingUnitOfWorkIT} and {@code AccountRepositoryIT}.</p>
  *
  * <pre>
- * this directory: 9 java files = 8 tests + 1 charter
+ * this directory: 10 java files = 9 tests + 1 charter
  * </pre>
  *
  * <p>Refactoring Rationale: this section counted four files and three tests, and admitted a fourth test
@@ -123,6 +123,19 @@
  * it, which is precisely the defect the composition proof exists to catch, so the proof was widened and
  * given an owner of its own.</p>
  *
+ * <p>Refactoring Rationale: this inventory then read nine files and named a tenth prohibited, and it is
+ * raised to ten because {@code AccountRepositoryIT} closes proofs this charter had ATTRIBUTED while no
+ * file held them -- the same failure this section corrected once already, and the one it calls worse than
+ * an uncounted file because a reader auditing coverage finds the property named and stops looking. The
+ * entry for {@code PostingUnitOfWorkIT} below claimed the account cycle accumulators and the version
+ * ruling; a count of its six cases found the accumulators covered on their POSITIVE arm alone and the
+ * version ruling covered by nothing whatever, in that class or any sibling. It also read every commit and
+ * every rollback through a CLEARED PERSISTENCE CONTEXT on the writing connection, while ruling four below
+ * states that atomicity here is proved from a SECOND CONNECTION -- so the technique the ruling prescribes
+ * had no executable instance either, and the in-flight moment that distinguishes one transaction from
+ * three was never observed at all. The prohibition the prose carries moves up a number rather than being
+ * dropped, because what a prohibition must not do is bar a proof the package needs.</p>
+ *
  * <p>Refactoring Rationale: that marker line is what turns the sentence above from a claim into a checked
  * one. {@code PackageCharterInventoryTest} in the shared kernel parses the line and re-counts this
  * directory on every build, so an inventory that falls behind fails the build instead of ageing quietly.
@@ -139,13 +152,13 @@
  * roster; it is cited rather than restated, so the two cannot disagree about a number.</p>
  *
  * <p>Alternatives Considered: one integration class per production interface, which would make this a
- * roster of ten rather than six and would let each class be named for the interface it covers. Rejected
+ * roster of ten rather than nine and would let each class be named for the interface it covers. Rejected
  * on what the classes would then contain. The property worth proving about most of the read-only feeds is
  * identical in each case -- that a mapping resolves against a table this module does not own and walks it
  * in a declared order -- so ten classes would be several near-copies of one another, and a change to the
  * harness would have to be chased through all of them. The property worth proving about posting is not a
  * property of any single interface at all: it spans four of them in one commit, so no per-interface class
- * could hold it without either splitting the proof or duplicating it. The six classes below are
+ * could hold it without either splitting the proof or duplicating it. The nine classes below are
  * therefore partitioned by PROPERTY rather than by interface, and between them they reach all ten.</p>
  *
  * <p>Assumptions: none of the three classes named for a single interface is a departure from that
@@ -184,8 +197,9 @@
  * {@code com.carddemo.batch} owns the full derivation of that split and the failure a wrong name
  * produces; what is restated here is only the part that binds a class in this directory.</p>
  *
- * <p>Assumptions: the plan's uniform per-service shape spells the name {@code *RepositoryIT}, and five
- * of the six members here follow that spelling while {@code PostingUnitOfWorkIT} does not. The departure is
+ * <p>Assumptions: the plan's uniform per-service shape spells the name {@code *RepositoryIT}, and eight
+ * of the nine members here follow that spelling while {@code PostingUnitOfWorkIT} does not. The departure
+ * is
  * deliberate and is recorded so it does not read as an oversight: the operative selector is the
  * {@code IT} ending, which that name satisfies, and what the class proves is a unit of work spanning four
  * interfaces and two schemas rather than one interface's contract, so naming it after any single
@@ -204,7 +218,7 @@
  *
  * <h2>Ruling two: the profile and the connection are declared on the class</h2>
  *
- * <p>Assumptions: each of the six carries {@code @ActiveProfiles("test")}, which is the whole of how
+ * <p>Assumptions: each of the nine carries {@code @ActiveProfiles("test")}, which is the whole of how
  * {@code src/test/resources/application-test.yml} comes into force. No build plugin activates that
  * profile on any class's behalf, so a class omitting the annotation would resolve the base profile
  * instead and reach for remote configuration sources the container does not serve.</p>
@@ -222,13 +236,13 @@
  * expect a mechanism that cannot resolve here.</p>
  *
  * <p>Alternatives Considered: one shared abstract base class holding the container, the property
- * registration and the schema prerequisite once for all six. Rejected: a container held in a base class
+ * registration and the schema prerequisite once for all nine. Rejected: a container held in a base class
  * is shared mutable state, so rows one class inserts are rows another reads, and the failure then names
  * whichever class happened to run second. That hazard is concrete rather than hypothetical here, because
- * three of the six arrange rows in {@code account.card_xref} and each empties it for itself. Each class
- * starts its own container and owns its own schema state, which is what lets any one of the six be run
+ * four of the nine arrange rows in {@code account.card_xref} and each empties it for itself. Each class
+ * starts its own container and owns its own schema state, which is what lets any one of the nine be run
  * alone and still mean something. Trade-offs: the
- * accepted cost is six container starts and six copies of the container declaration, paid every time
+ * accepted cost is nine container starts and nine copies of the container declaration, paid every time
  * that declaration changes.</p>
  *
  * <p>Alternatives Considered: an in-memory engine, rejected more firmly here than anywhere else in the
@@ -428,15 +442,20 @@
  *       because a stubbed repository can model an ORDER BY but cannot evaluate one, and because the
  *       window's upper bound is STRICT on a {@code TIMESTAMP(6)} -- a boundary only a real engine
  *       decides. It seeds rows one microsecond outside each edge, which is the resolution the column
- *       is declared at, so a comparison that admitted the following midnight is caught. It owns the commit-and-rollback pair in the baseline
- *       order established at L440 to L442, the account cycle accumulators that
- *       {@code app/cbl/CBTRN02C.cbl:545-551} maintains alongside the running balance, and the version
- *       ruling: a step that loses the optimistic-lock race FAILS THE STEP so the orchestrator retries
- *       it, and never re-reads and writes again behind the caller's back. Refactoring Rationale: this
- *       entry also claimed the ascending walk of the category balances in key order, and that claim is
- *       withdrawn because none of the six cases here was that walk -- the property is owned by the entry
- *       below, which does assert it. What this entry retains of the category balance is the single write
- *       it performs as the FIRST of the three that commit together.</li>
+ *       is declared at, so a comparison that admitted the following midnight is caught. It owns the
+ *       commit-and-rollback pair in the baseline order established at L440 to L442 AS READ THROUGH A
+ *       CLEARED PERSISTENCE CONTEXT on the writing connection, refused at the LAST of the three writes,
+ *       together with the POSITIVE arm of the account cycle accumulators that
+ *       {@code app/cbl/CBTRN02C.cbl:545-551} maintains alongside the running balance.
+ *       Refactoring Rationale: this entry also claimed the ascending walk of the category balances in key
+ *       order, and that claim is withdrawn because none of the six cases here was that walk -- the
+ *       property is owned by the entry below, which does assert it. What this entry retains of the
+ *       category balance is the single write it performs as the FIRST of the three that commit together.
+ *       Refactoring Rationale: this entry further claimed the accumulators without qualification and the
+ *       version ruling outright, and both claims are narrowed for the reason the admission note above
+ *       records -- the six cases here reach neither the zero nor the negative arm and contain no version
+ *       case at all. The out-of-transaction reading, the two earlier failure positions and the whole of
+ *       the version ruling belong to {@code AccountRepositoryIT} below.</li>
  *   <li>{@code TransactionCategoryBalanceRepositoryIT} across 11 cases -- the two access disciplines the
  *       category-balance interface declares, which is the one cluster the reference reaches two
  *       structurally different ways. It owns the ASCENDING WALK in key order, which is what makes the
@@ -481,6 +500,36 @@
  *       asserts ROWS and not BYTES -- {@code TransactionRejectRecordMapper} owns the byte image and the
  *       job tier owns whole-stream parity against the committed reject expectations -- and it asserts no
  *       return code, a graded exit status being a process concern rather than a repository's.</li>
+ *   <li>{@code AccountRepositoryIT} across 16 cases -- the account master's three durable rulings, each
+ *       read from a SECOND CONNECTION taken straight from the pool rather than through the writing
+ *       session. It owns the atomicity proof in the form ruling four prescribes: that the three flushed
+ *       writes are INVISIBLE to another session until the commit, which is the single assertion
+ *       distinguishing one transaction from three and the one that makes the plan's rejection of a
+ *       compensating-reversal design checkable rather than asserted; that a refusal at EACH of the three
+ *       positions leaves nothing in either schema, the first two positions having had no case before;
+ *       that no partial posting state is observable in either direction; and the ORDER itself, proved by
+ *       making two positions refusable at once so that the refusal which arises reports which write was
+ *       reached first. It owns the ACCOUNT half of the accumulation obligation across all three arms of
+ *       the sign partition -- the category-balance half is the entry above's -- including the two arms no
+ *       shipped row reaches, and it owns the interest control break's THIRD state change, the reset of
+ *       both cycle accumulators at {@code app/cbl/CBACT04C.cbl:353-354} that a balance-only assertion
+ *       misses. It owns the whole of the version ruling: that the column advances at all, that a lost
+ *       race is propagated rather than re-read behind the caller, and the composite in which a race lost
+ *       at the SECOND write rolls back the first and prevents the third. Two of its cases are
+ *       CONSTRUCTED because the reference supplies no vector -- a zero amount appears in no fixture and
+ *       in none of the three hundred shipped feed rows, and no posting fixture is negative although
+ *       fifty of those rows are -- and one records a MEASURED divergence rather than a predicted
+ *       behaviour: the reference rewrites the account unconditionally at
+ *       {@code app/cbl/CBTRN02C.cbl:554} while the provider issues no statement when no mapped column
+ *       changed, so a zero-amount posting leaves the version untouched. That difference is confined to a
+ *       column with no baseline counterpart and is unobservable in the migrated data, the record the
+ *       reference rewrote being byte-identical to the one already there.
+ *       Trade-offs: its commit case overlaps the entry above's commit case, and the overlap is retained
+ *       rather than removed. The two are not the same assertion -- that one reads the commit through the
+ *       writer's own cleared context, where this one reads it from a session that never participated --
+ *       and deleting either would leave one of the two readings unowned. The residual cost is that a
+ *       reader meets the posting commit in two files; it is recorded here so the second encounter reads
+ *       as a boundary rather than as a duplicated proof.</li>
  * </ul>
  *
  * <p>Alternatives Considered: no saga, no two-phase commit and no compensating reversal for the posting
@@ -492,7 +541,7 @@
  * engine rather than asserted in prose.</p>
  *
  * <p>Trade-offs: each proof above has exactly ONE owner, and the cost accepted for that is some
- * cross-referencing between the six classes -- the cross-reference table, for instance, is written by
+ * cross-referencing between the nine classes -- the cross-reference table, for instance, is written by
  * three of them, and only one of them owns its access paths, and the daily-transaction interface is read
  * by more than one, its resolve-and-order question and its driving-loop properties owned separately. The alternative
  * was to let two classes each
@@ -564,7 +613,7 @@
  * one of them with no match-if-missing fallback, so the gate stays closed and no case here needs a
  * transport to be stood up.</p>
  *
- * <p>Assumptions: this package's file set is closed at the six integration classes and this charter. A
+ * <p>Assumptions: this package's file set is closed at the nine integration classes and this charter. A
  * fixture builder, a shared constant holder or a container base class introduced here would reintroduce
  * the shared state ruling two rejects, and no subdirectory belongs here. The test-tree charter at
  * {@code com.carddemo.batch} owns the boundaries this whole tree does not cross -- that no controller

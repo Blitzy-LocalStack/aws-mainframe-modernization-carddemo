@@ -45,7 +45,7 @@ import { installApiHarness, removeApiHarness } from './test/apiHarness';
 import { endAnySession, establishSession } from './test/sessionHarness';
 
 import { APP_SHELL_TEST_ID, SHELL_SIGN_OFF_CONTROL_TEST_ID } from './layout/AppShell';
-import { ACCESS_DENIED_ADMIN_ONLY } from './messages/messages';
+import { ACCESS_DENIED_ADMIN_ONLY, SCREEN_NOT_AVAILABLE_TITLE } from './messages/messages';
 import {
   ACCOUNT_UPDATE_PATH,
   ACCOUNT_VIEW_PATH,
@@ -105,11 +105,17 @@ const USER_GROUP = 'carddemo-user';
 /**
  * Title the bounded not-found result renders.
  *
- * Assumptions: it is declared once here and used by both the registration cases and the catch-all case,
+ * Assumptions: it is bound once here and used by both the registration cases and the catch-all case,
  * because the two assert OPPOSITE things about the same string -- one requires its absence and the other
  * its presence -- and two spellings of it could drift into agreeing with each other.
+ *
+ * Refactoring Rationale: it is READ from the message catalogue where it was previously a literal copy
+ * of the heading. A copy asserts that the surface paints this exact sentence, so correcting the
+ * sentence in one place left the other asserting text nothing rendered -- and the failure surfaced as
+ * a missing element rather than as the stale duplicate it was. Reading the constant means the case
+ * asserts that the surface paints the CATALOGUED heading, which is the property actually wanted.
  */
-const NOT_FOUND_TITLE = 'Screen not found';
+const NOT_FOUND_TITLE = SCREEN_NOT_AVAILABLE_TITLE;
 
 /**
  * How long a case waits for a lazily loaded screen to commit inside the frame.

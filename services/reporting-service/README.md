@@ -1297,10 +1297,11 @@ target behaviour.
 
 ### 10.2 Test inventory
 
-<!-- test-inventory: 34 tests + 3 integration tests -->
-**37** test classes across nine subpackages and the module root: **34** matching `*Test`, run
-by Surefire, and **3** matching `*IT` — `repository/ReportingQueryBootstrapIT`,
-`repository/StatementHeadingChunkIT` and `repository/ReportingDeployedRelationIT` — run by
+<!-- test-inventory: 34 tests + 4 integration tests -->
+**38** test classes across nine subpackages and the module root: **34** matching `*Test`, run
+by Surefire, and **4** matching `*IT` — `repository/ReportingQueryBootstrapIT`,
+`repository/StatementHeadingChunkIT`, `repository/ReportingDeployedRelationIT` and
+`repository/StatementCardXrefRepositoryIT` — run by
 Failsafe against a Testcontainers-backed
 PostgreSQL, with the Testcontainers BOM at **2.0.5** managed by the parent. Every test package
 carries a `package-info.java`, because the documentation gate audits test sources (§8.2).
@@ -1336,6 +1337,23 @@ pass. A stand-in relation would have asserted masking and privilege of the stand
 authenticates as `carddemo_reporting` rather than as the container owner, since reading the
 projections as an owner exercises none of the privilege boundary.
 
+Refactoring Rationale: it then moved from 37 to 38 with a fourth integration test,
+`repository/StatementCardXrefRepositoryIT`, added because the **driving cursor of a statement
+run** had no engine-backed consumer and neither did `fixtures/xreffile.txt`, the 88-row
+statement-path cross-reference fixture. The step above states 36 because it numbers only its own
+integration test, while the same change also took the Surefire tier from 33 to 34 — so the
+census it left behind was 37, which is where this step starts. Four properties of that cursor
+are invisible to every cheaper gate: it must yield every published card **once** in a total
+order, the sequence must be **stable across two walks** over unchanged rows, it must refuse to
+open outside a transaction that outlives the call — its propagation is mandatory, because a
+cursor that started its own transaction would be exhausted before the caller read a row — and it
+must be unwritable at both the mapping and the database. It applies the shipped DDL like the
+class above it, but its write-refusal target is deliberately different: a **base table in
+another context's schema**, `card.cards`, where this login role holds no privilege at all, so
+the refusal carries condition code `42501` rather than the non-updatable-view rejection a
+projection would answer with. It also assumes the role on a direct connection rather than
+authenticating as it, so **no credential appears in the class**.
+
 Assumptions: the marker comment above this paragraph is **machine-checked**, not decorative.
 `ServiceReadmeInventoryTest` in `common-lib` parses it, re-measures both figures against this
 module's test tree, and additionally requires that the stated total equals their sum — so
@@ -1352,7 +1370,7 @@ fails the build in `common-lib` rather than here.
 | `domain` | 1 |
 | `fixtures` | 1 |
 | `task` | 3 |
-| `repository` | 3 (`ReportingQueryBootstrapIT`, `StatementHeadingChunkIT`, `ReportingDeployedRelationIT`) |
+| `repository` | 4 (`ReportingQueryBootstrapIT`, `StatementHeadingChunkIT`, `ReportingDeployedRelationIT`, `StatementCardXrefRepositoryIT`) |
 | module root | 1 |
 
 ### 10.3 What the suites must cover
@@ -1368,6 +1386,7 @@ fails the build in `common-lib` rather than here.
 | artifact-resolution tests | a published location **resolves** — the key is looked up and never composed from the selector — an absent artifact publishes no location and no production instant, and the run index is searched by bisection over ranged reads (§3.19) |
 | `*RepositoryIT` | the read-only role **cannot write**, and the views return the expected **card-then-date** ordering |
 | `StatementHeadingChunkIT` | the statement heading walk's keyset continuation reproduces its whole `ORDER BY`, so a chunked run visits every card **exactly once** and in the declared order — plus a companion case proving the seeded cards distinguish that order from fingerprint order, without which the first would hold vacuously |
+| `StatementCardXrefRepositoryIT` | the driving cursor yields all **88** cards of `fixtures/xreffile.txt` once in the declared order, **stably across two walks**, **refuses to open with no enclosing transaction**, and is unwritable at both levels — the mapping declares no write surface and no updatable column, and the login role's write to `card.cards` is refused with condition code `42501` |
 
 Assumptions: the execution-start test asserts an absence as well as a presence. Asserting only
 that the state machine was called would still pass if the handler also assembled the report

@@ -39,7 +39,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as AuthModule from './api/auth';
 import { APP_SHELL_TEST_ID } from './layout/AppShell';
 import { PF_KEY_BAR_REGION_LABEL } from './layout/PfKeyBar';
-import { ACCESS_DENIED_ADMIN_ONLY } from './messages/messages';
+import { ACCESS_DENIED_ADMIN_ONLY, SCREEN_NOT_AVAILABLE_TITLE } from './messages/messages';
 import { ADMIN_MENU_SUBTITLE } from './screens/admin';
 import { MAIN_MENU_SUBTITLE } from './screens/menu';
 import { cardDemoTheme } from './theme/antdTheme';
@@ -103,8 +103,16 @@ const { CardDemoRouter } = await import('./router');
  *       exchange.
  */
 
-/** The heading the not-found result paints, which no mounted route may render. */
-const NOT_FOUND_TITLE = 'Screen not found';
+/**
+ * The heading the not-found result paints, which no mounted route may render.
+ *
+ * Refactoring Rationale: it is READ from the message catalogue where it was previously a literal copy
+ * of the heading. A copy asserts that the surface paints this exact sentence, so correcting the
+ * sentence in one place left the other asserting text nothing rendered -- and because most cases here
+ * assert the heading is ABSENT, a stale copy would have gone on passing while measuring nothing.
+ * Reading the constant keeps every case pointed at the catalogued heading.
+ */
+const NOT_FOUND_TITLE = SCREEN_NOT_AVAILABLE_TITLE;
 
 /**
  * Builds an identity token whose claim carries the named groups.
