@@ -228,7 +228,9 @@ async function signOnEntersTheMainMenu(): Promise<void> {
 
   await signOnAs('USER0001');
 
-  expect(await screen.findByRole('heading', { name: MAIN_MENU_SUBTITLE })).toBeInTheDocument();
+  expect(
+    await screen.findByRole('heading', { name: MAIN_MENU_SUBTITLE }, QUERY_TIMEOUT),
+  ).toBeInTheDocument();
   expect(screen.queryByText(NOT_FOUND_TITLE)).not.toBeInTheDocument();
 }
 
@@ -245,7 +247,9 @@ async function signOnEntersTheAdministrativeMenu(): Promise<void> {
 
   await signOnAs('ADMIN001');
 
-  expect(await screen.findByRole('heading', { name: ADMIN_MENU_SUBTITLE })).toBeInTheDocument();
+  expect(
+    await screen.findByRole('heading', { name: ADMIN_MENU_SUBTITLE }, QUERY_TIMEOUT),
+  ).toBeInTheDocument();
   expect(screen.queryByText(NOT_FOUND_TITLE)).not.toBeInTheDocument();
 }
 
@@ -261,7 +265,9 @@ async function theRootOpensTheMainMenu(): Promise<void> {
   await installSession(['carddemo-user']);
   renderRouterAt('/');
 
-  expect(await screen.findByRole('heading', { name: MAIN_MENU_SUBTITLE })).toBeInTheDocument();
+  expect(
+    await screen.findByRole('heading', { name: MAIN_MENU_SUBTITLE }, QUERY_TIMEOUT),
+  ).toBeInTheDocument();
 }
 
 /**
@@ -295,6 +301,14 @@ async function anOrdinaryOperatorIsRefusedAnAdministrativeRoute(): Promise<void>
   expect(await screen.findByText(ACCESS_DENIED_ADMIN_ONLY.trim())).toBeInTheDocument();
   expect(screen.queryByRole('heading', { name: ADMIN_MENU_SUBTITLE })).not.toBeInTheDocument();
 }
+
+/*
+ * WHY : Assumptions: the sweep below waits on {@link QUERY_TIMEOUT}, the one query-level ceiling this
+ *       file declares, rather than on a ceiling of its own. Every wait here covers the same work --
+ *       transforming, importing, mounting and committing a whole screen module through `React.lazy`,
+ *       several of them pulling in the design system for the first time in the worker -- so a second
+ *       constant would only create somewhere for the two to drift apart.
+ */
 
 /**
  * Every path the table declares resolves to a screen inside the shared frame.
@@ -332,6 +346,21 @@ async function everyDeclaredPathResolvesToAScreen(): Promise<void> {
 
     // Assumptions: the frame is awaited rather than asserted synchronously, because seven of the nine
     //   screens arrive through `React.lazy` and are therefore behind one microtask at least.
+    /*
+     * WHY : Refactoring Rationale: the wait carries an EXPLICIT budget, and the default one is what
+     *       made this case fail intermittently while asserting nothing wrong. Testing Library's default
+     *       is one second per wait, but this loop visits nine paths and each visit transforms and
+     *       commits a separate `React.lazy` chunk -- the very cost this file's own `TIMEOUT` note
+     *       measures at "just over five seconds" for the first case. A one-second inner budget inside a
+     *       thirty-second case budget meant the case could fail on whichever chunk happened to be
+     *       slowest while the runner was busy, and it did: on a four-core container it reported the
+     *       `Suspense` fallback instead of the frame.
+     * WHY : Assumptions: this widens a WAIT and weakens nothing. Both assertions are unchanged -- the
+     *       frame must appear and the not-found result must not -- so a path that genuinely resolves to
+     *       nothing still fails, and still fails naming the path through the message below. The budget
+     *       reuses this file's own `TIMEOUT` rather than introducing a second number, so the inner wait
+     *       and the case that contains it cannot drift apart.
+     */
     await waitFor(
       /**
        * Waits until the frame has painted for this path.
@@ -340,6 +369,7 @@ async function everyDeclaredPathResolvesToAScreen(): Promise<void> {
       () => {
         expect(screen.getAllByTestId(APP_SHELL_TEST_ID).length).toBeGreaterThan(0);
       },
+      QUERY_TIMEOUT,
     );
     expect(
       screen.queryByText(NOT_FOUND_TITLE),
@@ -378,7 +408,7 @@ async function theFramePaintsOneKeyLegendOnly(): Promise<void> {
   await installSession(['carddemo-user']);
   renderRouterAt('/menu');
 
-  await screen.findByRole('heading', { name: MAIN_MENU_SUBTITLE });
+  await screen.findByRole('heading', { name: MAIN_MENU_SUBTITLE }, QUERY_TIMEOUT);
 
   expect(screen.getAllByRole('navigation', { name: PF_KEY_BAR_REGION_LABEL })).toHaveLength(1);
   expect(screen.queryByRole('button', { name: /F12=Sign off/u })).not.toBeInTheDocument();
@@ -396,7 +426,58 @@ async function theFramePaintsOneKeyLegendOnly(): Promise<void> {
  *       loosen the bound for every unit test in the tree, where five seconds is a useful signal that
  *       something is genuinely stuck.
  */
+
+/**
+ * Milliseconds the multi-path reachability case is allowed, in place of the single-case {@link TIMEOUT}.
+ *
+ * ⚠️ Assumptions: this case is not one navigation but NINE, walked in sequence, and each visits a
+ * distinct route whose screen arrives through `React.lazy` -- so it pays the chunk-transform cost nine
+ * times over where every other case in this file pays it once. Budgeting it like a single case is what
+ * left it failing at just over thirty seconds while each of its nine assertions individually passed.
+ * Trade-offs: a genuinely stuck run takes two minutes to report here rather than thirty seconds. That is
+ * accepted for the one case in the file whose cost is a multiple of the others; the alternative is a
+ * bound that the case exceeds when it is working correctly, which is a failure that carries no
+ * information about routing at all.
+ */
+const MULTI_PATH_TIMEOUT = 120_000;
+
 const TIMEOUT = 30_000;
+
+/*
+ * WHY : ⚠️ Refactoring Rationale: a QUERY-level ceiling is declared beside the case-level one above,
+ *       because the two bound different things and only the first was set. `TIMEOUT` is passed to `it`,
+ *       so it bounds the whole case; every `findBy*` and `waitFor` inside a case still took Testing
+ *       Library's own one-second default. That is what failed here: the case had thirty seconds to run
+ *       while its wait for a lazily loaded screen gave up after one, so the case reported a missing
+ *       heading rather than the slow chunk it was actually waiting on -- and it reported it for the
+ *       heaviest screens only, which is the signature of a ceiling rather than of a routing defect.
+ * WHY : Assumptions: raising it cannot weaken an assertion, since a wait ends early on success and only
+ *       a genuinely unreachable route consumes the whole ceiling before failing.
+ * WHY : Alternatives Considered: five seconds, matching the `ASYNC_CONDITION_TIMEOUT_MS` used for the
+ *       same job in `ui/src/screens/cardReadSequencing.test.tsx`,
+ *       `ui/src/screens/screenSelectionCarriers.test.tsx` and
+ *       `ui/src/screens/cardList/browseNarrowing.test.tsx`, so that this file reuses a number the tree
+ *       already carries rather than introducing a new one. Rejected on measurement: the first case in
+ *       this file alone takes just over five seconds, so that ceiling sits ON the boundary it is meant
+ *       to clear and would fail a passing assertion under load. Fifteen seconds is the same fix with
+ *       headroom -- it is the largest figure that still leaves a clear margin under the 30 s per-case
+ *       budget {@link TIMEOUT} gives every case here, so a screen that genuinely never mounts still fails on its own assertion rather than
+ *       stalling the case.
+ * WHY : Alternatives Considered: thirty seconds, on the measurement that a four-core runner routinely
+ *       exceeds one second for a screen whose imports pull in the design system for the first time in
+ *       the worker. Rejected for THIS file specifically: {@link TIMEOUT} gives each case exactly thirty
+ *       seconds, so a query ceiling of the same size could never report its own failure -- an
+ *       unreachable route would consume the case budget and be reported as a case timeout instead of as
+ *       the missing heading this file exists to name. Fifteen seconds keeps the query ceiling strictly
+ *       inside the case budget with room for a case that runs two queries in sequence, which is what
+ *       preserves the diagnostic.
+ * WHY : Trade-offs: this single ceiling bounds EVERY lazy-screen wait in the file -- the sign-on
+ *       landings, the bare-root redirect, the per-path frame check and the key-legend case -- rather
+ *       than each site carrying its own number. One constant is what makes the ceiling auditable; two
+ *       would leave a reader unable to tell which waits were deliberately given less room and which
+ *       were simply missed.
+ */
+const QUERY_TIMEOUT = { timeout: 15_000 };
 
 /**
  * Registers the router reachability cases.
@@ -419,7 +500,7 @@ function routerReachabilityCases(): void {
   it(
     'resolves every declared path to a screen inside the frame',
     everyDeclaredPathResolvesToAScreen,
-    TIMEOUT,
+    MULTI_PATH_TIMEOUT,
   );
   it(
     'renders the not-found result for an undeclared path',

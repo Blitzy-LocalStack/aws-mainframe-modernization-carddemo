@@ -7,11 +7,105 @@
 #   Grouping by module keeps the root contract stable as a module adds a
 #   documented output, without flattening hundreds of names into one namespace.
 #
+#   This file and the root-owned SSM parameters in main.tf are TOGETHER the only
+#   sanctioned source of a runtime endpoint or identifier for this environment,
+#   per specification section 0.5.3.5: no service hard-codes an endpoint. The two
+#   mechanisms serve different readers. A running task resolves its configuration
+#   from Parameter Store through its Spring profile and never reads a Terraform
+#   output; an operator, a runbook step and a pipeline job read the outputs below.
+#   That is why `runtime_configuration` publishes the parameter handles
+#   themselves -- a consumer that knows a parameter exists but cannot locate it
+#   would have to rebuild its name by hand, which is the hard-coding that section
+#   forbids.
+#
 # Parameters:
 #   None. Inputs are declared in variables.tf.
 #
 # Returns:
 #   One grouped output per module family plus root-owned runtime resources.
+#   Every value is resolved by the provider during apply, so none is readable
+#   until this root has been applied successfully.
+#
+# On `sensitive`: NOT ONE output below is marked, and the uniformity is a
+#   decision rather than an omission.
+#
+# WHY : Assumptions: every value published here is an endpoint, an address, an
+#       identifier, an ARN, a name or a plain integer -- never a credential, and
+#       never derived from one. That is the fact that makes a blanket choice safe
+#       instead of merely convenient, and it is the same position the two existing
+#       precedents in this package reached independently. Measured rather than
+#       assumed: `sensitive = true` appears zero times in all sixteen module
+#       output files. infra/bootstrap/outputs.tf marks nothing because "marking
+#       names sensitive would prevent normal backend initialization without
+#       protecting credential material"; infra/modules/secrets/outputs.tf marks
+#       nothing because every member it publishes is an identifier a consumer
+#       exchanges for a value at run time. Those two files look opposed -- one
+#       publishes backend configuration, the other publishes credential handles --
+#       and they converge on one rule this file adopts: publish the reference,
+#       never the value.
+# WHY : Trade-offs: marking these `sensitive` would cost real capability and buy
+#       nothing. `terraform output` would redact them, and the readers named above
+#       would be unable to obtain values that are already visible to any principal
+#       able to describe the resource -- the deploy runbook could not transcribe
+#       the SPA bucket and distribution id that `spa_publication` exists to hand
+#       it, and a pipeline job could not read the API endpoint.
+# WHY : Assumptions: `sensitive` redacts CLI and plan rendering ONLY; it does NOT
+#       encrypt the value in state. A credential marked `sensitive` is still
+#       written to the state file in clear text. That single fact, rather than a
+#       stylistic preference, is why no credential value appears here under any
+#       flag: the flag is not a control that could make one acceptable.
+# WHY : Alternatives Considered: publishing the database and seed-user credentials
+#       themselves, so a consumer needs one command rather than two. Rejected
+#       outright. Terraform would persist each value in state, and this root's
+#       state is a shared S3 object under carddemo/dev/terraform.tfstate -- server-
+#       side encrypted, but still a shared blob with none of a secret store's
+#       per-entry access control, rotation or read auditing. The credential would
+#       then exist in two places governed by two different policies.
+#       `service_credentials` and the Cognito members inside `identity` therefore
+#       publish Secrets Manager handles only; a consumer calls `get-secret-value`
+#       on a published id under its own IAM identity, which additionally leaves an
+#       audit record of the read that a Terraform output never would.
+#
+# Deliberately NOT published:
+#   - No database master password, no per-service database password, no seed-user
+#     password and no key material -- only the Secrets Manager handle for each.
+#   - No KMS key material. `encryption` carries key ARNs, key ids and alias names,
+#     which are the identifiers a grant is written against; a customer-managed
+#     key's material cannot leave the service and is not represented here even by
+#     reference.
+#   - No cardholder or personal data of any kind: no primary account number, no
+#     card verification value, no national or government-issued identifier. Those
+#     are Aurora columns and application DTOs. This file publishes the address of
+#     the cluster, never anything stored inside it.
+#
+# WHY : Assumptions: an absence a reader cannot account for reads as an oversight,
+#       so each one is named here. This follows the precedent in
+#       infra/modules/network/outputs.tf, which records that its interface-endpoint
+#       security group, flow-log IAM role and internet gateway are created by
+#       main.tf and deliberately not published.
+# WHY : Trade-offs: an ARN published here frequently CONTAINS the AWS account
+#       identifier, and that is accepted rather than engineered around. The
+#       constraint this package holds is that no account identifier, ARN, bucket
+#       name or endpoint is ever written as a LITERAL into source; a value the
+#       provider read back from the account during apply is the opposite of a
+#       committed literal. The distinction is recorded because the two are
+#       indistinguishable to a grep, and a reader applying the literal rule to an
+#       output would delete a legitimate handle -- after which a consumer would
+#       compose the ARN by hand from an account id, which is precisely the
+#       committed literal the rule exists to prevent.
+#
+# WHY : Alternatives Considered: flattening this file into one output per value,
+#       so `terraform output database_writer_endpoint` replaces
+#       `terraform output -json database | jq -r .writer_endpoint`. Rejected on two
+#       grounds beyond the namespace size. Each module already documents its own
+#       members at their point of definition -- the reason a reader must not treat
+#       `database`.`reader_endpoint` as a scale-out read path is argued on that
+#       output in infra/modules/aurora-postgresql/outputs.tf, where a consumer
+#       reading the module is already looking -- and a flat copy here would either
+#       duplicate that text or summarise it and drift from it. Flattening would
+#       also break the deliberate name parity with infra/envs/prod/outputs.tf,
+#       which declares these same eighteen names in this same order so a consumer
+#       written against dev works against prod unchanged.
 # =============================================================================
 
 output "network" {

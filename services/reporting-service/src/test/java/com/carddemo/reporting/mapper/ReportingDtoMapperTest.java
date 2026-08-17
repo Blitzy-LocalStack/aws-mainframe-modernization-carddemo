@@ -166,18 +166,36 @@ final class ReportingDtoMapperTest {
      * resolve is worth stating precisely, because the ten do not all resolve to the same place. Nine
      * appear as files in the immutable trees -- {@code trantype.txt} and {@code trancatg.txt} under
      * {@code app/data/ASCII/}, the remaining seven under {@code tests/fixtures/} -- and
-     * {@code tranfile.txt} appears nowhere in the repository, because the posted-transaction master its
+     * {@code tranfile.txt} appears in NEITHER immutable tree, because the posted-transaction master its
      * data definition names is batch OUTPUT rather than a seeded input. {@code CBTRN02C} declares it at
      * line 34 as {@code SELECT TRANSACT-FILE ASSIGN TO TRANFILE}, {@code app/jcl/POSTTRAN.jcl} supplies
      * it at line 28, and {@code scripts/test_env.sh} binds it at line 253. So this list names RECORDS
      * rather than locations, and the guards below are consequently expressed over values declared in
      * source rather than over bytes read from a path.
      *
+     * <p>Refactoring Rationale: that sentence said {@code tranfile.txt} "appears nowhere in the
+     * repository". It is now authored, at {@code src/test/resources/fixtures/tranfile.txt} in this
+     * module, as the 350-byte driving record of the transaction report, and
+     * {@code ReportingFixtureContractTest} admits it to the closed directory set and asserts its
+     * length, round trip and pad. The claim is narrowed to the one that remains true and that the
+     * paragraph was actually making -- it is in no IMMUTABLE tree, so this list still cannot be read
+     * as a set of loadable paths. Nothing in this class loads it either way: the guard below resolves
+     * its layout through {@link CopybookLayout} by NAME, so the correction is to the prose only. The
+     * Alternatives Considered paragraph below counted the same file among the rows a path column would
+     * get wrong, so its arithmetic moved from eight of ten to seven of ten for one reason and no
+     * other: the row that used to resolve nowhere now resolves in this module. Seven is still a
+     * majority and the conclusion it supports is unchanged, which is why the paragraph is corrected
+     * rather than withdrawn.
+     *
      * <p>Refactoring Rationale: this paragraph previously asserted that "this module has no test
      * resource directory and authors none of these files". The first half is now false --
-     * {@code src/test/resources/fixtures/} holds four authored records, {@code acctfile.txt},
-     * {@code custfile.txt}, {@code trantype.txt} and {@code trancatg.txt}, whose bytes and provenance are
-     * documented and asserted by {@code ReportingFixtureRecordTest} in this same package -- and the
+     * {@code src/test/resources/fixtures/} holds authored records, four of which --
+     * {@code acctfile.txt}, {@code custfile.txt}, {@code trantype.txt} and {@code trancatg.txt} -- have
+     * their bytes and provenance asserted by {@code ReportingFixtureRecordTest} in this same package. That
+     * sentence gave a count of the whole directory rather than of the four it then listed, so it fell out
+     * of date as soon as a fifth record landed and was already wrong before this one did; the count is now
+     * attached to the enumeration it was always describing, which is the half that stays true as the
+     * directory grows -- and the
      * second half was never the point being made. The claim has been narrowed to the one that is true and
      * that the surrounding guards actually rest on: this list is a list of record names, so nothing here
      * loads a file. A blanket denial that any test resource exists would send a reader looking for
@@ -185,7 +203,7 @@ final class ReportingDtoMapperTest {
      *
      * <p>Alternatives Considered: writing a resource path here so the names would read as loadable.
      * Rejected because seven of the ten resolve only under the reference-only {@code tests/fixtures/}
-     * tree and one resolves nowhere at all, so a path column would be wrong for eight of ten rows, and a
+     * tree, so a path column would be wrong for seven of ten rows, and a
      * citation a reader cannot follow costs more than no citation at all. The layouts these names carry
      * are pinned instead against the shared kernel's record registry by
      * {@link #theTenFixtureRecordNamesAreBoundExactly()}, which is a production symbol this module really

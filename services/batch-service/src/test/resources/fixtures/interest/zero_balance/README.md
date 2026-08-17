@@ -103,6 +103,27 @@ non-degenerate vector can show.
 **There is no test on `WS-MONTHLY-INT` anywhere between the computation and the write.** That is the
 whole rule this folder pins.
 
+The two cases the gate separates, side by side, so that "no interest accrued" is never read as one
+condition with two spellings:
+
+| Case | `DIS-INT-RATE` | `:214` `NOT = 0` | `1300-COMPUTE-INTEREST` | `1400-COMPUTE-FEES` | Asserted output |
+|---|---|---|---|---|---|
+| **this folder** -- zero balance | `15.00` | **true** | **runs**, yields `0.00` | reached, empty stub | one record per category row, `TRAN-AMT` = `0000000000{` |
+| zero rate -- contrast only, **not shipped as data** | `0.00` | **false** | **skipped** | skipped | **no record at all**, transaction file empty |
+
+Because `:214` encloses `:215` and `:216` together, a zero rate skips the fee paragraph as well as the
+interest one. The two rows are therefore different outcomes of the program, not two routes to one
+outcome, and no single fixture can occupy both.
+
+Assumptions: `:214` is a **numeric** comparison, so the migrated predicate is
+`rate.compareTo(BigDecimal.ZERO) != 0` and **not** `!rate.equals(BigDecimal.ZERO)`. `BigDecimal.equals`
+compares scale as well as unscaled value, so it reports `0.00` and `0` as different objects while
+`compareTo` reports them equal -- and a rate arriving as `0.00` from a `NUMERIC(6,2)` column is exactly
+the shape that reaches this predicate. Choosing `equals` would admit the calculation for a genuinely
+zero rate and write the records the second row above forbids, which is the zero-rate outcome produced
+under the zero-rate condition's own name and therefore invisible to any assertion phrased as "interest
+was not accrued".
+
 ### 2.3 The disclosure-group read is a direct hit
 
 `1200-GET-INTEREST-RATE` (`:415-440`) reads with the key composed at `:210-212` from
@@ -111,6 +132,32 @@ whole rule this folder pins.
 `'00'`, `:422` accepts it, and the `IF DISCGRP-STATUS = '23'` test at **`:436`** is false -- so
 `:437`'s `MOVE 'DEFAULT'` and the retry at `:438` never run. Master section 7.2.2 fixes the three
 outcomes; this is the first.
+
+**The order the key is assembled in is not the order it occupies on disk, and the difference is a real
+authoring hazard.** The physical key is declared at `:79-81` as group id `X(10)`, then transaction type
+`X(02)`, then transaction category `9(04)` -- which is the byte order `discgrp.txt` must be written in
+and the order section 5.3 tabulates. The three `MOVE` statements that populate it run in a **different**
+order, `:210` group id, then `:211` **category**, then `:212` **type**:
+
+```cobol
+MOVE ACCT-GROUP-ID TO FD-DIS-ACCT-GROUP-ID
+MOVE TRANCAT-CD TO FD-DIS-TRAN-CAT-CD
+MOVE TRANCAT-TYPE-CD TO FD-DIS-TRAN-TYPE-CD
+```
+
+Each `MOVE` names its own target field, so the assembled key is correct regardless of the order the
+statements appear in; sequence matters to a reader, not to the program. It matters here because reading
+`:210-212` top to bottom and transcribing that sequence into a record layout writes the group id, then
+the category, then the type -- which for this folder's codes yields `A000000000000101` where the key is
+`A000000000010001`. Both are sixteen bytes, both keep the group id intact, and they differ in exactly
+**two** byte positions, the twelfth and the fourteenth. That row misses the key and takes the `DEFAULT`
+fallback, and at a zero balance the fallback rate still produces `0.00`, so nothing in the output marks
+the mistake. Author the row from `:79-81`, never from `:210-212`.
+
+Assumptions: `discgrp.txt`'s byte order is taken from the **declaration** at `:79-81` rather than from the
+statement sequence at `:210-212`, because a `MOVE` names its destination while a record layout is
+positional. The two orders disagree, so which one an author follows is load-bearing even though the
+program itself is indifferent to it.
 
 ### 2.4 The control break, and the rewrite that changes nothing
 
@@ -134,6 +181,18 @@ consequence: this scenario cannot distinguish the baseline's missing final-accou
 target that flushes it, because both accounts' expected bytes are the same either way. That is a real
 limitation of this folder and is stated rather than left for a reader to discover.
 
+Assumptions: **the rewrite firing and the rewrite changing something are two different facts, and this
+folder holds only the first.** The single most likely misreading of this scenario's output is that
+account `...001` was never written back, because its persisted bytes equal its input bytes. It was
+written back: the control break at `:194` and `:196` reaches `1050-UPDATE-ACCOUNT` for it, and what that
+paragraph demonstrably does here is the **cycle reset** at `:353` and `:354` rather than the balance
+addition at `:352`. Both cycle buckets already hold `00000000000{` in this folder's input, so the reset
+writes the value they already carry and `:356` persists a record identical to the one it read. Any
+assertion phrased as "the account row changed" therefore fails on correct behaviour, and any assertion
+phrased as "the rewrite did not happen" passes on it -- which is why the property this folder can carry
+is the accrual arithmetic and the record generation, and `../happy_path` is where the rewrite becomes
+observable.
+
 ### 2.5 The generated transaction
 
 `1300-B-WRITE-TX` (`:473-515`) builds the record:
@@ -154,6 +213,40 @@ limitation of this folder and is stated rather than left for a reader to discove
 `1400-COMPUTE-FEES` (`:518-520`) is an **empty stub** -- its body is the single comment
 `* To be implemented`, followed by `EXIT`. **No fee record is produced**, and master section 7.2.4
 forbids fabricating one.
+
+Four of those rows encode decisions that look like mistakes until their mechanism is known, so each is
+recorded here rather than left to the table.
+
+Assumptions: **`TRAN-CAT-CD` is `0005` and must not be reconciled to the input.** `:483` moves the
+**literal** `'05'` into a `PIC 9(04)` field, so the generated record carries `0005` whatever the driving
+category was -- `0001` in this folder. The field is therefore a constant of the program, not a copy of
+the input, and an implementation that propagated the input category would write `0001` where `0005` is
+expected. The resulting diff points at a category code and reads as a data problem, which is the wrong
+place to look: the cause is a literal four lines above.
+
+Assumptions: **`TRAN-DESC` is NUL-padded while the three merchant fields are space-padded, and the two
+mechanisms are different statements.** `:485-489` `STRING`s 24 characters into an `X(100)` field, and
+`STRING` writes only what it is given -- it leaves the remaining 76 bytes of the receiving field exactly
+as they were, which over this program's storage is `0x00`. `:492-494` by contrast `MOVE SPACES`, which
+fills its targets to their declared width with `0x20`. Master section 6.3 holds the job-dependent split
+for the whole tree. The consequence is specific and expensive: space-padding `TRAN-DESC` shifts no field
+and changes no value, so the record still parses, every decoded field still reads correctly, and the
+comparison fails on 76 padding bytes of a field whose **value is right** -- the hardest class of failure
+to localise, because nothing that is wrong is visible.
+
+Assumptions: **both timestamps are volatile, they are necessarily equal, and the comparison layout is
+`INTTRAN` rather than `TRAN`.** `:496` performs the clock read **once** and `:497` and `:498` move that
+one result into `TRAN-ORIG-TS` and `TRAN-PROC-TS`, so the two fields cannot differ. That is the opposite
+of the posting domain, where the originating stamp arrives from the input and is asserted rather than
+masked, and it is why master section 8.1 gives the interest domain its own layout with **both** stamps
+flagged. Comparing this folder's records under `TRAN` leaves a live clock reading in the originating
+field and fails on every run, at a different byte each time.
+
+Assumptions: **the absence of a fee record is an expectation to assert, not an omission to fill.**
+`1400-COMPUTE-FEES` is reached on this path -- `:214` admits it because the rate is non-zero -- and it
+returns having done nothing, because its body is one comment. A fee record must therefore be asserted
+**absent**; fabricating one to make the scenario look complete would invent output the program does not
+produce.
 
 ---
 
@@ -239,6 +332,17 @@ the direct hit as an expectation rather than assuming it.
 (`:443-460`) treats anything other than status `'00'` as fatal at `:452-459`, so a missing `DEFAULT`
 row is an abend rather than a zero rate. This folder never enters that path.
 
+Assumptions: the rate lookup has **three** outcomes, this folder owns the first, and the three are not
+interchangeable. The direct hit returns `'00'` and is what this folder's data produces. The miss returns
+`'23'`, which `:422` admits as success before `:436` re-reads under the literal `'DEFAULT'` written by
+`:437` into the group-id component alone -- that is `../default_fallback`. The third is the abend above,
+and it is reachable only from the second: the retry's `READ` at `:444` carries **no `INVALID KEY` clause**
+at all, unlike the first read at `:416-420`, and `:446` accepts **only** `'00'`, so a fallback whose
+`'DEFAULT'` row is absent terminates the run rather than yielding a zero rate. That asymmetry between the
+two reads is why the harness seeds the `'DEFAULT'` rows unconditionally even for scenarios like this one
+that never read them, and why this folder states the direct hit as an expectation instead of assuming it:
+at a zero balance every one of the three outcomes that does not abend still reports `0.00`.
+
 **No fee record must appear.** `1400-COMPUTE-FEES` (`:518-520`) is an empty stub. Master section 7.2.4
 forbids fabricating fee output for any scenario.
 
@@ -247,11 +351,13 @@ the output records carry `0005` while the input rows carry `0001`. An implementa
 input category would produce `0001` in a field whose expected bytes are `0005`, and the diff would
 point at a category rather than at a literal.
 
-**Money must not pass through a floating-point value.** A zero balance is the one vector where a
-`double` conversion is harmless, so this folder cannot detect such a violation -- stated so the
-absence of a failure here is not read as evidence of compliance. Master section 5.5 forbids `float`,
-`double` and JSON numbers in the money path and records that the prohibition is asserted by an
-ArchUnit rule.
+**Money must never leave exact fixed point.** A zero balance is also the one vector on which a lapse
+would be undetectable: zero is representable exactly in IEEE-754 binary, so a round trip through a
+binary type returns the same value and every expected byte in this folder still matches. **This folder
+therefore cannot detect that class of violation at all**, and the absence of a failure here is not
+evidence of compliance. Master section 5.5 fixes the single money contract for the whole tree, names
+the binary types and JSON numbers it excludes from the money path, and records that the exclusion is
+asserted by an ArchUnit rule rather than left to review.
 
 **No abend occurs.** Every `9999-ABEND-PROGRAM` site on this path is status-guarded: the five opens
 (`0000-TCATBALF-OPEN` through `0400-TRANFILE-OPEN` at `:182-186`), the category-balance read
@@ -353,6 +459,19 @@ PY
 Offsets are zero-based; money is signed zoned with the sign folded into the last byte and no byte for
 the decimal point, per master sections 3.3 and 3.7.
 
+Assumptions: **`0000000000{` is a positive zero, and it is the single most misread byte string in this
+folder.** It is ten `0` characters followed by one `{` -- **eleven bytes**, filling an `S9(09)V99` field
+whose eleven digit positions carry no byte for the sign and no byte for the point -- and it decodes to
+**`+0.00`**, not to eleven plain zeros and not to a malformed value. The trailing `{` is the sign folded
+onto the low-order digit, so it simultaneously encodes "positive" and the digit `0`; master section 3.3
+holds the full overpunch table and is not reproduced here. Two consequences follow and both bear on
+this scenario specifically. A reader who sees `{` where a digit was expected may take the row for
+corrupt and reshape it, which would change the one value the scenario exists to hold. And a decoder that
+strips non-digits instead of decoding the overpunch reads `0000000000` as ten digits, arrives at the
+same `0` by a route that is wrong, and then reports a **negative** balance as positive on the very next
+fixture it meets -- which is why the check in section 5.2 decodes the sign byte rather than casting the
+field.
+
 `tcatbal.txt`, two `TRAN-CAT-BAL-RECORD` rows, in key order:
 
 | Row | `TRANCAT-ACCT-ID` 0 | `TRANCAT-TYPE-CD` 11 | `TRANCAT-CD` 13 | `TRAN-CAT-BAL` 17 | Decoded | `FILLER` 28 |
@@ -385,6 +504,22 @@ leaves the group id blank, and produces a run that takes the `DEFAULT` fallback 
 plausible figure -- which at a zero balance is `0.00` either way, so in **this** folder the mistake
 would be entirely invisible in the output. That is why the check in section 5.2 reads offset 112
 explicitly.
+
+Assumptions: **this scenario depends on the keyed disclosure-group read returning status `'00'`, and that
+depends entirely on the ten bytes at `[112:122]`.** `:210` moves `ACCT-GROUP-ID` into the key's group-id
+component, so those ten bytes are what the read resolves on; measured, the raw seed rows carry **ten
+spaces** there while carrying `A000000000` at `[102:112]`. **Verify this field by offset, never by
+searching for the literal**, because in the reshaped fixture the literal occurs twice, ten bytes apart,
+and matching the first occurrence finds the ZIP.
+
+Alternatives Considered: copying the two account rows from the seed verbatim, which is the default and
+the more faithful-looking option, and is what the provenance discipline of section 9 otherwise argues
+for. Rejected because it does not produce this scenario: a blank group id makes the composed key miss,
+`:422` admits the resulting status `23`, `:436` fires, and the run resolves its rate through the
+`'DEFAULT'` retry instead of the direct hit -- which is `../default_fallback`, a scenario that already
+exists and is deliberately kept distinct. The reshape is confined to that one field precisely so the
+rejection costs as little provenance as possible, and section 9 attests to it as the folder's only
+business-rule change.
 
 Neither credit limit, neither cash limit and none of the six dates is read by `CBACT04C`; they are
 seed values carrying no expectation. The credit limits differ markedly between the two accounts, which
@@ -428,6 +563,30 @@ in 22 and 28 bytes respectively, every one of them padding. The output records a
 
 No departure applies to `discgrp.txt`, whose single row is the seed's own including its `'0'` padding.
 
+Trade-offs: the line-ending normalisation of `tcatbal.txt` accepts a byte-level difference from its seed
+in exchange for a file the loader can read. Measured, `app/data/ASCII/tcatbal.txt` is 2599 bytes with
+**49 `CR` and 50 `LF`** -- the only `CRLF` seed of the four this folder derives from, and not even
+uniformly so, since one row lacks the `CR`. The loader treats one physical line as one fixed-length
+record, so a surviving `0x0D` is absorbed into the trailing 22-byte `FILLER` and presents a **51-byte**
+row against a `RECLN` of 50: one byte past the declared width, on a record whose every content field is
+correct, failing the load rather than the comparison and pointing at a length rather than at a line
+ending. The compromise is that this file is not byte-identical to its seed. It is accepted because the
+difference is confined to the terminator -- **no content byte moves and no field value changes**, as
+section 9 records -- and because the alternative, carrying the `CR` through, produces a corpus that
+cannot be loaded at all. Master sections 3.8 and 3.9 impose the rule tree-wide; this row records what it
+costs here.
+
+Assumptions: `cardxref.txt` is authored at the copybook's **full 50-byte width** while its seed rows are
+**36 bytes**, and that difference is a completion rather than an edit. `CVACT03Y` declares a trailing
+`FILLER X(14)` after the eleven-byte account id that ends at offset 36, so the copybook sums to 50 and
+the seed simply stops early; master section 3.10 rules for the copybook width and gives the reasoning the
+whole tree follows. This scenario depends on the ruling twice over. `:204-205` reads this file through the
+alternate key at offset **25**, which sits inside the first 36 bytes and so would resolve at either
+width -- meaning a 36-byte row would load, resolve, and yield correct interest, leaving the width mistake
+invisible in the output. The fourteen appended bytes are **spaces**, matching the measured padding of the
+account record rather than the ASCII `'0'` of the category-balance and disclosure-group rows, per master
+section 6.1.
+
 ---
 
 ## 6. Determinism -- and what the blank timestamps mean here
@@ -452,16 +611,47 @@ disclosure-group and cross-reference layouts carry none -- the account's three `
 dates, not timestamps -- so the "genuine input data" reading of a blank stamp does not arise here in
 either direction.
 
-**The business date is an input parameter of the scenario, not a fixture byte.** No file in this
-folder carries it; it arrives as the job's `PARM-DATE`, and `:476-480` copies its ten characters into
-the transaction identifier with **no formatting whatsoever**. This folder's golden carries the **ISO**
-token `2024-01-15`, producing `2024-01-15000001` and `2024-01-15000002`. Master section 8.2 measures
-that all three interest **scenario** goldens use the ISO form while both interest **end-to-end**
-goldens use the compact `2022071800` of `app/jcl/INTCALC.jcl:22`, and it requires the domain to
-exercise both shapes so the passthrough is genuinely tested; the module discharges that by
-parameterising one launch over both tokens rather than by splitting the two across scenario folders.
-**Any expectation that hard-codes one format is wrong**, and the ten-character prefix is treated
-throughout as an input parameter rather than as a derived value.
+**The business date is an input parameter of the scenario, not a fixture byte, and never a clock
+reading.** No file in this folder carries it. It reaches the program as `PARM-DATE`, a `PIC X(10)` in the
+LINKAGE SECTION at `:178` received through `PROCEDURE DIVISION USING EXTERNAL-PARMS` at `:180`, and
+`:476-480` `STRING`s those ten characters beside the `PIC 9(06)` counter of `:173` `DELIMITED BY SIZE`
+into a `PIC X(16)` identifier -- `10 + 6 = 16`, filled exactly, with **no formatting whatsoever** and no
+date-parsing code anywhere in the program. `:474` increments the counter **before** the `STRING`, so the
+first generated identifier always ends `000001`. That injection is what makes a rerun reproducible: the
+**only** legitimate clock read on this path is `:496` `Z-GET-DB2-FORMAT-TIMESTAMP`, which stamps the two
+record timestamps described above and never the business date.
+
+This folder's expectation carries the **ISO** token `2024-01-15`, producing `2024-01-15000001` and
+`2024-01-15000002`. Master section 8.2 measures that all three interest **scenario** expectations use the
+ISO form while both interest **end-to-end** expectations use the compact `2022071800` that
+`app/jcl/INTCALC.jcl:22` passes as `PARM='2022071800'`, and it requires the domain to exercise both
+shapes so that the passthrough is proven rather than assumed. **Any expectation that hard-codes one
+format is wrong**, and the ten-character prefix is treated throughout as an input parameter rather than
+as a derived value.
+
+Assumptions: the prefix above is ISO because that is the token the run this folder drives actually
+supplies, not because ISO is canonical -- there is no canonical form. `CalculateInterestJobTest`
+reproduces each committed scenario, this one among them, under its separated ten-character token and
+compares the result against `tests/golden/interest/zero_balance/`, so an expectation written here in the
+compact form would describe an output no run produces. The compact form is exercised in the same class by
+a case that supplies **both** committed layouts to one launch and asserts each reaches every collaborator
+unaltered, which is how the module discharges master section 8.2's both-shapes requirement -- by
+parameterising a launch rather than by splitting the two shapes across scenario folders, so that neither
+shape becomes a property of a directory. **Do not "align" this prefix to the compact form, and do not
+align a compact expectation to this one.** Either edit silently converts a passthrough assertion into a
+format assertion.
+
+Assumptions: `services/batch-service/README.md` describes the compact token as `yyyyMMdd` followed by the
+literal `00` and "not an ISO date". **Read as a description of what `app/jcl/INTCALC.jcl:22` happens to
+pass, that is accurate; read as a required format for the migrated Java, it is contradicted and must
+neither be followed nor propagated.** Master section 8.2 records the same guard. The stronger reading
+fails against the evidence on both sides: it contradicts the opaque-token contract `dto/BusinessDate`
+implements -- ten characters preserved exactly, no default instance, no clock-reading factory, a raw
+accessor kept separate from any calendar parsing -- and it would invalidate every ISO-prefixed scenario
+expectation in the domain, this folder's included. Rendering a parsed date under that reading is the
+specific defect both committed layouts exist to catch: applied to the compact token it emits sixteen
+characters of the wrong shape, which is the failure mode hardest to see because the length still checks
+out.
 
 Everything else holds by construction: every byte here is literal, there is no random identifier and
 no environment-derived string, and each test provisions and tears down its own workspace, per master
@@ -517,6 +707,23 @@ otherwise assume the folder covers it:
 - **the final-account flush**, for the reason section 3 states: both accounts' expected bytes are the
   same whether or not the last one is written back;
 - **the `DEFAULT` fallback**, which requires a blank group id and belongs to `../default_fallback`.
+
+Trade-offs: the first of those three is a coverage gap this folder accepts rather than narrows, and the
+reason is worth stating precisely because a zero vector looks like the safest possible test. Section 2.1
+already records that `(0.00 x 15.00) / 1200` is neutral on both the ordering axis and the rounding axis;
+what that buys is total insensitivity to how the migrated arithmetic is written, and what it costs is that
+**no defect in that arithmetic can fail here.** A vector of the shape master section 7.2.1 specifies is
+required instead. The compromise is accepted because the two properties trade against each other: the
+same degeneracy that makes this folder unable to discriminate operand order is what makes it able to
+prove that a zero product still produces a record, and no non-degenerate vector can prove that.
+
+Assumptions: section 7 of the reference-only `tests/fixtures/interest/happy_path/README.md` is the
+authority for a further, separately recorded divergence -- an observed end-to-end run of the compiled
+baseline over the two-account interest shape whose integrated multi-account arithmetic departs from the
+isolated per-row figures. It is referenced here rather than restated, and the reference is deliberately
+figureless: **those amounts belong to the non-zero scenarios and must never be carried into this folder**,
+where every expected amount is `0.00`. This folder is not evidence about that divergence in either
+direction, because a zero accrual moves no balance and so cannot show a departure in one.
 
 ### 8.3 The sibling folders
 
@@ -583,17 +790,6 @@ baseline or the parity oracle.
 
 ---
 
-*This README is the mandatory Explainability carrier for the four record files in this directory,
-required by master section 10 and by user-specified Rule 1. **No gate reads it.** `config/rule1/rule1_gate.py` governs the written form of rationale
-labels repository-wide and does include Markdown, but it excludes every path containing
-`/src/test/resources/fixtures/`, so it reads nothing here; the plain form is used regardless,
-because `docs/CODE_DOCUMENTATION_STANDARD.md` fixes one written form repository-wide and a
-Rule 1 audit finds a rationale by literal string search. `config/checkstyle/checkstyle.xml` limits its audit set to
-`java`, so no linter reads this prose either. Whether each rationale names a real consequence, and whether
-every number and line citation is true, are review obligations no lexical gate can decide.*
-
----
-
 ## 10. What drives this corpus, and what reads it
 
 This corpus is a **driven input**. `CalculateInterestJobTest` declares `FIXTURE_INTEREST_ROOT` as the
@@ -620,3 +816,22 @@ and compares against `tests/golden/posting/<scenario>`, and `PostTransactionsJob
 four files under `fixtures/posting/` -- so an edit in either family changes what a run asserts. Master
 section 1.5 holds the measured inventory for the whole tree and names the nine files, in `preflight/**`
 and `export/**`, that no job opens.
+
+---
+
+*This README is the mandatory Explainability carrier for the four record files in this directory,
+required by master section 10 and by user-specified Rule 1. Those four files can satisfy that rule
+neither in themselves nor by inspection, for two independent reasons, and this document exists because
+of both. **They admit no comment syntax:** every byte position is meaningful, a comment character inside
+a record shifts every field after it, and a comment on its own line is a physical row of the wrong length
+that the loader rejects -- master section 1.2. **And no mechanical gate reaches them:**
+`config/checkstyle/checkstyle.xml` narrows its audit set to `java`, and `config/checkstyle/suppressions.xml`
+suppresses `src/test/resources/fixtures/` outright as data rather than behaviour, while
+`config/rule1/rule1_gate.py` governs the written form of rationale labels repository-wide and does read
+Markdown, but excludes every path containing `/src/test/resources/fixtures/`. **So no gate reads this
+prose either.** The plain, unemphasised label form is used regardless, because
+`docs/CODE_DOCUMENTATION_STANDARD.md` and master section 1.4 fix one written form repository-wide and a
+Rule 1 audit finds a rationale by literal string search, which an emphasised label defeats. Whether each
+rationale names a real consequence, and whether every byte value and line citation here is true, are
+review obligations no lexical gate can decide -- which is why every number in this document was
+re-derived from the four files and from the cited baseline lines rather than carried over from prose.*

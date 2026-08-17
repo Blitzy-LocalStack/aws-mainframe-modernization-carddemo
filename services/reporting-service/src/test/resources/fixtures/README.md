@@ -1,6 +1,6 @@
 # Reporting test fixtures
 
-This directory holds **seven** files, and every one of them has **two** consumers.
+This directory holds **eight** files, and every one of them has **two** consumers.
 
 Assumptions: this README exists because fixture files sat here with **no consumer and no
 provenance statement**. A fixture nobody loads is indistinguishable from a fixture nobody needs,
@@ -11,20 +11,28 @@ national identifier, a government-issued identifier and a date of birth in every
 carry full card numbers.
 
 Refactoring Rationale: this document described **four** files and attested that no card number or
-card verification value appeared anywhere in the directory. **Seven** files are bound here, and two
-of them — `carddata.txt` and `cardxref.txt` — carry full 16-digit card numbers, with `carddata.txt`
+card verification value appeared anywhere in the directory. **Eight** files are bound here, and three
+of them — `carddata.txt`, `cardxref.txt` and `tranfile.txt` — carry full 16-digit card numbers, with `carddata.txt`
 additionally carrying a card-verification-shaped value in the clear in every row. The count and the
 attestation were therefore both wrong, and wrong in the worse direction: a reviewer auditing this
 directory for sensitive-shaped data was told there was none to audit, and `cardxref.txt` was not
 mentioned in this document at all. §1 now enumerates what is actually here rather than certifying
 its absence.
 
-Refactoring Rationale: the directory now holds **seven** data files, not the four it held when this
-document was written, and every count and list below is stated at seven. The three added since —
-`carddata.txt`, `cardxref.txt` and `tcatbal.txt` — are each argued for individually in the contract
-test's own preamble, which records why a card master, a cross-reference and a category-balance set
-are bound by a module that owns no table. Two of the three carry columns the earlier text asserted
-were absent from this directory entirely; §1.1 replaces that assertion.
+Refactoring Rationale: the directory now holds **eight** data files, not the four it held when this
+document was written, and every count and list below is stated at eight. The four added since —
+`carddata.txt`, `cardxref.txt`, `tcatbal.txt` and `tranfile.txt` — are each argued for individually in
+the contract test's own preamble, which records why a card master, a cross-reference, a
+category-balance set and the report's own driving record are bound by a module that owns no table.
+Three of the four carry columns the earlier text asserted were absent from this directory entirely;
+§1.1 replaces that assertion.
+
+Refactoring Rationale: every count in this document previously read **seven**, which was correct until
+`tranfile.txt` landed. The counts are restated at eight rather than made vague, because the census is
+enforced in code — `ReportingFixtureContractTest.EXPECTED_RESOURCES` admits an exact set and asserts
+the directory matches it in both directions — so a number here that disagrees with that list is a
+contradiction a reader can detect but not resolve, and the failure mode of an approximate count is
+that a file can be added with no row in the tables below and nobody notices.
 
 ---
 
@@ -89,7 +97,7 @@ enciphered column appears in any file here, in any field, because none of the fo
 one", and that "the card master and the cross-reference … neither is a fixture in this directory".
 Both are false, and the second is contradicted by the inventory table in §2 immediately below,
 which lists `carddata.txt` and `cardxref.txt` by name. The attestation was written when this
-directory held four files; it now holds seven, and two of the three added records are exactly the
+directory held four files; it now holds eight, and two of the four added records are exactly the
 two it claimed were absent. A false negative here is the most costly kind of documentation error in
 this repository: it is the sentence a reader would rely on before deciding a fixture needs no
 handling care, and it would have told them the opposite of the truth.
@@ -102,6 +110,19 @@ values, at these positions:
 | `CARD-NUM` | `carddata.txt` | 0 | 16 | the five keys listed in §2 | [`CVACT02Y.cpy`](../../../../../../app/cpy/CVACT02Y.cpy) line 5 |
 | `CARD-CVV-CD` | `carddata.txt` | 27 | 3 | `901`, `902`, `903`, `904`, `905` | [`CVACT02Y.cpy`](../../../../../../app/cpy/CVACT02Y.cpy) line 7 |
 | `XREF-CARD-NUM` | `cardxref.txt` | 0 | 16 | four of the five above | [`CVACT03Y.cpy`](../../../../../../app/cpy/CVACT03Y.cpy) line 5 |
+| `TRAN-CARD-NUM` | `tranfile.txt` | 262 | 16 | the four cross-referenced cards, plus `9999999999999999` on one orphan row | [`CVTRA05Y.cpy`](../../../../../../app/cpy/CVTRA05Y.cpy) line 15 |
+
+Assumptions: the transaction master is the **third** file here carrying a full card number, and its
+offset is 262 rather than 0 because the card is not this record's key — `TRAN-ID` is, at offset 0.
+That offset is confirmed four times over: field arithmetic across `CVTRA05Y.cpy`,
+[`app/jcl/TRANREPT.jcl`](../../../../../../app/jcl/TRANREPT.jcl) lines 41 and 42 declaring the
+one-based DFSORT positions 263 and 305, [`app/jcl/TRANIDX.jcl`](../../../../../../app/jcl/TRANIDX.jcl)
+line 27 building an alternate index `KEYS(26 304)` over `RECORDSIZE(350,350)`, and
+[`app/cbl/CBTRN03C.cbl`](../../../../../../app/cbl/CBTRN03C.cbl) lines 61 to 65 splitting its own file
+description as `X(304)` plus `X(26)` plus `X(20)`. It carries **no** verification value: `CVTRA05Y.cpy`
+declares none, so there is no such column to fabricate. The numbers are the same synthetic keys §2.1
+records, so this file adds no new card value to the directory — only a fourth position at which the
+existing ones appear.
 
 Assumptions: the five verification values are `901` through `905`, one per row in key order, which
 is a counter rather than a value any issuer would compute — a real verification value is derived
@@ -139,26 +160,43 @@ from the file.
 | File | Descriptor | Copybook | Record length | Key | Rows | Keys |
 |---|---|---|---|---|---|---|
 | `acctfile.txt` | `ACCOUNT` | [`app/cpy/CVACT01Y.cpy`](../../../../../../app/cpy/CVACT01Y.cpy) | 300 | 11 bytes at offset 0 | 4 | `00000000007`, `00000000050`, `00000000101`, `00000000102` |
-| `carddata.txt` | `CARD` | [`app/cpy/CVACT02Y.cpy`](../../../../../../app/cpy/CVACT02Y.cpy) | 150 | 16 bytes at offset 0 | 5 | `0500024453765740`, `0500024453765741`, `1010000000000001`, `3714496353984312`, `4859452612877065` |
-| `cardxref.txt` | `XREF` | [`app/cpy/CVACT03Y.cpy`](../../../../../../app/cpy/CVACT03Y.cpy) | 50 | 16 bytes at offset 0 | 4 | `0500024453765740`, `0500024453765741`, `3714496353984312`, `4859452612877065` |
+| `carddata.txt` | `CARD` | [`app/cpy/CVACT02Y.cpy`](../../../../../../app/cpy/CVACT02Y.cpy) | 150 | 16 bytes at offset 0 | 5 | `0500024453765740`, `4859452612877065`, `9900000000000502`, `9900001010000001`, `9900001020000001` |
+| `cardxref.txt` | `XREF` | [`app/cpy/CVACT03Y.cpy`](../../../../../../app/cpy/CVACT03Y.cpy) | 50 | 16 bytes at offset 0 | 4 | `0500024453765740`, `4859452612877065`, `9900000000000502`, `9900001020000001` |
 | `custfile.txt` | `CUSTOMER` | [`app/cpy/CUSTREC.cpy`](../../../../../../app/cpy/CUSTREC.cpy) | 500 | 9 bytes at offset 0 | 4 | `000000007`, `000000050`, `000000101`, `000000102` |
 | `tcatbal.txt` | `TCATBAL` | [`app/cpy/CVTRA01Y.cpy`](../../../../../../app/cpy/CVTRA01Y.cpy) | 50 | 17 bytes at offset 0 | 8 | `00000000007010001`, `00000000007030001`, `00000000050010001`, `00000000050010002`, `00000000050030001`, `00000000101010001`, `00000000101040001`, `00000000102070001` |
 | `trantype.txt` | `TRANTYPE` | [`app/cpy/CVTRA03Y.cpy`](../../../../../../app/cpy/CVTRA03Y.cpy) | 60 | 2 bytes at offset 0 | 7 | `01` through `07` |
 | `trancatg.txt` | `TRANCAT` | [`app/cpy/CVTRA04Y.cpy`](../../../../../../app/cpy/CVTRA04Y.cpy) | 60 | 6 bytes at offset 0 | 9 | `010001`, `010002`, `010005`, `020001`, `030001`, `040001`, `050001`, `060001`, `070001` |
-| `tcatbal.txt` | `TCATBAL` | [`app/cpy/CVTRA01Y.cpy`](../../../../../../app/cpy/CVTRA01Y.cpy) | 50 | 17 bytes at offset 0 | 8 | `00000000007010001`, `00000000007030001`, `00000000050010001`, `00000000050010002`, `00000000050030001`, `00000000101010001`, `00000000101040001`, `00000000102070001` |
+| `tranfile.txt` | `TRAN` | [`app/cpy/CVTRA05Y.cpy`](../../../../../../app/cpy/CVTRA05Y.cpy) | 350 | 16 bytes at offset 0 | 31 | `0000000000000001` through `0000000000000031` |
 
-Assumptions: all SEVEN files are listed, in the order `ReportingFixtureContractTest` declares them.
+Assumptions: `tranfile.txt` is the driving record of the transaction report rather than one of the
+tables the report joins to, which is why it is the only file here named for a data definition instead
+of a seed dataset. The posted transaction master is batch OUTPUT, so no seeded extract of it exists
+to take a name from: [`app/cbl/CBTRN03C.cbl`](../../../../../../app/cbl/CBTRN03C.cbl) names its input
+`TRANFILE` and [`app/jcl/TRANREPT.jcl`](../../../../../../app/jcl/TRANREPT.jcl) supplies it at lines
+65 and 66. Its 31 rows are 26 inside the `2022-01-01` to `2022-07-06` window that job states at lines
+43 and 44, two fully resolvable rows one day outside each end, and three rows whose card, type code
+and type-and-category pair respectively resolve in none of the three lookup fixtures.
+
+Refactoring Rationale: this table listed `tcatbal.txt` TWICE, on consecutive rows with identical
+contents, which made the census sentence below unverifiable -- a reader counting rows reached eight
+where the sentence claimed seven, and the surplus row was a duplicate rather than a file. The
+duplicate is removed. The card-number columns of `carddata.txt` and `cardxref.txt` were also stale:
+they still named `0500024453765741`, `1010000000000001` and `3714496353984312`, the three numbers
+§2.1 records as REPLACED outright, so the inventory contradicted both §2.1 and the committed bytes.
+They now name what the files hold.
+
+Assumptions: all EIGHT files are listed, in the order `ReportingFixtureContractTest` declares them.
 The table previously listed five, omitting `cardxref.txt` and `tcatbal.txt` while the contract test
 bound both -- so a reader reconciling the directory against this section found two files it did not
 admit, and the available conclusions were that the directory held something unauthorised or that
 this document was stale. The census is checkable in one place rather than two: that test's own
-`fixtureFiles` list names all seven plus this README and asserts the directory holds exactly those
-eight entries in both directions, so a file added without a row here still fails the build, and this
-table is the prose half of a claim the test already enforces.
+`EXPECTED_RESOURCES` list names all eight fixtures plus this README and asserts the directory holds
+exactly those nine entries in both directions, so a file added without a row here still fails the
+build, and this table is the prose half of a claim the test already enforces.
 
 Refactoring Rationale: `cardxref.txt` and `tcatbal.txt` were absent from this table while
 `ReportingFixtureContractTest` bound both, so the document that claims to be the inventory listed
-five of the seven files the test actually asserts. The two additions are the cross-reference —
+five of the seven files the test asserted at that point. The two additions are the cross-reference —
 `XREF`, whose registry name deliberately differs from the file name, because `XREF` is the
 descriptor for `app/cpy/CVACT03Y.cpy` while `cardxref.txt` is named for the dataset — and the
 transaction-category balance, whose 17-byte key is the composite `TRAN-CAT-KEY` group rather than a
@@ -168,7 +206,7 @@ Refactoring Rationale: the table previously listed **five** rows. It omitted `ca
 `tcatbal.txt` entirely, and its card keys were the five the file carried before §2.1's replacement.
 An inventory that omits a file is worse than no inventory, because a reader checking the directory
 against it concludes the two extra files are strays. The table is now closed against
-`ReportingFixtureContractTest.EXPECTED_RESOURCES`, which admits exactly these seven names plus this
+`ReportingFixtureContractTest.EXPECTED_RESOURCES`, which admits exactly these eight names plus this
 README, so a file added without a row here fails that case.
 
 Assumptions: every file is line-oriented with one fixed-width record per line and a terminating
@@ -241,7 +279,7 @@ and `ReportingDeployedRelationIT` reads it back out of the engine.
 | `9900001010000001` and `9900001020000001` end in the **same four digits** | A lookup on the whole number from one on the masked rendering, which names a tail rather than a card |
 | Card `9900001020000001` is `N` in the master while its cross-reference row remains | Whether a reporting read filters on the master's active flag; no reporting relation carries it, so a statement is produced for a closed card exactly as the batch oracle produces one |
 | The four cross-referenced cards span accounts `7`, `50` and `102` | A join that resolves per card from one that resolves per account |
-| `9999999999999999` appears in **no** file | A lookup that answers with nothing from one that answers with the nearest row |
+| `9999999999999999` appears in neither the card master nor the cross-reference, and appears in `tranfile.txt` as the card of its first orphan row | A lookup that answers with nothing from one that answers with the nearest row |
 
 ---
 
@@ -291,9 +329,10 @@ composite is what `CVTRA04Y.cpy` declares.
 ## 5. The trailing pad character is a per-record-type fact
 
 Every record here closes with a `FILLER` that carries no value, and **which character that
-`FILLER` is made of differs by record type**. For six of the seven it is taken from the record's own
-reference extract under `app/data/ASCII/`, measured rather than assumed; the seventh is the
-cross-reference, whose extract settles nothing and is treated separately below. All seven rows are
+`FILLER` is made of differs by record type**. For six of the eight it is taken from the record's own
+reference extract under `app/data/ASCII/`, measured rather than assumed. Two have no extract of their
+own and are treated separately below: the cross-reference, whose extract settles nothing, and the
+posted transaction master, which is batch output and so has no extract at all. All eight rows are
 listed, because a fixture absent from this table is a fixture whose pad nobody measured:
 
 | Fixture | Descriptor | `FILLER` span | Pad character | Reference extract |
@@ -303,8 +342,25 @@ listed, because a fixture absent from this table is a fixture whose pad nobody m
 | `cardxref.txt` | `XREF` | 36–50 (14) | **blank** | `cardxref.txt` pads **nothing** — see below |
 | `custfile.txt` | `CUSTOMER` | 332–500 (168) | **blank** | `custdata.txt` pads with blanks |
 | `tcatbal.txt` | `TCATBAL` | 28–50 (22) | **ASCII zero** | `tcatbal.txt` pads with zeroes |
+| `tranfile.txt` | `TRAN` | 331–350 (20) | **blank** | no extract of its own — measured from `dailytran.txt`, see below |
 | `trantype.txt` | `TRANTYPE` | 52–60 (8) | **ASCII zero** | `trantype.txt` pads with zeroes |
 | `trancatg.txt` | `TRANCAT` | 56–60 (4) | **ASCII zero** | `trancatg.txt` pads with zeroes |
+
+Assumptions: the posted transaction master is the second record whose pad cannot be measured from its
+own extract, and unlike the cross-reference it has no extract at all — `TRANSACT` is produced by the
+posting job rather than seeded. It is measured from a DIFFERENT record instead, and the substitution is
+exact rather than approximate: `app/data/ASCII/dailytran.txt` is the daily-transaction record of
+[`app/cpy/CVTRA06Y.cpy`](../../../../../../app/cpy/CVTRA06Y.cpy), whose fourteen field widths match
+[`app/cpy/CVTRA05Y.cpy`](../../../../../../app/cpy/CVTRA05Y.cpy) field for field, so its trailing
+`FILLER` occupies the same columns 331 to 350 of the same 350-byte record. All 300 of its records are
+350 bytes and every one of those spans holds 20 blanks, so the measurement is unanimous over 300
+observations rather than derived from one.
+
+Alternatives Considered: padding this one with ASCII zeroes to match the three zero-padded records.
+Rejected on that measurement, and for a second reason the cross-reference row does not have: a zero
+pad would move this fixture out of the codec-suppliable half of the rule below, turning a pad the
+descriptor can rebuild into content the file has to carry, for a record whose geometry is the most
+offset-dependent in the directory.
 
 Assumptions: the cross-reference is the one record whose pad **cannot** be measured from its own
 extract. `app/data/ASCII/cardxref.txt` stores only the 36 declared bytes and pads nothing at all
@@ -345,16 +401,17 @@ cannot be quietly standardised on one of them.
 Assumptions: whether the codec can *supply* a pad is a second and narrower fact, asserted separately
 by `everyFixturePadIsSuppliedByTheCodecOnlyWhenItIsBlank`. The codec's rule is content-based: a
 **blank** padding field is dropped when a record is decoded and restored when one is encoded, while a
-**nonblank** one stays content and is carried through. So the four blank-padded fixtures here can be
+**nonblank** one stays content and is carried through. So the five blank-padded fixtures here can be
 rebuilt from the descriptor alone, byte for byte, and the three zero-padded ones cannot — their zeroes
 are data the file supplies. That case asserts both directions, which is what keeps the table above
 honest: if the codec could derive every pad, the table would be redundant, and if it could derive
 none, the blank rows would be unverifiable.
 
 Alternatives Considered: padding everything here with zeroes, which is the simpler rule. Rejected
-on the measurement above — it would move all four blank-padded fixtures (`acctfile.txt`,
-`carddata.txt`, `cardxref.txt` and `custfile.txt`) away from what their own extracts do, trading
-three divergences for four new ones. The pad belongs to the record type, not to the directory.
+on the measurement above — it would move all five blank-padded fixtures (`acctfile.txt`,
+`carddata.txt`, `cardxref.txt`, `custfile.txt` and `tranfile.txt`) away from what their own extracts
+do, trading three divergences for five new ones. The pad belongs to the record type, not to the
+directory.
 
 ---
 
@@ -371,7 +428,7 @@ test is what proves the hand-authoring is right. To add a row:
 #       would then be read from the wrong offsets while the file still measured correctly.
 cd services/reporting-service/src/test/resources/fixtures
 awk '{ printf "%s row %d: %d bytes\n", FILENAME, FNR, length($0) }' acctfile.txt carddata.txt \
-    cardxref.txt custfile.txt tcatbal.txt trancatg.txt trantype.txt
+    cardxref.txt custfile.txt tcatbal.txt trancatg.txt trantype.txt tranfile.txt
 
 # WHAT: run both executable consumers for this directory.
 # WHY : -am is REQUIRED and not merely convenient. Without it Maven resolves an installed
@@ -387,10 +444,18 @@ mvn -B -f services/pom.xml -pl reporting-service -am -Dtest=ReportingFixtureCont
 mvn -B -f services/pom.xml -pl reporting-service -am -Dit.test=ReportingDeployedRelationIT verify
 ```
 
-Refactoring Rationale: the byte-length command previously named **four** of the seven files, so three
-of them — including both card files, the two most consequential in the directory — could be edited to
-a wrong length and the documented check would report nothing. It now names all seven, in the same
-order as the §2 inventory so the two can be read against each other.
+Refactoring Rationale: the byte-length command previously named **four** of the seven files then
+present, so three of them — including both card files, the two most consequential in the directory —
+could be edited to a wrong length and the documented check would report nothing. It now names all
+**eight**, so the two can be read against each other against the §2 inventory.
+
+Refactoring Rationale: `tranfile.txt` was appended to that command for the same reason the earlier
+three were, and it is the row where an omission would cost most. At 350 bytes it is the longest record
+here, its two load-bearing fields sit at offsets 262 and 304 rather than near the front, and its
+amount field carries a sign overpunch in its final byte — so a row a single byte short shifts the card
+number, the processing timestamp and the sign out of position at once, and every value still parses as
+something. A per-row length check is the cheapest way to catch that, and it only catches what it is
+told to read.
 
 To add a row, write it out at the exact declared length with the field offsets from the copybook
 linked in §2, then run the two commands above. The expected row count in

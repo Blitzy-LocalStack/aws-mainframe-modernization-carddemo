@@ -51,12 +51,14 @@
  *
  * <h2>The closed inventory</h2>
  *
- * <p>This directory holds six files and a seventh is prohibited: this charter, together with
+ * <p>This directory holds nine files and a tenth is prohibited: this charter, together with
  * {@code BatchRunRepositoryIT}, {@code CrossSchemaFeedRepositoryIT}, {@code CardXrefRepositoryIT},
- * {@code DailyTransactionRepositoryIT} and {@code PostingUnitOfWorkIT}.</p>
+ * {@code DailyTransactionRepositoryIT}, {@code TransactionRepositoryIT},
+ * {@code TransactionCategoryBalanceRepositoryIT}, {@code TransactionRejectRepositoryIT}
+ * and {@code PostingUnitOfWorkIT}.</p>
  *
  * <pre>
- * this directory: 6 java files = 5 tests + 1 charter
+ * this directory: 9 java files = 8 tests + 1 charter
  * </pre>
  *
  * <p>Refactoring Rationale: this section counted four files and three tests, and admitted a fourth test
@@ -85,6 +87,42 @@
  * needs, and the marker line is re-measured against the directory on every build so the two figures
  * cannot drift apart again.</p>
  *
+ * <p>Refactoring Rationale: this inventory then read six files and named a seventh prohibited, and it is
+ * raised to nine because three further proofs were admitted, each on the test this roster states rather
+ * than by drift. The first is {@code TransactionRepositoryIT}, admitted on the test this roster states
+ * rather than by drift: it names properties the list did not already own. {@code TransactionRepository}
+ * declares three reads, and a search for callers of each found that TWO of them had no executable
+ * consumer anywhere in the module -- the unbounded ascending walk that rebuilds the master, and the
+ * bounded continuation a restarted step resumes from. Only the third, the card-ordered daily subset, was
+ * exercised, and that one is {@code PostingUnitOfWorkIT}'s. So the interface that carries the module's
+ * only write surface had its two ordered reads entirely unexercised while the table LOOKED covered,
+ * which is the same shortfall this section already corrected twice above and is corrected here the same
+ * way. The prohibition the prose carries moves up a number rather than being dropped, because what a
+ * prohibition must not do is bar a proof the package needs.</p>
+ *
+ * <p>Refactoring Rationale: the second admission is
+ * {@code TransactionCategoryBalanceRepositoryIT}, which closes a proof this charter had
+ * CLAIMED while no file held it. The entry for {@code PostingUnitOfWorkIT} below asserted that it owned
+ * the ascending walk of the category balances in key order, citing the arithmetic that fixes that order;
+ * that class declares six cases and none of them was the walk. Nor did any sibling hold it: the two
+ * production callers of the ordered finder are stubbed wherever a job test reaches them, and the one
+ * integration class that calls it for real uses it as a byte read-back over single-account fixtures and
+ * asserts nothing about ordering. So the claim was true of no file, which is a worse failure than an
+ * uncounted file -- a reader auditing coverage would have found the property attributed and stopped
+ * looking. The marker check catches a count that falls behind but cannot catch a claim that names the
+ * wrong owner, which is why the entry below now names the class that actually holds it.</p>
+ *
+ * <p>Refactoring Rationale: the third admission is
+ * {@code TransactionRejectRepositoryIT}, added deliberately rather than by
+ * drift. What was wrong with the previous arrangement is recorded on the feed entry below: the reject
+ * stream's 430-byte composition was carried as ONE case inside {@code CrossSchemaFeedRepositoryIT}, which
+ * could assert that a 350-character value round-trips at its declared width but could not assert the
+ * property the composition actually turns on -- that the stored image is the daily record's own image AS
+ * READ, retaining that record's blank processing-timestamp span rather than a freshly stamped one. A
+ * case measuring only the width passes against an implementation that recomposed the record and stamped
+ * it, which is precisely the defect the composition proof exists to catch, so the proof was widened and
+ * given an owner of its own.</p>
+ *
  * <p>Refactoring Rationale: that marker line is what turns the sentence above from a claim into a checked
  * one. {@code PackageCharterInventoryTest} in the shared kernel parses the line and re-counts this
  * directory on every build, so an inventory that falls behind fails the build instead of ageing quietly.
@@ -101,20 +139,21 @@
  * roster; it is cited rather than restated, so the two cannot disagree about a number.</p>
  *
  * <p>Alternatives Considered: one integration class per production interface, which would make this a
- * roster of ten rather than four and would let each class be named for the interface it covers. Rejected
+ * roster of ten rather than six and would let each class be named for the interface it covers. Rejected
  * on what the classes would then contain. The property worth proving about most of the read-only feeds is
  * identical in each case -- that a mapping resolves against a table this module does not own and walks it
  * in a declared order -- so ten classes would be several near-copies of one another, and a change to the
  * harness would have to be chased through all of them. The property worth proving about posting is not a
  * property of any single interface at all: it spans four of them in one commit, so no per-interface class
- * could hold it without either splitting the proof or duplicating it. The five classes below are
+ * could hold it without either splitting the proof or duplicating it. The six classes below are
  * therefore partitioned by PROPERTY rather than by interface, and between them they reach all ten.</p>
  *
- * <p>Assumptions: neither of the two classes named for a single interface is a departure from that
+ * <p>Assumptions: none of the three classes named for a single interface is a departure from that
  * partition but an application of it. Each is named for an interface because it happens to reach only
  * one, yet what each owns is a PROPERTY none of the others holds -- the CHUNKED walk's behaviour across
- * more than one statement in the one case, the determinacy of a by-account read over a NON-UNIQUE index
- * in the other -- and both are different questions from whether a mapping resolves and walks in order.
+ * more than one statement in the first, the determinacy of a by-account read over a NON-UNIQUE index in
+ * the second, and the two access disciplines one cluster carries at once in the third -- and all three
+ * are different questions from whether a mapping resolves and walks in order.
  * Two classes therefore touch the daily-transaction interface, and the split between them is by
  * QUESTION rather than by member, now that the interface declares a single read: one bounded walk of the
  * feed belongs to {@code CrossSchemaFeedRepositoryIT} because it is one of that class's six
@@ -123,8 +162,13 @@
  * belong to {@code DailyTransactionRepositoryIT} because they have no counterpart among them. Two classes
  * likewise touch the cross-reference, and that split is by KIND of statement: the catalog fact and a
  * reachability read stay with the feed walks, while the keyed access paths and their multiplicity
- * ruling belong to {@code CardXrefRepositoryIT}. A sixth test would need to name a property this list
- * does not already own.</p>
+ * ruling belong to {@code CardXrefRepositoryIT}.
+ * Two classes finally touch the reject stream, and that
+ * split is by QUESTION as well: the reason-code constraint and a reachability read stay with the feed
+ * walks, while the 430-byte composition and its as-read property belong to
+ * {@code TransactionRejectRepositoryIT}.
+ * A further test would need to name a property this list does not
+ * already own.</p>
  *
  * <h2>Ruling one: the name is what makes a class here run at all</h2>
  *
@@ -140,8 +184,8 @@
  * {@code com.carddemo.batch} owns the full derivation of that split and the failure a wrong name
  * produces; what is restated here is only the part that binds a class in this directory.</p>
  *
- * <p>Assumptions: the plan's uniform per-service shape spells the name {@code *RepositoryIT}, and four
- * of the five members here follow that spelling while {@code PostingUnitOfWorkIT} does not. The departure is
+ * <p>Assumptions: the plan's uniform per-service shape spells the name {@code *RepositoryIT}, and five
+ * of the six members here follow that spelling while {@code PostingUnitOfWorkIT} does not. The departure is
  * deliberate and is recorded so it does not read as an oversight: the operative selector is the
  * {@code IT} ending, which that name satisfies, and what the class proves is a unit of work spanning four
  * interfaces and two schemas rather than one interface's contract, so naming it after any single
@@ -160,7 +204,7 @@
  *
  * <h2>Ruling two: the profile and the connection are declared on the class</h2>
  *
- * <p>Assumptions: each of the five carries {@code @ActiveProfiles("test")}, which is the whole of how
+ * <p>Assumptions: each of the six carries {@code @ActiveProfiles("test")}, which is the whole of how
  * {@code src/test/resources/application-test.yml} comes into force. No build plugin activates that
  * profile on any class's behalf, so a class omitting the annotation would resolve the base profile
  * instead and reach for remote configuration sources the container does not serve.</p>
@@ -178,13 +222,13 @@
  * expect a mechanism that cannot resolve here.</p>
  *
  * <p>Alternatives Considered: one shared abstract base class holding the container, the property
- * registration and the schema prerequisite once for all five. Rejected: a container held in a base class
+ * registration and the schema prerequisite once for all six. Rejected: a container held in a base class
  * is shared mutable state, so rows one class inserts are rows another reads, and the failure then names
  * whichever class happened to run second. That hazard is concrete rather than hypothetical here, because
- * three of the five arrange rows in {@code account.card_xref} and each empties it for itself. Each class
- * starts its own container and owns its own schema state, which is what lets any one of the five be run
+ * three of the six arrange rows in {@code account.card_xref} and each empties it for itself. Each class
+ * starts its own container and owns its own schema state, which is what lets any one of the six be run
  * alone and still mean something. Trade-offs: the
- * accepted cost is five container starts and five copies of the container declaration, paid every time
+ * accepted cost is six container starts and six copies of the container declaration, paid every time
  * that declaration changes.</p>
  *
  * <p>Alternatives Considered: an in-memory engine, rejected more firmly here than anywhere else in the
@@ -282,11 +326,20 @@
  *       reject interfaces. Of the daily-transaction interface it owns ONE bounded walk asking whether the
  *       mapping resolves and orders; the driving loop's own properties belong to
  *       {@code DailyTransactionRepositoryIT} below, and the division is by question rather than by
- *       member, the interface now declaring a single read. It owns the 430-byte reject composition, which the
- *       baseline builds at
- *       {@code app/cbl/CBTRN02C.cbl:447} as a whole-group move of the daily record exactly as read, so
- *       the stored row retains that record's own trailing filler span and its own processing timestamp
- *       rather than acquiring fresh ones. On the cross-reference it owns the CATALOG fact -- that the
+ *       member, the interface now declaring a single read. Of the reject interface it owns the
+ *       reason-code CHECK constraint -- that a value outside the four-digit picture is refused by the
+ *       engine at the statement that writes it -- together with one reachability case over the stored
+ *       row; the 430-byte COMPOSITION and the as-read property belong to
+ *       {@code TransactionRejectRepositoryIT} below.
+ *       Trade-offs: that reachability case overlaps the composition owner's width case, and the overlap
+ *       is retained rather than removed, on the same reasoning recorded for the cross-reference further
+ *       down. Deleting a case from a green sibling to tidy a boundary would take its reject fixture
+ *       helper and two of its imports out of use with it, and the two are not the same assertion in any
+ *       event -- this one asks whether a 350-character value round-trips at its declared width, where the
+ *       owner asks whether the stored image is the daily record's own, which a width assertion cannot
+ *       see. The residual cost is that a reader meets the reject stream in two files; it is recorded
+ *       here so the second encounter reads as a boundary rather than as a duplicated proof.
+ *       On the cross-reference it owns the CATALOG fact -- that the
  *       by-account secondary index exists and is not unique -- which is a statement about the schema
  *       rather than about a query, and it additionally carries one reachability case confirming that
  *       both cross-reference finders resolve at all.</li>
@@ -344,8 +397,33 @@
  *       {@code app/cbl/CBTRN02C.cbl:29-32} and driven at {@code app/cbl/CBTRN02C.cbl:202-219}, and
  *       {@code app/jcl/POSTTRAN.jcl:30-31} mounts the dataset for input only, which is the documentary
  *       basis for an interface that declares no mutator.</li>
- *   <li>{@code PostingUnitOfWorkIT} across 6 cases -- the atomicity proof, the account and
- *       transaction writes that only it performs, and the daily-subset finder's ordering and window
+ *   <li>{@code TransactionRepositoryIT} across 11 cases -- the posted-transaction master's two ordered
+ *       reads, neither of which any other member reaches, and the convergence of the two producers that
+ *       write it. It owns the combine walk's ordering, which is transcribed from a sort utility rather
+ *       than from a program: {@code app/jcl/COMBTRAN.jcl:28} declares {@code TRAN-ID,1,16,CH}, a
+ *       sixteen-byte CHARACTER field at position one, and {@code app/jcl/COMBTRAN.jcl:30} requests it
+ *       ascending. Because that format is a BYTE comparison, the class owns the further ruling that the
+ *       walk must be collation-independent, and its fixture is built to detect the failure rather than to
+ *       illustrate the success: it mixes the hyphenated identifiers the accrual golden carries with
+ *       digit-only ones, and asserts that a byte order and a punctuation-blind order genuinely DISAGREE
+ *       on that fixture before asserting which of the two the engine produced. A single-shape fixture
+ *       would order identically under every collation and pass whatever the column's collation was. It
+ *       owns the continuation predicate being STRICTLY greater and which row that excludes, and the
+ *       absence of counting-based positioning from the interface's declared surface. Both of those are
+ *       target-side: the only {@code RESTART=} in the reference is commented out at
+ *       {@code app/jcl/DEFGDGD.jcl:2}, so resumption is an improvement rather than a port, and the class
+ *       says so rather than citing a paragraph that does not exist. Its convergence cases are the one
+ *       place the two producers are observed on one table at all -- posting writes the master at
+ *       {@code app/cbl/CBTRN02C.cbl:564} while accrual writes a separate {@code SYSTRAN} generation
+ *       declared across {@code app/jcl/INTCALC.jcl:37-41} -- and what licenses one table for both is that
+ *       {@code app/jcl/COMBTRAN.jcl:23-26} already fed the sort their concatenation, so their union was
+ *       always the working set. It asserts the accrual constants against
+ *       {@code tests/golden/interest/happy_path/transact.expected}, including that the category code
+ *       stores as {@code 0005} and not {@code 05}: the program moves a two-character literal at
+ *       {@code app/cbl/CBACT04C.cbl:483} into a field {@code app/cpy/CVTRA05Y.cpy:7} declares
+ *       {@code PIC 9(04)}, so the move zero-fills rather than space-fills.</li>
+ *   <li>{@code PostingUnitOfWorkIT} across 6 cases -- the atomicity proof, the account write that only
+ *       it performs, and the daily-subset finder's ordering and window
  *       against a real engine. That last case is here rather than beside the job that calls the finder
  *       because a stubbed repository can model an ORDER BY but cannot evaluate one, and because the
  *       window's upper bound is STRICT on a {@code TIMESTAMP(6)} -- a boundary only a real engine
@@ -354,13 +432,55 @@
  *       order established at L440 to L442, the account cycle accumulators that
  *       {@code app/cbl/CBTRN02C.cbl:545-551} maintains alongside the running balance, and the version
  *       ruling: a step that loses the optimistic-lock race FAILS THE STEP so the orchestrator retries
- *       it, and never re-reads and writes again behind the caller's back. It also owns the ascending walk
- *       of the category balances in key order, which is what makes the interest control break at
- *       {@code app/cbl/CBACT04C.cbl:194} correct -- that program declares the cluster
- *       {@code ORGANIZATION IS INDEXED} with {@code ACCESS MODE IS SEQUENTIAL} at L29 to L30, and the
- *       key it walks is proved arithmetically by the {@code KEYS(17 0)} at
+ *       it, and never re-reads and writes again behind the caller's back. Refactoring Rationale: this
+ *       entry also claimed the ascending walk of the category balances in key order, and that claim is
+ *       withdrawn because none of the six cases here was that walk -- the property is owned by the entry
+ *       below, which does assert it. What this entry retains of the category balance is the single write
+ *       it performs as the FIRST of the three that commit together.</li>
+ *   <li>{@code TransactionCategoryBalanceRepositoryIT} across 11 cases -- the two access disciplines the
+ *       category-balance interface declares, which is the one cluster the reference reaches two
+ *       structurally different ways. It owns the ASCENDING WALK in key order, which is what makes the
+ *       interest control break at {@code app/cbl/CBACT04C.cbl:194} correct: that program declares the
+ *       cluster {@code ORGANIZATION IS INDEXED} with {@code ACCESS MODE IS SEQUENTIAL} at L29 to L30,
+ *       and the key it walks is proved arithmetically by the {@code KEYS(17 0)} at
  *       {@code app/jcl/TCATBALF.jcl:40} against the eleven, two and four digit fields at
- *       {@code app/cpy/CVTRA01Y.cpy:6-8}, fixing the order as account, then type, then category.</li>
+ *       {@code app/cpy/CVTRA01Y.cpy:6-8}, fixing the order as account, then type, then category. The
+ *       break is a SINGLE-KEY compare carrying no set of accounts already seen, so an unordered walk
+ *       does not merely look untidy -- it flushes a partial interest total per spurious break and
+ *       reports success having posted the wrong money. Its walk fixture therefore varies all THREE key
+ *       levels, is inserted in the exact reverse of the expected order, and exceeds the walk's own
+ *       fetch window, so neither insertion order nor a single-level ordering can satisfy it; a
+ *       companion case pins the account identifier as ordered by MAGNITUDE using identifiers of
+ *       differing digit counts, which equal-width padded values could not distinguish. It also owns the
+ *       keyed read and the two arms at the DATABASE level: that an absent row is an empty result rather
+ *       than a raise, which is the relational form of the not-found status
+ *       {@code app/cbl/CBTRN02C.cbl:481} accepts alongside success, and that the create arm at
+ *       {@code :503-524} stores exactly the posted amount while the update arm at {@code :526-542} adds
+ *       to the balance already read -- asserted as separate cases against the two committed vectors, so
+ *       which arm ran stays observable. Two applications of an amount distinguish addition from
+ *       assignment, and a CONSTRUCTED negative case covers the sign that no shipped posting fixture
+ *       reaches. It owns the CATEGORY-BALANCE half of the accumulation obligation only; the account
+ *       cycle buckets are the entry above's.</li>
+ *   <li>{@code TransactionRejectRepositoryIT} across 7 cases -- the reject stream's 430-byte
+ *       composition, and specifically the property that phrase turns on: that the stored image is the
+ *       daily-transaction record AS READ. {@code app/cbl/CBTRN02C.cbl:447} moves
+ *       {@code DALYTRAN-RECORD} wholesale into the reject area in one statement and {@code :448} moves
+ *       the trailer over the remaining eighty, so nothing is recomposed, reformatted or re-stamped. The
+ *       consequence it proves is that the image keeps the DAILY record's own spans from
+ *       {@code app/cpy/CVTRA06Y.cpy} -- a BLANK processing-timestamp span at 1-based 305 to 330 beside a
+ *       POPULATED originating span at 279 to 304 -- and not the posted transaction's stamp, which only
+ *       {@code app/cbl/CBTRN02C.cbl:437-438} mints and only on the arm of {@code :211-216} this stream is
+ *       never written from. Both directions are asserted, and a further case appends a deliberately
+ *       stamped image to show the span predicate can actually fail, because a width-only assertion passes
+ *       against a recomposing implementation. It also owns the four persisted reason codes with their
+ *       verbatim texts as DATA, stored as a {@code SMALLINT} against the four zero-padded characters of
+ *       the wire form; the admission of DUPLICATE rejects, which is target-side and has no baseline
+ *       constraint to be faithful to; the database-assigned surrogate ordinal, the reference stream being
+ *       keyless per {@code app/cbl/CBTRN02C.cbl:46-49}; and the compile-time reading of the append-only
+ *       contract, the interface extending the marker base and declaring one member. Trade-offs: it
+ *       asserts ROWS and not BYTES -- {@code TransactionRejectRecordMapper} owns the byte image and the
+ *       job tier owns whole-stream parity against the committed reject expectations -- and it asserts no
+ *       return code, a graded exit status being a process concern rather than a repository's.</li>
  * </ul>
  *
  * <p>Alternatives Considered: no saga, no two-phase commit and no compensating reversal for the posting
@@ -372,7 +492,7 @@
  * engine rather than asserted in prose.</p>
  *
  * <p>Trade-offs: each proof above has exactly ONE owner, and the cost accepted for that is some
- * cross-referencing between the five classes -- the cross-reference table, for instance, is written by
+ * cross-referencing between the six classes -- the cross-reference table, for instance, is written by
  * three of them, and only one of them owns its access paths, and the daily-transaction interface is read
  * by more than one, its resolve-and-order question and its driving-loop properties owned separately. The alternative
  * was to let two classes each
@@ -444,7 +564,7 @@
  * one of them with no match-if-missing fallback, so the gate stays closed and no case here needs a
  * transport to be stood up.</p>
  *
- * <p>Assumptions: this package's file set is closed at the five integration classes and this charter. A
+ * <p>Assumptions: this package's file set is closed at the six integration classes and this charter. A
  * fixture builder, a shared constant holder or a container base class introduced here would reintroduce
  * the shared state ruling two rejects, and no subdirectory belongs here. The test-tree charter at
  * {@code com.carddemo.batch} owns the boundaries this whole tree does not cross -- that no controller
@@ -466,9 +586,12 @@
  * {@code app/cbl/CBTRN02C.cbl:548} is an inclusive comparison, so zero accumulates into the CREDIT bucket
  * and only a constructed row can show it. A negative amount appears in no posting fixture, although fifty
  * of those three hundred rows are negative, and the debit arm adds the already-negative amount AS IS
- * rather than negating it, so the stored accumulator is itself negative. And the shipped cross-reference
- * data is fifty rows with fifty distinct account identifiers, so the one-account-to-many-cards case that
- * the non-unique index permits does not occur in it at all -- which is precisely why a bare single-result
+ * rather than negating it, so the stored accumulator is itself negative -- which is true of BOTH
+ * accumulators the posting paragraph maintains, so the account cycle bucket and the category balance each
+ * carry a constructed negative case in the class that owns that table rather than sharing one. And the
+ * shipped cross-reference data is fifty rows with fifty distinct account identifiers, so the
+ * one-account-to-many-cards case that the non-unique index permits does not occur in it at all --
+ * which is precisely why a bare single-result
  * finder would pass against everything that ships and fail only once data the contract admits arrives.</p>
  *
  * <h2>Parameters, return values and exceptions: declared inapplicable</h2>
@@ -483,7 +606,7 @@
  * Fabricating the at-clauses instead would be worse than useless: Javadoc has no parameter, return or
  * exception concept for a package, and the shared ruleset audits at-clause bodies for emptiness, so an
  * invented clause would either be discarded or reported. That exemption is this compilation unit's alone
- * and does not travel to the five classes beside it, where a test class, a test method and a private
+ * and does not travel to the six classes beside it, where a test class, a test method and a private
  * helper alike do have parameters, return values and thrown types to document.</p>
  *
  * <h2>Why this charter exists, and the form it takes</h2>

@@ -292,12 +292,48 @@ async function listRendersMapsetColumnsAndCodes(): Promise<void> {
     collapse(CARD_LIST_LABELS.cardColumn),
     collapse(CARD_LIST_LABELS.activeColumn),
   ]);
-  expect(
-    within(table).getByRole('button', { name: CARD_LIST_ROW_ACTION_CODES.detail }),
-  ).toBeInTheDocument();
-  expect(
-    within(table).getByRole('button', { name: CARD_LIST_ROW_ACTION_CODES.update }),
-  ).toBeInTheDocument();
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the two row controls are found by reading the buttons' own text
+   *       instead of through `getByRole('button', { name })`, and the assertion is unchanged -- both
+   *       forms require one control labelled `S` and one labelled `U` inside this table. The
+   *       role-and-name form is what made this case unfinishable: measured on a four-core runner it cost
+   *       roughly two minutes against a 45-second `testTimeout`, because the `name` option makes
+   *       `dom-accessibility-api` compute an accessible name per candidate, and each computation calls
+   *       `getComputedStyle(element, '::before')` -- a pseudo-element form jsdom does not implement, so
+   *       every call is routed through its virtual console. That is the same
+   *       `Not implemented: Window's getComputedStyle() method: with pseudo-elements` notice the run
+   *       prints, and the same defect `ui/src/screens/cardList/browseNarrowing.test.tsx` records at its
+   *       own control-count assertion. Reading `textContent` needs no accessible name at all.
+   * WHY : Alternatives Considered: raising this file's `testTimeout` past two minutes. Rejected because
+   *       it would keep a two-minute case in the suite and describe the cost as expected rather than
+   *       removing it, and because the property under test is the mapset's own codes rather than the
+   *       accessible-name algorithm's agreement with them.
+   * WHY : Assumptions: the cost was independently measured a second way, and both measurements agree
+   *       that the `name` option is what has to go. Inside this screen mounted in the shell,
+   *       `within(table).getByRole('button', { name: 'S' })` takes 20.4s and the same query for `'U'`
+   *       takes 40.1s, so the pair alone exceeds the 45s budget; the identical query against a BARE antd
+   *       table carrying the same two buttons takes 1.1s, and `getByText` against that table takes 2ms.
+   *       The cost therefore scales with the CSS volume antd injects once the whole screen and shell are
+   *       mounted, not with the number of buttons.
+   * WHY : Trade-offs: the labels are read from `tbody` BUTTONS rather than by text anywhere in the table,
+   *       which is what keeps the assertion's subject exact. A plain text query would also have been
+   *       fast -- `'S'` and `'U'` are each the entire text of their control and collide with nothing else
+   *       here, since the headings read `Select`, `Account Number`, `Card Number` and `Active` and the
+   *       row's own values are an account number, a masked card number and a status flag -- but it would
+   *       no longer assert that the code is carried by an interactive control, and this case is where
+   *       the mapset's action codes are checked to REACH the row.
+   */
+  const rowControlLabels = Array.from(table.querySelectorAll('tbody button')).map(
+    /**
+     * Reads one rendered row control's visible label.
+     * @param {Element} control - One button rendered inside the table body.
+     * @returns {string} The control's text, trimmed.
+     */
+    (control: Element): string => (control.textContent ?? '').trim(),
+  );
+
+  expect(rowControlLabels).toContain(CARD_LIST_ROW_ACTION_CODES.detail);
+  expect(rowControlLabels).toContain(CARD_LIST_ROW_ACTION_CODES.update);
   expect(within(table).getByText(ROW.activeStatus)).toBeInTheDocument();
   expect(screen.getByLabelText(collapse(CARD_LIST_LABELS.cardNumberFilter))).toBeInTheDocument();
 }
@@ -339,6 +375,28 @@ async function listReportsThePagingRefusals(): Promise<void> {
   await user.click(screen.getByRole('button', { name: 'F7=Backward' }));
   expect(
     await screen.findByText(collapse(PROGRAM_MESSAGES.COCRDLIC.NO_PREVIOUS_PAGES_TO_DISPLAY)),
+  ).toBeInTheDocument();
+
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the FIRST forward key now expects `NO MORE RECORDS TO SHOW` and only
+   *       the SECOND expects `NO MORE PAGES TO DISPLAY`, where this expected the pages sentence
+   *       immediately. The old expectation described a screen that could not emit the records sentence at
+   *       all -- it was a catalog entry keyed to this program with no reachable path -- and the reference
+   *       distinguishes the two by a flag carried BETWEEN turns.
+   * WHY : ⚠️ Assumptions: the distinguishing flag is `WS-CA-LAST-PAGE-DISPLAYED`, and it lives in the
+   *       carried communication area rather than in working storage (`app/cbl/COCRDLIC.cbl` L239 to
+   *       L241), so it survives a turn. It is set NOT-SHOWN by every attention identifier that is not PF8
+   *       (L410 to L414), which the PF7 above therefore does. The pages sentence at L905 to L909 requires
+   *       `CA-LAST-PAGE-SHOWN`, which is set only at L915 by an EARLIER exhausted PF8 -- so the first
+   *       exhausted forward key cannot reach it, and what it reaches instead is the read's own
+   *       `IF WS-ERROR-MSG-OFF MOVE 'NO MORE RECORDS TO SHOW'` at L1238 to L1240. The second forward key
+   *       then finds the flag set and the pages sentence overwrites it.
+   * WHY : Assumptions: this now exercises all THREE of the program's paging refusals rather than two,
+   *       which is what the case name promises, and none of the three is a disabled key.
+   */
+  await user.click(screen.getByRole('button', { name: 'F8=Forward' }));
+  expect(
+    await screen.findByText(collapse(PROGRAM_MESSAGES.COCRDLIC.NO_MORE_RECORDS_TO_SHOW)),
   ).toBeInTheDocument();
 
   await user.click(screen.getByRole('button', { name: 'F8=Forward' }));
@@ -570,7 +628,18 @@ async function updateRefusesAnUnchangedSubmission(): Promise<void> {
 }
 
 /**
- * Asserts the save key writes exactly once, and only after the confirmation turn.
+ * Asserts the save key writes exactly once, and only after the confirmation turn AND its overlay.
+ *
+ * ⚠️ Refactoring Rationale: the accept step is new, and it is asserted rather than bypassed. The save
+ * key now opens a `Popconfirm` instead of writing directly, which AAP section 0.3.2 assigns as the
+ * browser form of the reference's re-key-to-confirm convention and section 0.4.1.4 names in this
+ * screen's composition. Asserting the write BEFORE the overlay is accepted is what keeps this case able
+ * to fail: a screen that wrote on the key press alone would leave the overlay decorative, and nothing
+ * else here would say so.
+ *
+ * Assumptions: the accept control is matched on the library's default name rather than on a legend
+ * string. The screen deliberately leaves it defaulted, because labelling it `F5=Save` would put a second
+ * control of that name on the document beside the legend control that opened it.
  * @returns {Promise<void>} Resolves once the write has been issued.
  */
 async function updateSaveKeyWritesOnceAfterConfirmation(): Promise<void> {
@@ -588,6 +657,10 @@ async function updateSaveKeyWritesOnceAfterConfirmation(): Promise<void> {
 
   await user.click(screen.getByRole('button', { name: 'F5=Save' }));
 
+  expect(vi.mocked(updateCard)).not.toHaveBeenCalled();
+
+  await user.click(await screen.findByRole('button', { name: 'OK' }));
+
   await waitFor(
     /**
      * Waits for the single write to be issued.
@@ -602,11 +675,17 @@ async function updateSaveKeyWritesOnceAfterConfirmation(): Promise<void> {
 /**
  * Asserts the cancel key discards the pending edit, re-reads, and states the source's own prompt.
  *
- * Assumptions: the prompt must SURVIVE the read that the cancel arm triggers. The reader clears the
- * band before issuing its request and the arm states its message straight afterwards, so a reader that
- * cleared the band on arrival instead would blank a message that had already been set -- which is the
- * regression this case exists to catch, and it is invisible to any assertion made before the read
- * settles.
+ * Assumptions: the sentence must SURVIVE the read that the cancel arm triggers, which is the regression
+ * this case exists to catch and is invisible to any assertion made before the read settles.
+ *
+ * ⚠️ Refactoring Rationale: the expected sentence is `FOUND_CARDS_FOR_ACCOUNT` and it was
+ * `PROMPT_FOR_CHANGES`, which the reference does not state on this turn. `3250-SETUP-INFOMSG` is the
+ * program's information-line `EVALUATE` and it sets `PROMPT-FOR-CHANGES` only `WHEN CCUP-CHANGES-NOT-OK`
+ * (`app/cbl/COCRDUPC.cbl` L1147-L1148) -- the refusal turn. The cancel arm sets `CCUP-SHOW-DETAILS`
+ * (L1010-L1012, and L494 on the entry path), whose arm is `FOUND-CARDS-FOR-ACCOUNT` at L1145-L1146. The
+ * screen now derives the line from the turn rather than stating it, so the reference's own mapping
+ * decides it; the previous expectation had encoded the refusal turn's sentence for a turn where nothing
+ * was refused.
  * @returns {Promise<void>} Resolves once the record has been read a second time.
  */
 async function updateCancelDiscardsAndRestatesThePrompt(): Promise<void> {
@@ -624,7 +703,7 @@ async function updateCancelDiscardsAndRestatesThePrompt(): Promise<void> {
   await user.click(screen.getByRole('button', { name: 'F12=Cancel' }));
 
   expect(
-    await screen.findByText(collapse(STATUS_MESSAGES.COCRDUPC.PROMPT_FOR_CHANGES.text)),
+    await screen.findByText(collapse(STATUS_MESSAGES.COCRDUPC.FOUND_CARDS_FOR_ACCOUNT.text)),
   ).toBeInTheDocument();
   await waitFor(
     /**

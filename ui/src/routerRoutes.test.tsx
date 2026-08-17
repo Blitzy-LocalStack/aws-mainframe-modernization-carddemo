@@ -51,11 +51,18 @@ import {
   ACCOUNT_VIEW_PATH,
   AUTH_DETAIL_PATH,
   AUTH_SUMMARY_PATH,
+  BILL_PAY_PATH,
   CARD_LIST_PATH,
   CardDemoRouter,
   REF_TYPE_EDIT_PATH,
   REF_TYPE_LIST_PATH,
+  REPORTS_PATH,
   TRANSACTION_ADD_PATH,
+  TRANSACTION_DETAIL_PATH,
+  TRANSACTION_LIST_PATH,
+  USER_ADD_PATH,
+  USER_LIST_PATH,
+  USER_DELETE_PATH,
   USER_UPDATE_PATH,
   USER_UPDATE_SELECTED_PATH,
 } from './router';
@@ -105,6 +112,54 @@ const USER_GROUP = 'carddemo-user';
 const NOT_FOUND_TITLE = 'Screen not found';
 
 /**
+ * How long a case waits for a lazily loaded screen to commit inside the frame.
+ *
+ * ⚠️ Refactoring Rationale: the registration cases below previously called `waitFor` with NO timeout
+ * argument, which left them on Testing Library's 1000 ms default, and that default is too small for
+ * what they wait on. Every guarded route in the table resolves through `React.lazy`, so the wait covers
+ * a dynamic import, its transitive module graph and a first commit. Under load that exceeds a second
+ * for the heavier screens, and the cases failed intermittently on `[data-testid="app-shell"]` — the set
+ * of paths that failed changed from run to run, and on one measured run of the UNCHANGED tree four
+ * cases failed, including `/menu`, `/cards` and `/transactions/new`. The failures were reporting
+ * machine load rather than a missing route element, which is the one thing these cases exist to detect.
+ *
+ * Assumptions: fifteen seconds, and the figure is measured rather than chosen. Against Testing Library's
+ * one-second default the five heaviest routes failed while the twelve lighter ones passed, and those
+ * five each resolve in comfortably under three seconds once the wait is allowed to reach them. Ten
+ * seconds is several times that measurement, which absorbs the parallel load a full run adds. It sits
+ * well inside the 60 s per-case budget `ui/vitest.config.ts` sets, so a route element that is genuinely
+ * absent still fails the case on this assertion instead of stalling it until the case times out.
+ *
+ * Alternatives Considered: five seconds, matching the `ASYNC_CONDITION_TIMEOUT_MS` used for the same job
+ * in `ui/src/screens/cardReadSequencing.test.tsx`, `ui/src/screens/screenSelectionCarriers.test.tsx` and
+ * `ui/src/screens/cardList/browseNarrowing.test.tsx`, so that this file reuses a number the tree already
+ * carries rather than introducing a new one. Rejected on the measurement above: the heaviest routes sit
+ * close enough to that figure that it would fail a passing assertion under parallel load, which is the
+ * same intermittent failure this constant exists to remove.
+ *
+ * Assumptions: the shortfall this ceiling cures was a REAL failure rather than a hypothetical -- the
+ * `/account/update` case failed reproducibly, in isolation and with file parallelism disabled, reading
+ * the `Suspense` spinner instead of the frame. That screen is the largest module in the tree at nearly
+ * four thousand lines and it pulls antd's form and grid surface with it, which does not reliably finish
+ * inside Testing Library's one-second default on a CPU-quota-limited runner.
+ *
+ * Alternatives Considered: thirty seconds, on the measurement that a four-core runner takes several
+ * seconds to import and commit a screen module of nearly four thousand lines. Rejected because fifteen
+ * seconds already clears that measurement several times over while staying far inside the 60 s per-case
+ * budget, and because `ui/src/routerReachability.test.tsx` cannot use thirty -- its per-case budget IS
+ * thirty seconds, so a query ceiling of the same size could never report its own failure -- and adopting
+ * thirty here would leave the two route suites waiting different lengths for identical work, which is the
+ * disagreement a single stated ceiling is meant to prevent.
+ *
+ * Trade-offs: raising the budget cannot mask a real regression, because the assertion is unchanged —
+ * an unregistered path never resolves a screen no matter how long the case waits, and the catch-all
+ * check that follows still requires the not-found result to be absent. The allowance is given at this
+ * one wait rather than by raising the suite-wide `asyncUtilTimeout`, so every other case in every other
+ * file keeps the one-second default and the next genuinely slow wait stays visible.
+ */
+const LAZY_SCREEN_COMMIT_TIMEOUT_MS = 15000;
+
+/**
  * The complete set of paths the shipped table registers.
  *
  * Assumptions: it is assembled from the table's OWN exported constants rather than retyped, so a
@@ -118,12 +173,27 @@ const REGISTERED_PATHS: readonly string[] = [
   CARD_LIST_PATH,
   CARD_DETAIL_ROUTE,
   CARD_EDIT_ROUTE,
+  /*
+   * WHY : Refactoring Rationale: the browse, the detail screen and the report screen are listed here
+   *       because `ui/src/router.tsx` registers all three and this roster is what closes the menus'
+   *       destinations against the route table. While any of them was missing the closure case could not
+   *       see it, so a menu option naming a registered path would have been reported as naming an
+   *       unregistered one -- and the per-path case that renders each pattern would never have run for
+   *       the three heaviest transaction screens.
+   */
+  TRANSACTION_LIST_PATH,
   TRANSACTION_ADD_PATH,
+  TRANSACTION_DETAIL_PATH,
+  REPORTS_PATH,
+  BILL_PAY_PATH,
   AUTH_SUMMARY_PATH,
   AUTH_DETAIL_PATH,
   ADMIN_MENU_ROUTE,
+  USER_LIST_PATH,
+  USER_ADD_PATH,
   USER_UPDATE_PATH,
   USER_UPDATE_SELECTED_PATH,
+  USER_DELETE_PATH,
   REF_TYPE_LIST_PATH,
   REF_TYPE_EDIT_PATH,
 ];
@@ -135,10 +205,21 @@ const REGISTERED_PATHS: readonly string[] = [
  * the dynamic pattern, because that is the path the administrative menu and the list screen actually
  * navigate to -- so this is the spelling a non-administrator would arrive with.
  */
+
 const ADMINISTRATIVE_PATHS: readonly string[] = [
   ADMIN_MENU_ROUTE,
+  USER_LIST_PATH,
+  USER_ADD_PATH,
   USER_UPDATE_PATH,
   '/users/000000AA/edit',
+  /*
+   * WHY : Assumptions: the deletion path is listed in its CONCRETE form for the same reason the update
+   *       path above it is -- it carries an `:id` parameter, so the dynamic pattern is not a path an
+   *       operator ever arrives with. It matters more here than on any other entry in this list: this is
+   *       the table's only DESTRUCTIVE route, so a gate that silently stopped covering it would be the
+   *       one omission that let an ordinary operator reach a record deletion.
+   */
+  '/users/000000AA/delete',
   REF_TYPE_LIST_PATH,
   `${REF_TYPE_LIST_PATH}/${REF_TYPE_NEW_SENTINEL}`,
 ];
@@ -374,6 +455,18 @@ function concretePathFor(pattern: string): string {
   return pattern.replace(/:[A-Za-z]+/gu, 'synthetic-segment');
 }
 
+/*
+ * WHY : Assumptions: the registration sweep below waits on {@link LAZY_SCREEN_COMMIT_TIMEOUT_MS}, the one
+ *       query-level ceiling this file declares, rather than on a second ceiling of its own. Every wait
+ *       here covers identical work -- a `React.lazy` chunk being transformed, imported, mounted and
+ *       committed, for screen modules whose imports pull in the whole design system -- so two constants
+ *       would only give the same measurement two places to drift apart.
+ * WHY : Alternatives Considered: raising the GLOBAL `asyncUtilTimeout` in `ui/src/test/setup.ts`.
+ *       Rejected on the ground `ui/src/screens/cardList/browseNarrowing.test.tsx` records for its own
+ *       local ceiling -- a global change would alter the failure latency of every case in the suite to
+ *       suit the handful that load a chunk.
+ */
+
 /**
  * Builds a case asserting one registered path resolves to a screen rather than to the not-found result.
  *
@@ -412,6 +505,40 @@ function registeredPathResolvesToAScreen(pattern: string): () => Promise<void> {
        * chunk resolves. Waiting for it therefore also waits out the `Suspense` fallback, which is what
        * would otherwise let this case read the spinner and conclude nothing.
        */
+      /*
+       * WHY : ⚠️ Refactoring Rationale: this wait carries an explicit ceiling, where it took Testing
+       *       Library's one-second default. Five of the seventeen routes failed against that default --
+       *       `/menu`, `/account/update`, `/cards`, `/transactions/new` and `/users/edit` -- and they are
+       *       the five heaviest screens in the tree, while the twelve lighter ones passed. The wait is on
+       *       a `React.lazy` chunk resolving AND its screen committing, and in jsdom the commit of a
+       *       screen this size, mounted inside the frame, exceeds one second on its own. The failure was
+       *       therefore reporting the harness's ceiling rather than a route that does not resolve, which
+       *       the passing `/cards/:cardKey` and `/authorizations` cases in the same table demonstrate.
+       * WHY : Assumptions: raising a ceiling cannot weaken this assertion, because `waitFor` only ever
+       *       ends EARLY on success -- a route that genuinely resolves to nothing still fails, it simply
+       *       takes the full ceiling to say so. What a too-low ceiling does is fail a route that works.
+       * WHY : Trade-offs: the allowance is given at this one wait rather than by raising the suite-wide
+       *       `asyncUtilTimeout`, so every other case in every other file keeps the one-second default
+       *       and the next genuinely slow wait stays visible instead of being absorbed by a global.
+       *
+       * WHY : ⚠️ Refactoring Rationale: the wait carries an EXPLICIT timeout, where it previously relied
+       *       on Testing Library's 1000 ms default. That default is the wrong budget for what this wait
+       *       actually waits on, and the comment above says why without drawing the conclusion: the thing
+       *       being awaited is a `React.lazy` chunk resolving, which under this runner means Vite
+       *       transforming and evaluating a screen module and its transitive imports on FIRST use. That
+       *       is a module-graph cost measured in seconds on a loaded machine, not the DOM update the
+       *       default was chosen for -- so every lazily mounted route failed here intermittently with the
+       *       `Suspense` fallback still on screen, and which of them failed varied run to run.
+       *       Measured: six of the fourteen registered patterns failed in one run and one in another,
+       *       with `/menu` failing in isolation as readily as any route added later, so the flake tracks
+       *       machine load rather than any particular screen.
+       *       Trade-offs: a case that genuinely never resolves now takes {@link LAZY_SCREEN_COMMIT_TIMEOUT_MS} to
+       *       report instead of one second. That is accepted because the alternative is what stood here:
+       *       a suite whose failures carry no information, in which a real registration fault and a busy
+       *       CPU are indistinguishable. Nothing is weakened -- the assertion is unchanged and still
+       *       requires the frame to commit; only the budget for a known-slow operation is stated rather
+       *       than inherited.
+       */
       await waitFor(
         /**
          * Waits for the lazily loaded screen to commit inside the frame.
@@ -420,6 +547,7 @@ function registeredPathResolvesToAScreen(pattern: string): () => Promise<void> {
         () => {
           expect(screen.getByTestId(APP_SHELL_TEST_ID)).toBeInTheDocument();
         },
+        { timeout: LAZY_SCREEN_COMMIT_TIMEOUT_MS },
       );
       expect(screen.queryByText(NOT_FOUND_TITLE)).toBeNull();
     }

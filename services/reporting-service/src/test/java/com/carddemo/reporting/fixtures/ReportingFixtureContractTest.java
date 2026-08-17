@@ -179,6 +179,13 @@ class ReportingFixtureContractTest {
      * {@code app/cpy/CVTRA01Y.cpy}, which {@code app/jcl/PRTCATBL.jcl} reads at its declared
      * 50-byte length, and it is a planned member of this directory rather than a stray file.</p>
      *
+     * <p>Assumptions: {@code xreffile.txt} is the second such admission, and it is the same record
+     * as {@code cardxref.txt} under a different data-definition name rather than a new record type.
+     * {@code app/jcl/CREASTMT.JCL} line 84 supplies {@code XREFFILE} to {@code app/cbl/CBSTM03A.CBL},
+     * and line 118 of {@code app/cbl/CBSTM03B.CBL} resolves that name as one of its four branches, so
+     * the statement path reads the cross-reference under a name the report path never uses. Admitting
+     * it by name is what keeps the two files from being mistaken for a duplicate of one another.</p>
+     *
      * <p>Alternatives Considered: relaxing the assertion to a lower bound so that any newly added
      * fixture passes without an edit here. Rejected because it would surrender the exact property
      * the paragraph above is built on: an unrelated or accidentally committed file, or a fixture
@@ -269,10 +276,21 @@ class ReportingFixtureContractTest {
      * 486 to 490 ABENDS rather than warning and continuing, and because the lookup fires only inside
      * the control break at lines 181 to 188 a missing row makes the report print the account id left
      * resident from the PREVIOUS card rather than a blank. The sentinel {@code 9999999999999999} is
-     * absent for a different reason -- it is the value the statement path points at as its orphan, so
-     * it must exist in no fixture here. Both properties are asserted rather than described, by
+     * absent for a different reason -- it is the value the report and statement paths point at as
+     * their orphan, so it must exist in neither the card master nor the cross-reference. Both
+     * properties are asserted rather than described, by
      * {@link #theCardFixturesCarryEveryStatedRelationship()}, so adding either row to "tidy up" the
      * files fails rather than quietly deleting a case.</p>
+     *
+     * <p>Refactoring Rationale: that sentence previously said the sentinel "must exist in no fixture
+     * here", which was broader than both its purpose and the assertion enforcing it. An unresolvable
+     * key has to appear in the DRIVING record for the lookup to be attempted at all; what makes it
+     * unresolvable is its absence from the two files the lookup reads. {@code tranfile.txt} carries
+     * it as the card of its first orphan row for exactly that reason, and the assertions in
+     * {@link #theCardFixturesCarryEveryStatedRelationship()} were always scoped to
+     * {@code carddata.txt} and {@code cardxref.txt} alone, so the narrowed wording now matches both
+     * the design and the code. Left as it was, the paragraph would have read as a prohibition on the
+     * one row that makes the orphan case exist.</p>
      *
      * <p>Refactoring Rationale: this paragraph previously described the unreferenced card as one of
      * "the eighty-four {@code 1010000000000001} through {@code 1010000000000084} overflow cards" of a
@@ -280,10 +298,28 @@ class ReportingFixtureContractTest {
      * occurred only in this directory's own three files -- so the sentence attributed the row's
      * provenance to a corpus that does not exist. The row's real purpose, being the one card absent
      * from the cross-reference, is stated above and is now asserted.</p>
+     *
+     * <p>Assumptions: {@code tranfile.txt} is the third such admission, and it is the only member of
+     * this directory whose name is a data-definition name rather than a seed-dataset name. The posted
+     * transaction master is batch OUTPUT, so no seeded extract of it exists to borrow a name from;
+     * {@code app/cbl/CBTRN03C.cbl} names its input {@code TRANFILE} and {@code app/jcl/TRANREPT.jcl}
+     * supplies it at lines 65 and 66, so the DD name is what the file is called. Its layout is
+     * {@code app/cpy/CVTRA05Y.cpy}, registered as {@code TRAN}, 350 bytes, and it carries 31 rows:
+     * 26 inside the {@code 2022-01-01} to {@code 2022-07-06} window that lines 43 and 44 of that job
+     * supply, two fully resolvable rows one day outside each end, and three rows whose card, type
+     * code and type-and-category pair respectively resolve in none of the three lookup fixtures. It
+     * is 350 rather than the 60 or 50 bytes of its neighbours because it is the driving record of the
+     * report rather than one of the tables the report joins to.</p>
+     *
+     * <p>Trade-offs: admitting it costs one line here and three argument-source rows below, against
+     * the alternative of leaving the closed set as it was and letting the fixture live outside the
+     * assertions. That was rejected for the reason the paragraph above gives: a fixture this
+     * directory holds but this class does not name is a fixture whose length, round trip and pad
+     * character nobody checks, and it is the largest and most offset-dependent record here.</p>
      */
     private static final List<String> EXPECTED_RESOURCES =
             List.of("README.md", "acctfile.txt", "carddata.txt", "cardxref.txt", "custfile.txt",
-                    "tcatbal.txt", "trancatg.txt", "trantype.txt");
+                    "tcatbal.txt", "trancatg.txt", "tranfile.txt", "trantype.txt", "xreffile.txt");
 
     /**
      * Resolves the fixture directory on the test classpath.
@@ -373,6 +409,31 @@ class ReportingFixtureContractTest {
                 //       still leaving every surviving row exactly 50 bytes.
                 Arguments.of("cardxref.txt", "XREF", 50, 4),
 
+                // WHY : Assumptions: this is the second fixture the entry above anticipated, and it
+                //       arrives against that SAME descriptor rather than declaring one of its own.
+                //       xreffile.txt is the DD name app/jcl/CREASTMT.JCL line 84 supplies to
+                //       app/cbl/CBSTM03A.CBL, whose subprogram resolves it at line 118 of
+                //       app/cbl/CBSTM03B.CBL, where FD-XREFFILE-REC is declared X(16) + X(34) --
+                //       the same 50 bytes app/cpy/CVACT03Y.cpy sums to. Two file names over one
+                //       registry entry is the whole point: a layout declared twice can disagree
+                //       with itself.
+                //       Trade-offs: the row count of 88 is stated here as well as being readable
+                //       from the file. Eighty-four of those rows are one account's cards and exist
+                //       only to carry more distinct cards than the 51 of WS-CARD-TBL at line 226 of
+                //       app/cbl/CBSTM03A.CBL, so a silently dropped row would erode that margin
+                //       while still leaving every surviving row exactly 50 bytes and passing every
+                //       other case here.
+                //       Alternatives Considered: numbering those 84 cards as a plain consecutive run
+                //       9900001010000002 upward, which is the obvious scheme and is NOT what the file
+                //       does -- its sixteenth digit is deliberately not the Luhn check digit of the
+                //       first fifteen, so the visible sequence sits in digits ten to fifteen. The
+                //       consecutive run was rejected because the check digit cycles: roughly one card
+                //       in ten would come out Luhn-VALID, and a Luhn-valid sixteen-digit number is
+                //       exactly what a scanner or a reviewer reads as a real card. Forcing the digit
+                //       wrong keeps all 84 provably unissuable, which is the property this
+                //       directory's README attests of every fabricated number.
+                Arguments.of("xreffile.txt", "XREF", 50, 88),
+
                 // WHY : Assumptions: the balance fixture is registered last because it is the child
                 //       of the two reference fixtures above -- every one of its rows draws a type
                 //       code from trantype.txt and a type-and-category pair from trancatg.txt, which
@@ -385,7 +446,26 @@ class ReportingFixtureContractTest {
                 //       COBOL program and so has only generic SORTIN and SORTOUT names to offer,
                 //       while TCATBAL is the registry key. Passing either one in the other position
                 //       fails, which is the intended outcome.
-                Arguments.of("tcatbal.txt", "TCATBAL", 50, 8));
+                Arguments.of("tcatbal.txt", "TCATBAL", 50, 8),
+
+                // WHY : Assumptions: the posted-transaction master is the DRIVING record of the
+                //       report rather than one of the tables the report joins to, so its 350 bytes
+                //       and 31 rows are declared here for the same three structural cases as its
+                //       siblings. Its two load-bearing offsets are confirmed four times over -- field
+                //       arithmetic across app/cpy/CVTRA05Y.cpy puts TRAN-CARD-NUM at zero-based 262
+                //       and TRAN-PROC-TS at 304, app/jcl/TRANREPT.jcl lines 41 and 42 declare the
+                //       ONE-based DFSORT positions 263 and 305, app/jcl/TRANIDX.jcl line 27 builds an
+                //       alternate index KEYS(26 304) over RECORDSIZE(350,350), and
+                //       app/cbl/CBTRN03C.cbl lines 61 to 65 split its own FD as X(304) plus X(26)
+                //       plus X(20).
+                //       Trade-offs: the row count of 31 is stated here as well as being readable from
+                //       the file, because the count is load-bearing in a way a length check cannot
+                //       see. WS-PAGE-SIZE at line 131 of that program is 20 and the grand total is
+                //       accumulated from PAGE totals at line 297 rather than from transactions, so a
+                //       fixture that quietly fell to 20 in-range rows or fewer would stop
+                //       distinguishing that chain from a plain sum while every surviving row remained
+                //       exactly 350 bytes.
+                Arguments.of("tranfile.txt", "TRAN", 350, 31));
     }
 
     /**
@@ -461,10 +541,10 @@ class ReportingFixtureContractTest {
      *
      * <p>Assumptions: the pad character is a per-record-type fact taken from the shipped extracts
      * under {@code app/data/ASCII/}, and it is NOT one convention for the whole directory. Measured
-     * across those extracts, {@code acctdata.txt} and {@code custdata.txt} pad with BLANKS while
-     * {@code tcatbal.txt}, {@code trantype.txt} and {@code trancatg.txt} pad with ASCII ZEROES, and
-     * the sibling fixture trees agree -- {@code transaction-service}'s balance fixtures and
-     * {@code reference-service}'s type and category fixtures all pad with zeroes.</p>
+     * across those extracts, {@code acctdata.txt}, {@code custdata.txt} and {@code dailytran.txt}
+     * pad with BLANKS while {@code tcatbal.txt}, {@code trantype.txt} and {@code trancatg.txt} pad
+     * with ASCII ZEROES, and the sibling fixture trees agree -- {@code transaction-service}'s balance
+     * fixtures and {@code reference-service}'s type and category fixtures all pad with zeroes.</p>
      *
      * <p>Refactoring Rationale: three of this directory's fixtures padded with blanks where
      * their extracts pad with zeroes, so the same record type was written two ways two directories
@@ -501,7 +581,7 @@ class ReportingFixtureContractTest {
                 //       than described, and it is narrower than the withdrawn claim:
                 //       everyFixturePadIsSuppliedByTheCodecOnlyWhenItIsBlank below decodes each row,
                 //       removes the FILLER entry from the decoded map, re-encodes, and asserts the
-                //       committed bytes come back -- but only for the four BLANK-padded fixtures.
+                //       committed bytes come back -- but only for the five BLANK-padded fixtures.
                 //       The codec's rule is content-based, so a zero pad is content it carries
                 //       rather than padding it derives, and the three zero-padded fixtures are
                 //       asserted NOT to be reproducible from the descriptor. That asymmetry is why
@@ -519,7 +599,36 @@ class ReportingFixtureContractTest {
                 //       committed cardxref fixture in the repository for a record type whose own
                 //       extract offers no counter-evidence.
                 Arguments.of("cardxref.txt", "XREF", ' '),
+
+                // WHY : Assumptions: the statement path's cross-reference pads identically, because
+                //       the pad is a property of the DESCRIPTOR the two files share rather than of
+                //       either file. Registering it separately is still worth the line: it is what
+                //       puts all 88 of its rows through the codec-rebuild case below, which is the
+                //       only mechanical proof that its FILLER span agrees with app/cpy/CVACT03Y.cpy
+                //       byte for byte.
+                //       Alternatives Considered: leaving it out on the grounds that cardxref.txt
+                //       already covers the XREF pad. Rejected because the two files carry different
+                //       row counts and different card numbers, so a defect confined to the 84-row
+                //       block -- a short row, or a FILLER a generator filled with zeros -- would be
+                //       invisible to a case that only ever read the four-row file.
+                Arguments.of("xreffile.txt", "XREF", ' '),
                 Arguments.of("carddata.txt", "CARD", ' '),
+
+                // WHY : Assumptions: the posted-transaction master's pad is a BLANK, measured rather
+                //       than assumed, and it is measured from a DIFFERENT record's extract because
+                //       its own is batch output and does not exist. app/data/ASCII/dailytran.txt is
+                //       the daily-transaction record of app/cpy/CVTRA06Y.cpy, whose field widths are
+                //       identical to CVTRA05Y's field for field, so its trailing FILLER occupies the
+                //       same columns 331 to 350. All 300 of its records are 350 bytes and every one
+                //       of those spans holds 20 blanks, so the measurement is unanimous.
+                //       Alternatives Considered: padding this one with ASCII zeroes to match the
+                //       three zero-padded reference records. Rejected on that measurement -- the pad
+                //       belongs to the record type, and for this record type the only extract with
+                //       the same geometry pads with blanks. Choosing zeroes would also have moved
+                //       this fixture out of the codec-suppliable half of the rule asserted by
+                //       everyFixturePadIsSuppliedByTheCodecOnlyWhenItIsBlank, turning a pad the
+                //       descriptor can rebuild into content the file has to carry.
+                Arguments.of("tranfile.txt", "TRAN", ' '),
                 Arguments.of("tcatbal.txt", "TCATBAL", '0'),
                 Arguments.of("trantype.txt", "TRANTYPE", '0'),
                 Arguments.of("trancatg.txt", "TRANCAT", '0'));
@@ -1219,7 +1328,7 @@ class ReportingFixtureContractTest {
      * <p>Purpose: settle, per record type, whether the committed pad byte is something the codec
      * derives from the descriptor or something the file states. The codec's rule is content-based and
      * measured here rather than assumed: a BLANK padding field is dropped on decode and restored on
-     * encode, while a NONBLANK one stays content and is carried through. So the four blank-padded
+     * encode, while a NONBLANK one stays content and is carried through. So the five blank-padded
      * fixtures do get their pad from the codec, and the three zero-padded ones do not -- their zeroes
      * are data the file supplies, which is exactly why
      * {@link #everyFixturePadsWithItsExtractsCharacter} has to measure the character from the
@@ -1282,7 +1391,7 @@ class ReportingFixtureContractTest {
                     StandardCharsets.UTF_8).substring(pad.start(), pad.end());
 
             // WHY : Assumptions: the codec's restored pad is always BLANK, whatever the record type,
-            //       and that single fact is what makes the two branches above meaningful. For the four
+            //       and that single fact is what makes the two branches above meaningful. For the five
             //       blank-padded fixtures it equals the committed bytes, so the pad is a codec fact and
             //       a descriptor whose FILLER span disagreed with the file would fail here. For the
             //       three zero-padded ones it deliberately does NOT equal them, which is the positive

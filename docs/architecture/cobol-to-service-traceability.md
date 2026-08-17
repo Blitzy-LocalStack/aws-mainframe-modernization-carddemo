@@ -4391,7 +4391,7 @@ a register of this size stays true.
   failure", and the `TransactionTypePage` schema said an empty page is what a caller receives "when
   the filters match no row". All three were wrong about the filtered case, and the running code was
   right. So this is a **documentation correction, not a behavioural change** — the code was already a
-  faithful transcription and is untouched. **Alternatives Considered:** relaxing the code to 200 so
+  faithful transcription and is untouched. Alternatives Considered: relaxing the code to 200 so
   it matched the text as written. Rejected because that would discard a paragraph the baseline
   reaches on every filtered browse, along with a sentence and a pair of field highlights a user of
   that screen saw.
@@ -4401,10 +4401,10 @@ a register of this size stays true.
   list screen for categories to transcribe: the extension tree holds exactly two maps,
   `COTRTLI.bms` (type list) and `COTRTUP.bms` (type update); no program in it browses
   `CARDDEMO.TRANSACTION_TYPE_CATEGORY` as a list; and both of `COTRTLIC`'s declared cursors, at
-  **L339** and **L355**, read `CARDDEMO.TRANSACTION_TYPE`. **Alternatives Considered:** giving
+  **L339** and **L355**, read `CARDDEMO.TRANSACTION_TYPE`. Alternatives Considered: giving
   categories the same refusal for symmetry — rejected because it would invent a refusal the baseline
   never performs on a screen it never had, which rule T9 forbids absent a documented divergence.
-  **Trade-offs:** one condition therefore has two answers across two sibling collections, which
+  Trade-offs: one condition therefore has two answers across two sibling collections, which
   costs a caller writing one client for both. Accepted and **published on both operations** rather
   than smoothed over, because each half is faithful to what the baseline does and does not contain,
   and a silent divergence between siblings is the larger risk.
@@ -4852,7 +4852,7 @@ a register of this size stays true.
   class — only a test did — and with no listener there, no delivery could reach it, so the
   table was empty in every environment by construction. A table nothing inserts into
   supplies no idempotency, so keeping it documented a discipline the schema did not
-  enforce. **Alternatives Considered:** retaining it against a future listener in that
+  enforce. Alternatives Considered: retaining it against a future listener in that
   module. Rejected because the exchange has one consumer by design — two consumers on one
   queue would race for each delivery, and an earlier revision that bound a second
   `@SqsListener` here is recorded as withdrawn on `com.carddemo.reference.package-info`.

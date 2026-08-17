@@ -56,12 +56,39 @@
  * Assumptions: every card number reaching this screen is already masked by the service, and each row
  * carries an opaque selector used for navigation. Nothing here reconstructs a number, so a screen
  * capture, an edge access log and the browser history all hold the masked form only.
+ *
+ * Assumptions: masking to the LAST FOUR digits is AAP section 0.4.1.9's rule, which permits an unmasked
+ * primary account number on the administrative card-detail endpoint and nowhere else -- a browse is not
+ * that endpoint. The mask is applied by the service rather than here, so {@link CardSummary} publishes
+ * `displayCardNumber` already masked and this module has no unmasked value to leak; that is the stronger
+ * arrangement, because a client-side mask still ships the full number to the browser.
+ *
+ * Assumptions: no card verification value is rendered, requested or held. The record declares
+ * `CARD-CVV-CD PIC 9(03)` at `app/cpy/CVACT02Y.cpy` L7 and the browse row never carried it -- the
+ * program moves only the card number, the account and the status into the screen array at
+ * `app/cbl/COCRDLIC.cbl` L1165 to L1171 -- and `ui/src/api/types.ts` declares no such member at all.
+ *
+ * Cursor contract
+ * ---------------
+ * Assumptions: the browse position is a COMPOSITE of card number and account identifier, not the card
+ * number alone. Both COMMAREA cursors declare both halves -- `WS-CA-LAST-CARDKEY` as
+ * `WS-CA-LAST-CARD-NUM PIC X(16)` plus `WS-CA-LAST-CARD-ACCT-ID PIC 9(11)`, and `WS-CA-FIRST-CARDKEY`
+ * the same pair, at `app/cbl/COCRDLIC.cbl` L230 to L235. A single-column cursor would page incorrectly
+ * wherever the second half discriminates.
+ *
+ * Assumptions: the account half of the record-identification restore is COMMENTED OUT in the reference,
+ * at L490 to L491, L506 to L507 and L576 to L577, so the live code restores only the card number. That
+ * is precisely why the target carries the full DECLARED composite instead of copying the live subset:
+ * the declaration states the intended key and the commented lines show the restore was meant to use
+ * both halves. The cursors themselves are opaque strings here -- sealed by the service, never parsed and
+ * never constructed by this module -- so the composition is the service's to honour and this screen
+ * cannot silently disagree with it.
  */
 
-import { Button, Flex, Input, Space, Table, Typography } from 'antd';
+import { Button, Flex, Input, Space, Table, Typography, theme } from 'antd';
 import type { TableColumnsType } from 'antd';
 import { useCallback, useState } from 'react';
-import type { ReactElement } from 'react';
+import type { CSSProperties, ReactElement } from 'react';
 import { useNavigate } from 'react-router';
 
 import { listCards, lookupCard } from '../../api/cards';
@@ -77,6 +104,16 @@ import type { CardListQuery } from '../../api/types';
 import { VISUALLY_HIDDEN_STYLE, fieldAriaProps, fieldErrorId } from '../../layout/fieldHelp';
 import { usePagedQuery } from '../../hooks/usePagedQuery';
 import { ScreenTitle } from '../../layout/ScreenTitle';
+import { TYPOGRAPHY_TOKENS } from '../../theme/tokens';
+
+/**
+ * The `var(--…)` reference form of the design tokens, as antd's theme hook publishes it.
+ *
+ * Assumptions: derived from the hook rather than written out, so the column builder below takes exactly
+ * what `theme.useToken()` yields and no separate declaration can drift from it. This is the spelling
+ * `ui/src/screens/authSummary/index.tsx` L130 already uses for the same purpose.
+ */
+type AntdCssVariables = ReturnType<typeof theme.useToken>['cssVar'];
 
 /** Paging refusals this screen renders, taken verbatim from the catalog keyed by its program. */
 const CARD_LIST_PAGING_MESSAGES = PROGRAM_MESSAGES.COCRDLIC;
@@ -223,6 +260,21 @@ const ACCOUNT_NUMBER_LABEL_ID = 'card-list-account-number-label';
  */
 type FilterFieldName = 'accountNumber' | 'cardNumber';
 
+/**
+ * The refusal each filter field carries after the last turn, or `null` where that field was accepted.
+ *
+ * Assumptions: a sentence PER FIELD rather than one shared sentence, because the band and the field
+ * answer different questions. The band answers "what is wrong with this turn" and carries one sentence
+ * under the reference's account-first precedence (`app/cbl/COCRDLIC.cbl` L1021 unguarded against L1056
+ * guarded); a field's description answers "what is wrong with THIS field" and is announced only when
+ * that field has focus. Sharing one sentence between them makes the second answer wrong whenever both
+ * fields are refused.
+ */
+type FilterRefusals = Readonly<Record<FilterFieldName, string | null>>;
+
+/** No field refused, which is the state every turn begins in. */
+const NO_FILTER_REFUSALS: FilterRefusals = { accountNumber: null, cardNumber: null };
+
 /** Identifier of the account-number filter control itself. */
 const ACCOUNT_NUMBER_INPUT_ID = 'card-list-account-number';
 
@@ -239,6 +291,93 @@ const ACCOUNT_NUMBER_INPUT_ID = 'card-list-account-number';
 
 /** Identifier of the card-number filter control itself. */
 const CARD_NUMBER_INPUT_ID = 'card-list-card-number';
+
+/**
+ * Declared width of one row's action field, `CRDSELn` on the mapset.
+ *
+ * Assumptions: one character, from `LENGTH=1` on `CRDSEL1` at `app/bms/COCRDLI.bms` L143 and
+ * `CRDSEL1I PIC X(1)` at `app/cpy-bms/COCRDLI.CPY` L78. The terminal refused a second keystroke in
+ * that field, and `maxLength` is how a browser control refuses it.
+ */
+const ROW_ACTION_WIDTH = 1;
+
+/*
+ * WHY : ⚠️ Alternatives Considered: antd's `InputNumber` for the two numeric filter fields, which is the
+ *       obvious control for an all-digits entry and is REJECTED on two independent grounds. The first is
+ *       fidelity: `app/cpy/CVCRD01Y.cpy` L34 to L39 declares `CC-ACCT-ID PIC X(11)` with
+ *       `CC-ACCT-ID-N REDEFINES` it as `PIC 9(11)`, and `CC-CARD-NUM PIC X(16)` with
+ *       `CC-CARD-NUM-N REDEFINES` it as `PIC 9(16)` -- CHARACTERS on the wire and a number only where
+ *       arithmetic needs one, which is why `2210-EDIT-ACCOUNT` tests `IS NOT NUMERIC` on the character
+ *       form rather than reading a number.
+ * WHY : ⚠️ Trade-offs: the second ground is correctness and it is decisive. `Number.MAX_SAFE_INTEGER` is
+ *       9007199254740991, which is sixteen digits, so a real sixteen-digit primary account number such
+ *       as 4111111111111111 EXCEEDS it and a numeric binding loses precision silently -- the entry would
+ *       round to a different card with no error anywhere. Both filters are therefore plain `Input`
+ *       controls holding strings end to end, with `maxLength` supplying the width the terminal field
+ *       enforced and a digits-only predicate supplying the `IS NOT NUMERIC` test. The cost accepted is
+ *       that no stepper or numeric keypad affordance comes for free; `inputMode="numeric"` recovers the
+ *       keypad without recovering the precision loss.
+ */
+
+/*
+ * WHY : ⚠️ Trade-offs: the seven rows are grouped by a `Table` rather than positioned as the mapset's 72
+ *       absolute field coordinates, which is AAP gap G1 and is a deliberate, documented deviation.
+ *       `DFHMDI SIZE=(24,80)` fixes a 24-by-80 character grid and every one of the 72 `DFHMDF` entries
+ *       carries an absolute `POS=(row,column)`. What is preserved is field GROUPING, reading order and
+ *       tab order -- the selection field then the account number then the card number then the active
+ *       flag, in that order, one group per row. What is deliberately not preserved is pixel-for-character
+ *       positioning: reproducing absolute character coordinates in a browser would defeat every
+ *       assistive technology that reflows content and could not respond to a viewport at all.
+ */
+
+/*
+ * WHY : Assumptions: every user-visible string on this screen comes from `../../messages/messages` or
+ *       from the mapset constants declared in this module, and none is written inline at a use site.
+ *       That catalog is the single owner of text a COBOL source holds, which is what makes the
+ *       verbatim guarantee checkable in one place instead of at every render.
+ * WHY : ⚠️ Assumptions: `NO RECORDS TO SHOW` is deliberately NOT among them. It looks like an eleventh
+ *       message for this program and is not one: `app/cbl/COCRDLIC.cbl` L1243 is
+ *       `*               MOVE 'NO RECORDS TO SHOW'  TO WS-ERROR-MSG`, commented out with a `*` in
+ *       column 7, and the live statement beneath it at L1244 sets `WS-NO-RECORDS-FOUND` instead. The
+ *       reference therefore never emits that string, and rendering it would invent a message rather
+ *       than migrate one. The catalog holds no entry for it either.
+ * WHY : Assumptions: the composite `WS-FILE-ERROR-MESSAGE` (L153 to L171) is likewise not surfaced. It
+ *       appends the internal file name and the CICS response and reason codes, which are internal
+ *       identifiers that must not reach a browser; {@link CARD_LIST_PAGE_UNAVAILABLE} answers that
+ *       class of failure with the correlation identifier the operator already has.
+ */
+
+/*
+ * WHY : Assumptions: no design VALUE appears in this module -- no colour, spacing, radius, font or
+ *       duration literal -- and no `ConfigProvider` is instantiated here. `ui/src/App.tsx` is the sole
+ *       `ConfigProvider` and `ui/src/theme/tokens.ts` the sole source of design values, so the mapset's
+ *       own operands are resolved once, centrally: `GREEN` on the two filter fields to `colorSuccess`,
+ *       `TURQUOISE` on the labels and the legend to `colorInfo`, `NEUTRAL` on the headings and the
+ *       informational band to `colorTextSecondary`, `DEFAULT` on the row fields to `colorText` and
+ *       `RED` on the error band to `colorError`. A colour written here would be a second source of
+ *       truth for one of those operands, which is exactly what the zero-hardcoded-values rule exists
+ *       to prevent; the band's own severity and `Input`'s own `status` carry the two runtime colours
+ *       this screen needs, `DFHNEUTR` and `DFHRED`, without either being named locally.
+ */
+
+/** Identifier stem for the per-row action fields, suffixed with the row's position. */
+const ROW_ACTION_INPUT_ID_PREFIX = 'card-list-row-action-';
+
+/**
+ * Accessible name carried by every row's action field.
+ *
+ * Assumptions: the mapset gives these fields no label of their own -- the column heading
+ * `Select    ` at `app/bms/COCRDLI.bms` L111 names the whole column and a 3270 field needs no
+ * programmatic association -- so the heading's own text is used as each field's accessible name. It is
+ * trimmed because the declared padding sizes a terminal column and would otherwise be announced.
+ *
+ * Alternatives Considered: naming each field with the row it belongs to, which would make the names
+ * unique. Rejected because the only value available to distinguish them is the masked card number, and
+ * putting that in an accessible name would announce a card number on a screen whose entire disclosure
+ * posture is that it renders only the masked form. The column heading is what a sighted operator reads
+ * above the field, so it is the honest name.
+ */
+const ROW_ACTION_FIELD_LABEL = CARD_LIST_LABELS.selectColumn.trim();
 
 /*
  * WHY : ⚠️ Refactoring Rationale: the account filter is RESTORED to this screen. It is the first of the
@@ -257,8 +396,14 @@ const CARD_NUMBER_INPUT_ID = 'card-list-card-number';
  *       number's sixteen so the two widths read as the field contracts they are.
  */
 
-/** Declared width of the account-number filter field, `ACCTSID` at `app/bms/COCRDLI.bms` L89 to L93. */
-const ACCOUNT_FILTER_WIDTH = 11;
+/*
+ * WHY : ⚠️ Refactoring Rationale: a module-private `ACCOUNT_FILTER_WIDTH = 11` stood here and is GONE,
+ *       because {@link CARD_LIST_ACCOUNT_FILTER_WIDTH} below already held the same eleven as an EXPORTED
+ *       constant and nothing consumed it. Two names for one field contract is a value that can be
+ *       changed in one place and not the other, and the one a reader would reasonably trust -- the
+ *       exported one, which is the published contract -- was the one no control was bound to. The
+ *       control is now bound to the exported constant and the duplicate is withdrawn.
+ */
 
 /** Matches an account filter of exactly the declared width, all digits. */
 /*
@@ -299,15 +444,46 @@ export const CARD_LIST_FIRST_PAGE = 1;
 /**
  * How many rows this screen has room for, as the reference program declares it.
  *
- * Assumptions: seven, from `05 WS-MAX-SCREEN-LINES PIC S9(4) COMP VALUE 7` at
- * `app/cbl/COCRDLIC.cbl` L177 to L178, which is also the arity of its row array. The paging hook
- * requires this rather than defaulting it, because the five browses it serves declare five different
- * arities and a default would render another screen's.
+ * Assumptions: seven, corroborated THREE independent ways so the figure is not read off one line.
+ * First, the mapset paints seven row families -- `CRDSEL1` through `CRDSEL7` at
+ * `app/bms/COCRDLI.bms` L140, L162, L189, L216, L243, L270 and L297, on screen rows 11 to 17. Second,
+ * the program's own array comment reads `File Data Array 28 CHARS X 7 ROWS = 196` at
+ * `app/cbl/COCRDLIC.cbl` L250, over `WS-ALL-ROWS PIC X(196)` redefined as `WS-SCREEN-ROWS OCCURS 7
+ * TIMES` of an eleven-character account, a sixteen-character card number and a one-character status at
+ * L253 to L260, which is 28 bytes. Third, it is a named constant --
+ * `05 WS-MAX-SCREEN-LINES PIC S9(4) COMP VALUE 7` at L177 to L178 -- and it is that constant the browse
+ * loop compares the row counter against at L1191 to decide the page is full.
+ *
+ * Assumptions: the paging hook REQUIRES this rather than defaulting it, because the five browses it
+ * serves declare five different arities and a default would render another screen's page size.
  */
 export const CARD_LIST_PAGE_SIZE = 7;
 
 /** Width of the account filter field, from `CC-ACCT-ID PIC X(11)` and `ACCTSIDI` on the mapset. */
 export const CARD_LIST_ACCOUNT_FILTER_WIDTH = 11;
+
+/**
+ * Width of the card-number filter field, from `CC-CARD-NUM PIC X(16)` and `CARDSIDI` on the mapset.
+ *
+ * ⚠️ Refactoring Rationale: this constant is NEW and the card filter's `maxLength` was a bare `16`
+ * before it existed, which made the comment above the account width state something untrue -- that the
+ * eleven "is written as a named constant beside the card number's sixteen so the two widths read as the
+ * field contracts they are". There was no such constant, so one field contract was named and documented
+ * while its sibling was an unexplained literal at the point of use. Both are now named, and the claim
+ * that they read alike is true rather than aspirational.
+ *
+ * Assumptions: sixteen, from two agreeing sources -- `CARDSID DFHMDF ... LENGTH=16` at
+ * `app/bms/COCRDLI.bms` L101 and `02 CARDSIDI PIC X(16)` in the generated symbolic map at
+ * `app/cpy-bms/COCRDLI.CPY` L72 -- and the program's own refusal at `app/cbl/COCRDLIC.cbl` L1058 names
+ * sixteen digits.
+ *
+ * Assumptions: the width bounds a STRING and never a number. A sixteen-digit card number such as
+ * 4111111111111111 exceeds `Number.MAX_SAFE_INTEGER` (9007199254740991), so a numeric binding would lose
+ * precision silently -- which is the same reason the baseline itself carries the field as characters,
+ * `CC-CARD-NUM PIC X(16)` with a `CC-CARD-NUM-N REDEFINES ... PIC 9(16)` used only for arithmetic
+ * (`app/cpy/CVCRD01Y.cpy` L37 to L39).
+ */
+export const CARD_LIST_CARD_FILTER_WIDTH = 16;
 
 /*
  * WHY : ⚠️ Refactoring Rationale: the screen-ordinal helper that stood here is GONE, together with the
@@ -387,6 +563,427 @@ export function buildCardListQuery(
 }
 
 /**
+ * The two action characters `88 SELECT-OK VALUES 'S', 'U'` admits, as a type.
+ *
+ * Assumptions: UPPER CASE ONLY, and that is the source's own domain rather than a simplification.
+ * `app/cbl/COCRDLIC.cbl` contains no `FUNCTION UPPER-CASE` anywhere -- verified by search over all
+ * 1459 lines -- so `2250-EDIT-ARRAY` compares the received byte against `'S'` and `'U'` literally and
+ * a lower-case `s` falls to its `WHEN OTHER` arm at L1108. Folding case here would ACCEPT an entry the
+ * reference refuses, which is a behavioural change rather than a courtesy.
+ */
+export type CardListActionCode = 'S' | 'U';
+
+/**
+ * Outcome of editing the seven per-row action entries, as `2250-EDIT-ARRAY` computes it.
+ *
+ * Assumptions: a refusal and a selection are mutually exclusive, because the reference dispatches on
+ * `INPUT-ERROR` first: its `WHEN INPUT-ERROR` arm at `app/cbl/COCRDLIC.cbl` L419 re-displays the map
+ * and takes `GO TO COMMON-RETURN` at L438, so the two transfer arms at L517 and L545 are never
+ * reached on a turn that raised one. `selectedRow` is therefore `null` whenever `message` is set,
+ * even though the reference still assigns `I-SELECTED` at L1102 on the way through.
+ */
+export interface CardListSelectionEdit {
+  /** Index of the one row to act on within the entries supplied, or `null` when none may be. */
+  readonly selectedRow: number | null;
+  /** Action requested for that row, or `null` when no row may be acted on. */
+  readonly action: CardListActionCode | null;
+  /** The refusal to put on the message band, or `null` when the entries were acceptable. */
+  readonly message: string | null;
+  /** Indices of the rows to mark as errored, matching `WS-ROW-CRDSELECT-ERROR`. */
+  readonly erroredRows: readonly number[];
+}
+
+/**
+ * Edits the per-row action entries exactly as `2250-EDIT-ARRAY` does.
+ *
+ * Purpose: decide, from the characters standing in the selection column, whether one row may be
+ * opened, or which refusal the band must carry and which rows must be marked. It is the transcription
+ * of `app/cbl/COCRDLIC.cbl` L1073 to L1117 and is the whole reason the two selection messages in the
+ * catalog are reachable at all.
+ *
+ * Assumptions: the TALLY is taken across every entry before any row is judged, which is the order the
+ * reference uses -- `INSPECT WS-EDIT-SELECT-FLAGS TALLYING I FOR ALL 'S' ALL 'U'` at L1079 to L1082
+ * runs over the whole seven-byte field, and only then does `IF I > +1` at L1084 decide. Judging row by
+ * row and stopping at the first action would never see the second one, so the
+ * more-than-one refusal could not exist.
+ *
+ * Assumptions: when more than one action is present, EVERY row carrying one is marked and not just
+ * the last. L1088 to L1093 copies the whole flags field and replaces `'S'` and `'U'` with `'1'`, so
+ * the mark lands on each of them; an operator who typed two must be shown both.
+ *
+ * Assumptions: the invalid-code sentence is GUARDED and the row mark is not. L1110 marks the row
+ * unconditionally while L1111 writes the sentence only `IF WS-ERROR-MSG-OFF`, so a turn that already
+ * raised the more-than-one refusal keeps that sentence and still marks the stray row. This asymmetry
+ * is the same shape as the one between the two filter edits and is reproduced rather than smoothed.
+ *
+ * Assumptions: a blank entry is `' '` or unset, from `88 SELECT-BLANK VALUES ' ', LOW-VALUES` at L1106
+ * read against L80 to L82. A browser has no low-values state, so the empty string stands for it.
+ * @param {readonly string[]} entries - The action characters in row order, one per rendered row,
+ *   each already limited to a single character by the control that collected it.
+ * @returns {CardListSelectionEdit} The row to act on, or the refusal and the rows to mark.
+ */
+export function reduceCardListSelection(entries: readonly string[]): CardListSelectionEdit {
+  const codes = entries.map(
+    /**
+     * Reads one entry as the single byte the terminal field held.
+     * @param {string} entry - One row's action entry.
+     * @returns {string} That entry with surrounding blanks removed.
+     */
+    (entry: string): string => entry.trim(),
+  );
+
+  /*
+   * WHY : Assumptions: the tally is taken over EVERY entry before any row is judged, which is the
+   *       order `INSPECT WS-EDIT-SELECT-FLAGS TALLYING I FOR ALL 'S' ALL 'U'` imposes at
+   *       `app/cbl/COCRDLIC.cbl` L1079 to L1082 -- the whole seven-byte field is inspected and only
+   *       then does `IF I > +1` at L1084 decide.
+   * WHY : Alternatives Considered: judging row by row and stopping at the first action found.
+   *       Rejected because it can never observe the second action, so the more-than-one refusal
+   *       could not be produced at all.
+   */
+  const tooMany =
+    codes.filter(
+      /**
+       * Reports whether one entry names an action.
+       * @param {string} code - That row's action entry, blanks removed.
+       * @returns {boolean} True when the entry is `S` or `U`.
+       */
+      (code: string): boolean => code === 'S' || code === 'U',
+    ).length > 1;
+
+  const erroredRows: number[] = [];
+  let message: string | null = tooMany
+    ? CARD_LIST_STATUS_MESSAGES.WS_MORE_THAN_1_ACTION.text
+    : null;
+  let selectedRow: number | null = null;
+  let action: CardListActionCode | null = null;
+
+  /*
+   * WHY : Alternatives Considered: `forEach` with a callback, which is the idiom used elsewhere in
+   *       this file. A plain loop is used here because the loop assigns three enclosing bindings, and
+   *       assignments made inside a callback are not narrowed by the compiler at the return
+   *       statement below -- so the callback form would need an assertion the loop form does not.
+   */
+  for (let index = 0; index < codes.length; index += 1) {
+    const code = codes[index] ?? '';
+    if (code === 'S' || code === 'U') {
+      selectedRow = index;
+      action = code;
+      if (tooMany) {
+        erroredRows.push(index);
+      }
+      continue;
+    }
+    if (code === '') {
+      continue;
+    }
+    // WHY : Assumptions: a stray character marks its OWN row and no other, because L1110 writes the
+    //       mark at the loop's current subscript. The sentence is withheld when one is already set,
+    //       which is L1111's `IF WS-ERROR-MSG-OFF` guard -- so a turn that already raised the
+    //       more-than-one refusal keeps that sentence and still marks this row.
+    erroredRows.push(index);
+    message ??= CARD_LIST_STATUS_MESSAGES.WS_INVALID_ACTION_CODE.text;
+  }
+
+  /*
+   * WHY : Assumptions: a raised refusal suppresses the transfer entirely, for the reason
+   *       `CardListSelectionEdit` records -- the reference's `WHEN INPUT-ERROR` arm returns before
+   *       either transfer arm is evaluated. Returning the row anyway would open a card on the same
+   *       turn that told the operator their entries were wrong.
+   */
+  return message === null
+    ? { selectedRow, action, message: null, erroredRows: [] }
+    : { selectedRow: null, action: null, message, erroredRows };
+}
+
+/**
+ * Builds the four browse columns the mapset paints, in the order it paints them.
+ *
+ * Purpose: describe the selection column and the three data columns for the antd `Table`, so the
+ * column set is one documented value rather than an anonymous array buried in the render. Extracting
+ * it also makes the column order and the per-row control assertable without mounting the screen.
+ *
+ * Assumptions: FOUR columns in the mapset's own order -- the selection field at `app/bms/COCRDLI.bms`
+ * L140, the account number at L147, the card number at L152 and the active flag at L157 -- and their
+ * headings are the four `COLOR=NEUTRAL` literals at L111, L115, L119 and L123. The headings keep their
+ * declared padding in {@link CARD_LIST_LABELS} and are trimmed only here, at the point of rendering.
+ *
+ * Assumptions: no column is bound to an embossed name, an expiration date or a card verification
+ * value. The browse row is the three values `app/cbl/COCRDLIC.cbl` L258 to L260 declares, and
+ * {@link CardSummary} publishes exactly those three beside the row's selector, so a column bound to
+ * anything else would render empty for every row. The verification value is absent by design: the
+ * record declares `CARD-CVV-CD PIC 9(03)` at `app/cpy/CVACT02Y.cpy` L7 and this screen never showed
+ * it, so it reaches no request and no row model.
+ * @param {object} options - Everything the columns need from the screen's own state.
+ * @param {readonly string[]} options.actionEntries - Action characters in row order, one per row.
+ * @param {ReadonlySet<number>} options.erroredRows - Indices of rows the last turn marked.
+ * @param {boolean} options.rowsProtected - Whether every row's action field is protected, which is
+ *   this screen's spelling of `FLG-PROTECT-SELECT-ROWS-YES`.
+ * @param {string | null} options.refusal - The refusal sentence to describe a marked field with, or
+ *   `null` when the last turn raised none.
+ * @param {(index: number, entry: string) => void} options.onActionEntryChange - Records the character
+ *   typed into one row's action field.
+ * @param {(row: CardSummary) => void} options.onOpenDetail - Opens one row's detail immediately, for
+ *   a pointer user who cannot reach the unpainted Enter key.
+ * @param {(row: CardSummary) => void} options.onOpenUpdate - Opens one row's update form immediately.
+ * @param {AntdCssVariables} options.tokens - The theme's CSS-variable references, from which the two
+ *   identifier columns take the fixed-pitch face.
+ * @returns {TableColumnsType<CardSummary>} The four columns, selection column first.
+ */
+export function buildCardListColumns(options: {
+  readonly actionEntries: readonly string[];
+  readonly erroredRows: ReadonlySet<number>;
+  readonly rowsProtected: boolean;
+  readonly refusal: string | null;
+  readonly onActionEntryChange: (index: number, entry: string) => void;
+  readonly onOpenDetail: (row: CardSummary) => void;
+  readonly onOpenUpdate: (row: CardSummary) => void;
+  readonly tokens: AntdCssVariables;
+}): TableColumnsType<CardSummary> {
+  /*
+   * WHY : ⚠️ Assumptions: the two IDENTIFIER columns are placed in the fixed-pitch face, and they were
+   *       previously left on the body's proportional face. A browser run measured the gap rather than
+   *       inferring it: both cells computed the antd default sans stack, and the count of monospace
+   *       elements inside `.ant-table` was ZERO while the header band on the very same screen carried
+   *       four. AAP section 0.3.3 maps "Fixed-pitch money and identifier columns" to `fontFamilyCode`
+   *       precisely because it "preserves column alignment for numeric data", and an 11-digit account
+   *       number stacked above another in a proportional face does not align digit-for-digit the way the
+   *       terminal's character cells did.
+   * WHY : Assumptions: the token is read through `TYPOGRAPHY_TOKENS.fixedPitchData` rather than naming
+   *       `fontFamilyCode` here, so the mapping stays in `ui/src/theme/tokens.ts` where that module
+   *       records the measurement behind it -- 29 right-justified numeric fields and 5
+   *       `PICOUT='+ZZZ,ZZZ,ZZZ.99'` money fields in the baseline. No literal font value appears in this
+   *       file, which is what keeps AAP section 0.3.2's zero-hardcoded-values rule true here.
+   * WHY : ⚠️ Assumptions: the one-character ACTIVE column is deliberately NOT included. The token's
+   *       stated purpose is inter-row alignment of numeric data, and a column whose every value is
+   *       exactly one character (`CRDSTS1` through `CRDSTS7`, `app/bms/COCRDLI.bms` L157 `LENGTH=1`) is
+   *       aligned in any face, so switching it would change the face without preserving anything.
+   */
+  const fixedPitch: CSSProperties = {
+    fontFamily: options.tokens[TYPOGRAPHY_TOKENS.fixedPitchData],
+  };
+  return [
+    // WHY : Assumptions: the selection column comes FIRST because the mapset paints `CRDSEL1` at
+    //       column 12 and the account number at column 22 (`app/bms/COCRDLI.bms` L144, L151), and the
+    //       order a returning operator reads is part of the screen.
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the mapset's SIX hidden per-row carrier fields render NOTHING
+     *       here, and this note exists because the specification mis-describes them. `CRDSTP2` through
+     *       `CRDSTP7` sit at `app/bms/COCRDLI.bms` L169, L196, L223, L250, L277 and L304 -- one per list
+     *       row 2 to 7, with deliberately no `CRDSTP1` -- each declared
+     *       `ATTRB=(ASKIP,DRK,FSET) LENGTH=1 POS=(row,14)`. `ASKIP` means the cursor SKIPS the field, so
+     *       it can never be typed into, and a search for `CRDSTP` across all 1459 lines of
+     *       `app/cbl/COCRDLIC.cbl` returns ZERO hits: the program neither reads nor writes them. They
+     *       are inert, carry no data, and exist only in the mapset and the generated symbolic map
+     *       (`app/cpy-bms/COCRDLI.CPY` L103 to L108 and its five siblings).
+     * WHY : ⚠️ Assumptions: AAP gap G2 is WRONG about these six and the correction is recorded here
+     *       rather than acted on. That gap describes the `(ASKIP,DRK,FSET)` fields as "password entry on
+     *       the sign-on screen" and resolves them to `Input.Password`. That resolution is right for the
+     *       sign-on screen's own darkened field and wrong for these: a password field is typed into and
+     *       these cannot be, and no program statement references them. Rendering them as password
+     *       inputs would invent six focusable controls per page that the reference does not have, so
+     *       nothing is rendered for them and no `Input.Password` appears anywhere on this screen.
+     */
+    {
+      title: CARD_LIST_LABELS.selectColumn.trim(),
+      key: 'actions',
+      /**
+       * Renders one row's action field and the two immediate controls beside it.
+       * @param {CardSummary} row - The row the controls act on.
+       * @param {CardSummary} _record - The same row, which antd passes a second time; unused.
+       * @param {number} index - That row's position among the rendered rows.
+       * @returns {ReactElement} The action field and its two pointer controls.
+       */
+      render: (row: CardSummary, _record: CardSummary, index: number): ReactElement => {
+        /*
+         * WHY : ⚠️ Refactoring Rationale: ONE uniform error presentation for all seven rows, where the
+         *       reference has two. Row 1 takes `MOVE DFHBMPRF` and, when its entry is blank, also moves
+         *       a literal `'*'` into the field (`app/cbl/COCRDLIC.cbl` L753 to L759); rows 2 to 7 take
+         *       `MOVE DFHBMPRO` and instead move `-1` into the field's length to reposition the cursor
+         *       (L766 to L773 and the four blocks after it). Both arms then move the SAME `DFHRED` into
+         *       the colour attribute, so the visible refusal is identical and the divergence is in the
+         *       protect byte and in a cursor mechanism a browser expresses through focus rather than
+         *       through a length field. The asymmetry carries no behavioural meaning -- the paragraph's
+         *       own comment at L749 reads "USE REDEFINES AND CLEAN UP REPETITIVE CODE !!", which is the
+         *       author saying the repetition was unintended -- so reproducing it would reproduce a
+         *       transcription artefact. It is normalised deliberately and recorded here.
+         */
+        const errored = options.erroredRows.has(index);
+        const controlId = `${ROW_ACTION_INPUT_ID_PREFIX}${String(index)}`;
+        return (
+          <Space size="small">
+            {/*
+             * WHY : ⚠️ Assumptions: this is the row's own one-character field, `CRDSELn` at
+             *       `app/bms/COCRDLI.bms` L140 with `LENGTH=1` and `CRDSELnI PIC X(1)` at
+             *       `app/cpy-bms/COCRDLI.CPY` L78, so `maxLength` is one. It is what makes the
+             *       reference's workflow reachable: an operator types `S` or `U` and presses Enter,
+             *       and only that path can produce `PLEASE SELECT ONLY ONE RECORD TO VIEW OR UPDATE`
+             *       or `INVALID ACTION CODE`. Without a field to type into, both sentences are
+             *       structurally unreachable and two catalog entries describe behaviour the screen
+             *       cannot exhibit.
+             * WHY : Assumptions: `disabled` carries `FLG-PROTECT-SELECT-ROWS-YES`. The reference
+             *       protects every row's field when either filter edit failed -- set at
+             *       `app/cbl/COCRDLIC.cbl` L1020 and L1055, cleared at L987, consumed by
+             *       `1250-SETUP-ARRAY-ATTRIBS` at L748 to L831 -- and it also skips selection editing
+             *       altogether on such a turn (L1075 to L1077), so an entry made then could not be
+             *       acted on in any case.
+             * WHY : Refactoring Rationale: the empty-row half of that same condition,
+             *       `WS-EACH-CARD(n) EQUAL LOW-VALUES`, needs no test here. It protects the unfilled
+             *       tail of a seven-row array on a fixed terminal; a table renders a row per delivered
+             *       item, so an absent row renders no field to protect. The condition is satisfied
+             *       structurally rather than by a branch that could never be false.
+             * WHY : Alternatives Considered: wrapping the field in an antd `Form.Item` to carry
+             *       `validateStatus` and `help`. Rejected for the reason this file already records for
+             *       its filter controls -- the selection column is not a form, and a `Form.Item` per
+             *       row would give each row a submit path competing with the Enter binding
+             *       `usePfKeys` installs. `status` carries the identical error treatment, and
+             *       `fieldAriaProps` with a described refusal carries the `help` text accessibly,
+             *       which is the mechanism the two filter controls above already use.
+             */}
+            <Input
+              {...fieldAriaProps(controlId, {
+                invalid: errored,
+                hasError: errored && options.refusal !== null,
+                hasHint: false,
+              })}
+              aria-label={ROW_ACTION_FIELD_LABEL}
+              disabled={options.rowsProtected}
+              id={controlId}
+              maxLength={ROW_ACTION_WIDTH}
+              onChange={
+                /**
+                 * Records the character typed into this row's action field.
+                 * @param {object} event - The change event antd forwards.
+                 * @param {object} event.target - The input element the event came from.
+                 * @param {string} event.target.value - The entry as it now stands.
+                 * @returns {void} Nothing; the entry is recorded as a side effect.
+                 */
+                (event: { target: { value: string } }): void => {
+                  options.onActionEntryChange(index, event.target.value);
+                }
+              }
+              status={errored ? 'error' : ''}
+              value={options.actionEntries[index] ?? ''}
+            />
+            {/*
+             * WHY : ⚠️ Refactoring Rationale: this element was MISSING and its absence made the field's
+             *       own accessible description a dangling reference. `fieldAriaProps` above is given
+             *       `hasError`, so it emits `aria-describedby="card-list-row-action-<n>-error"`, but the
+             *       only `fieldErrorId` targets this module rendered were the two FILTER controls, so no
+             *       element with that id existed on the page. A browser run confirmed it rather than
+             *       inferring it: with rows marked, `getElementById` for that id returned `null` and
+             *       `[...document.querySelectorAll('[id$="-error"]')]` was empty. The consequence is
+             *       exactly the one `ui/src/layout/fieldHelp.tsx` names at L61 and L130 as the reason it
+             *       exists -- a screen-reader user on a marked row is told "invalid" and nothing about
+             *       why.
+             * WHY : Assumptions: the sentence is repeated here VISUALLY HIDDEN rather than beside the
+             *       field, which is the identical treatment the two filter controls already use in this
+             *       file. The shared band shows it to a sighted operator once, and row 23 is where the
+             *       mapset puts it, so printing it per row would add seven copies of a sentence the
+             *       mapset declares once. What the reference does put ON the row is the colour --
+             *       `app/cpy/CSSETATY.cpy` L17-L27 moves `DFHRED` into the FIELD's attribute byte -- and
+             *       `status="error"` above is that half; this element is the half an attribute byte
+             *       cannot carry.
+             * WHY : Assumptions: it is rendered only while this row is marked AND a sentence exists,
+             *       which is the same pair of conditions `hasError` is given, so the description can
+             *       neither outlive the refusal it describes nor be claimed without being rendered.
+             */}
+            {errored && options.refusal !== null ? (
+              <span id={fieldErrorId(controlId)} style={VISUALLY_HIDDEN_STYLE}>
+                {options.refusal}
+              </span>
+            ) : null}
+            {/*
+             * WHY : Trade-offs: the two immediate controls are KEPT beside the field even though the
+             *       reference has no such controls, and the cost is two affordances for one action.
+             *       They are kept because Enter is unpainted on this mapset -- its legend at
+             *       `app/bms/COCRDLI.bms` L339 names only F3, F7 and F8, so `usePfKeys` renders no
+             *       Enter control -- and a pointer-only user would otherwise have no way at all to
+             *       submit a row action. This is the same accommodation AAP section 0.4.4 makes for
+             *       the function keys themselves, where the bar "renders the same actions as buttons
+             *       so the workflow is discoverable to new users without being taken away from
+             *       existing ones". Each is labelled with the code the field accepts, so the two
+             *       affordances teach one vocabulary.
+             */}
+            <Button
+              disabled={options.rowsProtected}
+              onClick={
+                /**
+                 * Opens this row's card detail without waiting for a turn.
+                 * @returns {void} Nothing; navigation is the effect.
+                 */
+                (): void => {
+                  options.onOpenDetail(row);
+                }
+              }
+              size="small"
+            >
+              {CARD_LIST_ROW_ACTION_CODES.detail}
+            </Button>
+            <Button
+              disabled={options.rowsProtected}
+              onClick={
+                /**
+                 * Opens this row's card update form without waiting for a turn.
+                 * @returns {void} Nothing; navigation is the effect.
+                 */
+                (): void => {
+                  options.onOpenUpdate(row);
+                }
+              }
+              size="small"
+            >
+              {CARD_LIST_ROW_ACTION_CODES.update}
+            </Button>
+          </Space>
+        );
+      },
+    },
+    // WHY : Assumptions: the browse row carries the account number rather than the embossed name or
+    //       the expiration date, because those two are members of the card DETAIL while the list row
+    //       is the three values `app/cbl/COCRDLIC.cbl` L258 to L260 declares.
+    {
+      title: CARD_LIST_LABELS.accountColumn,
+      dataIndex: 'accountId',
+      /**
+       * Renders one row's account number in the fixed-pitch face.
+       * @param {string} accountId - The row's eleven-digit account number.
+       * @returns {ReactElement} The number, aligned digit-for-digit with the rows around it.
+       */
+      render: (accountId: string): ReactElement => (
+        <Typography.Text style={fixedPitch}>{accountId}</Typography.Text>
+      ),
+    },
+    {
+      title: CARD_LIST_LABELS.cardColumn.trim(),
+      dataIndex: 'displayCardNumber',
+      /**
+       * Renders one row's card number in the fixed-pitch face.
+       *
+       * Assumptions: the value arrives ALREADY masked to its last four digits and is rendered as
+       * delivered, so no masking happens here. `ui/src/api/types.ts` publishes the row's number as
+       * `displayCardNumber` for that reason, and AAP section 0.4.1.9 permits an unmasked number only on
+       * the administrative detail endpoint -- which this browse is not.
+       * @param {string} displayCardNumber - The row's masked card number, as the service delivered it.
+       * @returns {ReactElement} The masked number in the fixed-pitch face.
+       */
+      render: (displayCardNumber: string): ReactElement => (
+        <Typography.Text style={fixedPitch}>{displayCardNumber}</Typography.Text>
+      ),
+    },
+    // WHY : Assumptions: the flag renders as the stored character. The source column is one character
+    //       wide (`CRDSTS1` through `CRDSTS7`, `app/bms/COCRDLI.bms` L157 with `LENGTH=1`) under a
+    //       heading that names the domain, so `Y` and `N` are what an operator reads there. Expanding
+    //       them to `Active` and `Inactive` would widen a one-character column eightfold and would
+    //       render two words no COBOL source holds.
+    {
+      title: CARD_LIST_LABELS.activeColumn.trim(),
+      dataIndex: 'activeStatus',
+    },
+  ];
+}
+
+/**
  * Renders the keyset-paged card browse, per-row navigation, and the card-number entry that reaches one
  * card.
  *
@@ -402,6 +999,29 @@ export function buildCardListQuery(
  * detail and update screens are entered by typing into it. Entering a number now EXCHANGES it for a
  * selector through the lookup operation before navigating, so the number travels in a request body
  * rather than becoming a path segment.
+ *
+ * Errors: this component THROWS NOTHING and renders in every state, because a screen is the last place a
+ * rejection can be turned into something an operator can read. A refused page read is surfaced by
+ * {@link usePagedQuery} as `isFailed` with a normalised `ApiError` -- the problem document
+ * `ui/src/api/client.ts` produces -- on `error`, and it is painted as
+ * {@link CARD_LIST_PAGE_UNAVAILABLE} at `error` severity while the informational sentence is suppressed,
+ * so the screen never invites an operator to act on rows a failed read did not deliver. The rows, both
+ * cursors and the screen ordinal already on display are LEFT INTACT by that hook
+ * (`ui/src/hooks/usePagedQuery.ts` L654-L661), so a failed step forward leaves the operator on the page
+ * they were reading rather than on an empty table.
+ *
+ * Errors: the branch is taken on `isFailed` and NOT on `error !== null`, which is deliberate rather than
+ * incidental. That hook documents at L313-L322 that `error` is null for a failure whose cause was not a
+ * problem document -- a reader that rejected with a bare `Error` or a string, or an answer that was
+ * malformed -- so branching on the payload would render the informational sentence over a read that had
+ * actually failed. `isFailed` is the flag the hook names as the one to branch on.
+ *
+ * Errors: none of this module's exported helpers throws either. Each is a pure function over strings and
+ * arrays -- {@link isUnsuppliedFilter}, {@link isAccountFilterAbsent}, {@link isAccountFilterWellFormed},
+ * {@link buildCardListQuery}, {@link reduceCardListSelection} and {@link buildCardListColumns} -- and a
+ * malformed entry is REPORTED as a refusal sentence in the return value rather than raised, because the
+ * reference reports every one of its own edits that way: it moves a sentence into a message field and
+ * re-sends the map, and it has no abend path for a bad entry.
  * @returns {ReactElement} The card list screen.
  */
 export function CardListScreen(): ReactElement {
@@ -412,6 +1032,14 @@ export function CardListScreen(): ReactElement {
   //       band displays a PAINT-time instant, which is the property the baseline had because
   //       `POPULATE-HEADER-INFO` re-read the clock on each `SEND MAP` rather than on a timer.
   const paintedAt = useServerInstant();
+  /*
+   * WHY : Assumptions: the token map is read as CSS-VARIABLE references rather than as resolved values,
+   *       which is what `cssVar` yields and what antd 6 defaults to. A resolved value would be baked
+   *       into an inline style at paint time, so a later theme change would not reach it; a
+   *       `var(--…)` reference follows the theme `ui/src/App.tsx` configures. This is also why the
+   *       screen needs no `ConfigProvider` of its own -- it consumes the one already in the tree.
+   */
+  const { cssVar } = theme.useToken();
   const [error, setError] = useState<string | null>(null);
 
   /*
@@ -422,12 +1050,43 @@ export function CardListScreen(): ReactElement {
    *       shared band. The 3270 does not have that gap: `app/cpy/CSSETATY.cpy` moves `DFHRED` into the
    *       FIELD's attribute byte as well as writing the message line, so the field itself carries the
    *       refusal. This is the target's spelling of that attribute.
-   * WHY : Assumptions: it names the field rather than holding a per-field message map, because the two
-   *       edits are exclusive -- `2210-EDIT-ACCOUNT` refuses and returns before `2220-EDIT-CARD` runs,
-   *       which is why the account refusal wins when both filters are wrong -- so at most one field is
-   *       ever marked and a map would model a state this screen cannot reach.
+   * WHY : ⚠️ Refactoring Rationale: this records a refusal for EACH field where it recorded one field
+   *       name, and the single form encoded a claim about the reference that is not true. That claim
+   *       was that "the
+   *       two edits are exclusive -- `2210-EDIT-ACCOUNT` refuses and returns before `2220-EDIT-CARD`
+   *       runs", so at most one field could ever be marked. `2200-EDIT-INPUTS` performs BOTH edits
+   *       unconditionally, at `app/cbl/COCRDLIC.cbl` L989 to L993, and the `GO TO` at L1025 leaves only
+   *       `2210-EDIT-ACCOUNT` itself -- it is that paragraph's own exit label at L1032, not the
+   *       caller's -- so `FLG-ACCTFILTER-NOT-OK` and `FLG-CARDFILTER-NOT-OK` can both be set on one
+   *       turn. The consequence is visible: the two highlight tests at L872 and L877 are INDEPENDENT
+   *       `IF`s, so an operator who malforms both entries sees BOTH fields reddened while the band
+   *       carries only the account sentence. Marking one field was a real loss of fidelity, because the
+   *       card field would look accepted while its own edit had refused it.
+   * WHY : Assumptions: the SENTENCE precedence is unaffected and stays account-first, because that is a
+   *       separate mechanism -- the account arm writes `WS-ERROR-MSG` unconditionally at L1021 to L1023
+   *       while the card arm writes its own only `IF WS-ERROR-MSG-OFF` at L1056. So the two halves the
+   *       reference exhibits are now both reproduced: one sentence, up to two marked fields.
+   * WHY : ⚠️ Refactoring Rationale: each refused field carries its OWN sentence rather than sharing the
+   *       band's. A first attempt held only the list of refused field names and rendered the single band
+   *       sentence into every refused field's description; an ad-hoc render proved the consequence --
+   *       with both entries malformed, the CARD field's description announced
+   *       `ACCOUNT FILTER,IF SUPPLIED MUST BE A 11 DIGIT NUMBER`, so a screen-reader user who focused
+   *       the card field was told about the account field. The band still shows one sentence, and the
+   *       precedence is still the account's; what is per-field is what the FIELD says about itself.
    */
-  const [refusedFilter, setRefusedFilter] = useState<FilterFieldName | null>(null);
+  const [filterRefusals, setFilterRefusals] = useState<FilterRefusals>(NO_FILTER_REFUSALS);
+
+  /**
+   * Reports whether the last turn's filter edit refused one named field.
+   *
+   * Assumptions: each field is tested on its own, because up to TWO may be refused at once for the
+   * reason recorded above -- the reference's two highlight tests are independent `IF`s.
+   * @param {FilterFieldName} field - The filter field to test.
+   * @returns {boolean} True when that field carries a refusal from the last turn.
+   */
+  function isFilterRefused(field: FilterFieldName): boolean {
+    return filterRefusals[field] !== null;
+  }
   const [cardNumber, setCardNumber] = useState('');
   const [accountFilter, setAccountFilter] = useState('');
   // WHY : Assumptions: the ENTRY and the APPLIED narrowing are separate pieces of state, because the
@@ -438,6 +1097,41 @@ export function CardListScreen(): ReactElement {
   //       another.
   const [appliedAccountId, setAppliedAccountId] = useState('');
   const [resolving, setResolving] = useState(false);
+  /*
+   * WHY : ⚠️ Assumptions: the action characters are held POSITIONALLY, one per rendered row, because
+   *       that is what the reference holds -- `WS-EDIT-SELECT-FLAGS PIC X(7)` redefined as
+   *       `WS-EDIT-SELECT OCCURS 7 TIMES` at `app/cbl/COCRDLIC.cbl` L72 to L76, inspected as one field
+   *       by `2250-EDIT-ARRAY`. A map keyed by each row's selector would express the same entries, but
+   *       the tally that produces the more-than-one refusal is defined over the field in row order, and
+   *       the row marks it returns are subscripts into that same order.
+   * WHY : Assumptions: the entries are CLEARED whenever a new page is delivered, which the reset below
+   *       does through the page ordinal. A character typed against row three of one page must not
+   *       survive onto row three of the next, because it would then act on a different card than the
+   *       operator was looking at.
+   * WHY : Assumptions: the marked rows are subscripts and not selectors, matching
+   *       `WS-EDIT-SELECT-ERROR-FLAGS PIC X(7)` at `app/cbl/COCRDLIC.cbl` L83 to L88, whose
+   *       `WS-ROW-CRDSELECT-ERROR` is read per row by `1250-SETUP-ARRAY-ATTRIBS`.
+   * WHY : ⚠️ Alternatives Considered: clearing the entries from an effect that watches the page
+   *       ordinal. Rejected because an effect runs AFTER the render that already painted the new page,
+   *       so for one frame row three of the new page would show the character typed against row three
+   *       of the old one -- and a turn taken in that frame would act on a card the operator never
+   *       selected. Stamping the entries with the ordinal they were typed against makes the staleness
+   *       impossible to observe rather than merely brief: the entries are simply not this page's.
+   */
+  const [selection, setSelection] = useState<{
+    readonly pageNumber: number;
+    readonly entries: readonly string[];
+    readonly erroredRows: readonly number[];
+  }>({ pageNumber: CARD_LIST_FIRST_PAGE, entries: [], erroredRows: [] });
+
+  /*
+   * WHY : Assumptions: this is `WS-CA-LAST-PAGE-DISPLAYED` (`app/cbl/COCRDLIC.cbl` L239 to L241), whose
+   *       whole purpose is to distinguish the FIRST forward key that discovers the end of the browse
+   *       from a later one. The reference clears it on every attention identifier that is not PF8 --
+   *       `IF CCARD-AID-PFK08 CONTINUE ELSE SET CA-LAST-PAGE-NOT-SHOWN TO TRUE` at L410 to L414 -- so
+   *       the two handlers that answer the other keys clear it here for the same reason.
+   */
+  const [endOfBrowseReported, setEndOfBrowseReported] = useState(false);
   /*
    * WHY : Assumptions: the TYPED entry and the APPLIED narrowing are held separately, because the source
    *       separates them too -- the map field holds what an operator typed and `CDEMO-ACCT-ID` holds what
@@ -495,6 +1189,14 @@ export function CardListScreen(): ReactElement {
     fetchPage,
     resetKey: appliedAccountId,
   });
+
+  /*
+   * WHY : Assumptions: entries and marks belonging to another page read as absent, which is what makes
+   *       the stamp above load-bearing rather than decorative.
+   */
+  const selectionIsCurrent = selection.pageNumber === browse.pageNumber;
+  const actionEntries = selectionIsCurrent ? selection.entries : [];
+  const erroredRows = selectionIsCurrent ? selection.erroredRows : [];
 
   /*
    * WHY : Refactoring Rationale: a `loadPage` helper stood here and is withdrawn. It drove the
@@ -567,32 +1269,57 @@ export function CardListScreen(): ReactElement {
     }
 
     setError(null);
-    setRefusedFilter(null);
+    setFilterRefusals(NO_FILTER_REFUSALS);
 
-    if (!isAccountFilterAbsent(accountFilter) && !isAccountFilterWellFormed(accountFilter)) {
-      setError(SHARED_MESSAGES.ACCOUNT_FILTER_IF_SUPPLIED_MUST_BE_A_11_DIGIT_NUMBER);
-      /*
-       * WHY : Refactoring Rationale: the refused FIELD is recorded beside the sentence, which the
-       *       version this replaced did not do. The band states what is wrong and this marks WHICH of
-       *       the two entry boxes it is about, so that box carries the error styling and its
-       *       description is announced with it; a message naming "the account filter" beside two
-       *       unmarked boxes leaves a screen-reader user to guess.
-       */
-      setRefusedFilter('accountNumber');
-      return;
-    }
+    /*
+     * WHY : ⚠️ Assumptions: BOTH entries are edited on every turn and neither edit short-circuits the
+     *       other, because `2200-EDIT-INPUTS` performs `2210-EDIT-ACCOUNT` and then `2220-EDIT-CARD`
+     *       unconditionally at `app/cbl/COCRDLIC.cbl` L989 to L993. The `GO TO` inside each arm leaves
+     *       that arm's own exit label and not the caller, so a refused account entry does not prevent
+     *       the card entry from being judged.
+     * WHY : Refactoring Rationale: the two refusals are collected first and dispatched afterwards,
+     *       where an earlier revision returned from the account arm immediately. That early return
+     *       marked only the account field, so on a turn where BOTH entries were malformed the card
+     *       field rendered as though it had been accepted -- while the reference reddens both, through
+     *       two independent `IF`s at L872 and L877.
+     */
+    const accountRefusal =
+      !isAccountFilterAbsent(accountFilter) && !isAccountFilterWellFormed(accountFilter)
+        ? SHARED_MESSAGES.ACCOUNT_FILTER_IF_SUPPLIED_MUST_BE_A_11_DIGIT_NUMBER
+        : null;
+    const cardRefusal =
+      cardNumber !== '' && !enteredNumberIsAddressable
+        ? SHARED_MESSAGES.CARD_ID_FILTER_IF_SUPPLIED_MUST_BE_A_16_DIGIT_NUMBER
+        : null;
 
-    if (cardNumber !== '' && !enteredNumberIsAddressable) {
+    if (accountRefusal !== null || cardRefusal !== null) {
       /*
-       * WHY : Refactoring Rationale: this is the LIST screen's own refusal, not the detail screen's.
-       *       An earlier revision rendered `Card number if supplied must be a 16 digit number`, which
-       *       is what `app/cbl/COCRDSLC.cbl` L149 and `app/cbl/COCRDUPC.cbl` L194 declare; this
-       *       program declares the upper-case filter form at `app/cbl/COCRDLIC.cbl` L1058 instead.
-       *       The two are near-duplicates, which is exactly why the wrong one read as correct in
-       *       review -- and why the catalog holds both rather than folding them together.
+       * WHY : Assumptions: the ACCOUNT sentence wins the band whenever the account entry is one of the
+       *       refused, because the account arm moves its text into `WS-ERROR-MSG` unconditionally at
+       *       `app/cbl/COCRDLIC.cbl` L1021 to L1023 while the card arm moves its own only
+       *       `IF WS-ERROR-MSG-OFF` at L1056. One sentence, and it is the first arm's.
+       * WHY : Refactoring Rationale: the card sentence is the LIST screen's own wording and not the
+       *       detail screen's. An earlier revision rendered `Card number if supplied must be a 16
+       *       digit number`, which is what `app/cbl/COCRDSLC.cbl` L149 and `app/cbl/COCRDUPC.cbl` L194
+       *       declare; this program declares the upper-case filter form at L1058. The two are
+       *       near-duplicates, which is why the wrong one read as correct in review, and why the
+       *       catalog holds both rather than folding them together.
        */
-      setError(SHARED_MESSAGES.CARD_ID_FILTER_IF_SUPPLIED_MUST_BE_A_16_DIGIT_NUMBER);
-      setRefusedFilter('cardNumber');
+      setError(accountRefusal ?? cardRefusal);
+      /*
+       * WHY : Refactoring Rationale: the refused FIELDS are recorded beside the sentence, which the
+       *       version this replaced did not do at all. The band states what is wrong and this marks
+       *       WHICH entry boxes it is about, so each carries the error styling and its description is
+       *       announced with it; a message naming "the account filter" beside two unmarked boxes
+       *       leaves a screen-reader user to guess. `app/cpy/CSSETATY.cpy` L17 to L27 moves `DFHRED`
+       *       into the FIELD's attribute byte as well as writing the message line, so this is the
+       *       target's spelling of that attribute.
+       * WHY : Assumptions: recording them also protects every row, because this screen's
+       *       `rowsProtected` is derived from exactly this state -- which is the reference's own
+       *       coupling, `FLG-PROTECT-SELECT-ROWS-YES` being set inside the two refusing arms at L1020
+       *       and L1055.
+       */
+      setFilterRefusals({ accountNumber: accountRefusal, cardNumber: cardRefusal });
       return;
     }
 
@@ -627,6 +1354,185 @@ export function CardListScreen(): ReactElement {
   }
 
   /**
+   * Records the character typed into one row's action field.
+   *
+   * Assumptions: the entry is stored VERBATIM, with no case folding and no filtering of the character
+   * typed, because `2250-EDIT-ARRAY` is what judges it and the reference judges the byte the terminal
+   * sent. Rejecting a stray character at the keystroke would remove `INVALID ACTION CODE` from the
+   * screen's observable behaviour, and upper-casing one would accept an entry the reference refuses.
+   * @param {number} index - Position of the row whose field was typed into.
+   * @param {string} entry - The field's contents as they now stand, at most one character.
+   * @returns {void} Nothing; the entry is recorded as a side effect.
+   */
+  function recordActionEntry(index: number, entry: string): void {
+    setSelection(
+      /**
+       * Replaces the one position that changed, leaving every other row's entry alone.
+       *
+       * Assumptions: the result is stamped with the page ordinal on display, so an entry can never be
+       * read against a different page's rows.
+       * @param {object} current - The selection state as it stood.
+       * @param {number} current.pageNumber - Page ordinal those entries were typed against.
+       * @param {readonly string[]} current.entries - The entries as they stood.
+       * @param {readonly number[]} current.erroredRows - Rows the last turn marked.
+       * @returns {object} The selection state with this row's entry replaced and its mark cleared.
+       */
+      (current: {
+        readonly pageNumber: number;
+        readonly entries: readonly string[];
+        readonly erroredRows: readonly number[];
+      }): {
+        readonly pageNumber: number;
+        readonly entries: readonly string[];
+        readonly erroredRows: readonly number[];
+      } => {
+        const carried = current.pageNumber === browse.pageNumber ? current.entries : [];
+        return {
+          pageNumber: browse.pageNumber,
+          entries: Array.from(
+            { length: browse.items.length },
+            /**
+             * Reads one row's entry, substituting the newly typed character at its own position.
+             * @param {unknown} _unused - Array.from's element argument, which is always undefined here.
+             * @param {number} position - The row position being filled.
+             * @returns {string} That row's action entry.
+             */
+            (_unused: unknown, position: number): string =>
+              position === index ? entry : (carried[position] ?? ''),
+          ),
+          /*
+           * WHY : Assumptions: typing into a marked field CLEARS that row's mark, because the
+           *       reference recomputes `WS-EDIT-SELECT-ERROR-FLAGS` from scratch on the next turn --
+           *       `2250-EDIT-ARRAY` rebuilds it at `app/cbl/COCRDLIC.cbl` L1088 to L1093 and L1104
+           *       rather than accumulating it. Leaving the mark until the next turn would show a
+           *       refusal against a value the operator had already corrected.
+           */
+          erroredRows: current.erroredRows.filter(
+            /**
+             * Keeps the marks of rows other than the one just typed into.
+             * @param {number} marked - A marked row's position.
+             * @returns {boolean} True when that mark belongs to another row.
+             */
+            (marked: number): boolean => marked !== index,
+          ),
+        };
+      },
+    );
+  }
+
+  /**
+   * Opens one row's card detail immediately, for a pointer user.
+   *
+   * Assumptions: the row's own sealed selector is the address, so no card number reaches the route.
+   * This is the `'S'` transfer arm's destination (`app/cbl/COCRDLIC.cbl` L526 moves `LIT-CARDDTLPGM`,
+   * whose mapset `COCRDSL` is the detail screen) reached without a turn, which is the accommodation
+   * recorded on the controls themselves.
+   * @param {CardSummary} row - The row whose detail to open.
+   * @returns {void} Nothing; navigation is the effect.
+   */
+  function openRowDetail(row: CardSummary): void {
+    navigateSafely(navigate, cardDetailPath(row.key));
+  }
+
+  /**
+   * Opens one row's card update form immediately, for a pointer user.
+   *
+   * Assumptions: the `'U'` transfer arm's destination, `LIT-CARDUPDPGM` at `app/cbl/COCRDLIC.cbl` L554,
+   * addressed by the row's sealed selector for the same disclosure reason as the detail route.
+   * @param {CardSummary} row - The row whose update form to open.
+   * @returns {void} Nothing; navigation is the effect.
+   */
+  function openRowUpdate(row: CardSummary): void {
+    navigateSafely(navigate, cardEditPath(row.key));
+  }
+
+  /**
+   * Runs one Enter turn in the reference's own order: edit the filters, then the selection column.
+   *
+   * Purpose: reproduce `2200-EDIT-INPUTS` followed by the transfer arms of the main `EVALUATE`. It is
+   * what makes the two selection refusals reachable and what keeps a row action a TURN rather than a
+   * click, which is the workflow the 3270 screen has.
+   *
+   * Assumptions: the order is filters first and the selection second, from `app/cbl/COCRDLIC.cbl` L989
+   * to L996, and the selection edit is SKIPPED entirely when either filter refused -- `2250-EDIT-ARRAY`
+   * opens with `IF INPUT-ERROR GO TO 2250-EDIT-ARRAY-EXIT` at L1075 to L1077. That is the same turn on
+   * which every row's field is protected, so an entry made against a refused filter could not have been
+   * acted on in any case.
+   *
+   * Assumptions: a refused filter also suppresses the re-read, because the `WHEN INPUT-ERROR` arm reads
+   * forward only `IF NOT FLG-ACCTFILTER-NOT-OK AND NOT FLG-CARDFILTER-NOT-OK` at L431 to L435.
+   * `applyFilters` expresses that by returning before its own read.
+   *
+   * Assumptions: a turn carrying NO action character falls through to the narrowing and the re-read,
+   * which is the `WHEN OTHER` arm at L572 to L582 -- it reads forward and re-sends the map.
+   * @returns {void} Completion is represented by the screen's own state and by navigation.
+   */
+  function submitTurn(): void {
+    if (browse.isLoading || resolving) {
+      return;
+    }
+
+    // WHY : Assumptions: Enter clears the last-page flag for the reason recorded on PF7 -- the
+    //       reference clears it on any attention identifier other than PF8 (L410 to L414).
+    setEndOfBrowseReported(false);
+
+    const edit = reduceCardListSelection(actionEntries.slice(0, browse.items.length));
+
+    /*
+     * WHY : Assumptions: the FILTER edit is consulted first even though the selection was reduced
+     *       above, because the reference's precedence is the filters'. Reducing first costs nothing and
+     *       keeps the reduction a pure function of the entries; `applyFilters` returning a refusal is
+     *       what discards it, exactly as `2250-EDIT-ARRAY`'s own opening test discards its work.
+     */
+    const filtersRefused =
+      (!isAccountFilterAbsent(accountFilter) && !isAccountFilterWellFormed(accountFilter)) ||
+      (cardNumber !== '' && !enteredNumberIsAddressable);
+
+    if (filtersRefused || edit.message === null) {
+      setSelection({ pageNumber: browse.pageNumber, entries: actionEntries, erroredRows: [] });
+      if (edit.selectedRow !== null && !filtersRefused) {
+        const row = browse.items[edit.selectedRow];
+        if (row !== undefined) {
+          /*
+           * WHY : ⚠️ Assumptions: BOTH of the row's identifying values travel, which is what the
+           *       transfer arms do -- L531 to L534 move `WS-ROW-ACCTNO(I-SELECTED)` into
+           *       `CDEMO-ACCT-ID` and `WS-ROW-CARD-NUM(I-SELECTED)` into `CDEMO-CARD-NUM`, and L559 to
+           *       L562 repeat it for the update arm. They travel INSIDE the row's own sealed selector
+           *       rather than as two route parameters: the selector addresses one card and the detail
+           *       response republishes both members, so nothing is lost and no account number or card
+           *       number reaches a request line.
+           * WHY : Alternatives Considered: carrying the account number as a query parameter, which the
+           *       folder brief offers as one option. Rejected because a query string is written
+           *       verbatim into the load balancer's access log, which is the same reason the card
+           *       number left every path on this screen, and because
+           *       `CardApiContractTest.noRequestLineCanCarryACardNumber` asserts that boundary.
+           */
+          navigateSafely(
+            navigate,
+            edit.action === 'U' ? cardEditPath(row.key) : cardDetailPath(row.key),
+          );
+          return;
+        }
+      }
+      applyFilters();
+      return;
+    }
+
+    /*
+     * WHY : Assumptions: a selection refusal leaves the page exactly as it is and issues no read. The
+     *       `WHEN INPUT-ERROR` arm re-sends the SAME map (L436 to L438), so the rows an operator was
+     *       looking at stay on screen beneath the sentence and their marks.
+     */
+    setError(edit.message);
+    setFilterRefusals(NO_FILTER_REFUSALS);
+    setSelection({
+      pageNumber: browse.pageNumber,
+      entries: actionEntries,
+      erroredRows: edit.erroredRows,
+    });
+  }
+
+  /**
    * Exchanges the entered card number for a selector and navigates to the requested screen.
    *
    * Assumptions: the number is exchanged rather than being interpolated into the route, because a
@@ -639,12 +1545,15 @@ export function CardListScreen(): ReactElement {
   function openEnteredCard(buildPath: (selector: string) => string): void {
     if (!enteredNumberIsAddressable) {
       setError(SHARED_MESSAGES.CARD_ID_FILTER_IF_SUPPLIED_MUST_BE_A_16_DIGIT_NUMBER);
-      setRefusedFilter('cardNumber');
+      setFilterRefusals({
+        accountNumber: null,
+        cardNumber: SHARED_MESSAGES.CARD_ID_FILTER_IF_SUPPLIED_MUST_BE_A_16_DIGIT_NUMBER,
+      });
       return;
     }
     setResolving(true);
     setError(null);
-    setRefusedFilter(null);
+    setFilterRefusals(NO_FILTER_REFUSALS);
     lookupCard(cardNumber).then(
       /**
        * Navigates to the resolved card.
@@ -700,6 +1609,11 @@ export function CardListScreen(): ReactElement {
      *       boundary STATE and the screen owes the operator the reference's own sentence.
      */
     setError(null);
+    // WHY : Assumptions: PF7 clears the last-page flag, because the reference clears it on every
+    //       attention identifier that is not PF8 (`app/cbl/COCRDLIC.cbl` L410 to L414). Without this a
+    //       backward step followed by a forward one would report the pages sentence on the very first
+    //       forward key that reaches the end again.
+    setEndOfBrowseReported(false);
 
     if (!browse.hasPrev) {
       setError(CARD_LIST_PAGING_MESSAGES.NO_PREVIOUS_PAGES_TO_DISPLAY);
@@ -720,7 +1634,30 @@ export function CardListScreen(): ReactElement {
     setError(null);
 
     if (!browse.hasNext) {
-      setError(CARD_LIST_PAGING_MESSAGES.NO_MORE_PAGES_TO_DISPLAY);
+      /*
+       * WHY : ⚠️ Assumptions: TWO different sentences answer an exhausted forward browse, and which one
+       *       depends on whether the end was already known. `1400-SETUP-MESSAGE` moves
+       *       `NO MORE PAGES TO DISPLAY` only when PF8 arrives with no next page AND
+       *       `CA-LAST-PAGE-SHOWN` already true (`app/cbl/COCRDLIC.cbl` L905 to L909); the forward read
+       *       itself moves `NO MORE RECORDS TO SHOW` at the moment it first hits end-of-file, at L1218
+       *       to L1221 and L1238 to L1240, and L410 to L414 sets the last-page flag on any key that is
+       *       not PF8. So the FIRST PF8 that finds the end reports the records sentence and a
+       *       subsequent one reports the pages sentence.
+       * WHY : Refactoring Rationale: only the pages sentence was rendered before, so
+       *       `NO MORE RECORDS TO SHOW` -- a catalog entry keyed to this very program -- described
+       *       behaviour the screen could not exhibit. The distinction is carried here by whether this
+       *       page is the one that first reported no further page: the hook keeps the operator on the
+       *       last page, so a second PF8 arrives with the end already known.
+       * WHY : Assumptions: both sentences are guarded in the reference by `IF WS-ERROR-MSG-OFF`, and
+       *       the `setError(null)` above is what makes that guard vacuous here -- nothing else can have
+       *       written the band on this turn.
+       */
+      setError(
+        endOfBrowseReported
+          ? CARD_LIST_PAGING_MESSAGES.NO_MORE_PAGES_TO_DISPLAY
+          : CARD_LIST_PAGING_MESSAGES.NO_MORE_RECORDS_TO_SHOW,
+      );
+      setEndOfBrowseReported(true);
       return;
     }
     browse.nextPage();
@@ -735,11 +1672,15 @@ export function CardListScreen(): ReactElement {
     {
       ENTER: {
         /**
-         * Re-reads the list under the current filter, which is the source program's Enter arm: it
-         * performs `9000-READ-FORWARD` and re-sends the map (`app/cbl/COCRDLIC.cbl` L565-L578).
+         * Runs one turn: edits the filters, then the selection column, then re-reads.
+         *
+         * Assumptions: Enter carries BOTH responsibilities on this screen, because the reference gives
+         * it both -- `2200-EDIT-INPUTS` edits the filters and the selection array on the same turn
+         * (`app/cbl/COCRDLIC.cbl` L989-L996), and the main `EVALUATE` then either transfers to a card
+         * or performs `9000-READ-FORWARD` and re-sends the map (L517, L545, L572-L582).
          */
         onInvoke: () => {
-          applyFilters();
+          submitTurn();
         },
         label: CARD_LIST_KEY_LABELS.ENTER,
       },
@@ -747,6 +1688,39 @@ export function CardListScreen(): ReactElement {
         /**
          * Returns to the main menu, which is where the source program transfers on PF3
          * (`app/cbl/COCRDLIC.cbl` L390-L399, moving `LIT-MENUPGM` into the next-program field).
+         *
+         * ⚠️ Refactoring Rationale: this wrote the exit sentence `PF03 PRESSED.EXITING` to the error
+         * channel immediately before navigating, and the write has been REMOVED. The earlier note
+         * defended it as travelling "in the communication area so the menu paints it", and that claim is
+         * false in three independent ways, each checked against the baseline rather than reasoned about.
+         * `WS-ERROR-MSG` is declared at `app/cbl/COCRDLIC.cbl` L117 inside WORKING-STORAGE, which an
+         * `EXEC CICS XCTL` discards rather than carries. `app/cpy/COCOM01Y.cpy` holds NO message member
+         * at all -- a search for `MSG` or `MESSAGE` across the whole copybook returns nothing -- so the
+         * communication area has no field the sentence could travel in. And the arm itself puts
+         * `SET WS-EXIT-MESSAGE TO TRUE` at L396 directly before the `EXEC CICS XCTL` at L402 with NO
+         * `SEND MAP` between them, so the sentence is written into storage that is never transmitted and
+         * is then thrown away by the transfer. The reference therefore shows nothing on exit, and
+         * withdrawing the write is parity rather than a loss.
+         *
+         * ⚠️ Assumptions: the destination would discard it even if a carrier existed, which is worth
+         * recording because it closes the last way the old claim could have been true.
+         * `app/cbl/COMEN01C.cbl` L79-L80 clears its own message on entry -- `MOVE SPACES TO WS-MESSAGE,
+         * ERRMSGO OF COMEN1AO` -- into a field it declares itself at L38. The menu blanks the line
+         * before painting it.
+         *
+         * ⚠️ Refactoring Rationale: a browser run measured the defect this removes, and it was worse here
+         * than the unobservable write two sibling screens withdrew for the same reason. A mutation
+         * observer recorded the sentence appearing on `/menu` and being cleared 29 ms later, because the
+         * band is published through the SHARED `useShellSlot` and the arriving screen registers its own
+         * contribution one frame after this component unmounts. So the operator saw a 29 ms flash of a
+         * sentence the reference never paints at all -- a spurious paint rather than a near-miss.
+         *
+         * Assumptions: the catalog entry STAYS in `ui/src/messages/messages.ts` and is simply not read
+         * here, matching what `ui/src/screens/accountView/index.tsx` L1361 and
+         * `ui/src/screens/refTypeList/index.tsx` L1582 already concluded for their own exit arms.
+         * Transformation rule T8 keeps the transcription of every `88`-level sentence complete whether or
+         * not a program reaches it; only the program decides which are written, and this one writes it
+         * where it cannot be seen.
          */
         onInvoke: () => {
           navigateSafely(navigate, MAIN_MENU_ROUTE);
@@ -779,7 +1753,7 @@ export function CardListScreen(): ReactElement {
        */
       onInvalidKey: (rejection) => {
         if (rejection.reason === 'unmapped') {
-          applyFilters();
+          submitTurn();
         }
       },
     },
@@ -830,13 +1804,44 @@ export function CardListScreen(): ReactElement {
    *       cannot put a sentence on the band while a later page is on display, which is exactly what a
    *       local handler did. The sentence names no card and does not distinguish absence from fault.
    */
+  /*
+   * WHY : ⚠️ Assumptions: a settled, unfiltered-out, EMPTY opening page reports
+   *       `NO RECORDS FOUND FOR THIS SEARCH CONDITION.`, which is the reference's own condition:
+   *       `IF WS-CA-SCREEN-NUM = 1 AND WS-SCRN-COUNTER = 0 SET WS-NO-RECORDS-FOUND TO TRUE` at
+   *       `app/cbl/COCRDLIC.cbl` L1241 to L1245. Both halves matter -- the opening ordinal and a row
+   *       count of zero -- because an empty page reached by paging forward is the end of a browse that
+   *       did find records, and L1238 to L1240 answers that with a different sentence.
+   * WHY : Refactoring Rationale: this sentence was reachable only from the card-number lookup's failure
+   *       arm before, so a narrowing that matched nothing left the informational sentence on the band --
+   *       the screen invited an operator to "TYPE S FOR DETAIL" against an empty table.
+   * WHY : Assumptions: the loading and failed states are excluded so the sentence cannot appear while
+   *       the first read is still outstanding, when zero rows means "not yet" rather than "none".
+   */
+  const noRecordsFound =
+    !browse.isLoading &&
+    !browse.isFailed &&
+    browse.items.length === 0 &&
+    browse.pageNumber === CARD_LIST_FIRST_PAGE;
+
+  /*
+   * WHY : ⚠️ Assumptions: the informational sentence is SUPPRESSED when no records were found, which is
+   *       the guard `1400-SETUP-MESSAGE` puts on painting the 45-character field:
+   *       `IF NOT WS-NO-INFO-MESSAGE AND NOT WS-NO-RECORDS-FOUND` at `app/cbl/COCRDLIC.cbl` L926 to
+   *       L930. The reference has TWO fields and the frame provides one band, so the two collapse onto
+   *       it with the error taking precedence -- `INFOMSG` is a `COLOR=NEUTRAL` 45-character field at
+   *       row 20 (`app/bms/COCRDLI.bms` L324 to L328) and `ERRMSG` a `COLOR=RED` 78-character field at
+   *       row 23 (L331 to L334), the latter bounded by `CCARD-ERROR-MSG PIC X(75)` at
+   *       `app/cpy/CVCRD01Y.cpy` L28, which the band enforces.
+   */
   const bandMessage =
     error ??
     (browse.isFailed
       ? CARD_LIST_PAGE_UNAVAILABLE
-      : CARD_LIST_STATUS_MESSAGES.WS_INFORM_REC_ACTIONS.text);
+      : noRecordsFound
+        ? CARD_LIST_STATUS_MESSAGES.WS_NO_RECORDS_FOUND.text
+        : CARD_LIST_STATUS_MESSAGES.WS_INFORM_REC_ACTIONS.text);
 
-  const bandSeverity = error === null && !browse.isFailed ? 'info' : 'error';
+  const bandSeverity = error === null && !browse.isFailed && !noRecordsFound ? 'info' : 'error';
 
   useShellSlot({
     screen: { transactionId: CARD_LIST_TRANSACTION_ID, programName: CARD_LIST_PROGRAM_NAME },
@@ -850,84 +1855,30 @@ export function CardListScreen(): ReactElement {
   });
 
   /*
-   * WHY : Refactoring Rationale: FOUR columns, and an earlier revision of this screen rendered the
-   *       embossed name and the expiration date as well. The browse row has no such values to fill
-   *       them from - the baseline list row is an eleven-character account number, a
-   *       sixteen-character card number and a one-character status, declared at
-   *       app/cbl/COCRDLIC.cbl:258-260, and card-api.yaml publishes exactly those three - so those
-   *       two columns rendered blank for every row. The account column takes their place because the
-   *       baseline row does carry it and this screen had dropped it.
-   *       Refactoring Rationale: THREE columns now, not four. The fourth was a per-row actions column
-   *       whose buttons were built from an opaque selector the contract no longer publishes per row;
-   *       reaching one card is the card-number entry above.
+   * WHY : Refactoring Rationale: the column set is built by an exported helper rather than assembled
+   *       inline here, and the move is what makes the column ORDER and the per-row control assertable
+   *       without mounting the screen and its shell. It also puts the selection column's contract --
+   *       one character wide, protected with the rest when a filter is refused -- in one documented
+   *       place instead of inside a render body.
+   * WHY : Assumptions: FOUR columns, in the mapset's order. An earlier revision rendered the embossed
+   *       name and the expiration date instead of the account number; the browse row has no such
+   *       values to fill them from, because the list row is the three values
+   *       `app/cbl/COCRDLIC.cbl` L258 to L260 declares and `card-api.yaml` publishes exactly those
+   *       three, so both columns rendered blank for every row.
+   * WHY : Assumptions: every row's action field is protected together, not row by row, because the
+   *       reference's protect flag is a single `FLG-PROTECT-SELECT-ROWS` for the whole array
+   *       (`app/cbl/COCRDLIC.cbl` L105 to L107) and `1250-SETUP-ARRAY-ATTRIBS` applies it to all seven.
    */
-  const columns: TableColumnsType<CardSummary> = [
-    // WHY : Refactoring Rationale: the four columns are now headed and ORDERED as the mapset paints
-    //       them - the selection column first, then the account number, the card number and the
-    //       active flag (app/bms/COCRDLI.bms L111, L115, L119, L123). An earlier revision headed them
-    //       `Card`, `Account`, `Status` and `Actions`, none of which the source screen paints, and
-    //       put the row controls last. The order is part of what a returning operator reads.
-    {
-      title: CARD_LIST_LABELS.selectColumn.trim(),
-      key: 'actions',
-      /**
-       * Renders the two per-row controls, each labelled with the selection code the source screen
-       * accepts for that action and addressed by that row's own selector.
-       * @param {CardSummary} row - The row the controls act on.
-       * @returns {ReactElement} A detail control and an update control for that row.
-       */
-      render: (row: CardSummary): ReactElement => (
-        <Space size="small">
-          <Button
-            onClick={
-              /** Opens this row's card detail. */
-              () => {
-                navigateSafely(navigate, cardDetailPath(row.key));
-              }
-            }
-            size="small"
-          >
-            {CARD_LIST_ROW_ACTION_CODES.detail}
-          </Button>
-          <Button
-            onClick={
-              /** Opens this row's card update form. */
-              () => {
-                navigateSafely(navigate, cardEditPath(row.key));
-              }
-            }
-            size="small"
-          >
-            {CARD_LIST_ROW_ACTION_CODES.update}
-          </Button>
-        </Space>
-      ),
-    },
-    // WHY : Refactoring Rationale: the browse row carries the account number and
-    //       not the embossed name or the expiration date, because those two are
-    //       members of the card DETAIL and the contract's browse row is the three
-    //       values the 3270 list displayed per row. Columns bound to absent
-    //       members render as empty cells rather than failing, so the two that
-    //       were bound here showed nothing; the account number is what the
-    //       baseline row actually carried alongside the card number and status.
-    {
-      title: CARD_LIST_LABELS.accountColumn,
-      dataIndex: 'accountId',
-    },
-    {
-      title: CARD_LIST_LABELS.cardColumn.trim(),
-      dataIndex: 'displayCardNumber',
-    },
-    // WHY : Refactoring Rationale: the flag renders as the stored character. The source column is one
-    //       character wide (CRDSTS1 through CRDSTS7, app/bms/COCRDLI.bms LENGTH=1) under a heading
-    //       that names the domain, so `Y` and `N` are what an operator reads there. An earlier
-    //       revision expanded them to `Active` and `Inactive`, two words no COBOL source holds, which
-    //       also widened a one-character column eightfold.
-    {
-      title: CARD_LIST_LABELS.activeColumn.trim(),
-      dataIndex: 'activeStatus',
-    },
-  ];
+  const columns = buildCardListColumns({
+    actionEntries,
+    erroredRows: new Set(erroredRows),
+    rowsProtected: isFilterRefused('accountNumber') || isFilterRefused('cardNumber'),
+    refusal: error,
+    onActionEntryChange: recordActionEntry,
+    onOpenDetail: openRowDetail,
+    onOpenUpdate: openRowUpdate,
+    tokens: cssVar,
+  });
 
   return (
     <Flex vertical gap="large">
@@ -993,15 +1944,15 @@ export function CardListScreen(): ReactElement {
           allowClear
           aria-labelledby={ACCOUNT_NUMBER_LABEL_ID}
           {...fieldAriaProps(ACCOUNT_NUMBER_INPUT_ID, {
-            invalid: refusedFilter === 'accountNumber',
-            hasError: refusedFilter === 'accountNumber',
+            invalid: isFilterRefused('accountNumber'),
+            hasError: isFilterRefused('accountNumber'),
             hasHint: false,
           })}
           autoFocus
           id={ACCOUNT_NUMBER_INPUT_ID}
           inputMode="numeric"
-          maxLength={ACCOUNT_FILTER_WIDTH}
-          status={refusedFilter === 'accountNumber' ? 'error' : ''}
+          maxLength={CARD_LIST_ACCOUNT_FILTER_WIDTH}
+          status={isFilterRefused('accountNumber') ? 'error' : ''}
           onChange={
             /**
              * Records the entered account number.
@@ -1026,11 +1977,11 @@ export function CardListScreen(): ReactElement {
        * WHY : Assumptions: it is rendered only while the field is the refused one, so the description
        *       cannot outlive the refusal it describes.
        */}
-      {refusedFilter === 'accountNumber' && error !== null ? (
+      {filterRefusals.accountNumber === null ? null : (
         <span id={fieldErrorId(ACCOUNT_NUMBER_INPUT_ID)} style={VISUALLY_HIDDEN_STYLE}>
-          {error}
+          {filterRefusals.accountNumber}
         </span>
-      ) : null}
+      )}
       <Space.Compact>
         <Typography.Text id={CARD_NUMBER_LABEL_ID}>
           {CARD_LIST_LABELS.cardNumberFilter}
@@ -1039,14 +1990,14 @@ export function CardListScreen(): ReactElement {
           allowClear
           aria-labelledby={CARD_NUMBER_LABEL_ID}
           {...fieldAriaProps(CARD_NUMBER_INPUT_ID, {
-            invalid: refusedFilter === 'cardNumber',
-            hasError: refusedFilter === 'cardNumber',
+            invalid: isFilterRefused('cardNumber'),
+            hasError: isFilterRefused('cardNumber'),
             hasHint: false,
           })}
           id={CARD_NUMBER_INPUT_ID}
           inputMode="numeric"
-          maxLength={16}
-          status={refusedFilter === 'cardNumber' ? 'error' : ''}
+          maxLength={CARD_LIST_CARD_FILTER_WIDTH}
+          status={isFilterRefused('cardNumber') ? 'error' : ''}
           onChange={
             /**
              * Records the entered card number.
@@ -1103,11 +2054,11 @@ export function CardListScreen(): ReactElement {
        *       `IF WS-ERROR-MSG-OFF`, `app/cbl/COCRDLIC.cbl` L1057), so the id must travel with the
        *       field that was refused rather than sit on a neutral element both controls point at.
        */}
-      {refusedFilter === 'cardNumber' && error !== null ? (
+      {filterRefusals.cardNumber === null ? null : (
         <span id={fieldErrorId(CARD_NUMBER_INPUT_ID)} style={VISUALLY_HIDDEN_STYLE}>
-          {error}
+          {filterRefusals.cardNumber}
         </span>
-      ) : null}
+      )}
       <Table<CardSummary>
         columns={columns}
         dataSource={browse.items}
@@ -1152,3 +2103,18 @@ export function CardListScreen(): ReactElement {
     </Flex>
   );
 }
+
+/*
+ * WHY : Assumptions: the component is published BOTH ways, and both are load-bearing. The router
+ *       imports it by NAME and adapts it itself -- `ui/src/router.tsx` L158 to L161 does
+ *       `const module = await import('./screens/cardList'); return { default: module.CardListScreen };`
+ *       -- and the screen tests import the same named symbol, so the named export cannot be withdrawn.
+ *       The default alias is what lets any route loader mount the module directly as a route element
+ *       without that adapter, which is the form `React.lazy` accepts unaided.
+ * WHY : Assumptions: this is an alias of one component and NOT a barrel. AAP section 0.6.2.1 forbids
+ *       "default-export barrels for screens" -- a module that re-exports OTHER modules' screens -- and
+ *       this re-exports nothing; the helpers beside it stay named exports precisely so no caller can
+ *       reach them through a default. The sibling screens `ui/src/screens/menu/index.tsx` L477 and
+ *       `ui/src/screens/transactionAdd/index.tsx` L2461 publish themselves the same way.
+ */
+export default CardListScreen;

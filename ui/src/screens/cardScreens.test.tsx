@@ -102,6 +102,29 @@ const EMPTY_PAGE: PageResponse<CardSummary> = {
   hasNext: false,
 };
 
+/** One browse row, for the cases whose subject is a page that FOUND something. */
+const BROWSE_ROW: CardSummary = {
+  key: CARD_SELECTOR,
+  displayCardNumber: '************0011',
+  accountId: '00000000011',
+  activeStatus: 'Y',
+};
+
+/*
+ * WHY : ⚠️ Assumptions: a page carrying a row is a DIFFERENT case from an empty one, and the
+ *       distinction is the reference's. An empty opening page is not a quiet screen there: `9000-READ-
+ *       FORWARD` reaches end-of-file with its row counter still zero on screen one, and
+ *       `app/cbl/COCRDLIC.cbl` L1241 to L1245 answers that by setting `WS-NO-RECORDS-FOUND`, whose text
+ *       is `NO RECORDS FOUND FOR THIS SEARCH CONDITION.`. So "no message" can only be asserted against
+ *       a page that found rows, and the fixtures are separated accordingly.
+ */
+const ONE_ROW_PAGE: PageResponse<CardSummary> = {
+  items: [BROWSE_ROW],
+  firstKey: `first-${CARD_SELECTOR}`,
+  lastKey: `last-${CARD_SELECTOR}`,
+  hasNext: false,
+};
+
 /*
  * Assumptions: the display card number is already masked to its last four
  * digits, because that is what the service returns for a non-administrative
@@ -217,7 +240,16 @@ function resetTransportMocks(): void {
  * @returns {Promise<void>} Resolves once the loaded page has settled.
  */
 async function listReservesBandWhenThereIsNoMessage(): Promise<void> {
-  vi.mocked(listCards).mockResolvedValue(EMPTY_PAGE);
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the page now carries a ROW, where this used the empty page. An empty
+   *       opening page is precisely the case that DOES carry a message -- `app/cbl/COCRDLIC.cbl` L1241
+   *       to L1245 sets `WS-NO-RECORDS-FOUND` when the read reaches end-of-file on screen one with a row
+   *       counter of zero -- so the old fixture asserted the absence of a sentence the reference
+   *       requires. It passed only while that sentence was unreachable from the browse, which was itself
+   *       the defect. A page that found a row is the state this case is actually about: nothing to
+   *       report, and the row-23 field still painted so the layout does not shift when something is.
+   */
+  vi.mocked(listCards).mockResolvedValue(ONE_ROW_PAGE);
 
   renderAt('/cards', '/cards', <CardListScreen />);
 
@@ -650,7 +682,25 @@ async function listPrefersTheAccountRefusal(): Promise<void> {
       );
     },
   );
-  expect(document.body).not.toHaveTextContent(
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the card sentence is asserted absent from the BAND and no longer from
+   *       the whole document, which is what the note above this case already says the queries do. The
+   *       document-wide form asserted that a malformed card entry leaves no trace anywhere, and that was
+   *       only true while the screen could mark ONE field. It cannot: `2200-EDIT-INPUTS` performs both
+   *       edits unconditionally at `app/cbl/COCRDLIC.cbl` L989 to L993 -- the `GO TO` at L1025 leaves
+   *       that paragraph's own exit at L1032 rather than the caller -- so both filter flags can be set on
+   *       one turn, and the highlight tests at L872 and L877 are independent `IF`s that redden both
+   *       fields. The card control therefore carries its own accessible description now, so that a screen
+   *       reader on THAT field is told about that field.
+   * WHY : Assumptions: precedence is exactly the claim that one sentence reaches row 23, and it is the
+   *       account's because its arm writes `WS-ERROR-MSG` unconditionally at L1021 to L1023 while the
+   *       card arm writes only `IF WS-ERROR-MSG-OFF` at L1056. Scoping to the band asserts that and
+   *       nothing weaker.
+   */
+  expect(shellBand()).not.toHaveTextContent(
+    SHARED_MESSAGES.CARD_ID_FILTER_IF_SUPPLIED_MUST_BE_A_16_DIGIT_NUMBER,
+  );
+  expect(document.getElementById('card-list-card-number-error')).toHaveTextContent(
     SHARED_MESSAGES.CARD_ID_FILTER_IF_SUPPLIED_MUST_BE_A_16_DIGIT_NUMBER,
   );
 }

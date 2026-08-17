@@ -206,6 +206,23 @@ const CardUpdateScreen = lazy(
  *       submission was refused.
  */
 
+/**
+ * Loads the transaction browse screen only when its route needs it.
+ *
+ * Assumptions: the bare form is used because that screen publishes its component as the module's
+ * DEFAULT export, which is the one shape `React.lazy` accepts without adaptation. The two forms in
+ * this file are not stylistic -- the adapting form below exists only for the screens that publish a
+ * named export alone.
+ */
+const TransactionListScreen = lazy(
+  /**
+   * Imports the transaction browse chunk, which publishes its screen as the module's default export.
+   * @returns {Promise<{ default: () => ReactElement }>} The loaded module, already in the
+   *   default-export shape React.lazy accepts.
+   */
+  () => import('./screens/transactionList'),
+);
+
 /** Loads the transaction capture screen only when its route needs it. */
 const TransactionAddScreen = lazy(
   /**
@@ -218,6 +235,78 @@ const TransactionAddScreen = lazy(
     const module = await import('./screens/transactionAdd');
     return { default: module.TransactionAddScreen };
   },
+);
+
+/*
+ * WHY : ⚠️ Refactoring Rationale: the transaction DETAIL screen is mounted, where this table declared
+ *       no route for it at all. `ui/src/screens/transactionDetail/index.tsx` was authored against a
+ *       contract stating this file mounts it at `/transactions/:id`, and it did not -- so the screen
+ *       compiled, type-checked, linted and was unreachable, and every deep link a browse row will
+ *       publish resolved to the not-found result below. That is the same defect the transaction-capture
+ *       note above records, and it is invisible for the same reason: a route table cannot assert what is
+ *       absent from it. `./routerReachability.test.tsx` exists to assert that every authored screen
+ *       module is mounted at the path its own contract names, which an unmounted screen cannot satisfy.
+ * WHY : Assumptions: the DYNAMIC path coexists with the static `/transactions/new` above it and no
+ *       ordering rule is needed. React Router ranks a static segment ahead of a dynamic one when it
+ *       scores its routes, so `/transactions/new` continues to reach the capture screen and only some
+ *       other second segment reaches this one -- which is why the two are declared in reading order
+ *       rather than in a precedence order.
+ * WHY : Assumptions: it is loaded LAZILY and behind the guard, for the two reasons the sibling
+ *       transaction and card screens are. It pulls `Descriptions`, `Divider`, `Form` and `Input`, so an
+ *       eager import would put a record screen in the chunk an unauthenticated operator fetches to see
+ *       a login form; and the detail read validates the token independently, so an unguarded route
+ *       would render a screen whose only request was refused.
+ */
+/** Loads the transaction detail screen only when its route needs it. */
+const TransactionDetailScreen = lazy(
+  /**
+   * Imports the detail screen chunk, which publishes its screen as the module's default export.
+   * @returns {Promise<{ default: () => ReactElement }>} The loaded module, already in the
+   *   default-export shape React.lazy accepts.
+   */
+  () => import('./screens/transactionDetail'),
+);
+
+/*
+ * WHY : Refactoring Rationale: the bill payment screen is MOUNTED here, and previously it was not. The
+ *       screen module `ui/src/screens/billPay/index.tsx` exists and AAP section 0.4.1.4 mounts it at
+ *       `/billpay`, while this file declared no bill-payment route at all -- so the screen compiled,
+ *       linted and type-checked while being unreachable, and `/billpay` resolved to the not-found result
+ *       below. Nothing failed to say so, because a route table cannot assert what is absent from it.
+ *       AAP section 0.5.1.10 assigns the whole program-transfer graph to this module and the acceptance
+ *       criteria name bill pay among the flows that must work end to end, which an unmounted screen
+ *       cannot do.
+ * WHY : Assumptions: it is loaded LAZILY and behind the guard, for the same two reasons every other
+ *       guarded screen is. It pulls `Form`, `Input` and `Popconfirm`, so an eager import would add them
+ *       to the chunk an unauthenticated operator fetches to see a login form; and the payment service
+ *       validates the token independently, so an unguarded route would render a screen whose every
+ *       submission was refused.
+ */
+
+/** Loads the bill payment screen only when its route needs it. */
+const BillPayScreen = lazy(
+  /**
+   * Imports the bill payment chunk, which publishes its screen as the module's default export.
+   * @returns {Promise<{ default: () => ReactElement }>} The loaded module, already in the
+   *   default-export shape React.lazy accepts.
+   */
+  () => import('./screens/billPay'),
+);
+
+/**
+ * Loads the transaction-report submission screen only when its route needs it.
+ *
+ * Assumptions: a bare `lazy(() => import(...))` rather than the adapting form used above, because
+ * `ui/src/screens/reports/index.tsx` publishes a `default` export as well as a named one, and
+ * `React.lazy` accepts a module whose `default` IS the component with no adapter at all.
+ */
+const ReportsScreen = lazy(
+  /**
+   * Imports the report screen chunk, which publishes its screen as the module's default export.
+   * @returns {Promise<{ default: () => ReactElement }>} The loaded module, already in the
+   *   default-export shape React.lazy accepts.
+   */
+  () => import('./screens/reports'),
 );
 
 /** Loads the pending-authorization summary only when its route needs it. */
@@ -258,6 +347,30 @@ const AdminMenuScreen = lazy(
   () => import('./screens/admin'),
 );
 
+/** Loads the user browse only when its route needs it. */
+const UserListScreen = lazy(
+  /**
+   * Imports the user browse chunk, which publishes its screen as the module's default export.
+   * @returns {Promise<{ default: () => ReactElement }>} The loaded module, already in the
+   *   default-export shape React.lazy accepts.
+   */
+  () => import('./screens/userList'),
+);
+
+/** Loads the add-user screen only when its route needs it. */
+const UserAddScreen = lazy(
+  /**
+   * Imports the add-user screen chunk, which publishes its screen as the module's default export.
+   *
+   * Assumptions: the bare form is used because `ui/src/screens/userAdd/index.tsx` publishes BOTH a
+   * named export and a `default` one, so no adapter is needed to reach the shape `React.lazy` accepts.
+   * The sibling maintenance screen below needs the adapter because it publishes a name only.
+   * @returns {Promise<{ default: () => ReactElement }>} The loaded module, already in the
+   *   default-export shape React.lazy accepts.
+   */
+  () => import('./screens/userAdd'),
+);
+
 /** Loads the user maintenance screen only when its route needs it. */
 const UserUpdateScreen = lazy(
   /**
@@ -274,6 +387,21 @@ const UserUpdateScreen = lazy(
     const module = await import('./screens/userUpdate');
     return { default: module.UserUpdateScreen };
   },
+);
+
+/** Loads the user deletion screen only when its route needs it. */
+const UserDeleteScreen = lazy(
+  /**
+   * Imports the user deletion screen chunk, which publishes its screen as the module's default export.
+   *
+   * Assumptions: a direct `import()` is used with no named-to-default adapter, unlike the update screen
+   * immediately above. That module publishes only a named export, while this one publishes BOTH a named
+   * export and a default -- its own file records why -- so the default key React.lazy needs is already
+   * present and adapting it would add an async wrapper that resolves to the same component.
+   * @returns {Promise<{ default: () => ReactElement }>} The loaded module, already in the
+   *   default-export shape React.lazy accepts.
+   */
+  () => import('./screens/userDelete'),
 );
 
 /** Loads the transaction-type list only when its route needs it. */
@@ -319,14 +447,69 @@ export const ACCOUNT_UPDATE_PATH = '/account/update';
 /** Route the card browse screen occupies, which main-menu option 3 transfers to. */
 export const CARD_LIST_PATH = '/cards';
 
+/** Route the transaction browse screen occupies, which main-menu option 6 transfers to. */
+export const TRANSACTION_LIST_PATH = '/transactions';
+
 /** Route the transaction capture screen occupies, which main-menu option 8 transfers to. */
 export const TRANSACTION_ADD_PATH = '/transactions/new';
+
+/**
+ * Route the transaction detail screen occupies, addressed by a transaction identifier.
+ *
+ * Assumptions: the segment is spelled `id`, which is the name
+ * `ui/src/screens/transactionDetail/index.tsx` reads with `useParams`. React Router resolves a
+ * parameter by NAME, so the two spellings have to agree exactly or the screen receives `undefined` and
+ * silently falls back to its own parameterless arrival.
+ *
+ * Assumptions: the identifier travels in the path rather than in history state, and that is safe here
+ * where it is not for a card. A transaction identifier is `TRAN-ID PIC X(16)`
+ * (`app/cpy/CVTRA05Y.cpy` L5), an internally-assigned ledger key that identifies no cardholder and is
+ * not a credential -- unlike a card number, which `ui/src/routes/cards.ts` keeps out of a path
+ * precisely because a target is written into the edge access log and the browser's history. The screen
+ * additionally shows the card number only in the reduced rendering the service publishes.
+ *
+ * Assumptions: this screen ALSO serves the parameterless arrival, which is the reference's other first
+ * entry -- `app/cbl/COTRN01C.cbl` L109 sends an empty map and waits for a key when its selection
+ * carrier is blank. No second, selector-free route is declared for it: AAP section 0.4.1.4 gives
+ * `COTRN01C` exactly one route, and the browse screen that mints a selection is not yet delivered, so a
+ * second path would be a target-side invention with nothing navigating to it. Main-menu option 7
+ * consequently still answers the baseline's own not-installed sentence, which
+ * `ui/src/routes/programRoutes.ts` documents as the delivery boundary rather than a fault.
+ */
+export const TRANSACTION_DETAIL_PATH = '/transactions/:id';
+/** Route the bill payment screen occupies, which main-menu option 10 transfers to. */
+export const BILL_PAY_PATH = '/billpay';
+
+/**
+ * Route the transaction-report submission screen is entered at.
+ *
+ * Assumptions: main-menu option 9, whose `CDEMO-MENU-OPT-PGMNAME` is `CORPT00C` and whose
+ * `CDEMO-MENU-OPT-USRTYPE` is `'U'` in `app/cpy/COMEN02Y.cpy`. The user type is why the route sits
+ * OUTSIDE the administrative subtree below: every one of the eleven main-menu options is `'U'`, and only
+ * the six entries of the admin option table are gated.
+ */
+export const REPORTS_PATH = '/reports';
 
 /** Route the pending-authorization summary occupies, which main-menu option 11 transfers to. */
 export const AUTH_SUMMARY_PATH = '/authorizations';
 
 /** Route the pending-authorization detail occupies, selected from the summary grid. */
 export const AUTH_DETAIL_PATH = '/authorizations/:key';
+
+/**
+ * Route the add-user screen occupies, which administrative option 2 transfers to.
+ *
+ * Assumptions: option 2 is the entry, from `app/cpy/COADM02Y.cpy` L31-L34, which pairs the number `2`
+ * and the label `'User Add (Security)'` with the program name `COUSR01C`.
+ *
+ * Assumptions: the path is selector-free because the screen CREATES a row rather than addressing one.
+ * `app/cbl/COUSR01C.cbl` L86 opens on an empty map with the cursor homed to the first name and reads no
+ * selected user from the session structure at all, so there is no identifier for a path parameter to
+ * carry -- which is what distinguishes this route from the two maintenance routes below. It is declared
+ * inside the administrative subtree, which is what gates it on the signed `carddemo-admin` claim; the
+ * screen itself performs no authorization check of its own, by design.
+ */
+export const USER_ADD_PATH = '/users/new';
 
 /**
  * Route the user maintenance screen occupies when no operator has been selected yet.
@@ -340,8 +523,35 @@ export const AUTH_DETAIL_PATH = '/authorizations/:key';
  */
 export const USER_UPDATE_PATH = '/users/edit';
 
+/**
+ * Route the user browse occupies, which administrative option 1 transfers to.
+ *
+ * Assumptions: it is declared ABOVE the two maintenance paths below and mounted below them, and the
+ * ordering is safe either way -- react-router matches a static segment ahead of a dynamic one, so
+ * `/users` and `/users/edit` cannot shadow each other and neither can shadow `/users/:id/edit`. It is
+ * grouped with them here because all three belong to the same `COUSR0*` family.
+ */
+export const USER_LIST_PATH = '/users';
+
 /** Route the user maintenance screen occupies when an operator has already been selected. */
 export const USER_UPDATE_SELECTED_PATH = '/users/:id/edit';
+
+/**
+ * Route the user deletion screen occupies, replacing program `COUSR03C` (transaction `CU03`).
+ *
+ * Assumptions: this path carries the identifier as `:id`, the SAME parameter name the update routes
+ * above use, because `ui/src/screens/userDelete/index.tsx` reads `useParams().id` and the two screens
+ * are reached from the same selector. A different spelling would resolve to `undefined` silently and
+ * leave the screen waiting for a typed identifier on an arrival that named one.
+ *
+ * Assumptions: only the PARAMETERISED form is declared, where the update screen has two. `COUSR03C`
+ * reaches its own empty first turn through the same map, but a selector-free deletion path would offer
+ * a bare route whose only purpose is to destroy a record the operator has not yet named -- and the
+ * screen already refuses that with `User ID can NOT be empty...`. An administrator who needs to delete
+ * without a prior selection reaches this screen from the identifier they type into it, so the second
+ * route would add an entry point the reference's own navigation does not.
+ */
+export const USER_DELETE_PATH = '/users/:id/delete';
 
 /** Route the transaction-type list occupies, which administrative option 5 transfers to. */
 export const REF_TYPE_LIST_PATH = '/reference/transaction-types';
@@ -509,7 +719,37 @@ export function CardDemoRouter(): ReactElement {
               <Route path={CARD_LIST_PATH} element={<CardListScreen />} />
               <Route path={CARD_DETAIL_ROUTE} element={<CardDetailScreen />} />
               <Route path={CARD_EDIT_ROUTE} element={<CardUpdateScreen />} />
+              {/*
+               * WHY : Assumptions: the transaction browse is declared here, in the guarded but NOT
+               *       administrative subtree, because `app/cpy/COMEN02Y.cpy` L55-L59 gives main-menu
+               *       option 6 the program `COTRN00C` and the user type `'U'` -- so gating it on the
+               *       `carddemo-admin` claim would lock out exactly the operators the option exists
+               *       for. It is a STATIC path carrying no parameter: the starting transaction
+               *       identifier is entered on the screen itself, mirroring the mapset's own
+               *       `TRNIDIN` search field rather than travelling in the address.
+               * WHY : Refactoring Rationale: this route was absent while the screen module existed,
+               *       which is the same defect recorded above for `/transactions/new` -- the screen
+               *       compiled, linted and type-checked while being unreachable, and
+               *       `ui/src/routes/routeCensus.test.ts` reports it because it discovers screens from
+               *       the filesystem rather than from a list anyone has to remember to update.
+               * WHY : Assumptions: the browse's own transfer to `COTRN01C` -- main-menu option 7,
+               *       `/transactions/:id` -- is NOT declared yet, because no `screens/transactionDetail`
+               *       module exists to mount and a route whose element cannot be imported would fail
+               *       the build. Selecting a row therefore reaches the not-found result until that
+               *       screen lands, which is a visible absence rather than a silent one.
+               */}
+              <Route path={TRANSACTION_LIST_PATH} element={<TransactionListScreen />} />
               <Route path={TRANSACTION_ADD_PATH} element={<TransactionAddScreen />} />
+              <Route path={TRANSACTION_DETAIL_PATH} element={<TransactionDetailScreen />} />
+              <Route path={BILL_PAY_PATH} element={<BillPayScreen />} />
+              {/*
+               * Assumptions: the report screen is mounted here, between the transaction capture and the
+               * authorization summary, because that is its position in the reference's own option table --
+               * `app/cpy/COMEN02Y.cpy` lists Transaction Add as option 8, Transaction Reports as option 9
+               * and Pending Authorization View as option 11. Ordering the table by the menu an operator
+               * reads keeps this file comparable with the copybook it is derived from.
+               */}
+              <Route path={REPORTS_PATH} element={<ReportsScreen />} />
               {/*
                * Assumptions: the authorization detail path carries an OPAQUE key rather than the
                * composite the reference selects by. `ui/src/screens/authSummary/index.tsx` mints it and
@@ -521,8 +761,38 @@ export function CardDemoRouter(): ReactElement {
               <Route path={AUTH_DETAIL_PATH} element={<AuthDetailScreen />} />
               <Route element={<AdminSubtree />}>
                 <Route path={ADMIN_MENU_ROUTE} element={<AdminMenuScreen />} />
+                {/*
+                 * Assumptions: the user browse is declared INSIDE this administrative subtree, so it
+                 * inherits the one `RequireAdmin` above rather than carrying a guard of its own.
+                 * `app/cpy/COADM02Y.cpy` L28 gives `COUSR00C` administrative option 1 and
+                 * `app/cbl/COUSR00C.cbl` L124-L125 returns to `COADM01C` on PF3, so the browse is
+                 * reachable only from the administrative menu -- exactly the set of screens this
+                 * subtree exists for. Its screen reads no group claim, which keeps the authorization
+                 * decision in one place.
+                 */}
+                <Route path={USER_LIST_PATH} element={<UserListScreen />} />
+                {/*
+                 * Assumptions: the add-user route is declared BEFORE the two maintenance routes and is
+                 * a literal path, so it cannot be shadowed by them. `/users/new` and `/users/edit` are
+                 * both selector-free literals and cannot collide, and the parameterised
+                 * `/users/:id/edit` matches a deeper segment count, so react-router's ranking resolves
+                 * all three unambiguously without an explicit order. The order below follows the
+                 * administrative menu's own option sequence instead, which is the reading order
+                 * `app/cpy/COADM02Y.cpy` gives the options.
+                 */}
+                <Route path={USER_ADD_PATH} element={<UserAddScreen />} />
                 <Route path={USER_UPDATE_PATH} element={<UserUpdateScreen />} />
                 <Route path={USER_UPDATE_SELECTED_PATH} element={<UserUpdateScreen />} />
+                {/*
+                 * WHY : Assumptions: the deletion route sits INSIDE the administrative subtree, so the
+                 *       `carddemo-admin` claim gates it exactly as it gates the other user routes.
+                 *       `app/csd/CARDDEMO.CSD` reaches `COUSR03C` only from the administrative menu, and
+                 *       `app/cpy/COADM02Y.cpy` gives every administrative option the user type `'A'`, so
+                 *       a deletion route outside this subtree would be the one destructive operation in
+                 *       the table an ordinary operator could reach. The screen itself deliberately
+                 *       carries no gate of its own -- this is the single place the policy is stated.
+                 */}
+                <Route path={USER_DELETE_PATH} element={<UserDeleteScreen />} />
                 <Route path={REF_TYPE_LIST_PATH} element={<RefTypeListScreen />} />
                 <Route path={REF_TYPE_EDIT_PATH} element={<RefTypeEditScreen />} />
               </Route>

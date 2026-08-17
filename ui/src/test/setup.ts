@@ -6,9 +6,10 @@
  * This module is the one place the browser environment every component test
  * assumes is assembled. `ui/vitest.config.ts` names it in `setupFiles`, so it
  * runs once per test file, before that file's imports are evaluated, and nothing
- * imports it directly. It does exactly three things and deliberately nothing
- * else: it registers the DOM matchers, it unmounts what a test rendered, and it
- * supplies the one browser API jsdom omits that the design system requires.
+ * imports it directly. It does exactly four things and deliberately nothing
+ * else: it registers the DOM matchers, it unmounts what a test rendered, it sets
+ * the asynchronous wait budget that lazily loaded routes need, and it supplies
+ * the one browser API jsdom omits that the design system requires.
  *
  * Why this module exists at all
  * -----------------------------
@@ -21,6 +22,12 @@
  * file, so anything left mounted stays queryable. Both are addressed here rather
  * than in each test, so a screen test asserts on the screen and not on the
  * environment.
+ *
+ * The wait budget below is a third concern of the same kind but not a jsdom gap:
+ * it is a Testing Library default that is calibrated for a resolved import and is
+ * too small for a route this application loads through `React.lazy`. It is set
+ * here for the same reason - once, where the environment is assembled, rather
+ * than annotated onto each case that happens to open a route.
  *
  * What this module deliberately does not own
  * -----------------------------------------
@@ -42,13 +49,66 @@
  */
 
 import '@testing-library/jest-dom/vitest';
-import { cleanup } from '@testing-library/react';
+import { cleanup, configure } from '@testing-library/react';
 import { afterEach } from 'vitest';
 
 // Assumptions: Testing Library renders into document.body, so cleaning after
 // every test prevents a previous route or alert from satisfying the next
 // assertion by accident.
 afterEach(cleanup);
+
+/**
+ * Budget, in milliseconds, that `waitFor`, `waitForElementToBeRemoved` and every
+ * `findBy*` query is allowed before it reports a failure.
+ *
+ * ⚠️ Refactoring Rationale: Testing Library's own default is 1000ms and it is TOO
+ * SHORT for any case that opens a route in `ui/src/router.tsx`. Every screen there
+ * is loaded through `React.lazy`, so the first render of a route suspends on an
+ * on-demand module transform rather than on a resolved import, and that transform
+ * is charged to the case that triggered it. Measured on a four-core runner with
+ * file parallelism disabled, the shared frame committed 1704ms after opening
+ * `/menu`, 2599ms after `/transactions/:id` and 10798ms after `/transactions/new`
+ * -- so `ui/src/routerRoutes.test.tsx` and `ui/src/routerReachability.test.tsx`
+ * were reading the `Suspense` fallback and concluding the route resolved to
+ * nothing, on route tables that were entirely correct. The symptom is
+ * indistinguishable from a genuinely unmounted screen, which is what made it
+ * expensive: it reports as `Unable to find an element by:
+ * [data-testid="app-shell"]` and names neither lazy loading nor the budget.
+ *
+ * Assumptions: this weakens no assertion. Every expectation inside a `waitFor`
+ * callback is unchanged, and a wait budget decides only how long the utility
+ * retries before reporting the same failure -- a route that resolves to nothing
+ * still fails, and takes this long to say so.
+ *
+ * Assumptions: raising this costs an already-passing case nothing, which was
+ * measured rather than assumed. A budget bounds only the retry loop of a wait that
+ * never succeeds; a wait that succeeds resolves on the render that satisfies it and
+ * never observes the ceiling. Three runs of the same file in isolation at ceilings
+ * of 1000ms, 30000ms and 15000ms returned 39.7s, 45.4s and 93.0s for the identical
+ * case -- an ordering that no monotonic cost in this value can produce, and which
+ * is host CPU contention rather than an effect of the setting.
+ *
+ * Trade-offs: 15000ms is chosen from those measurements rather than picked round.
+ * It is 8.8x the 1704ms `/menu` commit, and 1.4x the slowest commit observed, so
+ * an ordinary route has an order of magnitude of headroom and the worst one still
+ * clears. It stays 4x BELOW the 60000ms `testTimeout` in `ui/vitest.config.ts` on
+ * purpose, so a genuine hang is still reported as a failed case rather than as a
+ * build that appears to stall -- which is the trade-off that file's own note
+ * records for rejecting a 60000ms value there, and the reason this budget is not
+ * simply set to match it.
+ *
+ * Alternatives Considered: (1) passing `{ timeout }` at each affected `waitFor`.
+ * Rejected for the reason `ui/vitest.config.ts` gives for rejecting per-case
+ * timeouts -- the cost is a property of mounting a lazily loaded screen, so every
+ * route case added later would need the same annotation and the one that forgot it
+ * would reintroduce the flake. (2) Eagerly importing the screens in the router so
+ * no transform is charged to a case. Rejected because the lazy split is a
+ * production decision that keeps a record screen out of the chunk an
+ * unauthenticated operator fetches, and a test budget must not dictate it.
+ */
+const LAZY_ROUTE_WAIT_BUDGET_MS = 15000;
+
+configure({ asyncUtilTimeout: LAZY_ROUTE_WAIT_BUDGET_MS });
 
 /**
  * Evaluates a single `(min-width: Npx)` or `(max-width: Npx)` feature against

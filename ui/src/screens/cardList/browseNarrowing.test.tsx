@@ -34,11 +34,15 @@
 
 // Assumptions: every test API is imported rather than taken from an ambient global, because
 // ui/vitest.config.ts sets `globals: false` and records that as a contract.
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 
 import { AppShell } from '../../layout/AppShell';
+import { MESSAGE_BAND_TEST_ID } from '../../layout/MessageBand';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { listCards } from '../../api/cards';
@@ -383,12 +387,48 @@ async function refusesAMalformedAccountFirst(): Promise<void> {
   expect(document.getElementById('card-list-account-number-error')?.textContent ?? '').toContain(
     collapse(SHARED_MESSAGES.ACCOUNT_FILTER_IF_SUPPLIED_MUST_BE_A_11_DIGIT_NUMBER),
   );
-  expect(
-    screen.queryByText(
-      collapse(SHARED_MESSAGES.CARD_ID_FILTER_IF_SUPPLIED_MUST_BE_A_16_DIGIT_NUMBER),
-    ),
-  ).toBeNull();
+  /*
+   * WHY : ⚠️ Refactoring Rationale: precedence is asserted on the BAND, where this asserted the card
+   *       sentence was absent from the whole document. That stronger claim was only true while the
+   *       screen could mark one field, and marking one field was itself the defect: `2200-EDIT-INPUTS`
+   *       performs BOTH edits unconditionally (`app/cbl/COCRDLIC.cbl` L989-L993 -- the `GO TO` at L1025
+   *       leaves that paragraph's own exit at L1032, not the caller), so both filter flags can be set on
+   *       one turn and the two highlight tests at L872 and L877 are INDEPENDENT `IF`s. The card field is
+   *       therefore reddened too, and it now carries its own accessible description so a screen reader
+   *       on that field is told what is wrong with THAT field rather than about the account.
+   * WHY : Assumptions: what precedence actually means here is which single sentence reaches the row-23
+   *       line, and that is the account's because its arm writes `WS-ERROR-MSG` unconditionally at L1021
+   *       to L1023 while the card arm writes only `IF WS-ERROR-MSG-OFF` at L1056. Asserting the band
+   *       tests exactly that, and the two field descriptions below test the other half.
+   */
+  expect(screen.getByTestId(MESSAGE_BAND_TEST_ID).textContent ?? '').toContain(
+    collapse(SHARED_MESSAGES.ACCOUNT_FILTER_IF_SUPPLIED_MUST_BE_A_11_DIGIT_NUMBER),
+  );
+  expect(screen.getByTestId(MESSAGE_BAND_TEST_ID).textContent ?? '').not.toContain(
+    collapse(SHARED_MESSAGES.CARD_ID_FILTER_IF_SUPPLIED_MUST_BE_A_16_DIGIT_NUMBER),
+  );
+  expect(document.getElementById('card-list-card-number-error')?.textContent ?? '').toContain(
+    collapse(SHARED_MESSAGES.CARD_ID_FILTER_IF_SUPPLIED_MUST_BE_A_16_DIGIT_NUMBER),
+  );
   expect(vi.mocked(listCards)).toHaveBeenCalledTimes(1);
+}
+
+/**
+ * Reports whether one control label is the detail selection code.
+ * @param {string} label - A rendered control's trimmed text.
+ * @returns {boolean} `true` for the `'S'` code `app/cbl/COCRDLIC.cbl` L77-L79 declares.
+ */
+function isDetailControlLabel(label: string): boolean {
+  return label === 'S';
+}
+
+/**
+ * Reports whether one control label is the update selection code.
+ * @param {string} label - A rendered control's trimmed text.
+ * @returns {boolean} `true` for the `'U'` code `app/cbl/COCRDLIC.cbl` L77-L79 declares.
+ */
+function isUpdateControlLabel(label: string): boolean {
+  return label === 'U';
 }
 
 /**
@@ -421,8 +461,47 @@ async function keysCollidingRowsApart(): Promise<void> {
   );
 
   expect(within(table).getByText('Y')).toBeInTheDocument();
-  expect(within(table).getAllByRole('button', { name: 'S' })).toHaveLength(2);
-  expect(within(table).getAllByRole('button', { name: 'U' })).toHaveLength(2);
+
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the two control counts are taken by reading the buttons' own text
+   *       rather than through `getAllByRole('button', { name })`, and the change is a PERFORMANCE fix
+   *       with the assertion left intact -- both forms count the controls labelled `S` and `U` inside
+   *       this table. The role-and-name form made this case the only one in the suite that could not
+   *       finish: measured on a four-core runner it cost 70 seconds for the `S` query and a further 154
+   *       seconds for the `U` query, against a 60-second `testTimeout`, so the case timed out before
+   *       reaching the row-key assertion it exists for. The cost is not in the DOM walk but in the
+   *       accessible-NAME computation the `name` option triggers: `dom-accessibility-api` asks
+   *       `getComputedStyle(element, '::before')` for each candidate, jsdom implements no
+   *       pseudo-element form of that call, and every one of those routes through its virtual console --
+   *       which is also why the run prints `Not implemented: Window's getComputedStyle() method: with
+   *       pseudo-elements`. Reading `textContent` needs no accessible name and completes immediately.
+   * WHY : Alternatives Considered: (1) raising `testTimeout` past 224 seconds, rejected because it
+   *       leaves a four-minute case in the suite and hides the cause rather than removing it;
+   *       (2) narrowing the query scope further, rejected because the scope is already this one table
+   *       and the cost is per-candidate rather than per-node; (3) dropping the two counts, rejected
+   *       because the paragraph above records that counting the controls was a deliberate part of this
+   *       case even though the row keys are what it turns on.
+   * WHY : Assumptions: counting two of each is what establishes that BOTH rows rendered, so the row-key
+   *       assertion below is comparing two distinct rendered rows rather than one row React reconciled
+   *       twice. The count is the point here, not the role.
+   * WHY : Alternatives Considered: (4) `getAllByText('S')` / `getAllByText('U')` scoped to the table,
+   *       which is equally free of the accessible-name cost -- independently measured at 2ms against
+   *       1.1s for the same role query on a bare table and 20s to 40s once this screen is mounted in the
+   *       shell. Rejected in favour of the form below only because it is stricter: it counts rendered
+   *       CONTROLS in `tbody`, so a stray text node reading `S` or `U` anywhere else in the table cannot
+   *       satisfy the count.
+   */
+  const controlLabels = Array.from(table.querySelectorAll('tbody button')).map(
+    /**
+     * Reads one rendered control's visible label.
+     * @param {Element} control - One button rendered inside the table body.
+     * @returns {string} The control's text, trimmed.
+     */
+    (control: Element): string => (control.textContent ?? '').trim(),
+  );
+
+  expect(controlLabels.filter(isDetailControlLabel)).toHaveLength(2);
+  expect(controlLabels.filter(isUpdateControlLabel)).toHaveLength(2);
 
   const rowKeys = Array.from(table.querySelectorAll('tbody tr')).map(
     /**
@@ -558,7 +637,48 @@ async function suppressesADuplicateTurn(): Promise<void> {
 }
 
 /**
- * Registers the seven cases.
+ * The exit sentence is not written at all, not merely never seen.
+ *
+ * Refactoring Rationale: this case exists because a DOM assertion CANNOT discriminate the fix, and the
+ * sibling suite established that by measurement rather than assumption -- `accountView.test.tsx` L297
+ * records that with the removed write restored, its runtime case still passed, because React batches the
+ * state write with the route transition and the screen unmounts before any paint. A browser run against
+ * THIS screen measured the same write surviving 29 ms on `/menu` before the arriving screen's shared-slot
+ * registration cleared it, which is short enough that no DOM assertion can catch it reliably and long
+ * enough that an operator sees a sentence the reference never paints.
+ *
+ * Assumptions: `PF03 PRESSED.EXITING` is never transmitted by the reference, which is why the write was
+ * withdrawn rather than re-plumbed. `WS-ERROR-MSG` is WORKING-STORAGE at `app/cbl/COCRDLIC.cbl` L117 and
+ * an `EXEC CICS XCTL` discards it; `app/cpy/COCOM01Y.cpy` declares no message member for it to travel in;
+ * the arm sets it at L396 with no `SEND MAP` before the transfer at L402; and `app/cbl/COMEN01C.cbl`
+ * L79-L80 clears its own message on entry regardless.
+ *
+ * Assumptions: the assertion is made against the module's SOURCE and is narrow -- the catalog entry must
+ * not be referenced by this screen outside a comment. The entry itself stays in
+ * `ui/src/messages/messages.ts`, because transformation rule T8 keeps the transcription of every
+ * `88`-level sentence complete whether or not a program reaches it; what must not exist is a screen that
+ * emits it. The technique and the `join(import.meta.dirname, ...)` spelling both follow
+ * `accountView.test.tsx` L320-L330, which records that `new URL('./index.tsx', import.meta.url)` does not
+ * work here because Vite rewrites that exact syntax as an asset reference.
+ * @returns {void} Nothing; the assertion carries the outcome.
+ */
+function referencesNoExitSentence(): void {
+  const source = readFileSync(join(import.meta.dirname, 'index.tsx'), 'utf8');
+  const referencing = source.split('\n').filter(
+    /**
+     * Keeps a line that reads the catalog entry rather than one that explains its absence.
+     * @param {string} line - One line of the module.
+     * @returns {boolean} `true` when the line references the entry outside a comment.
+     */
+    (line: string): boolean =>
+      line.includes('WS_EXIT_MESSAGE') && !line.trimStart().startsWith('*'),
+  );
+
+  expect(referencing).toEqual([]);
+}
+
+/**
+ * Registers the eight cases.
  * @returns {void} Nothing.
  */
 function browseNarrowingCases(): void {
@@ -574,6 +694,7 @@ function browseNarrowingCases(): void {
   it('keys two rows with identical masked renderings apart', keysCollidingRowsApart);
   it('discards a superseded paging response', discardsASupersededPagingResponse);
   it('issues no second read for a turn taken while one is outstanding', suppressesADuplicateTurn);
+  it('writes no exit sentence the reference never transmits', referencesNoExitSentence);
 }
 
 describe(

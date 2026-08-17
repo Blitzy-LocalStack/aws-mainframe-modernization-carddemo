@@ -59,6 +59,15 @@ export const AUTH_SUMMARY_ROUTE = '/authorizations';
 /** Route the transaction-type browse is reached at. */
 export const REF_TYPE_LIST_ROUTE = '/reference/transaction-types';
 
+/** Route the bill payment screen is reached at, which main-menu option 10 transfers to. */
+export const BILL_PAY_ROUTE = '/billpay';
+
+/** Route the transaction browse is reached at, which main-menu option 6 transfers to. */
+export const TRANSACTION_LIST_ROUTE = '/transactions';
+
+/** Route the transaction-report submission screen is reached at, which option 9 transfers to. */
+export const REPORTS_ROUTE = '/reports';
+
 /**
  * Reference program name to the browser route this delivery reaches it at.
  *
@@ -82,6 +91,38 @@ export const PROGRAM_ROUTES: Readonly<Record<string, string>> = Object.freeze({
   COCRDSLC: CARD_LIST_ROUTE,
   COCRDUPC: CARD_LIST_ROUTE,
   COTRN02C: TRANSACTION_ADD_ROUTE,
+  /*
+   * WHY : Refactoring Rationale: the browse and the report screen are registered here because both are
+   *       now mounted -- `ui/src/router.tsx` declares `/transactions` and `/reports` -- and this map is
+   *       what decides whether a menu option can reach them. While either program was absent the option
+   *       answered the baseline's not-installed sentence, which was correct for a screen that did not
+   *       exist and became wrong the moment one did: it would refuse an operator two delivered flows the
+   *       acceptance criteria name among those that must work end to end.
+   * WHY : Assumptions: `COTRN01C` is deliberately NOT registered alongside them even though
+   *       `ui/src/router.tsx` mounts its screen. Its route is `/transactions/:id`, which cannot be
+   *       navigated to without a transaction identifier, and a menu option carries no selection -- the
+   *       reference's own first turn of that program sends an empty map and waits for a key
+   *       (`app/cbl/COTRN01C.cbl` L109). Registering a pattern here would send an operator to a literal
+   *       `:id` segment, so main-menu option 7 keeps the not-installed sentence, which is the delivery
+   *       boundary this map's docstring describes rather than a fault. `COUSR03C` is absent from the
+   *       administrative menu's own map for exactly the same reason.
+   */
+  COTRN00C: TRANSACTION_LIST_ROUTE,
+  CORPT00C: REPORTS_ROUTE,
+  /*
+   * WHY : Refactoring Rationale: this entry names a route where the program was previously ABSENT from
+   *       this map, which resolved it to `null`. That absence was correct while no bill payment screen
+   *       existed; `ui/src/screens/billPay/index.tsx` is now authored and `ui/src/router.tsx` mounts it
+   *       at this path, so leaving the program unregistered would answer main-menu option 10 with the
+   *       baseline's not-installed sentence for a screen that IS installed -- refusing an operator a
+   *       delivered flow that the acceptance criteria name among those which must work end to end.
+   * WHY : Assumptions: the registration is made HERE rather than in either menu's own destination map.
+   *       Both menus derive their destinations from this module, so this is the single edit that makes
+   *       the option reachable; writing it into a menu would recreate the second, hand-maintained
+   *       program-to-route table this module's own docstring forbids, and the two would then be free to
+   *       disagree about which screens the delivery carries.
+   */
+  COBIL00C: BILL_PAY_ROUTE,
   COPAUS0C: AUTH_SUMMARY_ROUTE,
   COTRTLIC: REF_TYPE_LIST_ROUTE,
   COUSR02C: USER_UPDATE_UNSELECTED_ROUTE,

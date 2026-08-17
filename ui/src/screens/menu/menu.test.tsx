@@ -383,42 +383,110 @@ async function anOptionRowIsNotActivatable(): Promise<void> {
 /**
  * An option whose program this application does not serve reports the not-installed sentence.
  *
- * Assumptions: option 6 is `COTRN00C`, for which no screen module exists, so it takes the reference's
- * own not-installed arm. The expected sentence is composed through the catalog template, whose value
- * part is delimited by TWO spaces — which is what strips the option name's 35-character padding, so
- * the assertion also pins that the padding does not reach the middle of the sentence.
+ * ⚠️ Refactoring Rationale: this case reads option 7 where it previously read option 6. Option 6 named
+ * `COTRN00C`, and it was the right carrier for this assertion only while no transaction browse existed;
+ * `ui/src/screens/transactionList/index.tsx` is now authored, `ui/src/router.tsx` mounts it at the
+ * literal `/transactions`, and `ui/src/routes/programRoutes.ts` registers it -- so option 6 now ENTERS a
+ * screen and could no longer report an absent one. Left as it was, this case would have failed for the
+ * best possible reason, and moving it keeps the reference behaviour covered instead of deleting the
+ * coverage.
+ *
+ * Assumptions: option 7 is `COTRN01C`, and it is the one main-menu option that still takes the
+ * reference's own not-installed arm. Its screen IS mounted, but only at `/transactions/:id`, which needs
+ * a transaction identifier a menu option does not carry -- the reason `programRoutes.ts` records for
+ * omitting it. So the sentence is asserted against a genuine absence of a reachable destination rather
+ * than against a contrived one, which is what this case has always been for.
+ *
+ * Assumptions: the expected sentence is composed through the catalog template, whose value part is
+ * delimited by TWO spaces — which is what strips the option name's 35-character padding, so the
+ * assertion also pins that the padding does not reach the middle of the sentence.
  * @returns {Promise<void>} Resolves once the assertion has run.
  */
 async function reportsNotInstalledForAnUnservedOption(): Promise<void> {
   render(renderMenu());
 
-  await selectByTyping('06');
+  await selectByTyping('07');
 
   const expected = formatMessageTemplate(MESSAGE_TEMPLATES.MENU_OPTION_NOT_INSTALLED, {
-    'CDEMO-MENU-OPT-NAME': optionLine(6).slice('06. '.length),
+    'CDEMO-MENU-OPT-NAME': optionLine(7).slice('07. '.length),
   });
 
-  expect(expected).toBe('This option Transaction List is not installed...');
+  expect(expected).toBe('This option Transaction View is not installed...');
   expect(await screen.findByText(expected)).toBeInTheDocument();
 }
 
 /**
- * An option whose route carries an opaque selector also takes the not-installed arm.
+ * An option whose route carries an opaque selector enters the browse that mints the selector.
  *
- * Assumptions: option 4 is `COCRDSLC`, which HAS a screen module, and it is still reported as not
- * installed. Its route carries a card selector that only the browse screen mints, so the menu holds
- * no path to name — and reporting the reference's own sentence is the honest outcome, where inventing
- * a path would produce a request the selector guard refuses.
- * @returns {Promise<void>} Resolves once the assertion has run.
+ * ⚠️ Refactoring Rationale: this case previously asserted that option 4 reported itself NOT INSTALLED,
+ * and it ratified a defect. `ui/src/routes/programRoutes.ts` is the module that owns the
+ * program-to-route resolution for both menus — its docstring says so explicitly — and it maps both
+ * `COCRDSLC` and `COCRDUPC` to the card browse as the registered divergence `D-CARD-SELECTOR`. The menu
+ * screen carried a second, hand-written copy of that table which answered `null` for the same two
+ * programs, so options 4 and 5 reported an absent screen while the delivery in fact carries one. The
+ * screen now derives its map from the owning module, so the two cannot disagree, and this case asserts
+ * the resolution that module documents.
+ *
+ * Assumptions: the destination is the card BROWSE rather than a single-card path because
+ * `/cards/:cardKey` is addressable only by a selector the service mints, and the browse is where a
+ * typed card number is exchanged for one — which is what the reference's own first turn of `COCRDSLC`
+ * does with its empty account and card fields.
+ *
+ * Assumptions: the baseline's not-installed sentence keeps its own coverage independently of this case,
+ * in {@link reportsNotInstalledForAnUnservedOption}, which uses option 7 — the one option left with no
+ * reachable destination, its screen being addressable only by a transaction identifier the menu has not
+ * got. So repairing this case removes no assertion about reference behaviour.
+ * @returns {Promise<void>} Resolves once the destination has been reached.
  */
-async function reportsNotInstalledForASealedRoute(): Promise<void> {
+async function entersTheBrowseForASelectorSealedRoute(): Promise<void> {
   render(renderMenu());
 
   await selectByTyping('04');
 
-  expect(
-    await screen.findByText('This option Credit Card View is not installed...'),
-  ).toBeInTheDocument();
+  expect(await screen.findByText('CARD LIST REACHED')).toBeInTheDocument();
+}
+
+/**
+ * The normalised two-digit entry is written back into the option field.
+ *
+ * Assumptions: `app/cbl/COMEN01C.cbl` L125 performs `MOVE WS-OPTION TO OPTIONO` before it validates
+ * anything, so the echo is observable on a REFUSED turn — which is the turn that leaves the field
+ * mounted to be read. A blank entry normalises to `00` by the zero-fill at L123, so the field shows
+ * `00` beside the refusal rather than staying empty.
+ * @returns {Promise<void>} Resolves once the field has been read back.
+ */
+async function echoesTheNormalisedEntryIntoTheField(): Promise<void> {
+  render(renderMenu());
+
+  await selectByTyping('');
+
+  expect(await screen.findByText(SHARED_MESSAGES.PLEASE_ENTER_A_VALID_OPTION_NUMBER)).toBeVisible();
+  expect(screen.getByLabelText(MAIN_MENU_HEADINGS.OPTION_PROMPT)).toHaveValue('00');
+}
+
+/**
+ * A single typed digit is echoed back in the reference's zero-filled two-digit form.
+ *
+ * ⚠️ Refactoring Rationale: the digit typed here is `7` where it was previously `9`. This case needs a
+ * single digit whose turn is REFUSED, because the field it reads back only survives if the screen stays
+ * mounted — a digit that reaches a destination navigates away and leaves nothing to read. Option 9 was
+ * that digit only while the reports screen was unmounted; `ui/src/screens/reports/index.tsx` is now
+ * authored, `ui/src/router.tsx` mounts it at `/reports` and `ui/src/routes/programRoutes.ts` registers
+ * it, so typing `9` now enters the report screen and this case would read an unmounted field.
+ *
+ * Assumptions: option 7 is `COTRN01C` and is the only single digit still without a reachable
+ * destination — its screen is mounted at `/transactions/:id`, which needs a transaction identifier the
+ * menu has not got — so the turn is refused and the field survives to be read. The echo is `07`, which
+ * is what `WS-OPTION-X PIC X(02) JUST RIGHT` plus the zero-fill produces and what was measured from the
+ * compiled reference; the property under test is the two-digit echo, not which option carries it.
+ * @returns {Promise<void>} Resolves once the field has been read back.
+ */
+async function echoesASingleDigitAsTwo(): Promise<void> {
+  render(renderMenu());
+
+  await selectByTyping('7');
+
+  expect(screen.getByLabelText(MAIN_MENU_HEADINGS.OPTION_PROMPT)).toHaveValue('07');
 }
 
 /**
@@ -608,7 +676,9 @@ function mainMenuScreenCases(): void {
     'reports the not-installed sentence for an unserved option',
     reportsNotInstalledForAnUnservedOption,
   );
-  it('reports the not-installed sentence for a sealed route', reportsNotInstalledForASealedRoute);
+  it('enters the browse for a selector-sealed route', entersTheBrowseForASelectorSealedRoute);
+  it('echoes the normalised entry into the field', echoesTheNormalisedEntryIntoTheField);
+  it('echoes a single typed digit as two', echoesASingleDigitAsTwo);
   it('refuses an option above the catalogued count', refusesAnOptionAboveTheCount);
   it('refuses a zero entry', refusesAZeroEntry);
   it('refuses a blank entry', refusesABlankEntry);

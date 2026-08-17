@@ -22,6 +22,33 @@ requirements. The mainframe assets under `app/**` remain reference-only.
 | `<regional-alb-certificate-arn>` | ACM certificate ARN | REGIONAL certificate presented by the internal ALB HTTPS listener, covering `<internal-service-name>`. Required; no default exists. |
 | `<internal-service-name>` | bare DNS hostname | The name that certificate covers and that the API Gateway private integration verifies. Required; no default exists. |
 | `<us-east-1-spa-certificate-arn>` | ACM certificate ARN | Certificate for the SPA distribution, which CloudFront reads only from `us-east-1`. Required; no default exists. |
+| `<spa-hostname>` | bare DNS hostname | Alias the SPA distribution answers on; must be covered by the certificate above. |
+| `<api-hostname>` | bare DNS hostname | Host of the deployed API, used to narrow the SPA's permitted request origin after the apply. |
+| `<oidc-provider-arn>` | IAM provider ARN | The account's GitHub OIDC provider, published by `infra/bootstrap`. |
+| `<iam-permissions-boundary-arn>` | IAM policy ARN | The organisation's own IAM guardrail. This package does not create it. |
+| `<owner>`/`<repo>` | repository slug | Owner and name of the repository the publication role is granted to. |
+| `<oncall-address>` | email address | Alarm recipient. At least one is required in both environments. |
+| `<mask-hmac-secret-arn>` | Secrets Manager ARN | Entry holding the masking HMAC key. Its ARN is an input; its value is created out of band. |
+| `<mask-hmac-cmk-arn>` | KMS key ARN | Customer-managed key encrypting the masking secret. Must share the secret's account and Region. |
+| `<name-prefix>` | name prefix | The selected root's `name_prefix` variable, which prefixes the Secrets Manager entry names below. |
+| `<cluster-name>` | ECS cluster name | Read from the environment's Terraform output at the point of use. |
+| `<service-name>` | ECS service name | The service being rolled. Substitute each consumer in turn where a step names several. |
+| `<auth-service-name>`, `<account-service-name>`, `<minting-service-name>` | ECS service names | The specific services a rotation step must roll; named separately because rolling the wrong one widens an outage. |
+| `<user-pool-id>`, `<app-client-id>` | Cognito identifiers | Read from the environment's Terraform output; neither is a secret. |
+| `<app-client-secret-arn>` | Secrets Manager ARN | Entry holding the Cognito app-client secret payload. Never print its value. |
+| `<seed-user-secret-name>` | Secrets Manager name | Entry holding one seed user's generated initial password. Resolve it from the `credential_secret_name_prefix` output; do not paste a resolved name back into this file. |
+| `<secret-name>` | Secrets Manager name fragment | The single key being replaced in a rotation step, substituted into the entry name. |
+| `<role-name>` | database role name | The PostgreSQL role whose credential is being replaced. The role name is also its secret name. |
+| `<master-username>`, `<master-secret-arn>` | database master identity | The cluster master role and the Secrets Manager entry holding its credential. |
+| `<parameter-prefix>` | Parameter Store prefix | Prefix beneath which the environment's runtime configuration is published. |
+| `<trust-anchor-path>` | local file path | Certificate bundle used to verify the database server, because every service pins `sslmode=verify-full`. |
+| `<planfile>` | local file path | Saved plan; listed once above and reused by every `plan`/`apply` pair. |
+
+Three further tokens are **naming patterns rather than operator inputs**, and are shown as
+placeholders only so the shape of a generated name is visible: `<context>` in
+`carddemo_<context>_owner` and `carddemo_<context>_migrator`, `<role>` in `<role>_migrator`, and
+`<module>` in `python -m carddemo_migration.<module>`. Do not attempt to supply a value for these --
+substitute the bounded context or module you are acting on.
 
 **Expected outcome / success signal**: Terraform exits zero after applying the reviewed saved plan;
 all long-running ECS services reach a stable state; health checks report `UP`; Flyway reports no
@@ -41,18 +68,62 @@ This runbook provides operator commands; it is not evidence that a live AWS envi
 provisioned. A real `terraform apply` and the cost it incurs remain operator actions. The migration
 adds an AWS path and leaves the existing z/OS and AWS Mainframe Modernization paths intact.
 
+Assumptions: the infrastructure in this repository is **authored and statically validated only**.
+`terraform fmt -check`, a credential-free `init -backend=false`, `validate`, `tflint` and the policy
+and generated-document checks run as build gates in
+[`infra-ci.yml`](../../.github/workflows/infra-ci.yml); none of them contacts an AWS account. Static
+success is therefore evidence about the configuration and **not** evidence that any environment
+exists, that any resource has been created, or that any capacity, latency or throughput figure has
+been measured. No load test and no benchmark has been run. Read every command below as the procedure
+an operator would follow, not as a record of one already performed.
+
+There are exactly three Terraform roots, and every command in this runbook addresses one of them:
+
+| Root | Applied | Holds |
+|:---|:---|:---|
+| `infra/bootstrap` | Once per AWS account, out of band | The remote-state backend: a versioned, encrypted S3 bucket and a DynamoDB lock table |
+| `infra/envs/dev` | Per change to the development environment | The development environment root, sized down independently of production |
+| `infra/envs/prod` | Per change to the production environment | The production environment root |
+
+Each root composes the same sixteen reusable modules under `infra/modules/`: `network`, `kms`,
+`secrets`, `ecr`, `aurora-postgresql`, `ecs-cluster`, `ecs-service`, `alb`, `api-gateway-http`,
+`cognito`, `sqs`, `step-functions-batch`, `eventbridge-scheduler`, `s3-datasets`, `cloudfront-spa`
+and `observability`. Because both environment roots call the same modules, the topology they
+provision is identical and only the sizing and retention inputs differ.
+
 ---
 
 ## Prerequisites
 
-- Terraform 1.15.8.
-- AWS provider 6.x locked by each environment root and the random provider 3.9.x --
-  the only two providers any root declares, matching AAP §0.6.1.4.
-- AWS CLI with the Cognito `add-user-pool-client-secret`,
+- **Terraform 1.15.8.** Every root declares `required_version = ">= 1.15.0"`; 1.15.8 is the version
+  this configuration is validated on.
+- **Providers**: `hashicorp/aws` constrained `~> 6.56` and `hashicorp/random` constrained `~> 3.9` --
+  the only two providers any root declares, matching AAP §0.6.1.4. The tracked
+  `.terraform.lock.hcl` in each root resolves those constraints to **aws 6.57.1** and
+  **random 3.9.0**. Verify the lock file; never rewrite it as a way of moving a version.
+- **AWS CLI** with the Cognito `add-user-pool-client-secret`,
   `list-user-pool-client-secrets`, and `delete-user-pool-client-secret` operations.
-- Maven 3.9.16 on Java 21, Node.js compatible with `ui/package.json`, Python 3.13, Docker, and `jq`.
+- **Maven 3.9.16 on Java 21**, Node.js compatible with `ui/package.json`, Python 3.13, Docker, and `jq`.
 - A clean checkout and a short-lived federated AWS session. Do not create access keys for this
   procedure.
+
+The image builds pin these base images. They are listed because a wrong tag here fails a build
+outright rather than degrading a deployment, and one of them is easy to get wrong in a way the
+Dockerfile itself gives no hint of:
+
+| Stage | Pinned base image |
+|:---|:---|
+| Java build | `maven:3.9.16-amazoncorretto-21-al2023` |
+| Java runtime (eight services) | `public.ecr.aws/amazoncorretto/amazoncorretto:21.0.12-al2023-headless` |
+| UI build | `node:22.23.1-alpine` |
+| UI runtime | `nginx:1.30.4-alpine` |
+| ETL | `python:3.13.14-slim-trixie` |
+
+Assumptions: the Corretto publisher ships **no Alpine variant** of the Java runtime image -- that
+repository publishes only `-al2` and `-al2023` tags, and 21.0.12 is the highest 21.x -- so an
+intuitive `21-alpine` tag is not a smaller alternative. It resolves to nothing and fails every
+service image build. Trade-offs: `nginx` is held on the **stable** branch rather than mainline 1.31.x
+because a static asset server needs no mainline feature and stable receives a longer patch window.
 
 ```bash
 # WHAT: verifies that the deployment tools resolve before any state or registry operation.
@@ -65,6 +136,30 @@ node --version
 python --version
 docker version
 ```
+
+Static validation is a separate path from the deploy path below, and confusing the two wastes an
+apply. The credential-free form initialises without a backend and can therefore only check syntax:
+
+```bash
+# WHAT: checks formatting and validates each root without contacting AWS.
+# WHY : Assumptions: -backend=false initialises WITHOUT the remote state, so this form needs no
+#       credentials -- and for the same reason it cannot plan or apply. An operator who runs this
+#       and then tries to apply is working against an uninitialised backend. Use the
+#       backend-enabled init in Step 3 for a real deployment.
+terraform fmt -check -recursive infra/
+terraform -chdir=infra/envs/dev init -backend=false -lockfile=readonly
+terraform -chdir=infra/envs/dev validate
+```
+
+These same checks, plus `tflint --config infra/.tflint.hcl`, a policy scan and a `terraform-docs`
+drift check, are owned by [`infra-ci.yml`](../../.github/workflows/infra-ci.yml) and run on every
+pull request. They are repeated here only so an operator can reproduce a CI failure locally.
+
+**Note**: if you install Terraform through the `hashicorp/setup-terraform` action rather than
+directly, set `terraform_wrapper: false`. Assumptions: that action installs a wrapper which rewrites
+exit codes, and `terraform plan -detailed-exitcode` is three-valued -- 0 no changes, 1 error, 2
+changes present. Under the wrapper a "changes present" result can be read as success, which silently
+defeats any check built on that exit code.
 
 ---
 
@@ -144,10 +239,16 @@ mvn -B -f services/pom.xml clean verify
 ```
 
 ```bash
-# WHAT: installs the locked UI dependency graph and produces the production bundle.
+# WHAT: installs the locked UI dependency graph, then type-checks, lints, tests and bundles the SPA.
 # WHY : Alternatives Considered: npm install was rejected because it may resolve versions outside
 #       package-lock.json; npm ci refuses lock drift and makes the built bundle reproducible.
+# WHY : Assumptions: these four script names are the ones ui/package.json actually declares. Script
+#       names are owned by that manifest, not by this runbook -- confirm them there rather than
+#       guessing, because npm reports a missing script as an error that reads like a build failure.
 npm --prefix ui ci
+npm --prefix ui run typecheck
+npm --prefix ui run lint
+npm --prefix ui run test
 npm --prefix ui run build
 ```
 
@@ -158,6 +259,12 @@ npm --prefix ui run build
 ./.venv/bin/ruff check data-migration
 ./.venv/bin/python -m pytest data-migration/tests
 ```
+
+**Note**: the ETL is invoked as `python -m carddemo_migration.<module>`. The available modules and
+their arguments are owned by `data-migration/src/carddemo_migration/cli.py` and documented in
+`data-migration/README.md`; confirm a verb there rather than assuming one. Loading and verifying the
+data is a separate procedure with its own ordering and checks -- follow
+[data-migration.md](data-migration.md) for it rather than driving the ETL from this runbook.
 
 ```bash
 # WHAT: authenticates Docker to the target ECR registry without placing the password in argv.
@@ -177,7 +284,7 @@ into an eleventh ECR repository. Both the mirror and that repository are withdra
 `infra/modules/ecs-service` no longer composes a collector sidecar -- the collector is not in the
 frozen AAP, and it was forcing an eleventh repository against the ten of AAP §0.4.1.6 and a ninth
 interface endpoint against the eight of AAP §0.4.1.9. Nothing needs mirroring before an apply now;
-every image this deployment runs is built in Step 2a.
+every image this deployment runs is built by the Step 2 commands above.
 
 What does need a deliberate decision at this point is one security-group flow. `infra/modules/network`
 ships `identity_provider_egress_cidrs` as the **empty set**, so by default the application tier
@@ -210,7 +317,7 @@ curl -fsSL https://ip-ranges.amazonaws.com/ip-ranges.json |
 
 ---
 
-## Step 2c - Build the operational Lambda packages
+### Step 2c - Build the operational Lambda packages
 
 The three archives the environment roots deploy as Lambda functions are **build output**, not
 tracked files. Build them before any `terraform validate`, `plan` or `apply` in this runbook.
@@ -218,7 +325,7 @@ tracked files. Build them before any `terraform validate`, `plan` or `apply` in 
 ```bash
 # WHAT: assembles dist/online-write-flag.zip, dist/database-admin.zip and
 #       dist/dataset-generation-retention.zip from the reviewed sources beside them.
-# WHY : ⚠️ Refactoring Rationale: these were built INSIDE Terraform by `archive` provider data
+# WHY : Refactoring Rationale: these were built INSIDE Terraform by `archive` provider data
 #       sources. That provider is not in the frozen dependency inventory (AAP §0.6.1.4 names the
 #       Terraform CLI, `hashicorp/aws` and `hashicorp/random`), and an in-file comment recording
 #       the divergence does not amend the plan, so packaging moved here. The builder uses only the
@@ -293,14 +400,23 @@ export TF_VAR_mask_hmac_secret_kms_key_arn="<mask-hmac-cmk-arn>"
 export TF_VAR_alarm_email_endpoints='["<oncall-address>"]'
 ```
 
-**The automated path takes the same eleven values from protected GitHub environment variables.**
-`.github/workflows/deploy.yml` writes them into an untracked `deployment.auto.tfvars.json` that it
-deletes at the end, and `.github/workflows/infra-ci.yml` passes them as `TF_VAR_` for its review
-plan. Two of the ten are read from the run context instead of being set by an operator, so an
-environment needs the twelve variables below plus the four `CARDDEMO_TF_STATE_*` backend values.
+**Both environment roots declare exactly twelve variables with no default**, and those twelve are
+what the export block above supplies: `alarm_email_endpoints`, `alb_certificate_arn`,
+`cloudfront_acm_certificate_arn`, `cloudfront_aliases`, `cloudfront_api_connect_src_origins`,
+`github_oidc_provider_arn`, `github_repository`, `image_tag`, `internal_service_domain_name`,
+`mask_hmac_secret_arn`, `mask_hmac_secret_kms_key_arn` and `permissions_boundary_arn`. `plan` refuses
+to run until every one of them is set.
+
+**The automated path supplies the same twelve values.**
+[`deploy.yml`](../../.github/workflows/deploy.yml) composes them into an untracked
+`deployment.auto.tfvars.json` that it deletes at the end of the run, and
+[`infra-ci.yml`](../../.github/workflows/infra-ci.yml) passes them as `TF_VAR_` for its review plan.
+Ten arrive from protected GitHub environment variables; two are taken from the run itself so they
+cannot disagree with the commit being deployed. A configured environment therefore needs the twelve
+`CARDDEMO_*` variables below plus the four `CARDDEMO_TF_STATE_*` backend values.
 
 | GitHub environment variable | Terraform variable | Notes |
-|---|---|---|
+|:---|:---|:---|
 | `CARDDEMO_ALB_CERTIFICATE_ARN` | `alb_certificate_arn` | Regional ACM ARN covering `internal_service_domain_name` |
 | `CARDDEMO_INTERNAL_SERVICE_DOMAIN_NAME` | `internal_service_domain_name` | Bare DNS name the ALB certificate covers |
 | `CARDDEMO_CLOUDFRONT_ACM_CERTIFICATE_ARN` | `cloudfront_acm_certificate_arn` | Must be issued in **us-east-1** |
@@ -309,16 +425,17 @@ environment needs the twelve variables below plus the four `CARDDEMO_TF_STATE_*`
 | `CARDDEMO_PERMISSIONS_BOUNDARY_ARN` | `permissions_boundary_arn` | Organisation IAM guardrail |
 | `CARDDEMO_MASK_HMAC_SECRET_ARN` | `mask_hmac_secret_arn` | ARN of the masking HMAC secret. The secret's **value** is the operator's to create and must be canonical standard base64 of at least 32 random bytes -- see the note below |
 | `CARDDEMO_MASK_HMAC_SECRET_KMS_KEY_ARN` | `mask_hmac_secret_kms_key_arn` | ARN of the customer-managed KMS key that encrypts the secret above. Must be in the same account and Region as the secret, which the root validates by comparing the two ARNs. The AWS-managed `alias/aws/secretsmanager` key is **not** accepted -- it cannot be granted to one principal |
-| `CARDDEMO_IMAGE_DIGESTS_JSON` | `image_digests` | Has a default; supplied so a review plan reflects the deployed images |
+| `CARDDEMO_ALARM_EMAIL_ENDPOINTS_JSON` | `alarm_email_endpoints` | JSON list of alarm recipients; both roots refuse an empty list, so a topic can never be provisioned with no subscriber |
+| `CARDDEMO_IMAGE_DIGESTS_JSON` | `image_digests` | Has a default. `infra-ci.yml` passes it so a review plan reflects the deployed images; `deploy.yml` instead computes real digests from the images it just pushed and patches them in after the push |
 | `CARDDEMO_AWS_REGION` | *(not a variable)* | Region for the ECR login and image push |
 | `CARDDEMO_DEPLOY_ROLE_ARN` | *(not a variable)* | Role the workflow assumes by OIDC |
-| *(run context `github.sha`)* | `image_tag` | Not operator-set, so it cannot disagree with the commit being deployed |
+| *(workflow input, defaulting to `github.sha`)* | `image_tag` | An operator may pin an explicit tag for a redeploy; left empty it resolves to the commit being deployed, so it cannot silently disagree with it |
 | *(run context `github.repository`)* | `github_repository` | Not operator-set, so the publication role cannot be granted to another repository |
 
-`cloudfront_api_connect_src_origins` is the tenth required variable and is deliberately **not** an
-environment variable. The API endpoint does not exist until the apply creates it, so `deploy.yml`
-supplies an empty list -- which yields `connect-src 'self'` and permits nothing -- and narrows it to
-the real origin after the apply, before the SPA is published.
+`cloudfront_api_connect_src_origins` is the twelfth of those required variables and is deliberately
+**not** an environment variable. The API endpoint does not exist until the apply creates it, so
+`deploy.yml` supplies an empty list -- which yields `connect-src 'self'` and permits nothing -- and
+narrows it to the real origin after the apply, before the SPA is published.
 
 ### The registry actions the deployment role needs
 
@@ -327,7 +444,7 @@ operator's. Assumptions: beyond the Terraform permissions the apply itself needs
 calls four registry action families directly and fails at the calling step without them:
 
 | Action | Which step needs it | Why |
-|---|---|---|
+|:---|:---|:---|
 | `ecr:GetAuthorizationToken` | image push | The `docker login` that precedes every push |
 | `ecr:BatchCheckLayerAvailability`, `ecr:InitiateLayerUpload`, `ecr:UploadLayerPart`, `ecr:CompleteLayerUpload`, `ecr:PutImage` | image push | Writing the ten built images |
 | `ecr:DescribeImages` | image push | Reading back each pushed digest |
@@ -347,12 +464,22 @@ output size -- and refuses a passphrase, the URL-safe alphabet, a non-canonical 
 shorter, and material that is a single repeated byte. Create the value with:
 
 ```bash
+# WHAT: generates 32 random bytes, encodes them as canonical standard base64, and stores the result
+#       as the first version of the masking secret under a named customer-managed key.
 # WHY : Trade-offs: the value travels on STDIN via --secret-string fileb:///dev/stdin rather than as
 #       an argv value. An argv value is readable from the process table by any local process for as
 #       long as the call runs, and it is retained by the shell's history file and echoed by `set -x`;
 #       a transcript of this runbook would then contain the live key. The pipeline keeps it in memory
 #       between two processes instead. `set +o xtrace` is issued explicitly because a traced shell
 #       would defeat the pipeline by echoing the command's expansion.
+# WHY : Refactoring Rationale: --kms-key-id was absent here, and omitting it is not neutral --
+#       Secrets Manager then encrypts under the account's AWS-managed aws/secretsmanager key, whose
+#       policy admits any principal in the account holding the matching Secrets Manager permission.
+#       The decrypt the data-migration task performs therefore succeeded through a key policy far
+#       wider than the one task that needs it, and the root could neither name nor grant the key
+#       actually in use. The key is now a required input (mask_hmac_secret_kms_key_arn), the task
+#       role is granted kms:Decrypt on exactly it through Secrets Manager, and the root refuses a
+#       key in a different account or Region from the secret.
 # WHY : Assumptions: --query null keeps the new version identifier out of the transcript, for the
 #       same reason the value itself is kept out of it.
 set +o xtrace
@@ -365,33 +492,32 @@ python3 -c 'import base64,secrets; print(base64.b64encode(secrets.token_bytes(32
   --query "null" --output text
 ```
 
-WHY : ⚠️ Refactoring Rationale: `--kms-key-id` was absent, and omitting it is not neutral --
-Secrets Manager then encrypts under the account's AWS-managed `aws/secretsmanager` key. That key's
-policy admits any principal in the account holding the matching Secrets Manager permission, so the
-decrypt the data-migration task performs succeeded through a key policy far wider than the one task
-that needs it, and the root could neither name nor grant the key actually in use. The key is now a
-required input (`mask_hmac_secret_kms_key_arn`), the task role is granted `kms:Decrypt` on exactly
-it through Secrets Manager, and the root refuses a key in a different account or Region from the
-secret. Create the key first, with a policy admitting this account, and pass the same ARN to both
-the command above and the variable.
+Create the key first, with a policy admitting this account, and pass the same ARN to both the
+command above and the `mask_hmac_secret_kms_key_arn` variable.
 
-WHY : Assumptions: an EXISTING secret created without the flag is not repaired by supplying the
-variable -- the ciphertext is already sealed under the managed key, and the grant this root writes
-names a different one, so the task fails to decrypt. Re-key it with
-`aws secretsmanager update-secret --secret-id "carddemo/<env>/mask-hmac" --kms-key-id
-"<mask-hmac-cmk-arn>"`, which re-encrypts subsequent versions; then store the value again so the
-version the task reads is one sealed under the new key. Rotating the VALUE re-derives every
-fingerprint, so do this between load campaigns for the reason stated below.
+Assumptions: an EXISTING secret created without that flag is not repaired by supplying the variable
+-- the ciphertext is already sealed under the managed key, and the grant this root writes names a
+different one, so the task fails to decrypt. Re-key it, then store the value again so the version
+the task reads is one sealed under the new key.
 
-WHY : Assumptions: the refusal is stated here rather than only in the ETL's own README because the
+```bash
+# WHAT: re-points an existing masking secret at the customer-managed key.
+# WHY : Assumptions: this re-encrypts SUBSEQUENT versions only, so it must be followed by storing
+#       the value again with the create/put pipeline above. Running it alone leaves the version the
+#       task actually reads sealed under the previous key, which fails to decrypt while the console
+#       shows the intended key -- the most misleading of the available half-states.
+aws secretsmanager update-secret --secret-id "carddemo/<env>/mask-hmac" --kms-key-id "<mask-hmac-cmk-arn>"
+```
+
+Assumptions: the format refusal is stated here rather than only in the ETL's own README because the
 failure surfaces during a batch run, long after the apply that wired the ARN succeeded -- an apply
 cannot validate a secret's contents, and the operator who creates the secret is the one who needs
-the rule. WHY : Trade-offs: rotating the value re-derives every tag, so a verification pass that
-compares a rendering produced before rotation against one produced after reports differences that
-are not differences in the data; rotate between load campaigns, not during one.
+the rule. Trade-offs: rotating the value re-derives every tag, so a verification pass that compares
+a rendering produced before rotation against one produced after reports differences that are not
+differences in the data; rotate between load campaigns, not during one.
 `data-migration/README.md` §5.7.1 carries the full rule set.
 
-WHY : Refactoring Rationale: this table exists because none of these names was documented anywhere,
+Refactoring Rationale: this table exists because none of these names was documented anywhere,
 while the workflows required them. Worse, the workflows had been written against an OLDER variable
 vocabulary and were supplying six names -- `route53_zone_id`, `spa_domain_name`,
 `alb_tls_server_name`, `service_tls_domain_name`, `batch_glue_function_arns` and `release_version`
@@ -491,11 +617,35 @@ checksums, and money-total parity.
 
 ## Step 5 - Seed reference data
 
-Apply `reference-service`'s versioned seed migration. Verify that the `DEFAULT` disclosure-group row
-exists: the interest job falls back to it when a specific group lookup misses, and without that row
-the fallback cannot produce the required rate. Also verify the transaction-category foreign key is
-`ON DELETE RESTRICT`; the service translates that constraint into a conflict response rather than
-exposing a database error.
+`reference-service`'s `V2__seed_reference.sql` carries the reference data every other context reads:
+the transaction types and categories, the disclosure groups, and the 490 lookup codes -- phone area
+codes, states and state/ZIP prefixes -- drawn from the allow-lists in `app/cpy/CSLKPCDY.cpy`. It runs
+as part of that service's Flyway chain in Step 4, so this step is verification rather than a separate
+apply.
+
+**Verify the `'DEFAULT'` disclosure-group row exists.** This is the one row whose absence is not
+self-announcing. Interest accrual looks up a specific disclosure group and, when that lookup misses,
+falls back to the group named `DEFAULT` -- the behaviour the baseline reaches on VSAM status 23 in
+`app/cbl/CBACT04C.cbl`. With the row missing there is nothing for the fallback to resolve to, so the
+job does not fail loudly; it accrues interest at the wrong rate for exactly those accounts whose own
+group is absent. The seeded row is what makes the fallback path produce a rate at all.
+
+```bash
+# WHAT: confirms the DEFAULT disclosure-group row is present and reports the seeded reference counts.
+# WHY : Assumptions: the fallback is only exercised by accounts whose specific group is missing, so
+#       a smoke test over well-formed accounts never touches it. A missing DEFAULT row therefore
+#       survives every functional check and surfaces as wrong money in a later accrual, which is why
+#       it is asserted here by row existence rather than inferred from a passing job.
+psql -v ON_ERROR_STOP=1 -c "SELECT 1 FROM reference.disclosure_groups WHERE group_cd = 'DEFAULT'"
+psql -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM reference.transaction_types"
+psql -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM reference.transaction_categories"
+```
+
+Also verify the transaction-category foreign key is still `ON DELETE RESTRICT`. That constraint
+preserves the baseline `XTRNTYCAT` relationship, and `reference-service` translates the resulting
+foreign-key violation into a `409` conflict rather than exposing a database error. `RESTRICT` and
+`CASCADE` differ here in a way no test over unreferenced rows would reveal: under `CASCADE`, deleting
+a transaction type would silently delete every category beneath it.
 
 ---
 
@@ -513,6 +663,50 @@ aws ecs wait services-stable --region "<aws-region>" --cluster "<cluster-name>" 
 
 If stability fails, inspect the service's CloudWatch log group, the task's stopped reason, the image
 digest, and the Parameter Store and Secrets Manager references before retrying.
+
+### Publish the SPA
+
+The browser client is served from the S3 origin behind CloudFront, **not** from the `ui` container
+image, so rolling the services above does not publish it. Both values this needs come from the
+`spa_publication` root output, whose keys are `spa_bucket_name` and `spa_distribution_id`.
+
+```bash
+# WHAT: reads the publication target from the root output and uploads the built bundle to it.
+# WHY : Assumptions: the values are read from `spa_publication` rather than from a top-level
+#       spa_bucket_name or cloudfront_distribution_id output, because neither of those exists --
+#       the aggregate carries them, and it spells the second one spa_distribution_id. jq -e is
+#       used so a missing key exits non-zero instead of yielding an empty string that would
+#       publish to `s3:///`.
+publication="$(terraform -chdir="infra/envs/<env>" output -json spa_publication)"
+bucket="$(jq -er '.spa_bucket_name' <<<"$publication")"
+distribution="$(jq -er '.spa_distribution_id' <<<"$publication")"
+aws s3 sync ui/dist "s3://${bucket}/" --delete
+```
+
+The SPA reads its endpoint from a `config.json` written into `ui/dist` before the sync, so one
+publication step covers the bundle and its runtime configuration.
+
+```bash
+# WHAT: re-uploads only the runtime configuration document with an explicit no-cache directive.
+# WHY : Trade-offs: this is the one object rewritten in place on every deployment -- every other
+#       asset is content-hashed and therefore safely cacheable indefinitely. Left cacheable, a
+#       newly published bundle would be handed the PREVIOUS deployment's endpoint by an edge cache,
+#       which presents as a working page talking to the wrong environment rather than as a failure.
+aws s3 cp ui/dist/config.json "s3://${bucket}/config.json" --cache-control "no-cache, no-store, must-revalidate"
+```
+
+```bash
+# WHAT: invalidates the entry document and the SPA route fallback only.
+# WHY : Trade-offs: a wildcard invalidation of /* would also evict every content-hashed asset,
+#       which costs a full cache refill for no benefit -- a hashed filename cannot be stale. Paying
+#       for two paths keeps the rest of the distribution warm.
+aws cloudfront create-invalidation --distribution-id "${distribution}" --paths "/index.html" "/config.json"
+```
+
+**Note**: the API origin the SPA is permitted to call is set from `cloudfront_api_connect_src_origins`,
+which starts as an empty list because the API endpoint does not exist until the apply creates it. Narrow
+it to the real origin and re-apply before publishing, or the content-security policy will permit
+nothing and every request from the page will be refused by the browser rather than by the service.
 
 ### Rotate the Cognito app-client secret
 
@@ -558,7 +752,7 @@ The deployment role needs only the scoped Cognito add/list/delete client-secret 
 Secrets Manager get/put permissions for the app-client secret, plus KMS use through Secrets Manager.
 Do not grant wildcard secret access.
 
-#### If the rotation refuses: two active secrets, neither identified
+### If the rotation refuses: two active secrets, neither identified
 
 The bridge **fails closed** when the client has two active secrets and the stored payload identifies
 neither of them, printing the client id, the secret ARN and this remedy. It does not guess. Either of
@@ -809,7 +1003,7 @@ that procedure.
 **They differ in blast radius, and the difference decides when you may run each.**
 
 | Key | What a token names | Cost of invalidating every outstanding token |
-|---|---|---|
+|:---|:---|:---|
 | `pagination/cursor-signing-key` | a position in **one** browse, and it is *meant* to expire | an operator mid-browse gets a refused cursor and re-lists. Costs a re-listing, never data |
 | `security/card-selector-signing-key` | a card row's **stable address**, which a client may hold for as long as a list stays on screen | every single-card route reached from an already-rendered list stops resolving until the list is refreshed |
 
@@ -887,7 +1081,25 @@ writes them.
 ## Step 7 - Smoke-verify candidate business flows
 
 Retrieve a generated seed credential only through Secrets Manager and never paste it into this
-document or a shared log.
+document or a shared log. Seed users are created by the apply with generated initial passwords
+written beneath the name prefix the `credential_secret_name_prefix` output publishes, so no
+credential is ever typed, committed, or chosen by an operator.
+
+```bash
+# WHAT: reads one seed user's generated initial password for the sign-on smoke check.
+# WHY : Refactoring Rationale: the baseline published its demo sign-on credentials in its own
+#       deployment documentation, so anyone with the document had the credentials and rotating
+#       them meant editing prose. Nothing here carries a credential: the value is generated at
+#       apply time into Secrets Manager and read back by name at the moment it is needed, which
+#       is why this runbook can be public and the deployment still not be.
+# WHY : Assumptions: the secret id below is a PLACEHOLDER. Resolve the real name from the
+#       credential_secret_name_prefix output rather than pasting a resolved value back into this
+#       file -- a resolved name is an inventory of which accounts exist.
+aws secretsmanager get-secret-value --region "<aws-region>" --secret-id "<seed-user-secret-name>" --query "SecretString" --output text
+```
+
+The first sign-on with a generated password is expected to require a change; the challenge step in
+the table below is that exchange, not a failure.
 
 | Flow | Verification |
 |:---|:---|
@@ -903,6 +1115,34 @@ document or a shared log.
 | Transaction-type reference | Read and update reference data; verify referenced types cannot be deleted. |
 
 Use [batch-operations.md](batch-operations.md) for batch execution and parity-oracle detail.
+
+### Reading the parity oracle's result
+
+The COBOL suite in `tests/**` is the behavioural oracle this migration is verified against, and it
+remains reference-only -- neither its sources nor its pinned dependencies are modified. It runs from
+the repository root through `scripts/run_tests.sh`, which sources `scripts/test_env.sh` itself and
+executes six stages: `build`, `unit`, `integration`, `e2e`, an optional coverage combine, and
+`audit`. It aggregates a worst-case condition code across them:
+
+| Code | Meaning |
+|:---|:---|
+| 0 | Pass. |
+| 2 | Usage error. Deliberately never aggregated, so a mistyped invocation cannot masquerade as a warn. |
+| 4 | Warn or soft reject. |
+| 8 | Fail. |
+| 16 | Fatal or abend. |
+
+**A warn-level aggregate of 4 is the current green state, and it is not a regression introduced by
+this migration.** It is produced by the pre-existing `CBEXPORT`/`CBIMPORT` compile defect in the
+immutable baseline, which `scripts/run_tests.sh` L210 describes in the repository's own words as "a
+WARN (rc=4) -- honestly non-green". The COBOL is not edited to remove it; the migrated Java
+implements the correct behaviour and the divergence is registered in
+[cobol-to-service-traceability.md](../architecture/cobol-to-service-traceability.md). Treat 8 or 16
+as a real failure and 4 as the expected baseline.
+
+`tests/README.md` L3-L6 states that where a script and that README disagree, **the script is
+authoritative**. The same precedence applies to this section: it describes the runner's behaviour,
+and `scripts/run_tests.sh` decides it.
 
 ---
 
@@ -924,10 +1164,30 @@ is a dev-only characteristic.
 
 ## Idempotency
 
-Refactoring Rationale: baseline jobs used several separate rerun devices: condition-code
-normalization, delete-if-exists preambles, and manual uncommented deletes, while some definitions
-had no rerun guard. Terraform plan/apply provides one convergence model for all resources; rerunning
-the same configuration produces no duplicate definition and requires no source edit.
+Re-running `plan` and `apply` against an unchanged configuration converges: it creates no duplicate
+resource, requires no edit to any file, and reports no change. That property is uniform across all
+sixteen modules because it comes from the execution model rather than from anything written per
+resource.
+
+Refactoring Rationale: the baseline achieved re-runnability by hand, per job, through three different
+ad-hoc devices -- and in one job, not at all. The table below is the specific defect this uniformity
+replaces, not a general claim of superiority:
+
+| Device | Where | Effect on a re-run |
+|:---|:---|:---|
+| `IF LASTCC=12 THEN SET MAXCC=0` | `app/jcl/DEFGDGB.jcl` L29, L35, L41, L47, L53, L59 | Swallows the already-exists condition code, restated once per DEFINE |
+| `IEFBR14` with `DISP=(MOD,DELETE)` | `app/jcl/PRTCATBL.jcl` L21-L25 | A delete-if-exists preamble step ahead of the real work |
+| A manual "uncomment the DELETE" instruction | `app/jcl/CBADMCDJ.jcl` L38 and L42 | Requires the operator to **edit the deck** before re-running it |
+| No guard at all | `app/jcl/DALYREJS.jcl` L21-L28 | Re-running when the generation group already exists returns a non-zero condition code and the job **fails** |
+
+Three consequences follow, and each is a concrete cost rather than an aesthetic one. The guard had to
+be written again at every new DEFINE, so a missed one failed only on the second run. The guarded and
+unguarded jobs are indistinguishable by inspection, so an operator could not tell which decks were
+safe to resubmit. And the deck that needs a manual edit cannot be re-run from an unmodified checkout
+at all -- the artifact that was reviewed is not the artifact that runs.
+
+The baseline reference material is untouched. These citations exist so the improvement is measurable
+against something specific; no file under `app/**` is edited by this migration.
 
 ---
 

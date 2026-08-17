@@ -34,6 +34,7 @@ import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiRequestError } from '../api/client';
+import { AppShell } from '../layout/AppShell';
 import {
   createTransactionType,
   deleteTransactionType,
@@ -51,16 +52,19 @@ import {
 import { ADMIN_MENU_ROUTE } from '../routes/navigation';
 import {
   REF_TYPE_EDIT_FIELD_LABELS,
+  REF_TYPE_EDIT_KEY_LABELS,
   REF_TYPE_EDIT_ROUTE,
   REF_TYPE_NEW_SENTINEL,
   RefTypeEditScreen,
   TYPE_CODE_WIDTH,
   DESCRIPTION_WIDTH,
+  refTypeEditKeyMatrix,
   stageKeyAvailability,
   validateDescription,
   validateTypeCode,
   writeFailureMessage,
 } from './refTypeEdit';
+import type { RefTypeEditMode } from './refTypeEdit';
 
 /**
  * Builds the mocked surface of the reference transport module.
@@ -102,6 +106,33 @@ const EDIT_STATUS = STATUS_MESSAGES.COTRTUPC;
 /** Text a probe route renders so an exit can be observed. */
 const ARRIVED = 'ARRIVED';
 
+/**
+ * Every mode the screen declares, so a claim about "all modes" is checked against all of them.
+ *
+ * Assumptions: the sixteen names are the sixteen `88`-level states at `COTRTUPC.cbl` L298-L327, listed
+ * here rather than imported as a runtime array because the screen models them as a TYPE -- a union has no
+ * runtime members to enumerate, and adding an array to production code purely for a test would put a
+ * second list of the states beside the type.
+ */
+const REF_TYPE_EDIT_MODES: readonly RefTypeEditMode[] = [
+  'notFetched',
+  'invalidSearchKeys',
+  'detailsNotFound',
+  'showDetails',
+  'createNewRecord',
+  'reviewNewRecord',
+  'confirmDelete',
+  'startDelete',
+  'deleteDone',
+  'deleteFailed',
+  'changesNotOk',
+  'changesOkNotConfirmed',
+  'changesOkayedLockError',
+  'changesOkayedButFailed',
+  'changesOkayedAndDone',
+  'changesBackedOut',
+];
+
 /** One stored row, at the widths the mapset and the table definition both declare. */
 const STORED: TransactionType = {
   typeCd: '05',
@@ -117,10 +148,21 @@ const STORED: TransactionType = {
 function renderScreen(typeCd: string): ReactElement {
   return (
     <MemoryRouter initialEntries={[`/reference/transaction-types/${typeCd}`]}>
-      <Routes>
-        <Route path={REF_TYPE_EDIT_ROUTE} element={<RefTypeEditScreen />} />
-        <Route path={ADMIN_MENU_ROUTE} element={<div>{`${ARRIVED} ${ADMIN_MENU_ROUTE}`}</div>} />
-      </Routes>
+      {/*
+        WHY : ⚠ Refactoring Rationale: the screen is rendered INSIDE `AppShell`, where it was rendered
+              bare. The screen delegates its title band, its row-23 message line and its row-24 legend to
+              the one shell that `ui/src/router.tsx` mounts as a layout route -- it composes none of the
+              three itself -- so a bare render produced a screen with no legend and no band, and every
+              query for either failed on a screen that is in fact correct. The children form is used
+              rather than a layout route because it is the shape that needs no second route level, and
+              `AppShell` renders `children ?? <Outlet />`, so both forms paint the same frame.
+      */}
+      <AppShell>
+        <Routes>
+          <Route path={REF_TYPE_EDIT_ROUTE} element={<RefTypeEditScreen />} />
+          <Route path={ADMIN_MENU_ROUTE} element={<div>{`${ARRIVED} ${ADMIN_MENU_ROUTE}`}</div>} />
+        </Routes>
+      </AppShell>
     </MemoryRouter>
   );
 }
@@ -176,6 +218,23 @@ function failureWith(status: number, message: string | null): ApiRequestError {
  */
 function notFoundFailure(): ApiRequestError {
   return failureWith(404, null);
+}
+
+/**
+ * Waits for a read to have landed, anchored on the row it put on the glass.
+ *
+ * ⚠ Refactoring Rationale: this replaces an anchor on `'Selected transaction type shown above'`, which
+ * the screen no longer paints because the reference never painted it. `88 FOUND-TRANTYPE-DATA` is
+ * declared at `app/app-transaction-type-db2/cbl/COTRTUPC.cbl` L145-L146 and has NO set-site: the two
+ * `SET` statements that look like its own, at L528 and L1488, name `FOUND-TRANTYPE-IN-TABLE` -- a
+ * different flag declared at L127 recording that the SQL found a row. `3250-SETUP-INFOMSG` reaches
+ * `WHEN TTUP-SHOW-DETAILS` at L1221, which carries no statements and therefore falls through to L1225
+ * and sets the SEARCH-KEY prompt instead. Anchoring on the fetched description proves the read landed
+ * without asserting a sentence the baseline cannot produce.
+ * @returns {Promise<void>} Resolves once the stored description is on the glass.
+ */
+async function awaitStoredRow(): Promise<void> {
+  expect(await screen.findByDisplayValue(STORED.description)).toBeInTheDocument();
 }
 
 /** Restores the document between cases. */
@@ -314,11 +373,17 @@ async function reportsAFoundRow(): Promise<void> {
   serveStoredRow();
   render(renderScreen(STORED.typeCd));
 
-  expect(await screen.findByText(EDIT_STATUS.FOUND_TRANTYPE_DATA.text)).toBeInTheDocument();
+  await awaitStoredRow();
   expect(vi.mocked(getTransactionType)).toHaveBeenCalledWith(STORED.typeCd);
   expect(screen.getByLabelText(collapse(REF_TYPE_EDIT_FIELD_LABELS.description))).toHaveValue(
     STORED.description,
   );
+  /*
+   * Assumptions: the row-22 prompt after a successful read is the SEARCH-KEY prompt, for the reason
+   * recorded at awaitStoredRow -- the shown-row arm of `3250-SETUP-INFOMSG` falls through to it. This is
+   * asserted positively so the fall-through is pinned rather than merely not contradicted.
+   */
+  expect(screen.getByText(EDIT_STATUS.PROMPT_FOR_SEARCH_KEYS.text)).toBeInTheDocument();
 }
 
 /**
@@ -333,7 +398,7 @@ async function reportsAFoundRow(): Promise<void> {
 async function refusesAnUnchangedDescription(): Promise<void> {
   serveStoredRow();
   render(renderScreen(STORED.typeCd));
-  expect(await screen.findByText(EDIT_STATUS.FOUND_TRANTYPE_DATA.text)).toBeInTheDocument();
+  await awaitStoredRow();
 
   await userEvent.keyboard('{Enter}');
 
@@ -358,7 +423,7 @@ async function savesAValidatedChangeWithTheIssuedVersion(): Promise<void> {
     version: STORED.version + 1,
   });
   render(renderScreen(STORED.typeCd));
-  expect(await screen.findByText(EDIT_STATUS.FOUND_TRANTYPE_DATA.text)).toBeInTheDocument();
+  await awaitStoredRow();
 
   const description = screen.getByLabelText(collapse(REF_TYPE_EDIT_FIELD_LABELS.description));
   await userEvent.clear(description);
@@ -419,7 +484,7 @@ async function deletesOnlyOnTheSecondConfirmation(): Promise<void> {
   serveStoredRow();
   vi.mocked(deleteTransactionType).mockResolvedValue(undefined);
   render(renderScreen(STORED.typeCd));
-  expect(await screen.findByText(EDIT_STATUS.FOUND_TRANTYPE_DATA.text)).toBeInTheDocument();
+  await awaitStoredRow();
 
   await userEvent.keyboard('{F4}');
   expect(await screen.findByText(EDIT_STATUS.PROMPT_DELETE_CONFIRM.text)).toBeInTheDocument();
@@ -431,25 +496,66 @@ async function deletesOnlyOnTheSecondConfirmation(): Promise<void> {
 }
 
 /**
- * Asserts a refused delete reports the service's own sentence when it carries one.
+ * Asserts a refused delete reports the baseline's own child-records sentence.
  *
- * Assumptions: the sentence is the service's rather than the reference's for this one case, because the
- * refusal is the `ON DELETE RESTRICT` foreign key `app/app-transaction-type-db2/ddl/TRNTYCAT.ddl` L6-L7
- * declares -- and the service's sentence is the one that names the child records the operator has to
- * remove first, which the reference's generic `'Delete of record failed'` does not.
+ * ⚠ Refactoring Rationale: the expectation is the CATALOGUED sentence, not the service's wording. It used
+ * to be the service's, which looked like the more informative choice and is the wrong one: the refusal is
+ * the `ON DELETE RESTRICT` foreign key `app/app-transaction-type-db2/ddl/TRNTYCAT.ddl` L6-L7 declares, the
+ * baseline reports it at `COTRTUPC.cbl` L1638-L1641 as
+ * `'Please delete associated child records first:'`, and `ui/src/messages/messages.ts` registers exactly
+ * that string as the replacement for that site in `REDACTED_DIAGNOSTICS`. Rendering the service's text
+ * instead would let a message the target composes replace one Transformation Rule T8 carries verbatim,
+ * and would put whatever diagnostic the service chose to send in front of an operator.
+ *
+ * Assumptions: the service DOES send a sentence in this case and it is deliberately not rendered, which
+ * is why the case supplies one -- an expectation against a null-message failure would pass without
+ * proving the screen prefers the catalogued string.
  * @returns {Promise<void>} Resolves once the refusal is on the glass.
  */
-async function reportsARestrictedDeleteWithTheServiceSentence(): Promise<void> {
+async function reportsARestrictedDeleteWithTheBaselineSentence(): Promise<void> {
   const reported = 'Transaction type has categories referencing it';
   serveStoredRow();
   vi.mocked(deleteTransactionType).mockRejectedValue(failureWith(409, reported));
   render(renderScreen(STORED.typeCd));
-  expect(await screen.findByText(EDIT_STATUS.FOUND_TRANTYPE_DATA.text)).toBeInTheDocument();
+  await awaitStoredRow();
 
   await userEvent.keyboard('{F4}');
   await userEvent.keyboard('{F4}');
 
-  expect(await screen.findByText(reported)).toBeInTheDocument();
+  expect(
+    await screen.findByText(SHARED_MESSAGES.PLEASE_DELETE_ASSOCIATED_CHILD_RECORDS_FIRST),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(reported)).not.toBeInTheDocument();
+}
+
+/**
+ * Asserts the dead `F6=Add` legend is rendered and permanently disabled.
+ *
+ * ⚠ Assumptions: the mapset PAINTS five function-key legends and the program implements four. `FKEY06`
+ * is declared `ATTRB=(ASKIP,DRK) ... INITIAL='F6=Add'` at `COTRTUP.bms` L126-L130, and grepping the
+ * whole 1702-line program for `FKEY06`, `PFK06` and `F6=` returns zero matches -- so no arm brightens it
+ * and no arm dispatches it. Both halves are asserted here because getting either wrong is the most likely
+ * way this screen fails a parity review: dropping the label loses vocabulary the mapset declares, and
+ * enabling the control invents an action, while the real add path is PF5 from the not-found stage.
+ * @returns {Promise<void>} Resolves once the legend has been measured.
+ */
+async function paintsTheSixthLegendWithoutBindingIt(): Promise<void> {
+  render(renderScreen(REF_TYPE_NEW_SENTINEL));
+  expect(await screen.findByText(EDIT_STATUS.PROMPT_FOR_SEARCH_KEYS.text)).toBeInTheDocument();
+
+  const sixth = screen.getByRole('button', { name: REF_TYPE_EDIT_KEY_LABELS.PFK06 });
+  expect(sixth).toBeDisabled();
+  expect(REF_TYPE_EDIT_KEY_LABELS.PFK06).toBe('F6=Add');
+  /*
+   * Assumptions: every mode is asserted rather than the initial one alone, because "permanently" is the
+   * claim -- a legend disabled only where it happens to be tested would leave the other fifteen modes to
+   * be re-derived by the next reader.
+   */
+  for (const mode of REF_TYPE_EDIT_MODES) {
+    expect(refTypeEditKeyMatrix(mode).PFK06.accepted, `PF6 must stay unbound in ${mode}`).toBe(
+      false,
+    );
+  }
 }
 
 /**
@@ -459,7 +565,7 @@ async function reportsARestrictedDeleteWithTheServiceSentence(): Promise<void> {
 async function cancelsAPendingDelete(): Promise<void> {
   serveStoredRow();
   render(renderScreen(STORED.typeCd));
-  expect(await screen.findByText(EDIT_STATUS.FOUND_TRANTYPE_DATA.text)).toBeInTheDocument();
+  await awaitStoredRow();
 
   await userEvent.keyboard('{F4}');
   expect(await screen.findByText(EDIT_STATUS.PROMPT_DELETE_CONFIRM.text)).toBeInTheDocument();
@@ -484,7 +590,14 @@ async function reportsTheUnboundSixthKey(): Promise<void> {
 
   await userEvent.keyboard('{F6}');
 
-  expect(await screen.findByText(EDIT_STATUS.WS_INVALID_KEY.text.trim())).toBeInTheDocument();
+  /*
+   * ⚠ Assumptions: the sentence is `'Invalid key pressed'` -- nineteen characters, LOWER-case k, no
+   * trailing space -- and NOT `'Invalid Key pressed. '`. Both are declared, at L193-L194 and L171-L172
+   * respectively, and only the first is live: the sole `SET` for the second sits inside the commented-out
+   * block at L611-L616. The catalog keeps them apart, so this expectation names the live one and needs no
+   * trimming to match.
+   */
+  expect(await screen.findByText(EDIT_STATUS.WS_INVALID_KEY_PRESSED.text)).toBeInTheDocument();
 }
 
 /**
@@ -549,9 +662,10 @@ function refTypeEditCases(): void {
   it('adds a row through the not-found stage', addsARowThroughTheNotFoundStage);
   it('deletes only on the second confirmation', deletesOnlyOnTheSecondConfirmation);
   it(
-    'reports a restricted delete with the service sentence',
-    reportsARestrictedDeleteWithTheServiceSentence,
+    'reports a restricted delete with the baseline sentence',
+    reportsARestrictedDeleteWithTheBaselineSentence,
   );
+  it('paints the sixth legend without binding it', paintsTheSixthLegendWithoutBindingIt);
   it('cancels a pending delete', cancelsAPendingDelete);
   it('reports the unbound sixth key', reportsTheUnboundSixthKey);
   it('exits to the administrative menu', exitsToTheAdministrativeMenu);

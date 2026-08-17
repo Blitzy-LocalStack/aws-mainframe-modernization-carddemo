@@ -208,6 +208,13 @@ function refusesEveryEntryOutsideTheOptionDomain(): void {
  * Assumptions: the unavailable-option sentence is compared against the catalog's TEMPLATE applied to
  * the option's own padded name, not against a hand-written string, because the template is what models
  * the reference's `DELIMITED BY` double-space strip of the 35-character padding.
+ *
+ * ⚠️ Refactoring Rationale: the unmounted case reads option 7 where it previously read option 6. Option 6
+ * names `COTRN00C`, whose browse screen is now authored, mounted at the literal `/transactions` and
+ * registered in `ui/src/routes/programRoutes.ts`, so it ENTERS a route and can no longer report an absent
+ * one. Option 7 names `COTRN01C`, which is the one main-menu option still without a reachable
+ * destination: its screen is mounted only at `/transactions/:id`, and a menu option carries no
+ * transaction identifier to fill that segment with.
  * @returns {void} Nothing; failure is reported by the expectations.
  */
 function entersAMountedOptionAndReportsAnUnmountedOne(): void {
@@ -215,13 +222,15 @@ function entersAMountedOptionAndReportsAnUnmountedOne(): void {
   expect(accountView.destination).toBe('/account/view');
   expect(accountView.message).toBeNull();
 
-  const transactionList = MAIN_MENU_OPTIONS[5];
-  expect(transactionList?.programName).toBe('COTRN00C');
-  const unmounted = resolveMenuOption('6', false);
+  expect(resolveMenuOption('6', false).destination).toBe('/transactions');
+
+  const transactionView = MAIN_MENU_OPTIONS[6];
+  expect(transactionView?.programName).toBe('COTRN01C');
+  const unmounted = resolveMenuOption('7', false);
   expect(unmounted.destination).toBeNull();
   expect(unmounted.message).toBe(
     formatMessageTemplate(MESSAGE_TEMPLATES.MENU_OPTION_NOT_INSTALLED, {
-      'CDEMO-MENU-OPT-NAME': transactionList?.name ?? '',
+      'CDEMO-MENU-OPT-NAME': transactionView?.name ?? '',
     }),
   );
   /*
@@ -364,9 +373,31 @@ function decidesTheAdministrativeOptionTable(): void {
   expect(resolveAdminOption('5').destination).toBe('/reference/transaction-types');
   expect(resolveAdminOption('6').destination).toBe('/reference/transaction-types/new');
 
+  /*
+   * WHY : ⚠️ Refactoring Rationale: options ONE and TWO are both asserted as ENTERED and option FOUR now
+   *       carries the unavailable-option case. Option one names `COUSR00C` and option two `COUSR01C`,
+   *       whose screens became mounted at `/users` and `/users/new`, so both entered assertions follow
+   *       the delivery rather than changing what this case tests -- the reference enters the user browse
+   *       from exactly here (`app/cbl/COUSR00C.cbl` L124-L125 returns to `COADM01C` on PF3, making this
+   *       menu its caller).
+   * WHY : Assumptions: option FOUR carries the unavailable case because `COUSR03C` is the one
+   *       administrative option with no reachable destination left. Its screen IS mounted, but only at
+   *       `/users/:id/delete`, which needs a user identifier a menu option does not carry -- so the case
+   *       still proves the sentence AND its `success` severity against a real absence rather than a
+   *       contrived one. Option two could no longer carry it: registering its literal path is what makes
+   *       a delivered screen reachable, so asserting it absent would have ratified the opposite.
+   */
   const userList = ADMIN_MENU_OPTIONS[0];
   expect(userList?.programName).toBe('COUSR00C');
-  const unmounted = resolveAdminOption('1');
+  expect(resolveAdminOption('1').destination).toBe('/users');
+
+  const userAdd = ADMIN_MENU_OPTIONS[1];
+  expect(userAdd?.programName).toBe('COUSR01C');
+  expect(resolveAdminOption('2').destination).toBe('/users/new');
+
+  const unmountedOption = ADMIN_MENU_OPTIONS[3];
+  expect(unmountedOption?.programName).toBe('COUSR03C');
+  const unmounted = resolveAdminOption('4');
   expect(unmounted.destination).toBeNull();
   expect(unmounted.message).toBe(
     formatMessageTemplate(MESSAGE_TEMPLATES.ADMIN_OPTION_NOT_INSTALLED, {}),
