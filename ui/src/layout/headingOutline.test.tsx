@@ -23,7 +23,7 @@
  */
 
 import { render, screen } from '@testing-library/react';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -40,31 +40,49 @@ import {
 /** A caption standing in for whatever text a route paints on its row 4. */
 const CAPTION_TEXT = 'View Account';
 
-/**
- * Every screen module that paints a caption, a section heading, or both.
- *
- * Assumptions: written out rather than globbed, matching the convention
- * `ui/src/layout/screenHeaderClock.test.tsx` records for the same reason — a glob grows silently, so a
- * newly added screen would first fail this gate during an unrelated change instead of during its own.
- */
-const SCREENS_WITH_HEADINGS = [
-  'accountView',
-  'accountUpdate',
-  'admin',
-  'authDetail',
-  'authSummary',
-  'cardDetail',
-  'cardList',
-  'cardUpdate',
-  'menu',
-  'refTypeEdit',
-  'refTypeList',
-  'transactionAdd',
-  'userUpdate',
-] as const;
-
 /** Directory holding the screen modules, relative to this file. */
 const SCREENS_ROOT = join(import.meta.dirname, '..', 'screens');
+
+/**
+ * Every screen module, discovered from the filesystem.
+ *
+ * ⚠️ Refactoring Rationale: the population was a hand-written list of thirteen names, defended by
+ * citing the convention `ui/src/layout/screenHeaderClock.test.tsx` then recorded -- that a glob grows
+ * silently, so a new screen would first fail an unrelated change rather than its own. That file has
+ * since abandoned the convention for the reason this one demonstrates: `transactionList` wrote
+ * `level={4}` directly, which is the fourteenth independent choice of rank that
+ * `ui/src/layout/ScreenTitle.tsx` was authored to make unstateable, and it passed here because it was
+ * not on the list. A gate whose coverage the next author decides is not a gate.
+ *
+ * Assumptions: discovery is safe for the census below in a way it would not be for a positive
+ * assertion, because the assertion is a PROHIBITION -- a screen that paints no heading at all trivially
+ * writes no rank, so nothing is forced into the heading-bearing subset. `signon` is the delivered case:
+ * `app/bms/COSGN00.bms` declares no row-4 caption, so it renders no `ScreenTitle` and is required to,
+ * and covering it costs nothing while omitting it would have to be justified.
+ *
+ * Assumptions: a directory qualifies only when it holds `index.tsx`, matching
+ * `ui/src/routes/routeCensus.test.ts` and the delegation census, so all three measure one population.
+ * @returns {readonly string[]} Screen directory names, in directory order.
+ */
+function authoredScreens(): readonly string[] {
+  return readdirSync(SCREENS_ROOT, { withFileTypes: true })
+    .filter(
+      /**
+       * Keeps the entries that are directories holding a screen module.
+       * @param {{ name: string; isDirectory: () => boolean }} entry - One directory entry.
+       * @returns {boolean} `true` when the entry is a screen module directory.
+       */
+      (entry) => entry.isDirectory() && existsSync(join(SCREENS_ROOT, entry.name, 'index.tsx')),
+    )
+    .map(
+      /**
+       * Reduces a directory entry to its name.
+       * @param {{ name: string }} entry - One directory entry.
+       * @returns {string} The directory name.
+       */
+      (entry) => entry.name,
+    );
+}
 
 /**
  * Matches a heading whose rank is written as a bare number.
@@ -184,7 +202,14 @@ function theBandOutranksTheCaptionWhenBothAreRendered(): void {
  * @returns {void} Nothing; assertions raise on failure.
  */
 function noScreenWritesAHeadingRankOfItsOwn(): void {
-  for (const name of SCREENS_WITH_HEADINGS) {
+  const screens = authoredScreens();
+
+  // Assumptions: the population is asserted non-empty first, because this case is a prohibition over
+  //   it -- a resolution fault returning an empty list would let it pass while examining nothing, and a
+  //   prohibition that examines nothing is indistinguishable from one that holds.
+  expect(screens.length, 'no screen modules were discovered at all').toBeGreaterThan(0);
+
+  for (const name of screens) {
     expect(
       NUMERIC_LEVEL.test(withoutComments(sourceOf(name))),
       `${name} must take its heading rank from ScreenTitle.tsx, not from a literal level`,

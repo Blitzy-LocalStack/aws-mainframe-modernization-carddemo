@@ -517,21 +517,27 @@ management:
   otlp:
     metrics:
       export:
-        # WHY : Assumptions: meters are exposed for scraping on the existing
-        #       Prometheus endpoint rather than pushed. Enabling this exporter as
-        #       well would publish each meter twice through two independent
-        #       temporality paths wherever a scraper is present.
-        # WHY : Refactoring Rationale: this note said "the task-local collector
-        #       scrapes the existing Prometheus endpoint and exports those meters
-        #       through CloudWatch EMF". That collector was a sidecar
-        #       infra/modules/ecs-service composed into every task, and it has been
-        #       withdrawn -- it is outside the frozen technical specification and was
-        #       forcing an eleventh ECR repository and a ninth interface endpoint,
-        #       both also outside it. The reason to leave this exporter disabled is
-        #       unchanged and does not depend on a collector existing: pushing and
-        #       scraping the same meters is double publication. What DOES depend on
-        #       the collector is where scraped meters ended up, and that is recorded
-        #       in docs/architecture/observability.md rather than restated here.
+        # WHY : Assumptions: meters are exposed for SCRAPING on the existing
+        #       Prometheus endpoint rather than pushed, which is why this exporter is
+        #       off by default. Enabling both would publish each meter twice, through
+        #       two independent temporality paths, wherever a scraper is present.
+        # WHY : Assumptions: the deployed estate has a scraper again. The task-local
+        #       collector sidecar infra/modules/ecs-service composes into every task
+        #       reads https://127.0.0.1:<container-port>/actuator/prometheus every
+        #       sixty seconds and exports what it collects to CloudWatch metrics in the
+        #       CardDemo namespace, which is the namespace
+        #       infra/modules/observability's dashboard reads. Each service's
+        #       SecurityConfig grants that path by loopback network position precisely
+        #       because the scrape can present no token.
+        # WHY : Assumptions: a workload with NO listener to scrape -- batch and
+        #       data-migration, and reporting when the batch state machine starts it as
+        #       a one-shot task -- has this exporter turned on for the life of that run,
+        #       by OTEL_METRICS_EXPORTER=otlp in its task definition or run override.
+        #       That variable is what resolves this property in a deployed task:
+        #       spring-boot-starter-opentelemetry maps the OTEL_* environment
+        #       variables onto these properties and installs the result as the
+        #       first property source, so it takes precedence over this default and
+        #       over an equivalent MANAGEMENT_* variable naming the same property.
         enabled: false
 
   tracing:
@@ -540,23 +546,28 @@ management:
         # WHY : Assumptions: the OpenTelemetry starter is shared by every
         #       service, including local builds and tests where no collector is
         #       listening. Defaulting export on would turn an absent collector into
-        #       repeated connection failures in otherwise valid local runs.
-        # WHY : Refactoring Rationale: this note ended "ECS overrides this default
-        #       with OTEL_TRACES_EXPORTER and the task-local endpoint, so the deployed
-        #       path stays explicit." It no longer does. The task-local collector
-        #       sidecar has been withdrawn from infra/modules/ecs-service, along with
-        #       the OTEL_* variables that pointed the application at it, because the
-        #       collector is outside the frozen technical specification and was forcing
-        #       an eleventh ECR repository against the ten of section 0.4.1.6 and a
-        #       ninth interface endpoint for xray against the eight of section 0.4.1.9.
-        #       So this default is now the effective setting in EVERY environment:
-        #       spans are produced by the shared starter and are not exported anywhere.
-        #       Trade-offs: cross-service followability does not depend on that export
+        #       repeated connection failures in otherwise valid local runs, so this
+        #       default is a LOCAL default and not the deployed setting.
+        # WHY : Assumptions: every deployed task overrides it. infra/modules/ecs-service
+        #       sets OTEL_TRACES_EXPORTER=otlp with
+        #       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:4318/v1/traces on
+        #       every task definition it registers, and
+        #       spring-boot-starter-opentelemetry's own environment-variable mapping
+        #       resolves those onto this property and the endpoint property and
+        #       installs them as the FIRST property source -- so the deployed value
+        #       wins over this file without either side restating the other's spelling.
+        #       The collector sidecar receiving them exports to AWS X-Ray through the
+        #       xray interface endpoint infra/modules/network provisions, so a span
+        #       leaves the task, leaves the collector and lands in a managed store.
+        # WHY : Assumptions: the sampling decision is NOT taken here. Each task ships
+        #       OTEL_TRACES_SAMPLER=always_on and the collector's tail-sampling
+        #       processor decides afterwards, keeping every errored trace and a stated
+        #       percentage of successful ones. A head sampler in the application would
+        #       have to decide before the outcome of the request is known.
+        # WHY : Trade-offs: cross-service followability does not depend on that export
         #       -- CorrelationIdFilter puts one identifier into the diagnostic context
-        #       and onto the response, so a unit of work is traceable through the logs.
-        #       Re-introducing span export has to argue for its own interface endpoint
-        #       or its own egress, which is the argument that was skipped when the
-        #       sidecar was added. docs/architecture/observability.md records the gap.
+        #       and onto the response, so a unit of work stays followable in the logs
+        #       even for a local run with export off.
         enabled: false
 
 carddemo:

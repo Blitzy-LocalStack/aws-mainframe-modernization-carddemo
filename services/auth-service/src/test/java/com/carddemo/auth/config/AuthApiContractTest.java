@@ -964,6 +964,63 @@ class AuthApiContractTest {
     }
 
     /**
+     * Asserts the opening-position parameter publishes the identifier domain and admits the empty form.
+     *
+     * <p>Purpose: this parameter carries the reference's own search field, and its whole value depends
+     * on the published facets matching what the service accepts. The service holds the value to the
+     * identifier domain -- ASCII letters and digits, at most eight -- and treats a blank as ABSENCE,
+     * seeking from the start of the set exactly as {@code app/cbl/COUSR00C.cbl} does at line 219 when
+     * its search field is blank. A document that refused the empty form would describe a request the
+     * service in fact answers, and a validating gateway built from it would reject it.</p>
+     *
+     * <p>Assumptions: the pattern is asserted against VECTORS rather than compared as a string, because
+     * the property that matters is which values it admits and two different expressions can admit the
+     * same set. The vectors name the empty form, both cases, the URI-reserved character the domain
+     * exists to exclude, and one value past the width.</p>
+     */
+    @Test
+    @DisplayName("the opening position publishes the identifier domain and admits the empty form")
+    void theOpeningPositionPublishesTheIdentifierDomain() {
+        Map<String, Object> startUserId =
+                mapping(mapping(mapping(contract, "components"), "parameters"), "StartUserId");
+
+        assertThat(startUserId.get("name")).isEqualTo("startUserId");
+        assertThat(startUserId.get("in")).isEqualTo("query");
+        assertThat(startUserId.get("required"))
+                .as("the browse opens at the start of the set when no position is supplied")
+                .isEqualTo(false);
+
+        Map<String, Object> schema = mapping(startUserId, "schema");
+        assertThat(schema.get("maxLength"))
+                .as("SEC-USR-ID is PIC X(08) at app/cpy/CSUSR01Y.cpy line 18")
+                .isEqualTo(8);
+
+        Pattern declared = Pattern.compile(String.valueOf(schema.get("pattern")));
+        assertThat(declared.matcher("").matches())
+                .as("an empty position means the same as omitting it, which the service accepts")
+                .isTrue();
+        assertThat(declared.matcher("USER0001").matches()).isTrue();
+        assertThat(declared.matcher("user0001").matches())
+                .as("the service folds the value, so either case positions at the same row")
+                .isTrue();
+        assertThat(declared.matcher("US/R0001").matches())
+                .as("the addressable domain excludes every URI-reserved character")
+                .isFalse();
+        assertThat(declared.matcher("USER00001").matches())
+                .as("the published expression carries the width as well as the alphabet")
+                .isFalse();
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> declaredParameters = (List<Map<String, Object>>) mapping(
+                mapping(mapping(contract, "paths"), "/api/v1/auth/users"), "get").get("parameters");
+        assertThat(declaredParameters.stream()
+                .map(parameter -> String.valueOf(parameter.get("$ref")))
+                .toList())
+                .as("the list operation is the one operation that takes an opening position")
+                .contains("#/components/parameters/StartUserId");
+    }
+
+    /**
      * Asserts that the published correlation bound, character set and header name are exactly what the
      * shared filter enforces, and that the value the browser client previously sent is refused.
      */

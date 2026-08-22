@@ -100,15 +100,14 @@
 #     narrows it instead of a peer group.
 #     ⚠️ Refactoring Rationale: flow 5 named a SECOND destination, "outbound to
 #     the identity provider on 443", and that rule instantiated 0.0.0.0/0 in both
-#     roots. It is withdrawn from this enumeration because its default is now the
-#     empty set: cognito-idp is one of the ten endpointed services, so identity
-#     resolves through flow 3 like every other managed dependency. The rule
-#     itself is still declared, keyed one per entry of
-#     identity_provider_egress_cidrs, so an operator can admit a narrow
-#     destination without editing this file - but with nothing to enumerate, a
-#     list of the tier's permitted flows that still counted it would overstate
-#     what the group admits, which is the one thing this enumeration exists to
-#     get right.
+#     roots. The rule and the identity_provider_egress_cidrs input that keyed it
+#     are BOTH withdrawn -- not defaulted to an empty set, and not available for
+#     an operator to narrow -- so this enumeration is the whole of what the
+#     application group admits and there is no sixth flow to configure. Identity
+#     resolves through flow 3 like every other managed dependency, because
+#     cognito-idp is one of the ten endpointed services and private DNS makes the
+#     provider's public API host resolve to the endpoint ENI. Anything that
+#     wanted that destination back has to add a rule to this file under review.
 #   - Alternatives Considered: attaching the interface-endpoint ENIs to one of
 #     the three consumer-facing groups, so that exactly three groups exist. An
 #     interface endpoint must carry a group, so the task-to-endpoint flow has to
@@ -478,22 +477,26 @@ resource "aws_eip" "nat" {
 #       hourly to carry nothing, "losing its zone would remove egress from every
 #       private-application subnet" described the removal of a capability that was
 #       not in use, and the per-GB term the endpoints were said to claw back was
-#       already zero. The rules are unchanged in intent, and what the gateways carry
-#       is now exactly one flow: the OPT-IN identity-provider egress rule, created
-#       only when a caller supplies reviewed destinations. So the availability
-#       reasoning applies to that dependency when it is configured -- a zone whose
-#       gateway is lost can no longer resolve an issuer from a task in that zone --
-#       and where it is not configured the gateways carry no application traffic at
-#       all and their hourly cost buys the ability to enable that flow without a
-#       topology change.
-#       Refactoring Rationale: this paragraph previously named "Cognito identity and
-#       X-Ray" as the traffic traversing the gateways. X-Ray left with the collector
-#       sidecar, and the identity flow is no longer created by default, so naming
-#       both as live dependencies would have overstated what these gateways carry.
-#       The
-#       correction is recorded rather than the paragraph simply rewritten, because
-#       "we accept this cost for resilience" is exactly the kind of claim a cost
-#       review takes at face value.
+#       already zero. That is still the position, and it is stated plainly rather
+#       than dressed up: the application group carries no rule to a public
+#       destination, so these gateways carry NO application-tier traffic at all and
+#       their whole hourly charge buys the route rather than any packet on it.
+#       Assumptions: they are kept for two reasons that are worth more than the
+#       charge. AAP section 0.4.1.6 specifies NAT in this module's inventory, and the
+#       route they provide is what makes admitting a future dependency a reviewed
+#       security-group change in one file instead of a change of subnet topology
+#       across three zones. Per zone rather than one shared gateway follows from the
+#       same reasoning applied to the day that dependency exists: a single gateway
+#       makes one zone's failure the whole tier's failure.
+#       Refactoring Rationale: this paragraph has twice named traffic that could not
+#       flow -- first "Cognito identity and X-Ray" over an egress rule that pointed
+#       at 0.0.0.0/0, then an "OPT-IN identity-provider egress rule" that no longer
+#       exists as an input or a resource. Both destinations are now reached over
+#       interface endpoints -- cognito-idp for identity, xray for the collector's
+#       trace export -- so neither is a NAT dependency, and the corrections are
+#       recorded rather than the paragraph quietly rewritten, because "we accept this
+#       cost for resilience" is exactly the kind of claim a cost review takes at face
+#       value.
 resource "aws_nat_gateway" "this" {
   for_each = aws_subnet.public
 
@@ -1143,10 +1146,20 @@ data "aws_iam_policy_document" "interface_endpoint" {
 #       inquiry queues. states is called by reporting-service to start an
 #       on-demand batch execution. ssm is read by the batch tasks for the
 #       read-only flag that brackets the batch window.
-# WHY : Assumptions: the ninth and tenth names have named consumers too. xray carries the
-#       trace export section 0.9.3 requires, and cognito-idp carries the identity-provider
-#       calls every service makes -- issuer discovery and the JSON web key set at start-up,
-#       and auth-service's user-pool operations.
+# WHY : Assumptions: the ninth and tenth names are NOT symmetrical, and stating that is the
+#       point of this paragraph. cognito-idp carries the identity-provider calls every
+#       service makes -- issuer discovery and the JSON web key set at start-up, and
+#       auth-service's user-pool operations -- so it sits on a start-up path like the first
+#       eight. xray has NO consumer today. services/common-lib pulls
+#       spring-boot-starter-opentelemetry, so spans ARE created and their trace and span
+#       identifiers DO reach the logs through CorrelationIdFilter, but no OTLP exporter
+#       target is configured anywhere in the tree and the collector sidecar that was to
+#       receive them is withdrawn from infra/modules/ecs-service -- so no span is exported.
+#       The endpoint is kept because it is the private path span export will need, and the
+#       absent exporter is registered as an UNRESOLVED gap against the cross-cutting
+#       tracing requirement of AAP sections 0.1.1.2 and 0.9.4 Phase F rather than described
+#       as a delivered capability. Claiming otherwise here would put a working trace path
+#       in the one file a reader checks to find out whether one exists.
 # WHY : Refactoring Rationale: cognito-idp was WITHDRAWN from this set for a period on a
 #       finding that was right about the mechanism, and the finding is recorded here
 #       because what answers it sits a few lines below rather than at the endpoint itself.
@@ -1167,9 +1180,10 @@ data "aws_iam_policy_document" "interface_endpoint" {
 #       signed administrative calls, and adds one statement admitting exactly the five
 #       unauthenticated operations by name with no principal condition.
 #       Alternatives Considered: a per-endpoint boolean so a root could disable
-#       one. Rejected because every one of the eight is on a start-up or
-#       transaction path, so disabling any of them substitutes a public path for
-#       a private one silently; variables.tf validates the set as exact instead.
+#       one. Rejected because NINE of the ten are on a start-up or transaction
+#       path, so disabling any of those nine substitutes a public path for a
+#       private one silently; xray is the single exception and is covered by the
+#       gap recorded above. variables.tf validates the set as exact instead.
 #       Trade-offs: interface endpoints are charged per hour per endpoint per
 #       availability zone plus per GB processed, so ten endpoints across three zones fix
 #       the hourly term at thirty endpoint-zone-hours. The per-GB part is largely an offset rather

@@ -3,11 +3,13 @@
  *
  * Purpose
  * -------
- * Hold the destination constants that more than one screen needs -- the main and administrative menu
- * routes the reference programs transfer to -- and wrap the router's navigate function so that a
- * transition is checked before it is performed. This is where `EXEC CICS XCTL`'s destination naming
- * ends up: the reference names a program, a screen here names a route, and both are looked up rather
- * than composed at the call site.
+ * Hold every route constant more than one module needs -- the two menu routes the reference programs
+ * transfer to, and each parameterless screen route a menu dispatches to or a screen names as the origin
+ * it was entered from -- and wrap the router's navigate function so that a transition is checked before
+ * it is performed. This is where `EXEC CICS XCTL`'s destination naming ends up: the reference names a
+ * program, a screen here names a route, and both are looked up rather than composed at the call site.
+ * The same constants are what the origin census admits, so a destination and an admissible origin can
+ * never be two different spellings of one path.
  *
  * Why a helper rather than calling navigate directly
  * -------------------------------------------------
@@ -72,6 +74,16 @@ export interface ScreenTransitionState {
    * named origin and need not even belong to this application - which is why the origin is
    * handed over explicitly and validated against the route table by
    * {@link inApplicationRoute}.
+   *
+   * ⚠️ Refactoring Rationale: five screens read this member and, until this revision, nothing
+   * wrote it -- so every one of them took its fallback arm on every visit and the carrier was
+   * inert. There are five producers -- the two menus and the three browses that transfer with
+   * a selection: the main menu, the administrative menu, the transaction browse, the user
+   * browse and the reference-type browse each pass their own route as `from` at the
+   * transition, which is the `MOVE WS-PGMNAME TO CDEMO-FROM-PROGRAM` every one of those
+   * reference programs performs immediately before its `XCTL` (`app/cbl/COUSR00C.cbl` L194
+   * and L204 are the clearest pair). `ui/src/routes/routeCensus.test.ts` requires a producer
+   * for every consumer, so the carrier cannot fall inert again without a case failing.
    */
   readonly from?: string;
 }
@@ -132,37 +144,142 @@ export const CARD_LIST_ROUTE = '/cards';
 /** Route the transaction-capture screen occupies, replacing program `COTRN02C`. */
 export const TRANSACTION_ADD_ROUTE = '/transactions/new';
 
+/**
+ * Route the transaction browse occupies, replacing program `COTRN00C`.
+ *
+ * Assumptions: it is declared here because it is an ORIGIN as well as a destination.
+ * `ui/src/screens/transactionList/index.tsx` opens the detail screen from a selected row, and
+ * `app/cbl/COTRN01C.cbl` L246-L253 returns on PF3 to whichever program transferred to it rather
+ * than to a fixed menu -- so the browse has to be nameable as an origin for the detail screen's exit
+ * key to reproduce that, and {@link inApplicationRoute} admits only what this module declares.
+ */
+export const TRANSACTION_LIST_ROUTE = '/transactions';
+
+/**
+ * Route the user browse occupies, replacing program `COUSR00C`.
+ *
+ * ⚠️ Assumptions: it is declared here for the same reason the transaction browse above is -- it is
+ * the origin of two screens. `ui/src/screens/userList/index.tsx` opens user maintenance and user
+ * deletion from a selected row, and both of those screens read a handed-over origin on their exit
+ * key, so without this route in the admissible set the origin they were given would be discarded
+ * and the operator returned to the administrative menu instead of to the list they came from. It was
+ * absent while no user browse was mounted; `ui/src/router.tsx` mounts it at this path, so the
+ * absence had become a behaviour loss rather than a boundary.
+ */
+export const USER_LIST_ROUTE = '/users';
+
 /** Route the pending-authorization summary occupies, replacing program `COPAUS0C`. */
 export const AUTHORIZATION_SUMMARY_ROUTE = '/authorizations';
 
 /** Route the transaction-type maintenance list occupies, replacing program `COTRTLIC`. */
 export const REFERENCE_TYPE_LIST_ROUTE = '/reference/transaction-types';
 
+/*
+ * ⚠️ Refactoring Rationale: the six constants below were declared in the modules that
+ * navigate to them -- four in `ui/src/routes/programRoutes.ts`, one in
+ * `ui/src/screens/transactionList/index.tsx` and one in `ui/src/screens/refTypeList/index.tsx`
+ * -- and each is moved here because the origin census below has to name the SAME value a
+ * screen navigates by. A census holding its own copy of a path admits an origin that is
+ * spelled like a route rather than one that is a route, which is the defect that left
+ * `/users` inadmissible while the user browse was being navigated to: the browse's path was
+ * declared where the browse was, and this module could not see it. Both files now import
+ * these from here, so a renamed segment moves the destination and the admissible origin
+ * together.
+ */
+
+/** Route the add-user screen occupies, replacing program `COUSR01C`. */
+export const USER_ADD_ROUTE = '/users/new';
+
+/** Route the bill-payment screen occupies, replacing program `COBIL00C`. */
+export const BILL_PAY_ROUTE = '/billpay';
+
+/** Route the transaction-report submission screen occupies, replacing program `CORPT00C`. */
+export const REPORTS_ROUTE = '/reports';
+
+/**
+ * Concrete route the transaction-type maintenance screen occupies when adding a type.
+ *
+ * Assumptions: this is a CONCRETE path under the parameterised template
+ * {@link REFERENCE_TYPE_EDIT_ROUTE_TEMPLATE} rather than a route of its own, because the
+ * reference reaches its add and change entries through one program: `COTRTLIC.cbl` L630-L652
+ * transfers to `COTRTUPC` with no key, and `COTRTUPC` then prompts for one. The final segment
+ * is a sentinel the maintenance screen recognises, and it cannot collide with a key because
+ * `TR_TYPE` is `CHAR(2)` in `app/app-transaction-type-db2/ddl/TRNTYPE.ddl` L2 -- so no code
+ * can ever be `new`. It is declared beside the parameterless routes because a caller CAN hand
+ * it over unresolved, which is what makes it admissible below where the template is not.
+ */
+export const REFERENCE_TYPE_ADD_ROUTE = `${REFERENCE_TYPE_LIST_ROUTE}/new`;
+
 /**
  * Route template the user-update screen occupies, replacing program `COUSR02C`.
  *
- * Assumptions: this is a TEMPLATE carrying the router's `:id` parameter and is not a
- * navigable destination. The screen reads the identifier from the route, so a caller
- * transitioning there builds the concrete path from the user it selected; the constant
- * exists so the router and any future selector screen agree on the shape.
+ * Assumptions: this is a TEMPLATE carrying an `:id` parameter and is not a navigable
+ * destination. The screen reads the identifier from the route, so a caller transitioning
+ * there builds the concrete path from the user it selected; the constant exists so any
+ * future selector screen agrees on the shape of the selected form.
+ *
+ * Assumptions: the router's own pattern is `/users/:id/edit`, and this template is the same
+ * shape deliberately rather than by accident. A selector-free `/users/edit` was declared
+ * beside it and is withdrawn -- it made the table publish twenty-two paths for twenty-one
+ * programs -- so `COUSR02C` has one route and administrative option 3 reaches this screen
+ * through the browse's selection. A caller substituting an optional form would build a path
+ * carrying a literal `?` segment that matches nothing this table declares.
  */
 export const USER_UPDATE_ROUTE_TEMPLATE = '/users/:id/edit';
 
+/**
+ * Route template the transaction-type maintenance screen occupies, replacing program `COTRTUPC`.
+ *
+ * Assumptions: a TEMPLATE for the same reason {@link USER_UPDATE_ROUTE_TEMPLATE} is one -- it
+ * carries the router's `:typeCd` parameter, so it is not a value a caller hands over unresolved.
+ * It is declared here so that {@link REFERENCE_TYPE_ADD_ROUTE} can state which template its
+ * sentinel resolves under, and so the exclusion recorded below names a constant rather than a
+ * shape.
+ */
+export const REFERENCE_TYPE_EDIT_ROUTE_TEMPLATE = `${REFERENCE_TYPE_LIST_ROUTE}/:typeCd`;
+
 /*
- * Assumptions: the census below is a CLOSED set of admissible origins and deliberately
- * excludes four paths. The user-update template carries a route parameter, so it is not a
- * path a caller can hand over unresolved; the two card detail routes are minted by
- * `ui/src/routes/cards.ts` from an opaque selector, so a caller holding one already holds a
- * concrete path this set could not enumerate; and sign-on is excluded because it is never an
- * origin - `app/cbl/COSGN00C.cbl` L245 transfers to a MENU and to nothing else, so no screen
- * with a PF3 arm is ever entered from it. Excluding sign-on additionally keeps this module
- * free of `ui/src/routes/guards.tsx`, which owns that path: this file is imported by every
- * screen for its constants alone, and importing the guard module would pull the component
- * layer in behind it.
+ * Assumptions: the census below is a CLOSED set of admissible origins, and it holds every
+ * parameterless route `ui/src/router.tsx` registers except sign-on. Sign-on is excluded
+ * because it is never an origin -- `app/cbl/COSGN00C.cbl` L245 transfers to a MENU and to
+ * nothing else, so no screen with a PF3 arm is ever entered from it -- and excluding it
+ * additionally keeps this module free of `ui/src/routes/guards.tsx`, which owns that path:
+ * this file is imported by every screen for its constants alone, and importing the guard
+ * module would pull the component layer in behind it.
+ * Assumptions: the PARAMETERISED routes are excluded as a class rather than individually,
+ * and the exclusion is about shape rather than about trust. The two card detail routes are
+ * minted by `ui/src/routes/cards.ts` from an opaque selector; the user update and delete
+ * routes, the transaction detail route, the authorization detail route and the reference-type
+ * maintenance template each carry a route parameter. None of those is a value a caller can
+ * hand over unresolved, so a closed set could not enumerate them -- while a resolved instance
+ * of one is a concrete path that would have to be admitted by pattern rather than by
+ * membership, which is the string comparison this check exists to avoid. The one exception is
+ * {@link REFERENCE_TYPE_ADD_ROUTE}: its final segment is a fixed sentinel rather than a
+ * parameter, so it IS enumerable, and it is admitted.
+ * ⚠️ Refactoring Rationale: this set held eight of those routes and omitted six --
+ * `/users`, `/users/new`, `/transactions`, `/billpay`, `/reports` and the reference-type add
+ * route. The omission was not a policy: those six were simply declared in other modules, so a
+ * screen could navigate from one of them and the destination's exit key would silently take
+ * its hard-coded fallback instead of returning where the operator came from. `/users` was the
+ * live case -- the user browse transfers to the deletion screen, whose exit reads this set --
+ * so an administrator who arrived from the browse was returned to the administrative menu.
+ * Completing the set is half of that repair; the other half is that a departing screen has to
+ * HAND the origin over, which `ui/src/routes/routeCensus.test.ts` now holds to the code by
+ * requiring a producer for every consumer.
  */
 
 /**
  * Every parameterless application route a screen may name as its origin.
+ *
+ * ⚠️ Refactoring Rationale: the two browse routes at the end are ADMITTED where they were
+ * absent, and their absence was silently discarding origins the delivered screens hand over.
+ * `ui/src/screens/transactionList/index.tsx` opens the transaction detail screen and
+ * `ui/src/screens/userList/index.tsx` opens user maintenance and user deletion, so all three
+ * destinations read an origin that {@link inApplicationRoute} refused - and a refused origin
+ * is not an error, it is a fall back to the destination's own default, which is the generic
+ * menu. That is the behaviour loss `app/cbl/COACTVWC.cbl` L328-L339 shows the reference did
+ * not have: a program that was transferred to returns to the transferring program, not to a
+ * fixed menu.
  * @returns {readonly string[]} The routes {@link inApplicationRoute} admits.
  */
 function navigableRoutes(): readonly string[] {
@@ -172,9 +289,15 @@ function navigableRoutes(): readonly string[] {
     ACCOUNT_VIEW_ROUTE,
     ACCOUNT_UPDATE_ROUTE,
     CARD_LIST_ROUTE,
+    TRANSACTION_LIST_ROUTE,
     TRANSACTION_ADD_ROUTE,
+    BILL_PAY_ROUTE,
+    REPORTS_ROUTE,
     AUTHORIZATION_SUMMARY_ROUTE,
+    USER_LIST_ROUTE,
+    USER_ADD_ROUTE,
     REFERENCE_TYPE_LIST_ROUTE,
+    REFERENCE_TYPE_ADD_ROUTE,
   ];
 }
 

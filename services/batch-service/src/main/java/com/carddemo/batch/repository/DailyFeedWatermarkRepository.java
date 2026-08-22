@@ -32,20 +32,33 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <h2>Why the read is locked</h2>
  *
- * <p>Assumptions: the read below takes a PESSIMISTIC WRITE lock, and the whole posting pass runs in
- * one transaction, so the lock is held for the pass's duration. That is deliberate: it serialises
- * two posting passes that somehow overlap, rather than letting both read the same position and both
- * post the same rows. The chain's own online-write lease already makes an overlap unlikely -- the
- * quiesce state acquires a bracket that a second execution cannot -- so this is a second line
- * rather than the only one, and it costs a single-row lock on a table nothing else reads.</p>
+ * <p>Assumptions: the read below takes a PESSIMISTIC WRITE lock, and it is held for exactly as long
+ * as the CALLING transaction -- which, for the posting pass, is one transaction per feed record and
+ * one short transaction for the starting read, never the pass as a whole. So the lock serialises two
+ * overlapping passes one ADVANCE at a time rather than for a night: each advance re-reads the row
+ * under this lock inside its record's transaction, so two passes cannot interleave a read and a
+ * write of the same position, and the service's monotonic guard turns the loser's lower value into a
+ * no-op instead of moving the position backwards.</p>
+ *
+ * <p>Refactoring Rationale: this section stated that "the whole posting pass runs in one transaction,
+ * so the lock is held for the pass's duration". That was true of {@code PostTransactionsJob} before
+ * its boundary moved to the record, and the code now builds the step with
+ * {@code PROPAGATION_NOT_SUPPORTED} and opens one {@code TransactionTemplate} transaction per
+ * record. The claim is corrected rather than softened because it named this lock as what keeps two
+ * passes apart: the primary mechanism is the chain's online-write lease -- the quiesce state acquires
+ * a bracket a second execution cannot -- and this lock is the second line, at per-advance
+ * granularity. A reader who believed the pass-long hold would size the mechanism wrongly in both
+ * directions, expecting protection this lock no longer gives and lock contention it no longer
+ * causes.</p>
  *
  * <p>Trade-offs: locking a row that may not exist gives no protection for the very first pass, and
- * that gap is accepted rather than closed with an advisory lock or a seeded row. Two concurrent
- * first passes would both find nothing, both post from the beginning, and both attempt to INSERT the
- * same primary key -- so one of them is refused by {@code pk_daily_feed_watermark} and its whole
- * transaction rolls back, including its postings. The outcome is therefore one completed pass and
- * one failed step rather than a double post, which is the same outcome the lock produces on every
- * later pass.</p>
+ * that gap is accepted rather than closed with an advisory lock or a seeded row. Two concurrent first
+ * passes would both find nothing and both attempt to INSERT the same primary key, so one of them is
+ * refused by {@code pk_daily_feed_watermark}. Under the per-record boundary that refusal rolls back
+ * only the RECORD being posted when it happened -- the records that pass had already committed stay
+ * committed -- and the step fails, which the orchestrator's per-state retry re-runs. The retry then
+ * finds the winner's row and resumes above it, so the outcome is still one advancing position and no
+ * double post; what it is not, any longer, is an all-or-nothing rollback of that pass.</p>
  *
  * <h2>Rulings this interface inherits from the package charter</h2>
  *
@@ -55,7 +68,13 @@ import org.springframework.transaction.annotation.Transactional;
  * persistence provider with schema handling set to {@code validate}, and that pass compares mapping
  * metadata against the deployed table while never parsing the text of a native query. A mistyped
  * physical column inside a native upsert stays invisible until the statement executes, which for
- * this module means at the END of a nightly posting pass with every posting already written. The
+ * this module means partway through a nightly posting pass -- on the first record that reaches the
+ * advance, with that record's ledger and account writes already made inside the same transaction.
+ * Refactoring Rationale: this read "at the END of a nightly posting pass with every posting already
+ * written", which described the step's withdrawn pass-long boundary. Under the per-record boundary
+ * the failure arrives earlier and rolls back one record rather than the night; the reason for
+ * preferring a mapped query is unchanged either way, since {@code validate} cannot see inside native
+ * SQL in either arrangement. The
  * members here are a derived-name query and the inherited {@code save}, both bound to property names
  * declared on {@code DailyFeedWatermark}, so no physical column name appears in this file.</p>
  *
@@ -66,8 +85,11 @@ public interface DailyFeedWatermarkRepository extends JpaRepository<DailyFeedWat
     /**
      * Reads one feed's consumed position, taking a write lock on the row.
      *
-     * <p>This is the read the posting pass performs before it walks anything, and the lock it takes
-     * is what stops a second pass reading the same position concurrently.</p>
+     * <p>This is the read the posting pass performs before it walks anything, and the read each
+     * advance performs before it moves the position. The lock it takes lasts for the caller's
+     * transaction only -- a short one for the starting read, and the record's own for each advance --
+     * so it stops two passes interleaving a read and a write of this row, and does not hold the row
+     * for the length of a pass.</p>
      *
      * @param feedName the record-layout name of the feed, for example {@code DALYTRAN}, a
      *     {@code String} of at most thirty characters and the table's primary key; must not be

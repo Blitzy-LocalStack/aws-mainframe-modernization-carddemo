@@ -22,6 +22,7 @@ import com.carddemo.auth.dto.TokenRefreshRequest;
 import com.carddemo.auth.repository.UserRepository;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
+import com.carddemo.common.security.JwtRoleConverter;
 import java.lang.reflect.Field;
 import java.lang.reflect.RecordComponent;
 import java.net.ConnectException;
@@ -29,6 +30,8 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.Locale;
+import java.util.Optional;
+import java.util.UUID;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -68,11 +71,12 @@ import software.amazon.awssdk.services.cognitoidentityprovider.model.UserNotFoun
  *
  * <p>Purpose: this class pins every branch the sign-on exchange owns against the reference paragraph
  * it succeeds, {@code READ-USER-SEC-FILE} at {@code app/cbl/COSGN00C.cbl} line 209. It covers the
- * ordered presence chain and the one sentence it emits, the local existence probe, the credential
- * exchange, the classification of the pool's answer into a token set, a challenge, a refusal or an
- * unevaluable credential, and the disclosure boundary each of those answers has to respect. None of
- * those properties is visible to a compiler, and several of them -- a pool answering
- * {@code NEW_PASSWORD_REQUIRED}, a store failing on the probe, a pool reporting an incomplete token
+ * ordered presence chain and the one sentence it emits, the local reads -- the existence check the
+ * challenge branch makes and the subject lookup that binds an issued token set to its row -- the
+ * credential exchange, the classification of the pool's answer into a token set, a challenge, a refusal
+ * or an unevaluable credential, and the disclosure boundary each of those answers has to respect. None
+ * of those properties is visible to a compiler, and several of them -- a pool answering
+ * {@code NEW_PASSWORD_REQUIRED}, a store failing on a local read, a pool reporting an incomplete token
  * set, two refusal paths taking measurably different time -- are reachable only through a stood-in
  * collaborator.</p>
  *
@@ -156,6 +160,20 @@ class CognitoIdentityServiceTest {
     /** A submission that is blank rather than absent, matching the reference test for spaces. */
     private static final String BLANK = "   ";
 
+    // WHY : Assumptions: the two subjects below are fixed literals rather than randomly generated ones,
+    //       so a failure reports the same values on every run and a case that binds the wrong one is
+    //       readable from the report alone. Neither value has any meaning to the pool; what matters is
+    //       only that they differ, because the property under test is whether the subject the token
+    //       carries is the subject the row records.
+    /** The pool subject the stored row records, and the durable link an issued token is bound by. */
+    private static final UUID SUBJECT = UUID.fromString("6a1f0d3c-8b2e-4f57-9c31-0d4e7a6b5c28");
+
+    /** A second subject, standing for a pool account other than the one the stored row records. */
+    private static final UUID OTHER_SUBJECT = UUID.fromString("f0e9d8c7-b6a5-4321-8765-43210fedcba9");
+
+    /** A second identifier, standing for a row or a submission other than the one under test. */
+    private static final String OTHER_USER_ID = "USER0002";
+
     /** The pool client identifier every case builds the service over. */
     private static final String CLIENT_ID = "test-client-id";
 
@@ -208,7 +226,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("a new-password challenge is returned as the challenge outcome, not as a fault")
     void aNewPasswordChallengeIsReturnedAsTheChallengeOutcome() {
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
         when(provider.initiateAuth(any(InitiateAuthRequest.class))).thenReturn(
                 InitiateAuthResponse.builder()
                         .challengeName(ChallengeNameType.NEW_PASSWORD_REQUIRED)
@@ -256,7 +274,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("an unpublished challenge is an unevaluable credential, not a challenge body")
     void anUnpublishedChallengeIsUnevaluable() {
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
         when(provider.initiateAuth(any(InitiateAuthRequest.class))).thenReturn(
                 InitiateAuthResponse.builder()
                         .challengeName(ChallengeNameType.SOFTWARE_TOKEN_MFA)
@@ -282,7 +300,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("a challenge with no session is unevaluable rather than unanswerable")
     void aChallengeWithNoSessionIsUnevaluable() {
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
         when(provider.initiateAuth(any(InitiateAuthRequest.class))).thenReturn(
                 InitiateAuthResponse.builder()
                         .challengeName(ChallengeNameType.NEW_PASSWORD_REQUIRED)
@@ -301,7 +319,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("a complete token set is returned with the authenticated outcome")
     void aCompleteTokenSetIsReturned() {
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
         when(provider.initiateAuth(any(InitiateAuthRequest.class)))
                 .thenReturn(InitiateAuthResponse.builder()
                         .authenticationResult(completeResult().build())
@@ -334,7 +352,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("an incomplete token set is unevaluable rather than a 200")
     void anIncompleteTokenSetIsUnevaluable() {
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
 
         AuthenticationResultType[] incomplete = {
             completeResult().accessToken(null).build(),
@@ -374,7 +392,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("an absent renewal token is passed through rather than refused")
     void anAbsentRenewalTokenIsPassedThrough() {
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
         when(provider.getTokensFromRefreshToken(any(GetTokensFromRefreshTokenRequest.class)))
                 .thenReturn(GetTokensFromRefreshTokenResponse.builder()
                         .authenticationResult(completeResult().refreshToken(null).build())
@@ -407,7 +425,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("a rotated renewal token replaces the submitted one")
     void aRotatedRenewalTokenReachesTheCaller() {
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
         when(provider.getTokensFromRefreshToken(any(GetTokensFromRefreshTokenRequest.class)))
                 .thenReturn(GetTokensFromRefreshTokenResponse.builder()
                         .authenticationResult(completeResult().refreshToken("rotated-refresh-token").build())
@@ -435,16 +453,25 @@ class CognitoIdentityServiceTest {
      *
      * <p>Purpose: the rotation-compatible operation takes no user name, so the keyed digest that used to
      * bind the submitted identifier to the token is gone. Without a replacement binding, a caller holding
-     * one user's token could name any other still-present identifier, satisfy the membership probe with
-     * that name, and be handed a session minted for the first user. The refusal below is that
-     * replacement, and it is asserted rather than assumed because nothing else in the flow would notice.
-     * </p>
+     * one user's token could name any other still-present identifier and be handed a session minted for
+     * the first user. The refusal below is that replacement, and it is asserted rather than assumed
+     * because nothing else in the flow would notice.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: this case no longer asserts that the store was untouched, and the
+     * reason is the defect the binding closes. The comparison it used to make was between the token's
+     * user-name claim and the submitted identifier, which needs no row and therefore touched nothing; but
+     * a name claim cannot say which pool ACCOUNT a token was minted for, because the pool permits a user
+     * name to be reassigned and never reissues a subject. The row is now resolved through the subject, so
+     * the store is necessarily consulted -- and the case asserts it was consulted with the subject the
+     * token carries, which is the stronger property.</p>
      *
      * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
     @DisplayName("a renewal naming another identifier than the token's subject is refused")
     void aRenewalForAnotherSubjectIsRefused() {
+        when(users.findByCognitoSub(SUBJECT))
+                .thenReturn(Optional.of(rowOf("USER9999", "A", SUBJECT)));
         when(provider.getTokensFromRefreshToken(any(GetTokensFromRefreshTokenRequest.class)))
                 .thenReturn(GetTokensFromRefreshTokenResponse.builder()
                         .authenticationResult(completeResult().idToken(identityTokenFor("USER9999")).build())
@@ -454,7 +481,7 @@ class CognitoIdentityServiceTest {
                 .isInstanceOf(CognitoIdentityService.SessionRefusedException.class)
                 .hasMessage(SESSION_REFUSED);
 
-        verifyNoInteractions(users);
+        verify(users).findByCognitoSub(SUBJECT);
     }
 
     /**
@@ -521,9 +548,9 @@ class CognitoIdentityServiceTest {
     }
 
     /**
-     * Asserts a data-access failure on the local probe reports the reference unevaluable sentence.
+     * Asserts a data-access failure on the local read reports the reference unevaluable sentence.
      *
-     * <p>Assumptions: the translation is asserted rather than assumed because an unwrapped probe would
+     * <p>Assumptions: the translation is asserted rather than assumed because an unwrapped read would
      * let a data-access exception escape this class, and the shared advice would then match it with its
      * unanticipated-failure handler -- which answers 500 with a GENERIC sentence, because it carries a
      * service's own sentence only for the bare illegal-state type. The one condition the reference's
@@ -538,27 +565,32 @@ class CognitoIdentityServiceTest {
      * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
-    @DisplayName("a store failure on the local probe carries the reference unevaluable sentence")
-    void aStoreFailureOnTheProbeIsUnevaluable() {
+    @DisplayName("a store failure on the local read carries the reference unevaluable sentence")
+    void aStoreFailureOnTheLocalReadIsUnevaluable() {
         // WHY : ⚠️ Refactoring Rationale: the pool is stubbed to ACCEPT here, where this case used to
-        //       assert the pool was never touched. The probe now runs after the credential exchange, so
-        //       the only way to reach it at all is to let the exchange succeed first. What the case pins
-        //       is unchanged -- a probe that cannot answer is unevaluable rather than either a refusal or
-        //       a 200 -- and it is now pinned on the path the service actually takes.
+        //       assert the pool was never touched. The local read now runs after the credential exchange,
+        //       so the only way to reach it at all is to let the exchange succeed first. What the case
+        //       pins is unchanged -- a store that cannot answer is unevaluable rather than either a
+        //       refusal or a 200 -- and it is now pinned on the path the service actually takes.
+        // WHY : ⚠️ Refactoring Rationale: the failure is raised from the SUBJECT lookup rather than from
+        //       the existence check, because that is the read an accepted sign-on now makes. Stubbing the
+        //       existence check would leave this case green while the read the service performs went
+        //       untranslated, which is the reason the two are named separately rather than as one probe.
         when(provider.initiateAuth(any(InitiateAuthRequest.class)))
                 .thenReturn(InitiateAuthResponse.builder()
                         .authenticationResult(completeResult().build())
                         .build());
-        when(users.existsById(USER_ID)).thenThrow(new QueryTimeoutException("statement timed out"));
+        when(users.findByCognitoSub(SUBJECT))
+                .thenThrow(new QueryTimeoutException("statement timed out"));
 
         assertThatThrownBy(() -> service.authenticate(new SignOnRequest(USER_ID, "Passw0rd!")))
                 .isExactlyInstanceOf(IllegalStateException.class)
                 .hasMessage(UNABLE_TO_VERIFY);
 
-        // WHY : Assumptions: the probe is asserted to have been consulted, because a case whose stub
+        // WHY : Assumptions: the read is asserted to have been consulted, because a case whose stub
         //       never fires would pass for the wrong reason -- it would prove the exchange succeeded and
         //       nothing about the translation this case exists for.
-        verify(users).existsById(USER_ID);
+        verify(users).findByCognitoSub(SUBJECT);
     }
 
     /**
@@ -574,13 +606,23 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("an unknown identifier and a wrong credential answer one sentence")
     void bothRefusalsAnswerOneSentence() {
-        when(users.existsById(USER_ID)).thenReturn(false);
+        // WHY : ⚠️ Refactoring Rationale: the first leg now stubs the pool to ACCEPT, where it used to
+        //       leave the provider unstubbed. An unstubbed provider answered null, which the previous
+        //       order never dereferenced because it refused on local absence before looking at the
+        //       answer; the order is inverted and the answer is now what the refusal is derived from, so
+        //       a leg that supplies no answer would exercise nothing. What the leg means is unchanged: an
+        //       identifier the pool accepts and this context holds no row for.
+        unbindLocalRow();
+        when(provider.initiateAuth(any(InitiateAuthRequest.class)))
+                .thenReturn(InitiateAuthResponse.builder()
+                        .authenticationResult(completeResult().build())
+                        .build());
 
         assertThatThrownBy(() -> service.authenticate(new SignOnRequest(USER_ID, "Passw0rd!")))
                 .isInstanceOf(BadCredentialsException.class)
                 .hasMessage(CREDENTIAL_REFUSED);
 
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
         when(provider.initiateAuth(any(InitiateAuthRequest.class)))
                 .thenThrow(NotAuthorizedException.builder().message("Incorrect username or password")
                         .build());
@@ -622,12 +664,12 @@ class CognitoIdentityServiceTest {
                 .thenThrow(NotAuthorizedException.builder().message("Incorrect username or password")
                         .build());
 
-        when(users.existsById(USER_ID)).thenReturn(false);
+        unbindLocalRow();
         assertThatThrownBy(() -> service.authenticate(new SignOnRequest(USER_ID, ACCEPTED_CREDENTIAL)))
                 .isInstanceOf(BadCredentialsException.class)
                 .hasMessage(CREDENTIAL_REFUSED);
 
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
         assertThatThrownBy(() -> service.authenticate(new SignOnRequest(USER_ID, ACCEPTED_CREDENTIAL)))
                 .isInstanceOf(BadCredentialsException.class)
                 .hasMessage(CREDENTIAL_REFUSED);
@@ -676,7 +718,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("neither a refusal nor a success pays a deliberate delay")
     void noExchangePaysADeliberateDelay() {
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
         when(provider.initiateAuth(any(InitiateAuthRequest.class)))
                 .thenReturn(InitiateAuthResponse.builder()
                         .authenticationResult(completeResult().build())
@@ -688,7 +730,7 @@ class CognitoIdentityServiceTest {
         service.authenticate(new SignOnRequest(USER_ID, ACCEPTED_CREDENTIAL));
         long acceptedElapsed = System.nanoTime() - acceptedStartedAt;
 
-        when(users.existsById(USER_ID)).thenReturn(false);
+        unbindLocalRow();
         assertThatThrownBy(() -> service.authenticate(new SignOnRequest(USER_ID, ACCEPTED_CREDENTIAL)))
                 .isInstanceOf(BadCredentialsException.class);
 
@@ -714,7 +756,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("answering the challenge returns the token set the sign-on could not")
     void answeringTheChallengeReturnsTheTokenSet() {
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
         when(provider.respondToAuthChallenge(any(RespondToAuthChallengeRequest.class)))
                 .thenReturn(RespondToAuthChallengeResponse.builder()
                         .authenticationResult(completeResult().build())
@@ -754,7 +796,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("a policy-refused password is a caller-input failure carrying the pool's reason")
     void aPolicyRefusedPasswordIsCallerInput() {
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
         when(provider.respondToAuthChallenge(any(RespondToAuthChallengeRequest.class)))
                 .thenThrow(InvalidPasswordException.builder()
                         .message("Password did not conform with policy: Password not long enough")
@@ -793,7 +835,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("a policy reason carrying a long digit run is discarded rather than relayed")
     void anUnsafePolicyReasonIsDiscarded() {
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
         when(provider.respondToAuthChallenge(any(RespondToAuthChallengeRequest.class)))
                 .thenThrow(InvalidPasswordException.builder()
                         .message("Password must not contain 4111111111111111")
@@ -820,7 +862,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("an over-long policy reason is truncated to the width the advice will carry")
     void anOverLongPolicyReasonIsTruncated() {
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
         when(provider.respondToAuthChallenge(any(RespondToAuthChallengeRequest.class)))
                 .thenThrow(InvalidPasswordException.builder()
                         .message("Password did not conform with policy: Password must have lowercase,"
@@ -852,7 +894,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("a refused session reports the sign-on-again sentence, not the credential sentence")
     void aRefusedSessionReportsItsOwnSentence() {
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
         when(provider.respondToAuthChallenge(any(RespondToAuthChallengeRequest.class)))
                 .thenThrow(NotAuthorizedException.builder().message("Invalid session").build());
 
@@ -873,7 +915,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("a further challenge on the answer exchange is unevaluable rather than returned")
     void aFurtherChallengeOnTheAnswerIsUnevaluable() {
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
         when(provider.respondToAuthChallenge(any(RespondToAuthChallengeRequest.class)))
                 .thenReturn(RespondToAuthChallengeResponse.builder()
                         .challengeName(ChallengeNameType.SOFTWARE_TOKEN_MFA)
@@ -910,7 +952,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("the renewal uses the rotation-compatible operation with the client secret")
     void theRenewalUsesTheRotationCompatibleOperation() {
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
         when(provider.getTokensFromRefreshToken(any(GetTokensFromRefreshTokenRequest.class)))
                 .thenReturn(GetTokensFromRefreshTokenResponse.builder()
                         .authenticationResult(completeResult().refreshToken(null).build())
@@ -942,7 +984,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("a refused refresh token reports the sign-on-again sentence")
     void aRefusedRefreshTokenReportsItsOwnSentence() {
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
         when(provider.getTokensFromRefreshToken(any(GetTokensFromRefreshTokenRequest.class)))
                 .thenThrow(NotAuthorizedException.builder().message("Refresh Token has expired")
                         .build());
@@ -1061,10 +1103,15 @@ class CognitoIdentityServiceTest {
     /**
      * Asserts a locally-unknown identifier is refused on both new exchanges, after the pool has answered.
      *
-     * <p>Assumptions: the probe is not redundant on the challenge answer just because the caller holds a
-     * session this service issued: a row deleted between the sign-on and the answer must not be able to
-     * complete an exchange that ends in a usable token set. The same holds for a renewal, where the row
-     * may have been removed at any point in the token's thirty-day life.</p>
+     * <p>Assumptions: the local read is not redundant on the challenge answer just because the caller
+     * holds a session this service issued: a row deleted between the sign-on and the answer must not be
+     * able to complete an exchange that ends in a usable token set. The same holds for a renewal, where
+     * the row may have been removed at any point in the token's thirty-day life.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: what makes the identifier locally unknown here is that its SUBJECT
+     * resolves no row, where it used to be that the identifier keyed no row. The two coincide for a
+     * consistently provisioned pair and differ for exactly the case the binding exists to catch, so the
+     * vector is stated as the store answering nothing to either read.</p>
      *
      * <p>Assumptions: ⚠️ Refactoring Rationale: this case asserted the pool was NEVER reached, and now
      * asserts it was reached first. The gate itself is unchanged -- an identifier with no local row still
@@ -1081,7 +1128,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("a locally-unknown identifier is refused on both new exchanges, after the pool")
     void aLocallyUnknownIdentifierIsRefusedAfterThePool() {
-        when(users.existsById(USER_ID)).thenReturn(false);
+        unbindLocalRow();
         when(provider.respondToAuthChallenge(any(RespondToAuthChallengeRequest.class)))
                 .thenReturn(RespondToAuthChallengeResponse.builder()
                         .authenticationResult(completeResult().build())
@@ -1251,15 +1298,15 @@ class CognitoIdentityServiceTest {
     }
 
     /**
-     * Asserts a locally-absent row is refused without the credential ever reaching the pool.
+     * Asserts a locally-absent row is refused after the credential has reached the pool.
      *
      * <p>The refusal expected is {@link BadCredentialsException} and specifically the bare type rather
      * than its {@link CognitoIdentityService.SessionRefusedException} subtype, which carries a different
      * sentence. Being a refusal rather than a {@link ClientInputException}, it carries no field key at
      * all, so no control on the screen is marked.</p>
      *
-     * <p>Assumptions: the probe stands in for the keyed read at {@code app/cbl/COSGN00C.cbl} lines 211
-     * to 219. That read carries NO {@code UPDATE} option and keys on the folded working-storage
+     * <p>Assumptions: the local read stands in for the keyed read at {@code app/cbl/COSGN00C.cbl} lines
+     * 211 to 219. That read carries NO {@code UPDATE} option and keys on the folded working-storage
      * identifier named on line 215 with its key length on line 216, so it is a plain positioned read and
      * not a read for update. Nothing here acquires a lock for the same reason the reference does not:
      * no row is written.</p>
@@ -1293,7 +1340,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("a locally-absent row is refused after the credential has reached the pool")
     void aLocallyAbsentRowIsRefusedAfterTheCredentialReachesThePool() {
-        when(users.existsById(USER_ID)).thenReturn(false);
+        unbindLocalRow();
         when(provider.initiateAuth(any(InitiateAuthRequest.class)))
                 .thenReturn(InitiateAuthResponse.builder()
                         .authenticationResult(completeResult().build())
@@ -1313,7 +1360,7 @@ class CognitoIdentityServiceTest {
         //       afterwards, which is what stops a pool-accepted credential for a removed user becoming a
         //       usable token set.
         verify(provider).initiateAuth(any(InitiateAuthRequest.class));
-        verify(users).existsById(USER_ID);
+        verify(users).findByCognitoSub(SUBJECT);
     }
 
     /**
@@ -1325,7 +1372,7 @@ class CognitoIdentityServiceTest {
      * is the condition the reference reports with its own sentence on {@code app/cbl/COSGN00C.cbl} line
      * 249. Routing it to the sentence on lines 242 and 243 instead is the same documented merge the
      * locally-absent case above records, arriving this time from the pool rather than from the local
-     * probe.</p>
+     * read.</p>
      *
      * <p>Assumptions: the reference's corresponding arm is asymmetric in a way the target has nothing to
      * reproduce. The arm at {@code app/cbl/COSGN00C.cbl} lines 241 to 246 never moves {@code 'Y'} into
@@ -1343,7 +1390,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("both pool refusal types answer one sentence with no provider diagnostic")
     void bothPoolRefusalTypesCarryNoProviderDiagnostic() {
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
 
         SdkException[] refusals = {
             NotAuthorizedException.builder().message("Incorrect username or password.").build(),
@@ -1397,7 +1444,7 @@ class CognitoIdentityServiceTest {
     @MethodSource("transportFaults")
     @DisplayName("every transport fault collapses to the one unevaluable sentence")
     void everyTransportFaultCollapsesToOneSentence(String mode, SdkException fault) {
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
         when(provider.initiateAuth(any(InitiateAuthRequest.class))).thenThrow(fault);
 
         IllegalStateException unevaluable = assertThrows(IllegalStateException.class,
@@ -1421,17 +1468,18 @@ class CognitoIdentityServiceTest {
      * receivers at {@code app/cbl/COSGN00C.cbl} lines 132 to 136 -- the identifier into
      * {@code WS-USER-ID} on line 133 and {@code CDEMO-USER-ID} on line 134, the credential into
      * {@code WS-USER-PWD} on line 136. The target folds the identifier only. The identifier is the
-     * primary key of the row the probe reads, so folding it is what lets a lower-case submission find an
-     * upper-case row; the credential is left exactly as submitted because the pool compares it byte for
+     * primary key the row is stored under, and the identity binding refuses unless the folded submission
+     * equals it, so folding is what lets a lower-case submission bind to an upper-case row; the
+     * credential is left exactly as submitted because the pool compares it byte for
      * byte, so altering it would present characters the caller never typed and turn a correct submission
      * into a refusal naming the wrong cause. The reference folds it; the Java does not; the divergence is
      * documented.</p>
      *
      * <p>Assumptions: the process default locale is moved to Turkish for the duration of the exchange,
      * because that locale is the one place the two folds diverge. Turkish upper-cases {@code i} to a
-     * dotted capital outside the ASCII range, so an identifier folded in the default locale would key
-     * the probe by a string that is not the stored key and the row would not be found, while the same
-     * identifier folded in the root locale keys it by the ASCII form. Only this substitution can tell
+     * dotted capital outside the ASCII range, so an identifier folded in the default locale would be
+     * held against the stored key as a string that is not it and the exchange would be refused, while the
+     * same identifier folded in the root locale binds. Only this substitution can tell
      * the two apart; a case run in the runner's own locale passes either way and proves nothing about
      * which locale the fold used.</p>
      *
@@ -1447,7 +1495,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("the identifier is folded in the root locale and the credential is not folded at all")
     void theIdentifierIsFoldedInvariantlyAndTheCredentialIsNot() {
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
         when(provider.initiateAuth(any(InitiateAuthRequest.class)))
                 .thenReturn(InitiateAuthResponse.builder()
                         .authenticationResult(completeResult().build())
@@ -1463,10 +1511,15 @@ class CognitoIdentityServiceTest {
             Locale.setDefault(restored);
         }
 
-        // WHY : Assumptions: the probe argument is named rather than left to the stub, because the stub
-        //       answers only the folded key and any other key would simply miss it and read as an
-        //       ordinary refusal. Naming the argument states which key the row was actually looked up by.
-        verify(users).existsById(USER_ID);
+        // WHY : ⚠️ Refactoring Rationale: the local read asserted here is the subject lookup, and the
+        //       fold is no longer proved by the key it is called with -- the row is resolved by the
+        //       token's subject, which no fold touches. What proves the fold is that the exchange
+        //       SUCCEEDS: the row is keyed by the ASCII-folded identifier and the binding refuses unless
+        //       the folded submission equals it, so a fold performed in the Turkish default locale would
+        //       produce a dotted capital, disagree with the row and refuse. The captured request below
+        //       shows the same fold on the value sent to the pool.
+        verify(users).findByCognitoSub(SUBJECT);
+        verify(users, never()).existsById(USER_ID);
 
         ArgumentCaptor<InitiateAuthRequest> sent = ArgumentCaptor.forClass(InitiateAuthRequest.class);
         verify(provider).initiateAuth(sent.capture());
@@ -1511,7 +1564,7 @@ class CognitoIdentityServiceTest {
     @Test
     @DisplayName("the success shape carries the token set, no authority value and no credential")
     void theSuccessShapeCarriesNoAuthorityValueAndNoCredential() {
-        when(users.existsById(USER_ID)).thenReturn(true);
+        bindLocalRow();
         when(provider.initiateAuth(any(InitiateAuthRequest.class)))
                 .thenReturn(InitiateAuthResponse.builder()
                         .authenticationResult(completeResult().build())
@@ -1545,6 +1598,260 @@ class CognitoIdentityServiceTest {
                 .extracting(Field::getName)
                 .containsExactlyInAnyOrder("userId", "firstName", "lastName", "userType",
                         "cognitoSub");
+    }
+
+    /**
+     * Asserts the subject lookup rather than the existence check decides which row a token set belongs to.
+     *
+     * <p>Purpose: this is the case the identity-binding defect is measured by. The store is stubbed to
+     * answer that a row EXISTS for the submitted identifier and that NO row records the subject the pool
+     * minted the token for, which is precisely the state a reassigned pool user name produces. Before the
+     * binding, the existence check alone decided this and the sign-on succeeded; the exchange must now be
+     * refused, and the existence check must not be consulted at all on a path that has a subject to
+     * resolve.</p>
+     *
+     * <p>Assumptions: the refusal carries the reference sentence from {@code app/cbl/COSGN00C.cbl} lines
+     * 242 and 243 and nothing more, because a caller learning that its identifier exists but its subject
+     * does not would learn which identifiers are provisioned -- the disclosure the merged sentence exists
+     * to withhold.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("a subject that resolves no row is refused even when the identifier exists locally")
+    void aSubjectResolvingNoRowIsRefusedEvenWhenTheIdentifierExists() {
+        when(users.existsById(USER_ID)).thenReturn(true);
+        when(users.findByCognitoSub(SUBJECT)).thenReturn(Optional.empty());
+        poolIssues(identityTokenFor(USER_ID));
+
+        assertThatThrownBy(() -> service.authenticate(new SignOnRequest(USER_ID, ACCEPTED_CREDENTIAL)))
+                .isExactlyInstanceOf(BadCredentialsException.class)
+                .hasMessage(CREDENTIAL_REFUSED)
+                .hasNoCause();
+
+        verify(users).findByCognitoSub(SUBJECT);
+        // WHY : Assumptions: the existence check is asserted NOT to have run, which is the half of this
+        //       property a refusal alone cannot show. A service that consulted both and refused on either
+        //       would pass the assertion above while still admitting the reverse case -- a subject that
+        //       resolves a row whose identifier the caller never named.
+        verify(users, never()).existsById(USER_ID);
+    }
+
+    /**
+     * Asserts every identity that disagrees with the stored row is refused on sign-on.
+     *
+     * <p>Purpose: the binding holds four things to agreement -- the subject resolves a row, that row's key
+     * is the token's user name, the caller submitted that same identifier, and the token's recognised
+     * group membership is the one the row's stored type entails. Each vector below breaks exactly one of
+     * them, so a relaxation of any single comparison fails here rather than passing on the strength of
+     * the others.</p>
+     *
+     * <p>Assumptions: every vector answers the SAME sentence, and that is asserted rather than assumed.
+     * A finer answer per vector would tell an unauthenticated caller which of the four disagreed, and
+     * three of the four are statements about provisioning -- which identifiers exist, which subjects they
+     * carry, which authority they hold -- so distinguishing them would restore by attribution exactly
+     * what the merged sentence withholds.</p>
+     *
+     * <p>This case yields no value.</p>
+     *
+     * @param vector the drift being exercised, carried only to name the case in the report
+     * @param submitted the identifier the caller submits
+     * @param idToken the identity token the pool answers with
+     * @param row the row the store answers the token's subject with, or {@code null} for no row
+     */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("identityDrift")
+    @DisplayName("every identity that disagrees with the stored row is refused")
+    void everyIdentityDriftIsRefused(String vector, String submitted, String idToken, User row) {
+        when(users.existsById(any(String.class))).thenReturn(true);
+        when(users.findByCognitoSub(any(UUID.class)))
+                .thenReturn(row == null ? Optional.empty() : Optional.of(row));
+        poolIssues(idToken);
+
+        assertThatThrownBy(() -> service.authenticate(new SignOnRequest(submitted, ACCEPTED_CREDENTIAL)))
+                .as("%s must not obtain a token set", vector)
+                .isExactlyInstanceOf(BadCredentialsException.class)
+                .hasMessage(CREDENTIAL_REFUSED)
+                .hasNoCause();
+    }
+
+    /**
+     * Asserts identity drift is refused on the challenge answer and the renewal with their own sentence.
+     *
+     * <p>Purpose: the two exchanges that have no reference counterpart report the authored sign-on-again
+     * sentence rather than the reference refusal, so the binding's refusal has to arrive as that type on
+     * both. One vector is enough per exchange here, because the vectors themselves are exhausted on
+     * sign-on above and the binding is one method: what these two add is that each exchange supplies its
+     * own refusal rather than defaulting to the credential one.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("identity drift is refused as a session refusal on the challenge answer and the renewal")
+    void identityDriftIsRefusedAsASessionRefusalOnBothTokenExchanges() {
+        when(users.existsById(USER_ID)).thenReturn(true);
+        when(users.findByCognitoSub(OTHER_SUBJECT))
+                .thenReturn(Optional.of(rowOf(OTHER_USER_ID, "A", OTHER_SUBJECT)));
+        poolIssues(identityTokenFor(OTHER_USER_ID, OTHER_SUBJECT.toString(),
+                JwtRoleConverter.ADMIN_AUTHORITY));
+
+        assertThatThrownBy(() -> service.answerChallenge(
+                        new SignOnChallengeRequest(USER_ID, SESSION, "Perm4nentPassw0rd!")))
+                .as("a session held for one account must not be answerable in the name of another")
+                .isInstanceOf(CognitoIdentityService.SessionRefusedException.class)
+                .hasMessage(SESSION_REFUSED);
+
+        assertThatThrownBy(() -> service.refresh(new TokenRefreshRequest(USER_ID, "refresh-token")))
+                .as("a refresh token held for one account must not renew another's session")
+                .isInstanceOf(CognitoIdentityService.SessionRefusedException.class)
+                .hasMessage(SESSION_REFUSED);
+    }
+
+    /**
+     * Asserts a token this service cannot read is unevaluable rather than refused.
+     *
+     * <p>Purpose: the three vectors below are faults of the pool or of this deployment -- a token issued
+     * without the claims the pool always issues -- and they say nothing about the caller. Answering them
+     * with the refusal sentence would send a caller to reset a credential the pool has just accepted,
+     * which is the same distinction the reference draws between its comparison-failed arm and its
+     * catch-all arm at {@code app/cbl/COSGN00C.cbl} lines 241 and 252.</p>
+     *
+     * <p>Assumptions: the bare {@link IllegalStateException} is asserted rather than a subtype, because
+     * the shared advice carries a service's own sentence onto the 500 body only for that exact type.</p>
+     *
+     * <p>This case yields no value.</p>
+     *
+     * @param vector the unreadable-token fault being exercised, carried only to name the case
+     * @param idToken the identity token the pool answers with
+     */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("unbindableTokens")
+    @DisplayName("a token that carries no bindable identity is unevaluable, not refused")
+    void anUnbindableTokenIsUnevaluable(String vector, String idToken) {
+        bindLocalRow();
+        poolIssues(idToken);
+
+        assertThatThrownBy(() -> service.authenticate(new SignOnRequest(USER_ID, ACCEPTED_CREDENTIAL)))
+                .as("%s is a pool fault rather than a wrong credential", vector)
+                .isExactlyInstanceOf(IllegalStateException.class)
+                .hasMessage(UNABLE_TO_VERIFY)
+                .hasNoCause();
+    }
+
+    /**
+     * Asserts both stored types bind through their own group and an unrelated group is ignored.
+     *
+     * <p>Purpose: the group comparison must admit exactly the provisioned pairing and no more. An
+     * ordinary user is asserted alongside an administrator because the mapping is a two-way table and a
+     * check written against one value alone would admit the other by falling through, and a token
+     * carrying an extra unrecognised group is asserted to succeed because the shared
+     * {@code JwtRoleConverter} ignores such a group when deriving authorities -- a group added at the
+     * pool for an unrelated purpose grants nothing, so it must not stop a sign-on either.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("both stored types bind through their own group, and an unrelated group is ignored")
+    void bothStoredTypesBindThroughTheirOwnGroup() {
+        when(users.findByCognitoSub(SUBJECT)).thenReturn(Optional.of(rowOf(USER_ID, "U", SUBJECT)));
+        poolIssues(identityTokenFor(USER_ID, SUBJECT.toString(), JwtRoleConverter.USER_AUTHORITY));
+
+        assertThat(((SignOnResponse) service.authenticate(
+                new SignOnRequest(USER_ID, ACCEPTED_CREDENTIAL))).userId())
+                .as("an ordinary user must be able to sign on")
+                .isEqualTo(USER_ID);
+
+        when(users.findByCognitoSub(SUBJECT)).thenReturn(Optional.of(rowOf(USER_ID, "A", SUBJECT)));
+        poolIssues(identityTokenFor(USER_ID, SUBJECT.toString(), JwtRoleConverter.ADMIN_AUTHORITY,
+                "some-unrelated-pool-group"));
+
+        assertThat(((SignOnResponse) service.authenticate(
+                new SignOnRequest(USER_ID, ACCEPTED_CREDENTIAL))).userId())
+                .as("a pool group this system does not recognise grants nothing and must block nothing")
+                .isEqualTo(USER_ID);
+    }
+
+    /**
+     * Asserts the row's stored key is what the response carries, not the value the caller submitted.
+     *
+     * <p>Purpose: the column is fixed-width {@code CHAR(8)} and the driver returns it blank-padded, so a
+     * binding that compared or returned the raw column value would either refuse every identifier shorter
+     * than eight characters or emit a padded identifier onto the response. A six-character identifier is
+     * used here for that reason: it is the shortest case that pads.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("a blank-padded stored key binds and is returned trimmed")
+    void aBlankPaddedStoredKeyBindsAndIsReturnedTrimmed() {
+        when(users.findByCognitoSub(SUBJECT))
+                .thenReturn(Optional.of(rowOf("USER01  ", "A", SUBJECT)));
+        poolIssues(identityTokenFor("USER01"));
+
+        assertThat(((SignOnResponse) service.authenticate(
+                new SignOnRequest("user01", ACCEPTED_CREDENTIAL))).userId())
+                .as("a stored key padded to its declared width is the same identifier as its trim")
+                .isEqualTo("USER01");
+    }
+
+    /**
+     * Supplies one vector per comparison the identity binding makes.
+     *
+     * <p>Assumptions: each vector breaks exactly one comparison and leaves the rest satisfied, which is
+     * what makes a relaxed comparison detectable: a vector that broke two would still fail if either
+     * check remained.</p>
+     *
+     * <p>This method takes no parameter.</p>
+     *
+     * @return the vectors, each naming the drift, the submitted identifier, the pool's identity token and
+     *     the row the store answers the token's subject with
+     */
+    private static Stream<Arguments> identityDrift() {
+        return Stream.of(
+                Arguments.of("a subject that resolves no row",
+                        USER_ID, identityTokenFor(USER_ID), null),
+                Arguments.of("a subject bound to a different identifier",
+                        USER_ID, identityTokenFor(USER_ID), rowOf(OTHER_USER_ID, "A", SUBJECT)),
+                Arguments.of("a token user name that is not the row's key",
+                        USER_ID, identityTokenFor(OTHER_USER_ID), rowOf(USER_ID, "A", SUBJECT)),
+                Arguments.of("a submitted identifier the token was not issued for",
+                        OTHER_USER_ID, identityTokenFor(USER_ID), rowOf(USER_ID, "A", SUBJECT)),
+                Arguments.of("a token asserting no recognised group",
+                        USER_ID, identityTokenFor(USER_ID, SUBJECT.toString()),
+                        rowOf(USER_ID, "A", SUBJECT)),
+                Arguments.of("an administrator group on a row typed ordinary",
+                        USER_ID, identityTokenFor(USER_ID), rowOf(USER_ID, "U", SUBJECT)),
+                Arguments.of("an ordinary group on a row typed administrative",
+                        USER_ID,
+                        identityTokenFor(USER_ID, SUBJECT.toString(), JwtRoleConverter.USER_AUTHORITY),
+                        rowOf(USER_ID, "A", SUBJECT)),
+                Arguments.of("a token asserting both recognised groups at once",
+                        USER_ID,
+                        identityTokenFor(USER_ID, SUBJECT.toString(), JwtRoleConverter.ADMIN_AUTHORITY,
+                                JwtRoleConverter.USER_AUTHORITY),
+                        rowOf(USER_ID, "A", SUBJECT)),
+                Arguments.of("a stored type outside the two the column admits",
+                        USER_ID, identityTokenFor(USER_ID), rowOf(USER_ID, "X", SUBJECT)));
+    }
+
+    /**
+     * Supplies one vector per identity token this service cannot bind at all.
+     *
+     * <p>This method takes no parameter.</p>
+     *
+     * @return the vectors, each naming the fault and the identity token that carries it
+     */
+    private static Stream<Arguments> unbindableTokens() {
+        return Stream.of(
+                Arguments.of("a token with no subject claim",
+                        identityTokenFor(USER_ID, null, JwtRoleConverter.ADMIN_AUTHORITY)),
+                Arguments.of("a token whose subject is not a UUID",
+                        identityTokenFor(USER_ID, "not-a-uuid", JwtRoleConverter.ADMIN_AUTHORITY)),
+                Arguments.of("a token with no user-name claim",
+                        identityTokenFor(null, SUBJECT.toString(), JwtRoleConverter.ADMIN_AUTHORITY)),
+                Arguments.of("a token that is not a three-segment serialisation", "not.a.token.at.all"),
+                Arguments.of("a token whose claim segment is not base-64url",
+                        "header.***not-base64url***.signature"));
     }
 
     /**
@@ -1608,13 +1915,30 @@ class CognitoIdentityServiceTest {
     }
 
     /**
-     * Builds a compact-serialised identity token carrying one pool user name and nothing else.
+     * Builds a compact-serialised identity token for the stored row, as the pool issues one.
      *
-     * <p>Purpose: the renewal exchange reads the {@code cognito:username} claim out of the identity token
-     * the pool returns, so a stub answer whose identity token is an arbitrary string cannot exercise that
-     * path at all. This produces the shape the pool produces -- three dot-separated segments, the middle
-     * one base-64url without padding -- so the service's own reader is what is exercised rather than a
-     * test-only shortcut around it.</p>
+     * <p>Purpose: every exchange that ends in a token set reads three claims out of the identity token the
+     * pool returns -- the subject it resolves the row through, the pool user name it holds that row to,
+     * and the group membership it holds the row's stored type to -- so a stub answer whose identity token
+     * is an arbitrary string cannot exercise that path at all. This produces the shape the pool produces:
+     * three dot-separated segments, the middle one base-64url without padding.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: this used to carry the user name alone, because the renewal was the one
+     * exchange that read the token and the name claim was the one claim it read. All three exchanges read
+     * it now, and the claim that decides which ROW a token belongs to is the subject, so a token carrying
+     * only a name would be refused everywhere and would assert nothing.</p>
+     *
+     * @param userName the pool user name to place in the {@code cognito:username} claim; must not be
+     *     {@code null}
+     * @return the three-segment token, carrying {@link #SUBJECT} and the administrator group; never
+     *     {@code null}
+     */
+    private static String identityTokenFor(String userName) {
+        return identityTokenFor(userName, SUBJECT.toString(), JwtRoleConverter.ADMIN_AUTHORITY);
+    }
+
+    /**
+     * Builds a compact-serialised identity token from an explicit subject, user name and group set.
      *
      * <p>Assumptions: the signature segment is a fixed placeholder and the header names no algorithm that
      * is honoured, because the service deliberately does not verify a token it received as the body of its
@@ -1622,16 +1946,107 @@ class CognitoIdentityServiceTest {
      * Producing a genuinely signed token would therefore assert nothing this does not, while requiring a
      * key this test has no reason to hold.</p>
      *
-     * @param userName the pool user name to place in the {@code cognito:username} claim; must not be
-     *     {@code null}
+     * <p>Assumptions: a {@code null} subject or user name OMITS that claim rather than emitting a null
+     * literal, and an empty group array omits the group claim, because an absent claim is the vector the
+     * unreadable-token and drift cases need and a JSON null is a shape the pool never sends.</p>
+     *
+     * @param userName the pool user name for the {@code cognito:username} claim, or {@code null} to omit
+     *     the claim entirely
+     * @param subject the subject text for the {@code sub} claim, or {@code null} to omit the claim
+     *     entirely; not required to be a well-formed UUID, so a malformed subject can be exercised
+     * @param groups the group names for the {@code cognito:groups} claim; none omits the claim entirely
      * @return the three-segment token; never {@code null}
      */
-    private static String identityTokenFor(String userName) {
+    private static String identityTokenFor(String userName, String subject, String... groups) {
+        StringBuilder claims = new StringBuilder("{\"token_use\":\"id\"");
+        if (subject != null) {
+            claims.append(",\"sub\":\"").append(subject).append('"');
+        }
+        if (userName != null) {
+            claims.append(",\"cognito:username\":\"").append(userName).append('"');
+        }
+        if (groups.length > 0) {
+            claims.append(",\"").append(JwtRoleConverter.GROUPS_CLAIM).append("\":[");
+            for (int member = 0; member < groups.length; member++) {
+                claims.append(member == 0 ? "" : ",").append('"').append(groups[member]).append('"');
+            }
+            claims.append(']');
+        }
+        claims.append('}');
+
         Base64.Encoder encoder = Base64.getUrlEncoder().withoutPadding();
         String header = encoder.encodeToString(
                 "{\"alg\":\"RS256\",\"kid\":\"test\"}".getBytes(StandardCharsets.UTF_8));
-        String claims = encoder.encodeToString(("{\"cognito:username\":\"" + userName
-                + "\",\"token_use\":\"id\"}").getBytes(StandardCharsets.UTF_8));
-        return header + "." + claims + ".c2lnbmF0dXJl";
+        return header + "." + encoder.encodeToString(claims.toString().getBytes(StandardCharsets.UTF_8))
+                + ".c2lnbmF0dXJl";
+    }
+
+    /**
+     * Builds the row {@code auth.users} holds for the identifier every case authenticates.
+     *
+     * @param userId the identifier the row is keyed by, so a row keyed differently from the token's user
+     *     name can be produced
+     * @param userType the stored type, {@code "A"} or {@code "U"}, or an unadmitted value for the case
+     *     that exercises one
+     * @param cognitoSub the subject the row records, so a row recording a different pool account can be
+     *     produced
+     * @return the row; never {@code null}
+     */
+    private static User rowOf(String userId, String userType, UUID cognitoSub) {
+        return new User(userId, "Alice", "Admin", userType, cognitoSub);
+    }
+
+    /**
+     * Stubs the local store so the issued token set binds to an administrator row.
+     *
+     * <p>Purpose: this is what the majority of cases below need -- a row whose subject is the one the
+     * stubbed token carries, whose key is the identifier being authenticated, and whose stored type
+     * agrees with the token's group. It stubs the existence check as well, because the sign-on branch
+     * that ends in a CHALLENGE has no token to bind and reads that instead.</p>
+     *
+     * <p>This method takes no parameter and yields no value.</p>
+     */
+    private void bindLocalRow() {
+        when(users.existsById(USER_ID)).thenReturn(true);
+        when(users.findByCognitoSub(SUBJECT))
+                .thenReturn(Optional.of(rowOf(USER_ID, "A", SUBJECT)));
+    }
+
+    /**
+     * Stubs the local store so no row exists for the identifier or for any subject.
+     *
+     * <p>Assumptions: both reads are stubbed explicitly rather than left to the mock's defaults, so a
+     * case asserting a refusal states which local answer produced it instead of depending on what an
+     * unstubbed call happens to return.</p>
+     *
+     * <p>This method takes no parameter and yields no value.</p>
+     */
+    private void unbindLocalRow() {
+        when(users.existsById(USER_ID)).thenReturn(false);
+        when(users.findByCognitoSub(any(UUID.class))).thenReturn(Optional.empty());
+    }
+
+    /**
+     * Stubs all three token-issuing provider exchanges to answer with one identity token.
+     *
+     * <p>Purpose: the binding under test runs on each of the three, and every drift vector is a property
+     * of the token rather than of the exchange, so stubbing all three from one place lets one vector be
+     * asserted on whichever exchange a case is about without restating the provider setup.</p>
+     *
+     * @param idToken the identity token the pool is to answer with on all three exchanges
+     */
+    private void poolIssues(String idToken) {
+        when(provider.initiateAuth(any(InitiateAuthRequest.class)))
+                .thenReturn(InitiateAuthResponse.builder()
+                        .authenticationResult(completeResult().idToken(idToken).build())
+                        .build());
+        when(provider.respondToAuthChallenge(any(RespondToAuthChallengeRequest.class)))
+                .thenReturn(RespondToAuthChallengeResponse.builder()
+                        .authenticationResult(completeResult().idToken(idToken).build())
+                        .build());
+        when(provider.getTokensFromRefreshToken(any(GetTokensFromRefreshTokenRequest.class)))
+                .thenReturn(GetTokensFromRefreshTokenResponse.builder()
+                        .authenticationResult(completeResult().idToken(idToken).build())
+                        .build());
     }
 }

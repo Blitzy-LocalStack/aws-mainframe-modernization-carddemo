@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.carddemo.common.codec.CopybookLayout;
 import com.carddemo.common.codec.FixedWidthCodec;
+import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.reporting.domain.CardXrefView;
 import jakarta.persistence.Column;
 import jakarta.persistence.EntityManager;
@@ -34,8 +35,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Stream;
 import org.hibernate.annotations.Immutable;
+import org.hibernate.resource.jdbc.spi.StatementInspector;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -45,6 +48,7 @@ import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.persistence.autoconfigure.EntityScan;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.dao.DataAccessException;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
 import org.springframework.data.repository.Repository;
 import org.springframework.test.context.ActiveProfiles;
@@ -145,7 +149,14 @@ import org.testcontainers.utility.MountableFile;
     //       being read, so neither key is a credential; this class supplies no access key and no
     //       signing material at all, because it makes no cloud call for one to sign.
     "spring.cloud.aws.parameterstore.enabled=false",
-    "spring.cloud.aws.secretsmanager.enabled=false"
+    "spring.cloud.aws.secretsmanager.enabled=false",
+    // WHY : Assumptions: the plan case below must examine the plan of the statement the PROVIDER
+    //       emits, and recording it as it is issued is the only way to be sure of that.
+    //       Alternatives Considered: writing the expected SQL into the case. Rejected because it is a
+    //       second transcription of the query -- the case would pass while the repository executed
+    //       something else, which is the shape of the defect it exists to catch.
+    "spring.jpa.properties.hibernate.session_factory.statement_inspector="
+            + "com.carddemo.reporting.repository.StatementCardXrefRepositoryIT$EmittedStatements"
 })
 class StatementCardXrefRepositoryIT {
 
@@ -321,20 +332,6 @@ class StatementCardXrefRepositoryIT {
     private static final int ACCOUNT_ID_LAST_BYTE = 36;
 
     /**
-     * The number of trailing digits the projection publishes of a card number, four.
-     */
-    private static final int PUBLISHED_TAIL_LENGTH = 4;
-
-    /**
-     * The narrowing prefix the projection substitutes for the leading digits of a card number.
-     *
-     * <p>Assumptions: twelve characters, so the narrowed rendering occupies the declared width of
-     * {@value CardXrefView#CARD_NUMBER_WIDTH} exactly and needs no pad. Writing the prefix out is
-     * what lets an assertion below check the rendering without reading a card number.</p>
-     */
-    private static final String NARROWING_PREFIX = "************";
-
-    /**
      * The chunk of the cursor a bounded consumption asks for, five rows.
      *
      * <p>Assumptions: five is far below both the retrieval batch of
@@ -382,10 +379,129 @@ class StatementCardXrefRepositoryIT {
      * the reference. The absence the reference DOES support is the absence of a write arm, and that
      * one is asserted separately. Naming the whole set is the stronger form in any case: it fails on
      * a method removed as well as on one added.</p>
+     *
+     * <p>Assumptions: the heading chunk appears twice, and the pair is one read rather than two. The
+     * native query is declared as {@code findHeadingChunkTuples} and returns a projection carrying the
+     * balance as a raw decimal, because a native result tuple cannot be converted to the shared money
+     * type -- the conversion service Spring Data builds for a projection has generic
+     * object-to-object conversion removed, so a value class reached only through a static factory is
+     * not reachable from it. {@code findHeadingChunk} is the declared contract: a default method that
+     * converts and returns an immutable copy. Both are named here because reflection reports a default
+     * method as declared, so omitting either would let this assertion pass on an interface that had
+     * lost one of them.</p>
      */
     private static final Set<String> DECLARED_READ_METHOD_NAMES = Set.of(
             "streamAllInCardNumberOrder", "resolveByWholeCardNumber", "findById",
-            "findCardsOfAccount", "findHeadingChunk");
+            "findCardsOfAccount", "findHeadingChunk", "findHeadingChunkTuples");
+
+    /**
+     * The single maintenance method the interface declares beside its reads.
+     *
+     * <p>Refactoring Rationale: the read set above is asserted to be exact, so this one is named
+     * separately rather than folded into it. It is not a read: it reconciles the derived per-card
+     * identity relation the heading chunk is ordered from, and that relation is derived state whose
+     * staleness fails silently -- a card absent from it is absent from every card-bearing reporting
+     * projection, so a run emits one statement fewer and reports nothing. Keeping it out of the read
+     * set is what preserves the read set's meaning: the write-absence case below asserts that nothing
+     * in this interface writes the RECORD data, which is still true of a call that maintains a derived
+     * lookup and true of nothing else.</p>
+     */
+    private static final String DECLARED_MAINTENANCE_METHOD_NAME = "refreshCardIdentity";
+
+    /**
+     * The identity relation the heading chunk drives from, unqualified as a plan names it.
+     */
+    private static final String IDENTITY_RELATION_NAME = "card_identity";
+
+    /**
+     * The composite index whose columns are exactly the heading walk's ordering tuple.
+     */
+    private static final String IDENTITY_ORDERING_INDEX = "idx_card_identity_masked_fingerprint";
+
+    /**
+     * The relations whose sequential scan is the defect the heading finding named.
+     *
+     * <p>Assumptions: both are named because the walk reads both -- the identity relation supplies the
+     * order and the cross-reference supplies the account and customer the heading needs -- and a plan
+     * that seeks one while scanning the other is still linear in the population per chunk.</p>
+     */
+    private static final List<String> FORBIDDEN_HEADING_SCANS =
+            List.of("Seq Scan on card_identity", "Seq Scan on card_xref");
+
+    /**
+     * How many cards one planned heading chunk asks for.
+     *
+     * <p>Assumptions: this is a plausible run chunk rather than the whole population, because the
+     * property under assertion is that a BOUNDED request is served by a seek. A limit near the
+     * population size would make a scan the cheaper plan and the engine would rightly choose one.</p>
+     */
+    private static final int PLAN_CHUNK_SIZE = 100;
+
+    /**
+     * The masked rendering a planned continuation resumes after.
+     *
+     * <p>Assumptions: the value is a masked form and not a card number, because the walk's first
+     * ordering component is the masked rendering. A whole card number here would compare against a
+     * column that holds none and the chunk would return the entire relation.</p>
+     *
+     * <p>Assumptions: the masked region is composed from the shared masker's own mask character and
+     * visible-tail length rather than written out as a run of asterisks, so this class carries no
+     * second statement of what a masked card looks like. Composing it also keeps a sixteen-digit
+     * card-shaped literal out of this source entirely, which the profile's register of omissions
+     * requires of this directory.</p>
+     */
+    private static final String PLAN_CONTINUATION_MASK =
+            String.valueOf(CardNumberMasker.MASK_CHARACTER)
+                    .repeat(CardXrefView.CARD_NUMBER_WIDTH - CardNumberMasker.VISIBLE_TAIL_LENGTH)
+                    + "0500";
+
+    /**
+     * The fingerprint a planned continuation resumes after, breaking a tie on the masked rendering.
+     *
+     * <p>Assumptions: the value need not exist. {@code GENERIC_PLAN} plans with parameters unknown, so
+     * no bound value reaches the planner at all -- what matters is that the ARITY and the types match
+     * the query's, which is what makes the plan the one a run would get.</p>
+     */
+    private static final String PLAN_CONTINUATION_FINGERPRINT =
+            "0000000000000000000000000000000000000000000000000000000000000000";
+
+    /**
+     * The leading digits every card this class seeds for a plan measurement carries.
+     *
+     * <p>Assumptions: no fixture row begins with these digits, which is what lets the seeded rows be
+     * removed by prefix without taking a fixture row with them. The removal is verified rather than
+     * assumed: the case asserts the fixture's own card count once the seeding is discarded.</p>
+     */
+    private static final String PLAN_CARD_PREFIX = "1800";
+
+    /**
+     * How many cards a plan measurement seeds.
+     *
+     * <p>Assumptions: the figure is chosen so that the engine would prefer a sequential scan of the
+     * identity relation over any ordering it cannot serve from an index, which is what gives the
+     * no-scan assertion its force. At the committed fixture's eighty-eight rows a sequential scan is
+     * genuinely the cheapest plan, so the same assertion there would be asserting that the engine had
+     * chosen wrongly.</p>
+     */
+    private static final int PLAN_CARD_COUNT = 5_000;
+
+    /**
+     * The fragment the engine's refusal of a write inside a read-only transaction carries.
+     *
+     * <p>Assumptions: the fragment is matched rather than the whole diagnostic, because the engine
+     * names the statement kind it refused -- and the statement kind inside the procedure is an
+     * implementation detail of the procedure. What the assertion is about is the REASON, which is the
+     * transaction's read-only state, and that phrase is stable across statement kinds.</p>
+     */
+    private static final String READ_ONLY_TRANSACTION_REFUSAL = "read-only transaction";
+
+    /**
+     * A card number the fixture does not publish, used to observe a reconciliation in both directions.
+     *
+     * <p>Assumptions: it shares no prefix with {@link #PLAN_CARD_PREFIX}, so the plan case's removal by
+     * prefix cannot take it and the two cases cannot interfere whichever order they run in.</p>
+     */
+    private static final String LATE_ISSUED_CARD = "1899999999999999";
 
     /**
      * The migration directory whose ABSENCE this module's ownership requires.
@@ -651,18 +767,32 @@ class StatementCardXrefRepositoryIT {
         List<CardXrefView> walked = walkTheWholeCursor();
 
         assertThat(walked).as("the cursor yielded rows to resolve").isNotEmpty();
-        for (CardXrefView row : walked) {
+        // WHY : Assumptions: the row is located by its ORDINAL in the cursor's order and never by the
+        //       identifier that failed to resolve. An assertion message is emitted verbatim into the
+        //       build log, and a build log is retained, searchable and readable by everyone with
+        //       access to the pipeline -- so a message naming a customer or an account identifier
+        //       publishes a record key to a destination no masking reaches. The ordinal is as precise
+        //       for a reader as the identifier would be, because the order is total and asserted to be
+        //       so by the ordering case in this class: position n names exactly one row, and whoever
+        //       is diagnosing has the fixture in front of them.
+        // WHY : Alternatives Considered: printing a prefix, a last-four rendering or a digest of the
+        //       failing identifier, which would keep the message self-contained. All three rejected --
+        //       a prefix and a rendering are still parts of the key, and a digest of a nine- or
+        //       eleven-digit decimal identifier is invertible by enumeration in negligible time, so it
+        //       is the key in a form that merely looks safe.
+        for (int ordinal = 1; ordinal <= walked.size(); ordinal++) {
+            CardXrefView row = walked.get(ordinal - 1);
             assertThat(publishedCustomers)
-                    .withFailMessage("the cross-reference names customer %s, which no published"
-                            + " customer relation carries; the reference treats that as an abort at"
-                            + " app/cbl/CBSTM03A.CBL L921 rather than as a card to skip",
-                            row.getCustomerId())
+                    .withFailMessage("the cross-reference row at position %d of the cursor's order"
+                            + " names a customer that no published customer relation carries; the"
+                            + " reference treats that as an abort at app/cbl/CBSTM03A.CBL L921 rather"
+                            + " than as a card to skip", ordinal)
                     .contains(row.getCustomerId());
             assertThat(publishedAccounts)
-                    .withFailMessage("the cross-reference names account %s, which no published"
-                            + " account relation carries; the reference treats that as an abort at"
-                            + " app/cbl/CBSTM03A.CBL L921 rather than as a card to skip",
-                            row.getAccountId())
+                    .withFailMessage("the cross-reference row at position %d of the cursor's order"
+                            + " names an account that no published account relation carries; the"
+                            + " reference treats that as an abort at app/cbl/CBSTM03A.CBL L921 rather"
+                            + " than as a card to skip", ordinal)
                     .contains(row.getAccountId());
         }
 
@@ -726,12 +856,28 @@ class StatementCardXrefRepositoryIT {
         //       this corpus because every card here carries a distinct last four digits, and keeps a
         //       card number out of the comparison and out of any failure message.
         assertThat(reportTriples).as("the report-path fixture carries rows to compare").isNotEmpty();
-        assertThat(statementTriples)
+        // WHY : Assumptions: the divergence is reported as a list of ORDINALS rather than by handing
+        //       the two collections to a containment assertion. A containment assertion that fails
+        //       prints both collections in full, and each element of these two carries a customer
+        //       identifier and an account identifier -- so the safe-looking form would emit every
+        //       identifier in both fixtures into the build log on the first divergence, which is a
+        //       wider disclosure than the message this case previously carried.
+        // WHY : Trade-offs: what the ordinal form gives up is the message naming WHICH field diverged,
+        //       so a reader has to open the fixture at the named position to see it. That is accepted:
+        //       the fixtures are committed beside this class, so the position is enough to find the
+        //       row, and the alternative is a record key in a retained log.
+        List<Integer> divergingPositions = new ArrayList<>();
+        for (int ordinal = 1; ordinal <= reportTriples.size(); ordinal++) {
+            if (!statementTriples.contains(reportTriples.get(ordinal - 1))) {
+                divergingPositions.add(ordinal);
+            }
+        }
+        assertThat(divergingPositions)
                 .withFailMessage("every card the report-path fixture carries must appear in the"
-                        + " statement-path fixture with the same customer and the same account; they"
-                        + " diverge, so one card would resolve to two cardholders depending on which"
-                        + " job read it")
-                .containsAll(reportTriples);
+                        + " statement-path fixture with the same customer and the same account; the"
+                        + " report-path rows at positions %s diverge, so one card would resolve to two"
+                        + " cardholders depending on which job read it", divergingPositions)
+                .isEmpty();
 
         List<String> published = walkTheWholeCursor().stream()
                 .map(CardXrefView::getCardNum)
@@ -868,9 +1014,19 @@ class StatementCardXrefRepositoryIT {
         for (Method declared : StatementCardXrefRepository.class.getDeclaredMethods()) {
             declaredNames.add(declared.getName());
         }
+        // WHY : Refactoring Rationale: the expected set is the register's reads PLUS the one
+        //       maintenance call, composed here rather than folded into the read constant. The interface gained
+        //       refreshCardIdentity because the heading chunk is now ordered from a DERIVED relation,
+        //       and derived state needs a reconciliation point; keeping it out of the read constant is
+        //       what lets the write-absence assertion above keep meaning what it says, since that call
+        //       writes a lookup and no record data. Composing the union here is also what makes this
+        //       assertion still fail on a read added or removed.
+        Set<String> expected = new LinkedHashSet<>(DECLARED_READ_METHOD_NAMES);
+        expected.add(DECLARED_MAINTENANCE_METHOD_NAME);
         assertThat(declaredNames)
-                .as("the declared surface is exactly the five reads the register accounts for")
-                .isEqualTo(DECLARED_READ_METHOD_NAMES);
+                .as("the declared surface is exactly the reads the register accounts for plus the"
+                        + " one reconciliation the derived identity relation requires")
+                .isEqualTo(expected);
     }
 
     /**
@@ -1101,18 +1257,25 @@ class StatementCardXrefRepositoryIT {
     /**
      * Applies the narrowing rule the projection applies, to one whole card number.
      *
-     * <p>Assumptions: the result occupies the declared width of
-     * {@value CardXrefView#CARD_NUMBER_WIDTH} exactly, because the prefix is twelve characters and the
-     * published tail is four, so the projection's cast to that width neither pads nor truncates. A
-     * whole card number never leaves this method: the value it returns is the only card rendering any
-     * assertion or message in this class handles.</p>
+     * <p>Assumptions: the rendering is produced by {@link CardNumberMasker#mask(String)} -- the one
+     * authority this repository has for a masked card -- and it occupies the declared width of
+     * {@value CardXrefView#CARD_NUMBER_WIDTH} exactly, because that authority preserves the input's
+     * length. A whole card number never leaves this method: the value it returns is the only card
+     * rendering any assertion or message in this class handles.</p>
+     *
+     * <p>Refactoring Rationale: this concatenated a local twelve-asterisk constant with the last four
+     * characters of the argument, agreeing with the authority by coincidence rather than by
+     * construction. A local rule is free to be MORE PERMISSIVE than the authority, which is how a
+     * masking control drifts: the authority masks a value at or below the visible-tail length
+     * entirely, whereas the local tail arithmetic would have returned a short value as itself -- so a
+     * rendering this class accepted could have been a card number the deployment would have refused to
+     * publish. Delegating removes the second rule rather than aligning it.</p>
      *
      * @param wholeCardNumber a whole card number as the fixture carries it
-     * @return that card narrowed to a constant prefix and its last four digits, never {@code null}
+     * @return that card as the shared authority masks it, never {@code null} for a non-null argument
      */
     private static String narrowedRenderingOf(String wholeCardNumber) {
-        return NARROWING_PREFIX
-                + wholeCardNumber.substring(wholeCardNumber.length() - PUBLISHED_TAIL_LENGTH);
+        return CardNumberMasker.mask(wholeCardNumber);
     }
 
     /**
@@ -1123,6 +1286,11 @@ class StatementCardXrefRepositoryIT {
      * number. The narrowed rendering is unique across this corpus -- every card in the statement-path
      * fixture has a distinct last four digits, which the ordering case asserts -- so narrowing costs
      * the comparison no discriminating power here.</p>
+     *
+     * <p>Assumptions: a value this returns must never reach an assertion message or a build log. The
+     * card component is narrowed, but the customer and account components are whole record keys, so
+     * the return value is a COMPARISON key and not a diagnostic. Its only caller compares the two
+     * lists element by element and reports the positions that differ, for exactly that reason.</p>
      *
      * @param rows decoded cross-reference rows
      * @return one triple per row joining the narrowed card, its customer and its account, never
@@ -1403,12 +1571,17 @@ class StatementCardXrefRepositoryIT {
     }
 
     /**
-     * Loads {@code xreffile.txt} into the card cross-reference.
+     * Loads {@code xreffile.txt} into the card cross-reference and refreshes the derived identity.
      *
      * <p>Assumptions: this is the statement-path fixture and the only one of the two cross-reference
      * fixtures loaded, because loading both would insert one card twice and the relation's key is the
      * card number. The four rows the report-path fixture carries are present in this one verbatim,
      * which is the property the agreement case asserts.</p>
+     *
+     * <p>Assumptions: the derived identity relation is refreshed here as part of the load, because a
+     * card the cross-reference carries but that relation does not is absent from
+     * {@code reporting.v_card_xref} and unresolvable by {@code reporting.resolve_card}. The adjacent
+     * comment records why the refresh is a call rather than a trigger.</p>
      *
      * @param connection an open connection able to write the account schema
      * @throws SQLException if any row cannot be inserted
@@ -1425,6 +1598,25 @@ class StatementCardXrefRepositoryIT {
                 insert.addBatch();
             }
             insert.executeBatch();
+        }
+        // WHY : Assumptions: the identity relation is brought level with the rows just inserted, and
+        //       this is the SAME step the load path performs rather than an arrangement convenience.
+        //       reporting.card_identity holds one row per card and is backfilled when
+        //       data-migration/sql/V1__reporting_views.sql creates it, so every card inserted after
+        //       that script ran -- which is every card here, because the migrations are applied before
+        //       the fixture -- has no identity row until the maintenance procedure runs, and a card
+        //       with no identity row is absent from reporting.v_card_xref and unresolvable by
+        //       reporting.resolve_card. The omission is silent, which is why it is closed in the load.
+        //       data-migration/src/carddemo_migration/loaders/aurora.py publishes the same step as
+        //       refresh_card_identity(connection), to be run after its cross-reference load.
+        // WHY : Alternatives Considered: a trigger on account.card_xref maintaining the row as part of
+        //       the write, which would make this call unnecessary. Rejected because
+        //       data-migration/sql/V1__reporting_views.sql runs under
+        //       SET LOCAL ROLE carddemo_reporting_owner and that role holds no TRIGGER privilege on a
+        //       relation the account context owns; granting it would widen a cross-context boundary
+        //       and would make an account-context write fail whenever reporting maintenance failed.
+        try (Statement refresh = connection.createStatement()) {
+            refresh.execute("call reporting.refresh_card_identity()");
         }
     }
 
@@ -1538,6 +1730,433 @@ class StatementCardXrefRepositoryIT {
         }
         throw new IllegalStateException(
                 "no ancestor of the working directory carries services/pom.xml");
+    }
+
+    /**
+     * Records every statement the persistence provider emits, so a generated read can be planned.
+     *
+     * <p>Assumptions: the provider instantiates this type by name from the property declared on the
+     * class above, so it is public with an implicit no-argument constructor and its store is static --
+     * the instance the provider builds is not one a case could otherwise reach.</p>
+     */
+    public static final class EmittedStatements implements StatementInspector {
+
+        /**
+         * The serialized form's version, fixed at one.
+         */
+        // WHY : Assumptions: the provider's inspector interface extends the serialization marker, so
+        //       this type is serializable whether or not anything serializes it, and the compiler
+        //       reports a missing version under the build's warning set. A fixed value is declared
+        //       rather than derived because a derived one changes whenever a member is added.
+        private static final long serialVersionUID = 1L;
+
+        /**
+         * Every statement seen since the last clear, in emission order, safe for concurrent append.
+         */
+        private static final List<String> SEEN = new CopyOnWriteArrayList<>();
+
+        /**
+         * Records one statement and returns it unchanged.
+         *
+         * <p>Assumptions: the statement is returned exactly as received, because this inspector
+         * observes and never rewrites -- a returned change would alter what the provider executes, and
+         * the case would then plan a statement the deployment never issues.</p>
+         *
+         * @param sql the statement the provider is about to issue
+         * @return that same statement, unchanged
+         */
+        @Override
+        public String inspect(String sql) {
+            SEEN.add(sql);
+            return sql;
+        }
+
+        /**
+         * Discards every recorded statement.
+         *
+         * <p>This method takes no parameter and returns no value.</p>
+         */
+        static void clear() {
+            SEEN.clear();
+        }
+
+        /**
+         * Returns the last recorded statement that reads the named relation.
+         *
+         * @param relation the unqualified relation name the wanted statement must name
+         * @return that statement, never {@code null}
+         * @throws IllegalStateException if no recorded statement names the relation, which means the
+         *     read under examination did not reach the database at all
+         */
+        static String theOneNaming(String relation) {
+            List<String> matching = SEEN.stream()
+                    .filter(sql -> sql.toLowerCase(Locale.ROOT).contains(relation))
+                    .toList();
+            if (matching.isEmpty()) {
+                throw new IllegalStateException("no statement naming " + relation + " was emitted,"
+                        + " so there is nothing to plan; the read under examination did not reach the"
+                        + " database. Recorded statements: " + SEEN);
+            }
+            return matching.getLast();
+        }
+    }
+
+    /**
+     * Confirms the heading walk reaches its own ordering by index at production-like cardinality.
+     *
+     * <p>Purpose: this is the evidence the review finding asked for. The walk pages a relation ordered
+     * by the masked card rendering and then by the fingerprint, and the finding's point was that
+     * nothing stood behind either component -- so every chunk read the whole cardholder population and
+     * top-N sorted it, which made a whole-run walk quadratic in the population and which no assertion
+     * over an 88-row fixture could see.</p>
+     *
+     * <p>Assumptions: BOTH the opening chunk and a continuation chunk are planned, because they are
+     * not the same question. The opening chunk's predicate is satisfied by every row, so a plan that
+     * scanned would still return the right answer quickly; the continuation is the one that has to
+     * SEEK, and it is the one a walk issues once per chunk for the whole of a run.</p>
+     *
+     * <p>Assumptions: the plan is taken with {@code GENERIC_PLAN}, so the engine plans the statement
+     * with its parameters unknown -- deliberately harder than planning with the values bound, since a
+     * plan that survives without knowing the anchor cannot have been chosen because one particular
+     * constant looked selective.</p>
+     *
+     * <p>Assumptions: the population is seeded to {@value #PLAN_CARD_COUNT} cards and then analysed,
+     * because the committed fixture is far too small for a plan to mean anything -- at 88 rows a
+     * sequential scan is genuinely the cheapest way to read the relation, so "no sequential scan"
+     * would be asserting that the engine had made the wrong choice. At the seeded size the engine
+     * prefers a sequential scan for any ordering it cannot serve from an index, which is what gives
+     * the assertion teeth.</p>
+     *
+     * <p>Assumptions: the seeded rows are removed in a {@code finally} arm and the fixture's own count
+     * is asserted afterwards, because sibling cases in this class assert that exact count. The removal
+     * doubles as the only exercise of the maintenance procedure's delete arm.</p>
+     *
+     * <p>This method takes no parameter and returns no value.</p>
+     *
+     * @throws SQLException if the container connection cannot be opened, the population cannot be
+     *     seeded or removed, or a plan cannot be taken -- all arrangement failures rather than the
+     *     property under test
+     */
+    @Test
+    @DisplayName("the heading walk reaches its ordering by index at production cardinality")
+    void theHeadingWalkReachesItsOrderingByIndexAtProductionCardinality() throws SQLException {
+        try (Connection connection = POSTGRES.createConnection("")) {
+            try {
+                seedRepresentativeCardPopulation(connection);
+
+                EmittedStatements.clear();
+                cardXrefs.findHeadingChunk("", "", PLAN_CHUNK_SIZE);
+                String opening = EmittedStatements.theOneNaming(IDENTITY_RELATION_NAME);
+                assertHeadingChunkSeeksItsIndex("the opening heading chunk", opening);
+
+                EmittedStatements.clear();
+                cardXrefs.findHeadingChunk(
+                        PLAN_CONTINUATION_MASK, PLAN_CONTINUATION_FINGERPRINT, PLAN_CHUNK_SIZE);
+                String continuation = EmittedStatements.theOneNaming(IDENTITY_RELATION_NAME);
+                assertHeadingChunkSeeksItsIndex("a continuation heading chunk", continuation);
+                assertThat(continuation)
+                        .withFailMessage("the continuation must issue the same statement as the"
+                                + " opening chunk, differing only in a bound value; a different text"
+                                + " means it has its own plan and its own cost")
+                        .isEqualTo(opening);
+            } finally {
+                discardRepresentativeCardPopulation(connection);
+            }
+
+            // WHY : Assumptions: the return to the committed fixture is verified by counting BOTH
+            //       relations rather than by trusting the delete. Sibling cases in this class assert
+            //       the fixture's exact card count, so a residue here would surface as an unrelated
+            //       case failing on a row this one left behind -- and the identity count is asserted
+            //       beside it because the two are maintained by different statements: the delete
+            //       removes the cross-reference rows and the maintenance procedure is what withdraws
+            //       their identities. A residue in either is a defect of a different kind.
+            assertThat(countOf(connection, "account.card_xref"))
+                    .withFailMessage("the committed fixture must be all that remains in the"
+                            + " cross-reference once the seeded population is discarded")
+                    .isEqualTo(PUBLISHED_CARD_COUNT);
+            assertThat(countOf(connection, "reporting.card_identity"))
+                    .withFailMessage("the maintenance procedure must have withdrawn the identity of"
+                            + " every discarded card; a residue keeps a departed card resolvable")
+                    .isEqualTo(PUBLISHED_CARD_COUNT);
+        }
+    }
+
+    /**
+     * Confirms the maintenance procedure publishes a new card and withdraws a departed one.
+     *
+     * <p>Purpose: the relation the walk is ordered from is DERIVED from the cross-reference, and
+     * derived state that is never reconciled fails silently -- a card absent from it is absent from
+     * every card-bearing reporting projection, so a whole-run pass emits one statement fewer and
+     * nothing reports the omission. This case is what establishes that the reconciliation the
+     * repository exposes actually closes that gap in both directions.</p>
+     *
+     * <p>Assumptions: the case asserts the BEFORE state as well as the after. Without it the
+     * assertion would pass on a deployment where the identity relation were maintained by something
+     * else entirely, and the procedure could be a no-op.</p>
+     *
+     * <p>Assumptions: the resolution used to observe the card is the shipped lookup rather than a
+     * direct read of the relation, because that is the path a request takes: the lookup joins the
+     * identity relation to the cross-reference, so it answers only for a card BOTH carry -- which is
+     * exactly the property a reconciliation has to establish.</p>
+     *
+     * <p>This method takes no parameter and returns no value.</p>
+     *
+     * @throws SQLException if the container connection cannot be opened or the cross-reference cannot
+     *     be written, which are arrangement failures rather than the property under test
+     */
+    @Test
+    @DisplayName("the maintenance procedure publishes a new card and withdraws a departed one")
+    void theMaintenanceProcedurePublishesANewCardAndWithdrawsADepartedOne() throws SQLException {
+        try (Connection connection = POSTGRES.createConnection("")) {
+            try {
+                try (Statement insert = connection.createStatement()) {
+                    insert.executeUpdate("insert into account.card_xref"
+                            + "(card_num, customer_id, account_id) values ('" + LATE_ISSUED_CARD
+                            + "', 900000001, 90000000001)");
+                }
+
+                assertThat(cardXrefs.resolveByWholeCardNumber(LATE_ISSUED_CARD))
+                        .withFailMessage("a card the cross-reference has just gained must NOT be"
+                                + " resolvable before the reconciliation; if it is, this case cannot"
+                                + " establish that the reconciliation is what publishes it")
+                        .isEmpty();
+
+                // WHY : Assumptions: the refusal below is asserted rather than worked around,
+                //       because it is the deployment's actual posture and a caller has to know it.
+                //       application.yml declares this service's pool `read-only: true`, which the
+                //       driver enforces by opening every transaction READ ONLY -- so the engine
+                //       refuses the write inside the procedure even though the procedure is
+                //       SECURITY DEFINER and the role holds EXECUTE on it. Definer rights raise the
+                //       PRIVILEGE a body runs with and do not lift a transaction's read-only state.
+                //       Alternatives Considered: leaving this unasserted and documenting it in the
+                //       interface's Javadoc alone, which is where it is also documented. Rejected
+                //       because prose cannot fail: a future change to the pool posture or to the
+                //       procedure would silently alter which callers can reconcile, and the whole
+                //       reason the reconciliation is owned by the load path is this constraint.
+                assertThatThrownBy(cardXrefs::refreshCardIdentity)
+                        .withFailMessage("the reconciliation must be refused through this service's"
+                                + " read-only pool; if it succeeds, the pool is no longer read-only"
+                                + " and this module's second, independent guard over writes is gone")
+                        .isInstanceOf(DataAccessException.class)
+                        .hasMessageContaining(READ_ONLY_TRANSACTION_REFUSAL);
+
+                // WHY : Assumptions: the reconciliation is then performed the way a DEPLOYED caller
+                //       must perform it -- over a writable connection, which is the connection
+                //       data-migration/src/carddemo_migration/loaders/aurora.py takes as the argument
+                //       of refresh_card_identity. That is the whole point of the two halves of this
+                //       case: this service cannot reconcile at all, so the load path is where the step
+                //       belongs, and the property under test is that the procedure closes the gap in
+                //       both directions rather than which caller invokes it.
+                reconcileCardIdentity(connection);
+
+                assertThat(cardXrefs.resolveByWholeCardNumber(LATE_ISSUED_CARD))
+                        .withFailMessage("the reconciliation must publish the card the"
+                                + " cross-reference gained; while it does not, a whole-run statement"
+                                + " pass omits that cardholder's document and reports nothing")
+                        .isPresent();
+
+                try (Statement remove = connection.createStatement()) {
+                    remove.executeUpdate("delete from account.card_xref where card_num = '"
+                            + LATE_ISSUED_CARD + "'");
+                }
+                reconcileCardIdentity(connection);
+
+                assertThat(cardXrefs.resolveByWholeCardNumber(LATE_ISSUED_CARD))
+                        .withFailMessage("the reconciliation must withdraw the identity of a card the"
+                                + " cross-reference no longer publishes; a residue keeps a withdrawn"
+                                + " card resolvable and leaves the fixture this class asserts against"
+                                + " wrong")
+                        .isEmpty();
+            } finally {
+                // WHY : Assumptions: the removal is unconditional, because the card this case adds
+                //       names a customer and an account no dimension publishes -- which is
+                //       deliberate, since a reconciliation must publish a card on the strength of
+                //       the cross-reference alone. A residue would therefore fail two sibling cases
+                //       in this class for a reason that names neither this case nor the real defect.
+                try (Statement remove = connection.createStatement()) {
+                    remove.executeUpdate("delete from account.card_xref where card_num = '"
+                            + LATE_ISSUED_CARD + "'");
+                    remove.execute("call reporting.refresh_card_identity()");
+                }
+            }
+            assertThat(countOf(connection, "account.card_xref"))
+                    .as("the committed fixture is all that remains")
+                    .isEqualTo(PUBLISHED_CARD_COUNT);
+        }
+    }
+
+    /**
+     * Reconciles the derived identity relation the way the load path does, over a writable session.
+     *
+     * <p>Assumptions: the procedure is invoked directly rather than through the repository, and the
+     * reason is a posture rather than a preference -- this service's pool is declared read-only, so
+     * the repository's reconciliation is refused by the engine, which the case above asserts. The
+     * deployment's caller is the load path, which holds a writable connection.</p>
+     *
+     * @param connection an open, writable connection able to execute the procedure
+     * @throws SQLException if the procedure cannot be executed, which includes it being absent
+     */
+    private static void reconcileCardIdentity(Connection connection) throws SQLException {
+        try (Statement refresh = connection.createStatement()) {
+            refresh.execute("call reporting.refresh_card_identity()");
+        }
+    }
+
+    /**
+     * Counts the rows of one relation over a connection that may read it.
+     *
+     * @param connection an open connection able to read the relation
+     * @param relation the schema-qualified relation to count
+     * @return that relation's row count
+     * @throws SQLException if the relation cannot be read
+     */
+    private static int countOf(Connection connection, String relation) throws SQLException {
+        try (Statement count = connection.createStatement();
+                ResultSet answer = count.executeQuery("select count(*) from " + relation)) {
+            answer.next();
+            return answer.getInt(1);
+        }
+    }
+
+    /**
+     * Fails unless one emitted heading statement seeks the ordering index rather than sorting.
+     *
+     * <p>Assumptions: the placeholders the provider emits are rewritten from {@code ?} to {@code $n}
+     * in textual order, because {@code EXPLAIN (GENERIC_PLAN)} accepts only the numbered form. The
+     * rewrite is textual and assumes no question mark appears inside a string literal, which holds for
+     * this query -- its only literals are the view bodies', which the planner resolves rather than this
+     * text carrying.</p>
+     *
+     * <p>Assumptions: the absence of a sort is asserted alongside the presence of the index, and the
+     * two are different properties. An engine can use an index to FILTER and still sort the result, and
+     * that plan is the defect: the walk asks for a bounded chunk of an order, so a sort means the whole
+     * population was ordered to return a chunk of it, once per chunk.</p>
+     *
+     * @param label how the failure message should describe the read, for a reader who has to find it
+     * @param emitted the statement the provider issued, with {@code ?} placeholders
+     * @throws SQLException if the statement cannot be planned
+     */
+    private static void assertHeadingChunkSeeksItsIndex(String label, String emitted)
+            throws SQLException {
+        List<String> plan = genericPlanOf(emitted);
+        String rendered = String.join(System.lineSeparator(), plan);
+
+        assertThat(plan)
+                .withFailMessage("%s must be served by %s, which is the index whose columns ARE the"
+                        + " walk's ordering tuple. Plan:%n%s", label, IDENTITY_ORDERING_INDEX,
+                        rendered)
+                .anySatisfy(line -> assertThat(line).contains(IDENTITY_ORDERING_INDEX));
+        assertThat(plan)
+                .withFailMessage("%s must not SORT: the walk asks for a bounded chunk of an order, so"
+                        + " a sort means the whole population was ordered to return a chunk of it --"
+                        + " once per chunk, for every chunk of a run. Plan:%n%s", label, rendered)
+                .noneSatisfy(line -> assertThat(line).contains("Sort"));
+        for (String forbidden : FORBIDDEN_HEADING_SCANS) {
+            assertThat(plan)
+                    .withFailMessage("%s must not scan %s sequentially at this cardinality; that is"
+                            + " the defect the finding named, and it is invisible from the result."
+                            + " Plan:%n%s", label, forbidden, rendered)
+                    .noneSatisfy(line -> assertThat(line).contains(forbidden));
+        }
+    }
+
+    /**
+     * Plans one statement with its parameters unknown and returns the plan, line by line.
+     *
+     * <p>Assumptions: the plan is taken over a connection of its own, opened in the driver's SIMPLE
+     * query mode, and that mode is required rather than preferred. In the default extended mode every
+     * statement is parsed and then bound, and the server registers a {@code $n} it sees during parsing
+     * as a parameter of the statement being prepared -- so the bind that follows supplies none and the
+     * server refuses with "bind message supplies 0 parameters". Simple mode has no bind step, which
+     * leaves the placeholder for {@code EXPLAIN (GENERIC_PLAN)} itself to interpret.</p>
+     *
+     * @param emitted the statement to plan, with {@code ?} placeholders
+     * @return every line of the plan, in the engine's order, never empty
+     * @throws SQLException if the statement cannot be planned
+     */
+    private static List<String> genericPlanOf(String emitted) throws SQLException {
+        StringBuilder numbered = new StringBuilder(emitted.length() + 16);
+        int placeholder = 0;
+        for (int index = 0; index < emitted.length(); index++) {
+            char character = emitted.charAt(index);
+            if (character == '?') {
+                placeholder++;
+                numbered.append('$').append(placeholder);
+            } else {
+                numbered.append(character);
+            }
+        }
+        List<String> plan = new ArrayList<>();
+        try (Connection planner = POSTGRES.createConnection("?preferQueryMode=simple");
+                Statement explain = planner.createStatement();
+                ResultSet answer = explain.executeQuery(
+                        "explain (generic_plan, costs off) " + numbered)) {
+            while (answer.next()) {
+                plan.add(answer.getString(1));
+            }
+        }
+        if (plan.isEmpty()) {
+            throw new SQLException("the engine returned no plan for " + numbered);
+        }
+        return plan;
+    }
+
+    /**
+     * Seeds a production-like cardholder population and analyses the relations the plan depends on.
+     *
+     * <p>Assumptions: the identity rows for the seeded cards are created by CALLING the deployed
+     * maintenance procedure rather than by inserting them here. Inserting them would be a second
+     * implementation of the keyed digest, and a plan taken against rows this class computed would
+     * prove nothing about the rows the deployment computes.</p>
+     *
+     * <p>Assumptions: the relations are analysed before anything is planned. Without fresh statistics
+     * the engine plans against the fixture's size and would reasonably choose to scan, so an
+     * un-analysed seeding would produce a failure that is a property of the arrangement rather than of
+     * the query.</p>
+     *
+     * @param connection an open connection able to write the account schema
+     * @throws SQLException if the population cannot be seeded
+     */
+    private static void seedRepresentativeCardPopulation(Connection connection) throws SQLException {
+        try (Statement seed = connection.createStatement()) {
+            seed.executeUpdate("insert into account.card_xref(card_num, customer_id, account_id)"
+                    + " select '" + PLAN_CARD_PREFIX + "' || lpad(g.i::text, 12, '0'),"
+                    + " 800000000 + g.i, 80000000000 + g.i"
+                    + " from generate_series(1, " + PLAN_CARD_COUNT + ") as g(i)");
+            seed.execute("call reporting.refresh_card_identity()");
+            analyseHeadingRelations(seed);
+        }
+    }
+
+    /**
+     * Removes every seeded card and returns the relations to the committed fixture.
+     *
+     * <p>Assumptions: the rows are matched by the leading digit group this class seeds with, which the
+     * committed fixture does not use. A collision would not go unnoticed: the caller asserts the
+     * fixture's own card count afterwards, so a delete that took a fixture row with it fails there.</p>
+     *
+     * @param connection an open connection able to write the account schema
+     * @throws SQLException if the rows cannot be removed
+     */
+    private static void discardRepresentativeCardPopulation(Connection connection)
+            throws SQLException {
+        try (Statement discard = connection.createStatement()) {
+            discard.executeUpdate("delete from account.card_xref where card_num like '"
+                    + PLAN_CARD_PREFIX + "%'");
+            discard.execute("call reporting.refresh_card_identity()");
+            analyseHeadingRelations(discard);
+        }
+    }
+
+    /**
+     * Refreshes the statistics of the two relations the heading plan depends on.
+     *
+     * @param statement an open statement on a connection able to analyse the relations
+     * @throws SQLException if a relation cannot be analysed
+     */
+    private static void analyseHeadingRelations(Statement statement) throws SQLException {
+        statement.execute("analyze account.card_xref");
+        statement.execute("analyze reporting.card_identity");
     }
 
     /**

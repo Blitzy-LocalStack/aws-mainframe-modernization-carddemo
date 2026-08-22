@@ -351,7 +351,9 @@ public class ClientInputException extends IllegalArgumentException {
      * @param message the redacted aggregate diagnostic; must not be {@code null}
      * @param fieldErrors the per-field entries, empty when the refusal carries none; must not be
      *     {@code null} and must hold no {@code null}
-     * @throws NullPointerException if any argument is {@code null}, or if any element of either list is
+     * @throws NullPointerException if {@code code}, {@code fields}, {@code state}, {@code message} or
+     *     {@code fieldErrors} is {@code null}, or if any element of {@code fields} or of
+     *     {@code fieldErrors} is {@code null}
      * @throws IllegalArgumentException if {@code code} is blank
      */
     private ClientInputException(String code, List<String> fields, FieldValidationFlag state,

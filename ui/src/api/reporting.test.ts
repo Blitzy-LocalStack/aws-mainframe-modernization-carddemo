@@ -26,12 +26,17 @@ import {
   generateStatement,
   listStatementTransactions,
   listTransactionReportLines,
+  newSubmissionKey,
   readReportExecution,
   readTransactionReportTotals,
   submitTransactionReport,
 } from './reporting';
 
-const API_BASE_URL = 'https://api.carddemo.example';
+// Assumptions: the fixture carries the `/api/v1` operation prefix because
+// `normalizeApiBaseUrl` requires it -- a base URL one segment short is refused at
+// start-up rather than producing a 404 on every request. The prefix changes no
+// assertion here: every case below asserts the RELATIVE request path.
+const API_BASE_URL = 'https://api.carddemo.example/api/v1';
 
 const CORRELATION_HEADER = 'X-Correlation-Id';
 
@@ -42,6 +47,38 @@ const MASKED_CARD_NUMBER = '************7065';
 const HTTP_OK = 200;
 
 const HTTP_CREATED = 201;
+
+/**
+ * The widest correlation identifier the services carry.
+ *
+ * Assumptions: twenty-four, spelled here as a literal rather than imported, for the reason
+ * {@link OCTET_STREAM} is spelled as one -- this file states what the wire must carry independently of
+ * the constant the module happens to hold it in, so a rename cannot change both sides at once and
+ * assert nothing. It is `CORRELATION_ID_MAX_LENGTH` in
+ * `services/common-lib/src/main/java/com/carddemo/common/web/CorrelationIdFilter.java`.
+ */
+const CORRELATION_ID_MAX_LENGTH = 24;
+
+/**
+ * The submission-key domain the reporting service publishes.
+ *
+ * Assumptions: `IDEMPOTENCY_KEY_PATTERN` and `IDEMPOTENCY_KEY_MAX_LENGTH` in
+ * `services/reporting-service/src/main/java/com/carddemo/reporting/service/ReportExecutionService.java`
+ * -- at most forty letters, digits, hyphens or underscores. A key outside it is refused with HTTP 400.
+ */
+const PUBLISHED_SUBMISSION_KEY_SHAPE = /^[A-Za-z0-9_-]{1,40}$/u;
+
+/**
+ * The narrower domain a value must also satisfy to travel as the correlation identifier.
+ *
+ * Assumptions: the same alphabet minus nothing but bounded at {@link CORRELATION_ID_MAX_LENGTH}, which
+ * is why a submission identity is drawn from the INTERSECTION of the two contracts rather than from the
+ * wider one: the identity is sent under both header names.
+ */
+const ACCEPTED_SUBMISSION_IDENTITY = new RegExp(
+  `^[A-Za-z0-9._-]{1,${String(CORRELATION_ID_MAX_LENGTH)}}$`,
+  'u',
+);
 
 /** One dispatched request, reduced to the parts these assertions are about. */
 interface DispatchedRequest {
@@ -779,6 +816,126 @@ async function collectsAStatementDocumentFromItsAnswer(): Promise<void> {
 }
 
 /**
+ * Returns one recorded request by position.
+ *
+ * Assumptions: a positional reader exists beside {@link onlyRequest} because the submission-identity
+ * cases below are ABOUT the relationship between two dispatches, so neither of them can be the only one.
+ * @param {number} index - Zero-based position in the order the requests were dispatched.
+ * @returns {DispatchedRequest} The request at that position.
+ * @throws {Error} If no request was dispatched at that position, so the narrowed type is sound rather
+ *   than asserted non-null -- tsconfig's `noUncheckedIndexedAccess` makes the check load-bearing.
+ */
+function requestAt(index: number): DispatchedRequest {
+  const request = dispatched[index];
+  if (request === undefined) {
+    throw new Error(`no request was dispatched at position ${String(index)}`);
+  }
+  return request;
+}
+
+/**
+ * Asserts every attempt at ONE submission carries one submission key and one correlation identifier.
+ *
+ * Purpose: this is the case a retry cannot be deduplicated without. `ReportExecutionService` composes an
+ * orchestration execution name from the report type, both bounds and a submission key, and it takes that
+ * key from the `Idempotency-Key` header when one arrives and from a digest of the request's correlation
+ * identifier when none does. A second attempt whose headers differ from the first therefore starts a
+ * SECOND run of the same report, which is what an operator retrying after a client timeout produces.
+ *
+ * Assumptions: both headers are asserted, not just the submission key, because the client mints a fresh
+ * correlation identifier for any request that carries none -- so a submission that pinned only the key
+ * would still present a different fallback identity on its second attempt.
+ */
+async function sendsOneIdentityOnEveryAttemptAtOneSubmission(): Promise<void> {
+  nextStatus = HTTP_CREATED;
+  nextBody = startedSubmissionBody();
+  const identity = newSubmissionKey();
+  await submitTransactionReport({ monthly: 'X', confirm: 'Y' }, identity);
+  await submitTransactionReport({ monthly: 'X', confirm: 'Y' }, identity);
+  expect(dispatched).toHaveLength(2);
+  const first = requestAt(0);
+  const second = requestAt(1);
+  expect(first.headers['idempotency-key']).toBe(identity);
+  expect(second.headers['idempotency-key']).toBe(identity);
+  expect(first.headers['x-correlation-id']).toBe(identity);
+  expect(second.headers['x-correlation-id']).toBe(identity);
+}
+
+/**
+ * Asserts a distinct submission carries a distinct identity, and that the identity is one both
+ * contracts accept.
+ *
+ * Purpose: the complement of the case above, and the reason the identity is minted rather than derived
+ * from the request. Two deliberate runs of one report over one range must remain two runs, and the
+ * service remembers an execution name for ninety days -- so an identity that repeated would have the
+ * operator's second, intended submission refused as a duplicate.
+ *
+ * Assumptions: the shape is asserted against BOTH published domains rather than against the generator
+ * that produced it. `IDEMPOTENCY_KEY_PATTERN` in the reporting service admits at most forty letters,
+ * digits, hyphens and underscores; the shared correlation filter admits at most twenty-four and refuses
+ * a run of nine or more digits once separators are removed. Asserting the intersection here is what
+ * keeps a later change to the generator from producing a value one of the two sides would refuse with
+ * HTTP 400.
+ */
+async function mintsADistinctIdentityForEachSubmission(): Promise<void> {
+  nextStatus = HTTP_CREATED;
+  nextBody = startedSubmissionBody();
+  const first = newSubmissionKey();
+  const second = newSubmissionKey();
+  expect(second).not.toBe(first);
+  for (const identity of [first, second]) {
+    expect(identity).toMatch(PUBLISHED_SUBMISSION_KEY_SHAPE);
+    expect(identity).toMatch(ACCEPTED_SUBMISSION_IDENTITY);
+    // Assumptions: a letter is required because the filter refuses a value that is a run of nine or
+    //   more digits, and one letter anywhere disqualifies a value from that test before any digit is
+    //   counted -- so this is the whole of the third condition rather than a sample of it.
+    expect(identity).toMatch(/[A-Za-z]/u);
+  }
+  await submitTransactionReport({ monthly: 'X', confirm: 'Y' }, first);
+  await submitTransactionReport({ monthly: 'X', confirm: 'Y' }, second);
+  expect(requestAt(0).headers['idempotency-key']).toBe(first);
+  expect(requestAt(1).headers['idempotency-key']).toBe(second);
+}
+
+/**
+ * Asserts a submission with no identity sends no submission key and a fresh correlation identifier.
+ *
+ * Purpose: fixes the unchanged behaviour of the ordinary case, which is what makes the pinned case a
+ * genuine opt-in. A submission with no identity to preserve has each attempt named separately, so one
+ * report can be produced again over one range -- and the absent header is what leaves the service free
+ * to derive its own key.
+ */
+async function omitsTheSubmissionKeyWithoutAnIdentity(): Promise<void> {
+  nextStatus = HTTP_CREATED;
+  nextBody = startedSubmissionBody();
+  await submitTransactionReport({ monthly: 'X', confirm: 'Y' });
+  await submitTransactionReport({ monthly: 'X', confirm: 'Y' });
+  const first = requestAt(0);
+  const second = requestAt(1);
+  expect(first.headers['idempotency-key']).toBeUndefined();
+  expect(second.headers['idempotency-key']).toBeUndefined();
+  expect(first.headers['x-correlation-id']).toMatch(ACCEPTED_SUBMISSION_IDENTITY);
+  expect(second.headers['x-correlation-id']).not.toBe(first.headers['x-correlation-id']);
+}
+
+/**
+ * Asserts an identity the shared correlation filter would refuse fails at the call site.
+ *
+ * Assumptions: the rejected value is one the REPORTING service would accept -- forty letters is within
+ * `IDEMPOTENCY_KEY_MAX_LENGTH` and matches its shape -- and it is refused here because the same value is
+ * sent as the correlation identifier, whose published width is twenty-four. Failing before the dispatch
+ * names the caller that minted its own identity instead of calling `newSubmissionKey`; sending it would
+ * be answered HTTP 400 by the filter, which at a screen is indistinguishable from a rejected payload.
+ */
+async function refusesAnIdentityTheCorrelationContractWouldNotCarry(): Promise<void> {
+  const tooWideForCorrelation = 'A'.repeat(CORRELATION_ID_MAX_LENGTH + 1);
+  await expect(
+    submitTransactionReport({ monthly: 'X', confirm: 'Y' }, tooWideForCorrelation),
+  ).rejects.toBeInstanceOf(RangeError);
+  expect(dispatched).toHaveLength(0);
+}
+
+/**
  * Asserts a location no statement answer could have carried is refused without being dispatched.
  *
  * Assumptions: the rejected value is the request-path form of a REAL location -- the same selector
@@ -845,6 +1002,16 @@ function reportingClientContract(): void {
   );
   it('collects a statement document from its answer', collectsAStatementDocumentFromItsAnswer);
   it('refuses a location no answer could have carried', refusesALocationNoAnswerCouldHaveCarried);
+  it(
+    'sends one identity on every attempt at one submission',
+    sendsOneIdentityOnEveryAttemptAtOneSubmission,
+  );
+  it('mints a distinct identity for each submission', mintsADistinctIdentityForEachSubmission);
+  it('omits the submission key without an identity', omitsTheSubmissionKeyWithoutAnIdentity);
+  it(
+    'refuses an identity the correlation contract would not carry',
+    refusesAnIdentityTheCorrelationContractWouldNotCarry,
+  );
   it('composes every path under the reports prefix', composesEveryPathUnderTheReportsPrefix);
   it(
     'negotiates a binary body on exactly the two document operations',

@@ -5,9 +5,13 @@
 #   The hand-authored OpenAPI 3.1 contract of record for the pending credit-card
 #   authorization bounded context. It settles the paths, operation identifiers,
 #   parameter and property names, response shapes, value domains and error
-#   vocabulary of the three synchronous operations this service exposes. Every
-#   other tree that touches this context is written against this document rather
-#   than against a fresh reading of the reference COBOL.
+#   vocabulary of the five synchronous operations this service exposes, counted
+#   from the paths tree below: four reads -- listPendingAuthorizations,
+#   getPendingAuthorization, getPendingAuthorizationScreen and
+#   getNextPendingAuthorization -- and the one write,
+#   setAuthorizationFraudState. Every other tree that touches this context is
+#   written against this document rather than against a fresh reading of the
+#   reference COBOL.
 #
 #   Field names, widths, value domains, nullability and monetary precision are not
 #   derived here. The persistent shape is settled by
@@ -19,19 +23,31 @@
 #
 # Parameters:
 #   - Path: the sealed opaque selector naming one pending authorization, declared
-#   once at components/parameters/AuthorizationKeyPath. It is not a card number
-#   and not the baseline's packed key.
-#   - Query: the mandatory list scope accountId and the two paging inputs cursor
-#   and direction. Page size is settled server-side and a client cannot vary it.
-#   - Header: X-Correlation-Id, optional on every operation.
-#   - Body: FraudMarkRequest on the fraud operation alone, carrying the fraud
-#   state to reach. The two read operations carry no body.
+#   once at components/parameters/AuthorizationKeyPath and referenced at the path
+#   level by each of the four operations under /api/v1/authorizations/{key}. It is
+#   not a card number and not the baseline's packed key.
+#   - Query: none. No operation of this contract declares a query parameter. The
+#   list scope and the two paging inputs travel in the list request body instead,
+#   for the reason argued on the /api/v1/authorizations/search path, and page size
+#   is settled server-side so a client cannot vary it.
+#   - Header: X-Correlation-Id, optional, declared on all five operations.
+#   - Body: two of the five operations carry one, and one of those two is a read.
+#   PendingAuthPageQuery on the list read, carrying the mandatory account scope
+#   accountId and the optional paging inputs cursor and direction; FraudMarkRequest
+#   on the fraud write, carrying the fraud state to reach in its single member
+#   action. The three selector-keyed GET reads carry no body.
 #
 # Return values:
 #   - PendingAuthListResponse: the account-level summary block, one page of
 #   authorization rows and the cursor tokens that walk the ordered set by key.
 #   - PendingAuthDetail: the full state of one pending authorization, with the
 #   primary account number rendered to its last four digits.
+#   - PendingAuthScreen: the same authorization projected onto the shape the
+#   reference detail screen renders, plus the screen chrome no segment holds.
+#   - The forward-move envelope declared inline on
+#   /api/v1/authorizations/{key}/next: the following PendingAuthDetail or null,
+#   the end-of-data flag and the boundary message. It is inline rather than a
+#   named schema because nothing else in this document returns that shape.
 #   - FraudMarkResponse: the outcome flag and the verbatim outcome sentence, the
 #   two response-direction fields of the baseline communication area. The
 #   insert-versus-update distinction is carried by the status code.
@@ -44,12 +60,17 @@
 #   are reachable from no path deliberately.
 #
 # Exceptions or errors:
-#   Six reusable failure responses under components/responses: 400 an unacceptable
-#   request, carrying the per-field array; 401 no usable bearer token; 403 a token
-#   without the required authority; 404 no authorization for the selector; 409 the
-#   authorization changed underneath a fraud write; 500 a failure the caller cannot
-#   correct. Nothing surfaces a credential, a connection string, a stack trace, a
-#   database vendor code or a CICS response code.
+#   Eleven reusable failure responses under components/responses, counted from that
+#   mapping: 400 BadRequest, an unacceptable request, carrying the per-field array;
+#   401 Unauthorized, no usable bearer token; 403 Forbidden, a token without the
+#   required authority; 404 NotFound, no authorization for the selector; 405
+#   MethodNotAllowed and 406 NotAcceptable, the two dispatch refusals every
+#   operation can answer with; 409 Conflict, a lock this context could not obtain
+#   under a fraud write; 413 PayloadTooLarge and 415 UnsupportedMediaType, reachable
+#   only on the two operations that consume a body; 500 InternalServerError, a
+#   failure the caller cannot correct; and 503 ServiceUnavailable, declared on the
+#   fraud write alone. Nothing surfaces a credential, a connection string, a stack
+#   trace, a database vendor code or a CICS response code.
 #
 # Rationale for the non-obvious choices:
 #   - Assumptions: paths are absolute from the server root and carry an explicit
@@ -80,13 +101,18 @@ info:
     credit-card management application.
   description: >-
     The authorization bounded context owns four tables in one schema and
-    exposes three of them through three synchronous operations that carry
-    across three online reference programs: the summary list
-    cbl/COPAUS0C.cbl, the detail view cbl/COPAUS1C.cbl and the fraud write
-    cbl/COPAUS2C.cbl. The first ran as CICS transaction CPVS
-    (csd/CRDDEMO2.csd L49-L50) and the second as CPVD (L39-L40); the third is
-    not a transaction of its own and is reached by EXEC CICS LINK from the
-    detail program at cbl/COPAUS1C.cbl L248-L252.
+    exposes three of them -- pending_auth_summary, pending_auth_detail and
+    auth_fraud, the outbox being internal to the message-driven half -- through
+    five synchronous operations that carry across three online reference
+    programs: the summary list cbl/COPAUS0C.cbl, the detail view
+    cbl/COPAUS1C.cbl and the fraud write cbl/COPAUS2C.cbl. Three of the four
+    reads carry across the detail program alone, because this contract publishes
+    its record, its screen-shaped projection and its forward move as three
+    separate representations rather than as one negotiated resource, each on the
+    path that says so. The list ran as CICS transaction CPVS
+    (csd/CRDDEMO2.csd L49-L50) and the detail view as CPVD (L39-L40); the fraud
+    write is not a transaction of its own and is reached by EXEC CICS LINK from
+    the detail program at cbl/COPAUS1C.cbl L248-L252.
 
 
     Four structural transformations distinguish this contract from the screens
@@ -188,8 +214,10 @@ tags:
   - name: authorizations
     description: >-
       Every operation of the pending credit-card authorization context: listing
-      an account's pending authorizations by key, reading one of them, and
-      setting the fraud state of one of them. All three carry
+      an account's pending authorizations by key, reading one of them in each of
+      its three published representations -- the record, the screen-shaped
+      projection and the forward move -- and setting the fraud state of one of
+      them. All five carry
       x-required-authority carddemo-user, which admits either group. The field is
       published per operation regardless, because the fraud route is the only
       state-changing one here and is therefore the one whose authority is most
@@ -755,10 +783,12 @@ components:
   # Assumptions: each is declared once here rather than restated per
   #   operation. An input re-typed at each operation is an input one of whose
   #   copies ends up typed differently from the others, and the correlation
-  #   header is taken by ALL THREE operations while the list operation alone
-  #   takes the account scope, the cursor and the direction. The selector path
-  #   parameter is referenced at the path level rather than per operation, for
-  #   the reason written beside it.
+  #   header is taken by ALL FIVE operations while the selector is taken by the
+  #   four under /api/v1/authorizations/{key}. This mapping holds exactly those
+  #   two: the account scope, the cursor and the direction are members of the
+  #   list request body rather than query parameters, so they are typed once on
+  #   PendingAuthPageQuery instead. The selector path parameter is referenced at
+  #   the path level rather than per operation, for the reason written beside it.
   parameters:
 
     # Assumptions: the account identifier is the list's MANDATORY scope and
@@ -1273,8 +1303,10 @@ components:
       #   declares no 404 at all -- an account with no pending authorizations is
       #   an empty page and not a missing resource, which is what the reference
       #   screen shows -- so the sentence described an outcome the contract does
-      #   not publish and a client could not receive. Only the two selector-keyed
-      #   operations reference this response, and both are about a detail row.
+      #   not publish and a client could not receive. Only the four selector-keyed
+      #   operations reference this response -- the member read, its screen-shaped
+      #   projection, the forward move and the fraud write -- and every one of them
+      #   is about a detail row.
       headers:
         X-Correlation-Id:
           $ref: '#/components/headers/XCorrelationId'

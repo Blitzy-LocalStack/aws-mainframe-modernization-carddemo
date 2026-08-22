@@ -7,8 +7,14 @@
  * Prove three things the route table alone cannot assert about itself. First, that every
  * authenticated route resolves to its screen AND renders that screen INSIDE the shell, so the
  * header band, the skip link and the sign-off key are reachable from each one. Second, that the
- * four screens which previously had no address are now addressable. Third, that the two
- * administered routes admit an administrator and refuse an ordinary operator.
+ * four screens which previously had no address are now addressable. Third, that the administered
+ * routes admit an administrator and refuse an ordinary operator, and that each parameterised route
+ * hands its screen the value under the name that screen reads.
+ *
+ * Assumptions: the cases mount the SHIPPED route objects in a memory router rather than rendering a
+ * router component over jsdom's history, which is what `ui/src/router.tsx` now offers and the more
+ * robust of the two -- the initial location is an argument, so no case can inherit a location another
+ * left behind. The tree itself is the delivered one, guards and shell mounts included.
  *
  * Why the screens are substituted
  * -------------------------------
@@ -29,7 +35,7 @@
 // Assumptions: every test API is imported rather than taken from an ambient global, because
 // ui/vitest.config.ts sets `globals: false` and records that as a contract.
 import { render, screen, within } from '@testing-library/react';
-import { useParams } from 'react-router';
+import { createMemoryRouter, RouterProvider, useParams } from 'react-router';
 import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -44,12 +50,11 @@ import { installApiHarness, removeApiHarness } from './test/apiHarness';
 import { endAnySession, establishSession } from './test/sessionHarness';
 
 /*
- * WHY : ⚠️ Refactoring Rationale: a `carddemo.id-token` session-storage key was named here and written
- *       to directly, and that key no longer exists -- `ui/src/hooks/useAuth.ts` holds the session in a
- *       module variable installed by one private validator. Writing storage therefore arranged nothing,
- *       so every case below rendered as an anonymous caller and the guards replaced the screen it asked
- *       for with sign-on. `ui/src/test/sessionHarness.ts` establishes a session by driving the real
- *       exchange, which is the only path that installs one.
+ * WHY : Assumptions: a session is arranged ONLY through `ui/src/test/sessionHarness.ts`, which drives
+ *       the real token exchange. There is no storage key to write: `ui/src/hooks/useAuth.ts` holds the
+ *       session in a module variable installed by one private validator, so a case that wrote storage
+ *       would arrange nothing and would render as an anonymous caller -- the guards would then replace
+ *       the screen it asked for with sign-on, and the case would fail describing the wrong thing.
  */
 
 /**
@@ -83,6 +88,22 @@ function stubScreen(marker: string): () => ReactElement {
 function StubUserUpdateScreen(): ReactElement {
   const { id } = useParams<{ id: string }>();
   return <div>{`USER UPDATE:${id ?? 'NONE'}`}</div>;
+}
+
+/**
+ * Paints the reference-maintenance marker together with the type code the route supplied.
+ *
+ * Assumptions: this stub reads `useParams().cd`, the name the frozen route table gives the
+ * transaction-type key and the name `ui/src/screens/refTypeEdit/index.tsx` reads. It is a stub rather
+ * than the real screen deliberately: the property under test belongs to the ROUTE PATTERN, so reading
+ * the parameter here proves the pattern publishes it under that name whatever the screen does with it.
+ * A mismatch resolves to `undefined` in react-router with no diagnostic, so the only proof is a value
+ * arriving.
+ * @returns {ReactElement} The marker followed by the type code the route supplied.
+ */
+function StubRefTypeEditScreen(): ReactElement {
+  const { cd } = useParams<{ cd: string }>();
+  return <div>{`REF TYPE EDIT:${cd ?? 'NONE'}`}</div>;
 }
 
 vi.mock(
@@ -171,6 +192,19 @@ vi.mock(
 );
 
 vi.mock(
+  './screens/refTypeEdit',
+  /**
+   * Substitutes the reference-type maintenance screen so the route table is exercised without its
+   * dependencies.
+   * Assumptions: `default` is named because this module publishes its screen as the default export,
+   * exactly as its list sibling above does, and a substitution naming a screen instead would resolve
+   * to `undefined` and render nothing.
+   * @returns {{ default: () => ReactElement }} The substituted module shape.
+   */
+  () => ({ default: StubRefTypeEditScreen }),
+);
+
+vi.mock(
   './screens/userUpdate',
   /**
    * Substitutes the user-update screen so the route table is exercised without its dependencies.
@@ -183,11 +217,10 @@ vi.mock(
 );
 
 /*
- * WHY : Refactoring Rationale: a local `idTokenFor` composed the identity token here and is withdrawn.
- *       `ui/src/test/sessionHarness.ts` composes the token the exchange is answered with, and it carries
- *       BOTH claims the installer compares -- the group list and the user name it checks against the
- *       identifier the token set arrived with. A locally composed token carried only the first, so it
- *       looked equivalent and would be refused by the real installer.
+ * WHY : Assumptions: the identity token is composed ONLY by `ui/src/test/sessionHarness.ts`, never
+ *       locally. That harness carries BOTH claims the installer compares -- the group list and the
+ *       user name it checks against the identifier the token set arrived with -- and a locally
+ *       composed token carrying only the first looks equivalent and is refused by the real installer.
  */
 
 /**
@@ -200,19 +233,31 @@ async function signOnAs(groups: readonly string[]): Promise<void> {
 }
 
 /**
- * Renders the real route table at the supplied address.
+ * Renders the SHIPPED route objects at the supplied address, in a memory router.
  *
- * Assumptions: the router under test mounts `BrowserRouter`, so the address is set on the history
- * before rendering rather than passed as an initial entry. The module is imported through `await
- * import` BELOW the substitutions above, because a static import would be evaluated before the stub
- * helpers this file defines are initialised.
- * @param {string} path - Address to place on the history before mounting.
+ * ⚠️ Refactoring Rationale: the address was previously pushed onto jsdom's history and the exported
+ * router COMPONENT rendered over it, because the route table built its own `BrowserRouter` internally
+ * and offered no other way in. It now exports its route objects, so the initial entry is passed to
+ * `createMemoryRouter` instead. That is the more robust arrangement for three reasons: the initial
+ * location is an argument rather than ambient state, so a case cannot be affected by a location a
+ * previous case left behind; no module reset is needed to re-home the router; and nothing in the file
+ * has to keep jsdom's history and the router's idea of the location in step.
+ *
+ * Assumptions: a memory router over the SHIPPED array is not a re-declaration of the tree. The routes,
+ * the guards, the lazy boundaries and both shell mounts are the delivered ones -- only the history
+ * implementation differs -- so an unmounted route still fails here, where a test supplying its own
+ * routes could only ever prove that a screen renders once mounted.
+ *
+ * Assumptions: the module is imported through `await import` BELOW the substitutions above, because a
+ * static import evaluates the route table -- and therefore the stub factories it resolves -- before
+ * this file's helper declarations are initialised.
+ * @param {string} path - Address the router opens on.
  * @returns {Promise<void>} Resolves once the table is mounted.
  */
 async function renderRouterAt(path: string): Promise<void> {
-  window.history.pushState({}, '', path);
-  const { CardDemoRouter } = await import('./router');
-  render(<CardDemoRouter />);
+  const { CARD_DEMO_ROUTES } = await import('./router');
+  const router = createMemoryRouter([...CARD_DEMO_ROUTES], { initialEntries: [path] });
+  render(<RouterProvider router={router} />);
 }
 
 /**
@@ -251,25 +296,37 @@ const AUTHENTICATED_ROUTES: ReadonlyArray<readonly [string, string]> = [
   ['/authorizations', 'AUTH SUMMARY'],
 ];
 
-/** The two addresses the administrative group claim gates. */
+/**
+ * The administered addresses, paired with the marker each one's screen paints.
+ *
+ * Assumptions: three of the six gated paths are exercised here, chosen because each carries a
+ * different shape -- a static path, a path parameterised by an operator identifier, and a path
+ * parameterised by a two-character type code. `ui/src/routerRoutes.test.tsx` asserts the gated SET is
+ * exactly the six administrative options; what these cases add is that the guard admits and refuses at
+ * a rendered route, which is a property of a mounted tree rather than of the table.
+ */
 const ADMINISTERED_ROUTES: ReadonlyArray<readonly [string, string]> = [
   ['/reference/transaction-types', 'REF TYPE LIST'],
+  ['/reference/transaction-types/AA', 'REF TYPE EDIT:AA'],
   ['/users/U0000001/edit', 'USER UPDATE:U0000001'],
 ];
 
 /**
- * Ends any held session, replaces the transport harness and restores the address.
+ * Ends any held session and replaces the transport harness.
  *
  * Assumptions: the session is ENDED rather than storage cleared, and the harness is reinstalled in the
  * same call so a file keeps one lifecycle. `endAnySession` unmounts before discarding, which is the order
  * that keeps React from reporting an update outside `act` when the discard notifies a live tree.
- * @returns {void} Nothing; no session is held, the harness is armed and the history is at the root.
+ *
+ * Refactoring Rationale: this no longer resets jsdom's history. Each case now opens a memory router on
+ * an explicit initial entry, so the ambient location influences nothing and resetting it would suggest
+ * a dependency that no longer exists.
+ * @returns {void} Nothing; no session is held and the harness is armed.
  */
-function resetSessionAndAddress(): void {
+function resetSessionAndTransport(): void {
   endAnySession();
   removeApiHarness();
   installApiHarness();
-  window.history.pushState({}, '', '/');
 }
 
 /**
@@ -277,8 +334,8 @@ function resetSessionAndAddress(): void {
  * @returns {void} Nothing; cases are registered as a side effect.
  */
 function shellCompositionCases(): void {
-  beforeEach(resetSessionAndAddress);
-  afterEach(resetSessionAndAddress);
+  beforeEach(resetSessionAndTransport);
+  afterEach(resetSessionAndTransport);
 
   it.each(AUTHENTICATED_ROUTES)(
     'renders %s inside the shell for a signed-on operator',
@@ -315,18 +372,14 @@ function shellCompositionCases(): void {
   );
 }
 
-/*
- * WHY : ⚠️ Refactoring Rationale: the case below asserted sign-on paints NO shell, on the ground that
- *       the shell offers sign-off and a signed-off operator has nothing to sign off from. The premise
- *       is right and the conclusion does not follow: the shell renders its sign-off control only while
- *       a session is held, so an unframed sign-on was not what kept the control away -- and being
- *       unframed is what left the screen with no row-23 message line and no row-24 legend, since it
- *       delegates both. All three of the reference's refusal sentences were therefore computed and
- *       discarded. The frame is asserted PRESENT and the control ABSENT, which is the pair the
- *       original intent actually describes.
- */
 /**
  * Sign-on is painted inside the one frame, and the frame offers no sign-off with no session held.
+ *
+ * Assumptions: the frame is asserted PRESENT and the sign-off control ABSENT, which are two separate
+ * properties and not one. The shell renders its sign-off control only while a session is held, so
+ * framing sign-on offers an anonymous operator nothing they cannot do; and sign-on delegates its
+ * row-23 message line and its row-24 legend to that frame, so an unframed sign-on would compute all
+ * three of the reference's refusal sentences and discard them.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
 async function framesSignOnWithoutOfferingSignOff(): Promise<void> {
@@ -346,11 +399,12 @@ async function redirectsAnUnauthenticatedOperator(): Promise<void> {
 
   expect(await screen.findByText('SIGN ON')).toBeInTheDocument();
   /*
-   * WHY : ⚠️ Refactoring Rationale: the SCREEN is asserted absent and the frame is no longer, because
-   *       the frame is now above the guard rather than behind it. What this case is about is that the
-   *       guard sends the operator to sign-on instead of rendering the account screen, and the marker
-   *       below is the whole of that; asserting the frame away as well asserted the guard's position
-   *       in the tree, which is `ui/src/router.tsx`'s decision and not this case's subject.
+   * WHY : Assumptions: the SCREEN is asserted absent and the frame is not, because the frame sits
+   *       ABOVE the guard in the route tree and is therefore present on both sides of the boundary.
+   *       What this case is about is that the guard sends the operator to sign-on instead of
+   *       rendering the account screen, and the two markers below are the whole of that; asserting
+   *       the frame away as well would assert the guard's position in the tree, which is
+   *       `ui/src/router.tsx`'s decision and not this case's subject.
    */
   expect(screen.queryByText('ACCOUNT VIEW')).not.toBeInTheDocument();
   expect(screen.queryByText(SHELL_SIGN_OFF_LABEL)).not.toBeInTheDocument();
@@ -373,14 +427,29 @@ async function carriesTheRouteIdentifierToUserUpdate(): Promise<void> {
 }
 
 /**
+ * The transaction-type route parameter is spelled `cd`, so the type code arrives.
+ *
+ * ⚠️ Assumptions: this case exists because the parameter was RENAMED -- the pattern spelled it
+ * `typeCd` and the frozen route table spells it `cd` -- and a rename of a route parameter is silent in
+ * both directions. React Router resolves by name, so a pattern and a screen that disagree still mount
+ * the screen and merely hand it `undefined`, which the maintenance screen treats as an arrival with no
+ * type code selected. Observing the VALUE is the only assertion that can tell the two apart.
+ * @returns {Promise<void>} Resolves once the assertion has run.
+ */
+async function carriesTheTypeCodeToReferenceMaintenance(): Promise<void> {
+  await signOnAs(['carddemo-admin']);
+
+  await renderRouterAt('/reference/transaction-types/07');
+
+  expect(await screen.findByText('REF TYPE EDIT:07')).toBeInTheDocument();
+}
+
+/**
  * An address the table does not match renders the bounded not-found result, outside the frame.
  *
- * ⚠️ Refactoring Rationale: this case is RESTORED. A remediation replaced the catch-all with a
- * coverage table over all 21 specified routes, so an unauthored screen answered deliberately instead of
- * dead-ending; the delivered table answers the same way with a single bounded result at `*`, and the
- * case that held the catch-all to anything did not survive with it. The property is worth a gate rather
- * than a note, because the catch-all is the ONE surface an unauthenticated caller reaches without
- * passing the guard.
+ * Assumptions: the catch-all is worth a gate rather than a note, because it is the ONE surface an
+ * unauthenticated caller reaches without passing either guard -- so what it renders is a security
+ * property as much as a navigation one.
  *
  * Assumptions: the result is asserted OUTSIDE the shell. `*` sits beside the frame deliberately -- there
  * is no screen to frame, so painting a header band, a message line and a legend around a not-found
@@ -420,13 +489,72 @@ async function theNotFoundResultReflectsNoPartOfTheAddress(): Promise<void> {
 }
 
 /**
+ * The composition root provides the router this module exports, and provides it once.
+ *
+ * Purpose: every other case here builds its own router from the exported route objects, which proves
+ * the TABLE and proves nothing about who mounts it. This one closes that: `ui/src/router.tsx` exports
+ * an initialised data router and renders no provider itself, and `ui/src/App.tsx` is the module that
+ * hands it to `RouterProvider` inside the one theme provider. The arrangement is not observable from
+ * either file alone, and the failure it guards against is silent -- a provider mounted in both files
+ * frames every screen twice, which is the defect `ui/src/layout/appShellIntegration.test.tsx` records.
+ *
+ * Assumptions: the exported instance is asserted to BE a router rather than a component -- it answers
+ * `navigate` and carries the routes it was built from -- because that is the half of the contract a
+ * rendered result cannot show. A component that owned `BrowserRouter` internally would produce the same
+ * document; it would not answer `navigate`, and `ui/src/App.tsx` could not import it under this name.
+ *
+ * Assumptions: the address is chosen by navigating the exported instance rather than by pushing a
+ * history entry, because this instance read its location once as it initialised at module evaluation and
+ * does not observe a later `pushState`. Navigating it is also the only way to make the case independent
+ * of the order the file's cases run in, since the address the instance captured is whatever address the
+ * first case to import this module happened to be at.
+ *
+ * Assumptions: sign-on is the address used because it needs no session, so the case asserts the
+ * composition and not the guards -- which have their own cases below.
+ * @returns {Promise<void>} Resolves once the framed document has been counted.
+ */
+async function theCompositionRootProvidesTheExportedRouter(): Promise<void> {
+  const { CARD_DEMO_ROUTES, cardDemoRouter } = await import('./router');
+  const { App } = await import('./App');
+
+  expect(typeof cardDemoRouter.navigate, 'the export must be a data router').toBe('function');
+  expect(cardDemoRouter.routes, 'the router must carry the exported route objects').toHaveLength(
+    CARD_DEMO_ROUTES.length,
+  );
+
+  await cardDemoRouter.navigate('/signon');
+
+  render(<App />);
+
+  expect(await screen.findByText('SIGN ON')).toBeInTheDocument();
+  /*
+   * Assumptions: the frame is counted with `queryAllBy*` and required to be a singleton rather than
+   * fetched with `getBy*`, because the number found IS the diagnostic -- a `getBy*` query throws on
+   * multiple matches without reporting how many there were.
+   */
+  expect(
+    screen.queryAllByTestId(APP_SHELL_TEST_ID),
+    'the composition root may mount exactly one shell',
+  ).toHaveLength(1);
+  expect(screen.queryAllByRole('banner'), 'exactly one banner may be painted').toHaveLength(1);
+  expect(
+    screen.queryAllByRole('contentinfo'),
+    'exactly one contentinfo landmark may be painted',
+  ).toHaveLength(1);
+}
+
+/**
  * Registers the cases covering the authentication boundary the shell sits inside.
  * @returns {void} Nothing; cases are registered as a side effect.
  */
 function authenticationBoundaryCases(): void {
-  beforeEach(resetSessionAndAddress);
-  afterEach(resetSessionAndAddress);
+  beforeEach(resetSessionAndTransport);
+  afterEach(resetSessionAndTransport);
 
+  it(
+    'is provided to the tree by the composition root',
+    theCompositionRootProvidesTheExportedRouter,
+  );
   it('frames sign-on without offering sign-off', framesSignOnWithoutOfferingSignOff);
   it(
     'renders the bounded not-found result for an unknown address',
@@ -448,8 +576,8 @@ function authenticationBoundaryCases(): void {
  * @returns {void} Nothing; cases are registered as a side effect.
  */
 function administrativeGuardCases(): void {
-  beforeEach(resetSessionAndAddress);
-  afterEach(resetSessionAndAddress);
+  beforeEach(resetSessionAndTransport);
+  afterEach(resetSessionAndTransport);
 
   it.each(ADMINISTERED_ROUTES)(
     'refuses an ordinary operator at %s',
@@ -474,8 +602,13 @@ function administrativeGuardCases(): void {
     'carries the route identifier to the user-update screen under the name it reads',
     carriesTheRouteIdentifierToUserUpdate,
   );
+
+  it(
+    'carries the type code to the reference-maintenance screen under the name it reads',
+    carriesTheTypeCodeToReferenceMaintenance,
+  );
 }
 
-describe('CardDemoRouter shell composition', shellCompositionCases);
-describe('CardDemoRouter authentication boundary', authenticationBoundaryCases);
-describe('CardDemoRouter administrative guard', administrativeGuardCases);
+describe('route table shell composition', shellCompositionCases);
+describe('route table authentication boundary', authenticationBoundaryCases);
+describe('route table administrative guard', administrativeGuardCases);

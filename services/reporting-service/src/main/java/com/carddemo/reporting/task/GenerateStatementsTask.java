@@ -26,7 +26,7 @@ import software.amazon.awssdk.services.s3.S3Client;
  * {@link ReportingTask} bean up under that exact name, and no bean carried it. The runner's own charter said
  * so plainly -- it described the name list as "a target contract" and recorded that a run would accept the
  * command, start the context, miss the lookup and end in the hard-failure tier. This class closes that:
- * the {@code GenerateStatements} state of the {@code carddemo-daily-batch} machine now produces the two
+ * the {@code GenerateStatements} state of the {@code carddemo-daily-batch} machine now produces the
  * artifacts it is scheduled to produce.</p>
  *
  * <p>Assumptions: the bean NAME is the job token and is set on the annotation rather than derived from the
@@ -43,14 +43,25 @@ import software.amazon.awssdk.services.s3.S3Client;
  * can be attributed to a night. Filtering on it would be a behavioural change the reference does not
  * have.</p>
  *
- * <p>Assumptions: the two artifact keys are composed from the configured prefix and a fixed object name per
- * artifact, so a rerun of a night replaces that night's output rather than accumulating a second copy. The
- * dataset bucket is versioned and its lifecycle retains five noncurrent versions, which is the generation
- * retention the reference expresses as {@code LIMIT(5) SCRATCH}, so the previous run's artifact remains
- * recoverable without the key having to carry a generation.</p>
+ * <p>⚠️ Assumptions: the three object keys of a run are composed from the configured prefix and a
+ * freshly minted run identifier, so a run writes each of them EXACTLY ONCE and a rerun of a night
+ * accumulates a second complete set beside the first rather than overwriting it. The keys used to be
+ * fixed, and a review found what that cost: the three objects became visible one at a time, so a reader
+ * could hold one run's index over another run's artifact and report a position that addressed an
+ * unrelated cardholder's statement. The run becomes readable only when {@link #run(java.util.Map)}
+ * writes the manifest last, and the reasoning for that scheme is recorded on
+ * {@code StatementService.MANIFEST_OBJECT}.</p>
+ *
+ * <p>Trade-offs: superseded runs are now retained as whole key sets rather than as noncurrent versions
+ * of a fixed key, so the bucket's five-noncurrent-version lifecycle -- the generation retention the
+ * reference expresses as {@code LIMIT(5) SCRATCH} -- no longer reclaims them, and retention of old runs
+ * becomes a lifecycle rule on the run prefixes. That cost is accepted because version-paired reads were
+ * the alternative to it and they cannot be made coherent without a manifest anyway; and because the
+ * previous run staying intact and readable under its own keys is what lets a failed run leave a working
+ * one behind.</p>
  *
  * <p>Trade-offs: the sink is closed in a try-with-resources so the artifacts are published only when the
- * run has finished writing, and a run that throws leaves the previous artifacts in place. What is given up
+ * run has finished writing, and a run that throws leaves the previous run current. What is given up
  * is that a partially produced run yields nothing rather than a partial file; what is bought is that no
  * reader can be handed a truncated statement file that looks complete.</p>
  */
@@ -69,7 +80,7 @@ public class GenerateStatementsTask implements ReportingTask {
     /** The destination bucket. */
     private final String bucket;
 
-    /** The key prefix the two artifacts sit under. */
+    /** The key prefix a run's own prefix and the manifest sit under. */
     private final String prefix;
 
     /**
@@ -79,8 +90,8 @@ public class GenerateStatementsTask implements ReportingTask {
      * @param s3 the object-store client; must not be {@code null}
      * @param bucket the destination bucket, supplied by
      *     {@value StatementService#OUTPUT_BUCKET_PROPERTY}; must not be {@code null}
-     * @param prefix the key prefix, supplied by {@value StatementService#STATEMENT_PREFIX_PROPERTY}; must
-     *     not be {@code null}
+     * @param prefix the key prefix a run's objects and the manifest sit under, supplied by
+     *     {@value StatementService#STATEMENT_PREFIX_PROPERTY}; must not be {@code null}
      * @throws NullPointerException if any argument is {@code null}
      */
     public GenerateStatementsTask(
@@ -95,13 +106,28 @@ public class GenerateStatementsTask implements ReportingTask {
     }
 
     /**
-     * Produces the run's two statement artifacts.
+     * Produces the run's three immutable objects and then publishes the run.
+     *
+     * <p>⚠️ Refactoring Rationale: the four writes are ORDERED, and the order is the whole of this
+     * task's coherence guarantee. This task used to write its three objects to fixed keys, so each
+     * became visible the moment it was written and a reader arriving between two of them saw a mixture
+     * of two runs -- the previous run's index over this run's artifact, whose positions then addressed
+     * whichever cardholder this run had placed there. The three objects now go to keys that carry a
+     * freshly minted run identifier and are therefore written exactly once and never overwritten, and
+     * the manifest naming that run is written LAST. Until it is written, nothing addresses this run; a
+     * run that fails at any earlier point leaves the previous run current and complete, which is why
+     * every write below propagates its failure rather than being caught.
+     *
+     * <p>Assumptions: the run identifier is minted HERE, once per run, rather than derived from the
+     * business date. A rerun of one date is an ordinary operation -- the orchestrator's redrive performs
+     * one -- and a date-derived prefix would make the rerun overwrite the run it is replacing, which is
+     * the mutation this ordering exists to remove.
      *
      * @param parameters the validated run parameters, from which the business date is read for the journal
      *     line; must not be {@code null}
-     * @throws Exception if either artifact cannot be published, or if a cross-reference row names a
-     *     customer or an account that does not resolve, both of which stop the run as the reference's abend
-     *     does
+     * @throws Exception if any of the four objects cannot be published, or if a cross-reference row names
+     *     a customer or an account that does not resolve, both of which stop the run as the reference's
+     *     abend does
      */
     @Override
     public void run(Map<String, String> parameters) throws Exception {
@@ -113,22 +139,29 @@ public class GenerateStatementsTask implements ReportingTask {
         LocalDate businessDate = businessDateOrNull(
                 parameters.get(ReportingTaskRunner.BUSINESS_DATE_PARAMETER));
 
+        String runId = StatementService.mintRunId();
+        String runPrefix = StatementService.runKeyPrefix(prefix, runId);
+
         StatementRunOutcome outcome;
         try (S3StatementSink sink = new S3StatementSink(
-                new S3ArtifactWriter(s3, bucket, prefix + S3StatementSink.PLAIN_TEXT_OBJECT),
-                new S3ArtifactWriter(s3, bucket, prefix + S3StatementSink.HTML_OBJECT))) {
+                new S3ArtifactWriter(s3, bucket, runPrefix + S3StatementSink.PLAIN_TEXT_OBJECT),
+                new S3ArtifactWriter(s3, bucket, runPrefix + S3StatementSink.HTML_OBJECT))) {
             outcome = statements.generateStatements(sink);
         }
-        publishIndex(outcome);
+        publishIndex(runPrefix, outcome);
+        publishManifest(runId);
         int produced = outcome.statementsProduced();
 
-        // WHY : Assumptions: the journal line names the business date and the count and no cardholder
-        //       value of any kind. The count is what an operator reconciles against the previous night and
-        //       the date is what attributes the artifact; a card number, an account identifier or a
-        //       customer name would each be a value docs/architecture/observability.md names as one an
-        //       operator-read record must omit.
-        LOG.info("event=reporting.statements.produced businessDate={} statements={}",
-                businessDate == null ? "unset" : businessDate, produced);
+        // WHY : Assumptions: the journal line names the business date, the run and the count, and no
+        //       cardholder value of any kind. The count is what an operator reconciles against the
+        //       previous night and the date is what attributes the artifact; a card number, an account
+        //       identifier or a customer name would each be a value docs/architecture/observability.md
+        //       names as one an operator-read record must omit. The run identifier is admissible for the
+        //       same reason it is publishable in a key: it is 122 random bits and derives from no
+        //       cardholder value, and without it an operator reading this line cannot tell which of the
+        //       stored runs it describes.
+        LOG.info("event=reporting.statements.produced businessDate={} run={} statements={}",
+                businessDate == null ? "unset" : businessDate, runId, produced);
     }
 
     /**
@@ -143,25 +176,64 @@ public class GenerateStatementsTask implements ReportingTask {
      * known until its statement has been emitted.
      *
      * <p>Assumptions: the index is written even when the run produced NO statements, and the object it
-     * then writes is empty. Writing it unconditionally is what keeps the three artifacts of a run in
-     * step: a night that produced nothing leaves an empty index rather than the previous night's, so a
-     * read cannot resolve a card into a position in an artifact that no longer contains it.
+     * then writes is empty. Writing it unconditionally is what keeps the three objects of a run in step:
+     * a run that produced nothing publishes an empty index of its own rather than leaving a reader to
+     * pair its empty artifact with some other run's index.
      *
      * <p>Assumptions: the writer is closed before this method returns, in the same
      * try-with-resources shape as the two artifact writers above, so a failure mid-index abandons the
      * upload rather than publishing a truncated index -- and a truncated index is the one state the read
      * path refuses outright, because every position derived from it would name the wrong card.
      *
+     * @param runPrefix the run's own key prefix, which the caller composed once for all three objects;
+     *     must not be {@code null}
      * @param outcome what the generator produced, carrying one index entry per statement; must not be
      *     {@code null}
      * @throws IOException if the index cannot be published
      */
-    private void publishIndex(StatementRunOutcome outcome) throws IOException {
+    private void publishIndex(String runPrefix, StatementRunOutcome outcome) throws IOException {
         try (S3ArtifactWriter writer =
-                new S3ArtifactWriter(s3, bucket, prefix + StatementService.INDEX_OBJECT)) {
+                new S3ArtifactWriter(s3, bucket, runPrefix + StatementService.INDEX_OBJECT)) {
             for (StatementIndexEntry entry : outcome.index()) {
                 writer.write(entry.encode());
             }
+            // WHY : Assumptions: the write is completed EXPLICITLY inside the try, because
+            //       S3ArtifactWriter publishes on complete() and its close() aborts an upload that was
+            //       never completed. Relying on the close alone would publish no index at all, and a
+            //       run whose manifest named a missing index would answer every per-card read with
+            //       "not in this artifact" for statements the artifact does contain.
+            writer.complete();
+        }
+    }
+
+    /**
+     * Publishes the run, by naming it in the manifest every read resolves against.
+     *
+     * <p>Purpose: this is the run's commit. Everything before it is invisible to a reader and everything
+     * after it is visible atomically, because a single-object write in the store either replaces the
+     * object or does not.
+     *
+     * <p>Assumptions: the manifest is written through the same writer the artifacts use, to the key
+     * {@code StatementService.manifestKey} composes, and it is the ONLY object of this task that is
+     * written to a fixed key. That asymmetry is the design: the run's data is immutable so a reader
+     * cannot be shown a changed artifact, and exactly one pointer moves so a reader cannot be shown half
+     * a run. Alternatives Considered: writing a marker object into the run prefix and having readers
+     * list the prefix for the newest complete one; rejected because a listing is eventually consistent
+     * in ordering terms, costs a request per read that grows with the number of retained runs, and
+     * leaves two readers free to disagree about which run is current.
+     *
+     * @param runId the identifier of the run whose objects have all been published; must not be
+     *     {@code null}
+     * @throws IOException if the manifest cannot be published, which leaves the previous run current
+     */
+    private void publishManifest(String runId) throws IOException {
+        try (S3ArtifactWriter writer =
+                new S3ArtifactWriter(s3, bucket, StatementService.manifestKey(prefix))) {
+            writer.write(StatementService.encodeManifest(runId));
+            // WHY : Assumptions: completed explicitly for the same reason as the index above -- this is
+            //       the run's commit, and an aborted upload would leave the previous run current while
+            //       this task reported success.
+            writer.complete();
         }
     }
 

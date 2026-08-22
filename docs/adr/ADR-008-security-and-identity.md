@@ -151,18 +151,22 @@ optional.
    tiers per zone: **public** subnets carrying only the load balancer and the NAT
    gateways; **private-application** subnets carrying the ECS tasks; and
    **isolated-data** subnets carrying the database, **with no route to the
-   internet at all**. Eight interface VPC endpoints and one S3 gateway endpoint
+   internet at all**. **Ten** interface VPC endpoints and one S3 gateway endpoint
    keep AWS API traffic inside the VPC. **Three** security groups — `alb`, `app`
    and `data` — carry the only permitted flows, and the count is frozen: the
    interface-endpoint ENIs share the `app` group and the API Gateway VPC Link
    shares the `alb` group rather than either holding one of its own. There are
-   **six** flows, not three, and the extra three are mandatory rather than
-   discretionary: tasks reach S3 through the gateway endpoint (which is also how
-   an ECR image pull fetches its layers), tasks fetch the identity provider's key
-   set, and tasks reach sibling contexts through the internal listener. See the
-   flow table in
-   [security-and-identity.md](../architecture/security-and-identity.md) for the
-   per-flow ports and destination forms.
+   **seven** flows over **twelve** rule resources, not three, and the extra four are
+   mandatory rather than discretionary: tasks reach S3 through the gateway endpoint
+   (which is also how an ECR image pull fetches its layers), tasks reach the identity
+   provider's discovery and key-set documents through the `cognito-idp` interface
+   endpoint, tasks reach sibling contexts through the internal listener, and the edge's
+   VPC Link reaches that same listener. Six of the seven are declared by the network
+   module and the seventh by the API Gateway module, both on groups the network module
+   owns. The complete resource-by-resource enumeration is in
+   [Seven security-group flows, each with one purpose](#seven-security-group-flows-each-with-one-purpose);
+   [security-and-identity.md](../architecture/security-and-identity.md) carries the
+   exhaustive architecture-level inventory.
 2. **Identity.** A **Cognito user pool** with an application client. The
    baseline's `'A'` and `'U'` user types become the groups `carddemo-admin` and
    `carddemo-user`; the `cognito:groups` claim is converted to Spring Security
@@ -212,12 +216,16 @@ graph TB
     AG -->|"VPC Link"| ALB
     ALB -->|"8080"| TASK
     TASK -->|"5432"| DB
-    TASK -->|"443, stays in VPC"| VPCE
-    TASK -.->|"443, identity provider (opt-in, off by default)"| NAT
-%% All AWS API traffic leaves through VPCE, not NAT. The identity provider is the one
-%% service with no interface endpoint in the specified eight-service set, so in-task
-%% issuer resolution would leave through NAT -- and that rule is opt-in and empty by
-%% default, which is why the edge shows it dashed. By default no task reaches NAT at all.
+    TASK -->|"443, stays in VPC — includes the identity provider"| VPCE
+%% ⚠️ Refactoring Rationale: a dashed TASK -.-> NAT edge stood here, labelled "443,
+%% identity provider (opt-in, off by default)", on the reading that the identity
+%% provider had no interface endpoint. It has one -- cognito-idp is in the exact
+%% endpoint set -- and the opt-in egress rule that edge depicted is withdrawn from
+%% infra/modules/network, along with the input that created it. The edge is REMOVED
+%% rather than redrawn, because a task has no permitted path to NAT at all: the
+%% application group's egress is enumerated and no rule in it names an internet
+%% destination.
+%% All AWS API traffic leaves through VPCE, not NAT. NO application task reaches NAT.
 %% The data tier has no NAT association at all — that absence is the control.
 ```
 
@@ -347,11 +355,15 @@ Every one of those is an AWS API call, and by default each would leave through t
 NAT gateways and traverse the public internet to a public service endpoint.
 
 Ten **interface** endpoints are provisioned instead, one set per zone, covering
-exactly: the ECR API and the ECR Docker registry for image pulls, CloudWatch Logs
-for delivery, Secrets Manager for credentials, KMS for envelope operations, SQS
-for messaging, Step Functions for workflow calls, Systems Manager for
-configuration, **X-Ray** for trace export and **Cognito identity** for issuer,
-signing-key and administrative user-pool calls. Object storage uses a **gateway**
+exactly: `ecr.api` and `ecr.dkr` for image pulls, `logs` for delivery,
+`secretsmanager` for credentials, `kms` for envelope operations, `sqs` for messaging,
+`states` for workflow calls, `ssm` for configuration, **`cognito-idp`** for OIDC
+discovery, key-set retrieval and the sign-on operations, and **`xray`** — which is
+provisioned and **has no consumer**, for the reason recorded in
+[The trace path does not reach a managed backend, and that is an open AAP gap](#the-trace-path-does-not-reach-a-managed-backend-and-that-is-an-open-aap-gap).
+That set is declared identically in the default and in the exact-set validation of
+`interface_endpoint_services`, so it is a contract rather than a starting point.
+Object storage uses a **gateway**
 endpoint instead, which is a
 route-table entry rather than an ENI — the distinction matters twice over, because
 a gateway endpoint carries no hourly charge (see
@@ -371,29 +383,46 @@ silent NAT fallback is visible only in a flow log.
 Refactoring Rationale: this said **eight** interface endpoints covering eight
 services, and that "no call to one of the nine endpointed services needs internet
 egress" — the nine counting the S3 gateway. The set is ten interface endpoints plus
-the gateway, and the two additions are load-bearing rather than cosmetic. It is a
+the gateway. **One of the two additions is load-bearing and the other is not**, and
+this record does not blur them: `cognito-idp` carries the calls the paragraph below
+describes, while `xray` is provisioned against no consumer, as
+[The trace path does not reach a managed backend, and that is an open AAP gap](#the-trace-path-does-not-reach-a-managed-backend-and-that-is-an-open-aap-gap)
+records. The set is a
 deliberate SUPERSET of the enumeration in AAP §0.4.1.6 and §0.4.1.9, adopted
 because the same §0.4.1.9 states the stronger constraint that the security groups
 permit only load-balancer-to-application, application-to-Aurora and
-application-to-endpoint — no internet destination at all. Every service validates
-tokens against the pool's issuer at start-up and the telemetry sidecar exports
-traces continuously, so with an enumerated egress and no endpoint for either, both
-calls are dropped at the group: identity validation fails every request and traces
-vanish silently. Widening the endpoint enumeration keeps the constraint that governs
-security intact, whereas keeping the enumeration literal could only be paid for with
-an internet-bound rule the same section forbids. The deviation is recorded here
-rather than absorbed, and the alternative it replaced is recorded in the section
-below.
+application-to-endpoint — no internet destination at all. Every service resolves the
+pool's issuer, key set and sign-on operations at start-up and in service, so with an
+enumerated egress and no endpoint for the provider, **every one of those calls is
+dropped at the group and identity validation fails every request**. Widening the
+endpoint enumeration keeps the constraint that governs security intact, whereas keeping
+the enumeration literal could only be paid for with an internet-bound rule the same
+section forbids. The deviation is recorded here rather than absorbed, and the
+alternative it replaced is recorded in the section below.
 
 ### How the two additions were reached
 
-* the **security** claim is now unbounded for task-to-AWS traffic, because every
-  service a task calls has an endpoint: identity and trace export were the two that
-  did not, and both were added rather than routed out;
+* the **security** claim is unbounded for task-to-AWS traffic, because every AWS
+  service a task calls has an endpoint — the identity provider was the one that did
+  not, and it was added rather than routed out;
 * the **cost** claim in [§Cost Implications](#cost-implications) is bounded only by
   what the endpoints cannot displace — NAT data-processing spend for task-to-AWS
-  calls is now displaced in full, while the hourly per-endpoint-per-zone term is
+  calls is displaced in full, while the hourly per-endpoint-per-zone term is
   genuinely additive and grew by two endpoints across three zones.
+
+Assumptions: the two additions do **not** stand on the same footing, and this section
+does not treat them as though they did. `cognito-idp` is exercised on every sign-on and
+every start-up; `xray` is provisioned and **unexercised**, because span export is
+disabled everywhere and the collector that used to receive spans is withdrawn. The
+second one is a paid-for path with no consumer, recorded as an open shortfall in
+[The trace path does not reach a managed backend, and that is an open AAP gap](#the-trace-path-does-not-reach-a-managed-backend-and-that-is-an-open-aap-gap)
+rather than presented here as a delivered capability.
+⚠️ Refactoring Rationale: the paragraph above this list justified both additions on the
+claim that "the telemetry sidecar exports traces continuously". It does not: the sidecar
+is withdrawn from `infra/modules/ecs-service`. The identity half of that justification
+stands unchanged and is the one that carries the widening; the trace half is replaced by
+the gap section, because a justification that rests on a component the tree does not
+contain is the shape of claim this record exists to prevent.
 
 Refactoring Rationale: this section previously read as a rejection. It recorded that
 the two uncovered services *did* need internet egress, that "adding the endpoints for
@@ -411,26 +440,80 @@ fails **closed** on sign-on, which is the whole service. Alternatives Considered
 leaving the rule with an open default and documenting it — rejected, because a
 default that neither environment root overrides is the effective configuration of
 every environment, so the documentation would have described an intent nothing
-implemented. The input survives with an EMPTY default so that an account whose
-PrivateLink coverage genuinely falls short has a narrow, reviewable way to admit one
-destination; with the set empty the rule creates no instance.
+implemented.
+
+⚠️ Refactoring Rationale: this paragraph ended "The input survives with an EMPTY
+default so that an account whose PrivateLink coverage genuinely falls short has a
+narrow, reviewable way to admit one destination; with the set empty the rule creates no
+instance." **The input does not survive.** Both the
+`identity_provider_egress_cidrs` variable and the `app_to_identity_provider` rule it
+created are withdrawn from
+[`infra/modules/network`](../../infra/modules/network) — `variables.tf` carries a
+comment block in the variable's place headed "The identity-provider egress input is
+WITHDRAWN, and the withdrawal is the security control rather than a simplification",
+and `main.tf` carries one in the rule's place headed "The application tier has NO
+public-internet egress rule, and its absence is the control rather than an omission".
+Trade-offs: the escape hatch this record described is gone, so an account whose
+PrivateLink coverage genuinely falls short cannot open a destination by configuration —
+it has to edit the module under review. That is the accepted cost, and it is the
+stronger property: with no such input, open application-tier egress is **unexpressible**
+rather than merely unconfigured, so there is no default anyone can inherit and no
+variable a later root can set.
 
 ### Seven security-group flows, each with one purpose
 
-The permitted flows are narrow enough to enumerate completely, and the table below
-is that complete enumeration — **eleven** rule resources expressing **seven** flows,
-of which six create an instance in a delivered environment:
+The permitted flows are narrow enough to enumerate completely, and the two tables below
+are that complete enumeration, regenerated resource by resource from the HCL rather than
+carried forward. **Six** flows are declared by
+[`infra/modules/network/main.tf`](../../infra/modules/network/main.tf) over **three**
+security groups and **ten** rule resources; a **seventh** is declared by
+[`infra/modules/api-gateway-http/main.tf`](../../infra/modules/api-gateway-http/main.tf)
+over **two** more, on a group the network module owns. **Twelve rule resources, seven
+flows, two modules.** Every one of the twelve is unconditional — none is behind a
+`count` or a `for_each` — so all seven flows exist in every delivered environment, and
+there is no eighth.
 
-| Flow | Port | Destination form | Why it exists |
-|---|---|---|---|
-| Load balancer → application tasks | **8080** | group | The only ingress to a service; the tasks accept traffic from the load balancer's group and from nothing else |
-| Application tasks → load balancer | **443** | group | The internal listener, which is how one migrated context calls another without leaving the private tier |
-| Application tasks → database | **5432** | group | The only data-tier ingress, and it is sourced from the application group rather than from a CIDR range |
-| Application tasks → interface endpoints | **443** | group | Carries every AWS API call a task makes, which is what keeps that traffic off the public path |
-| Application tasks → load balancer | **443** | group | How one migrated context calls another: the delivered synchronous service-to-service edges are addressed through the internal listener, so without this rule each one fails as a connect timeout |
-| Application tasks → S3 gateway endpoint | **443** | **prefix list** | Object-storage reads and writes. A gateway endpoint places no network interface and so has no group to reference, so this rule matches the service's managed prefix list instead |
-| Isolated data tier → S3 gateway endpoint | **443** | **prefix list** | What makes the data tier's own gateway-endpoint association usable — a snapshot export, for instance — without giving it any internet path |
-| Application tasks → identity provider | **443** | **CIDR input, opt-in** | In-task issuer and key-set resolution. Cognito has no interface endpoint in the specified eight-service set, so this leaves through NAT. **The input is empty by default, so this rule does not exist unless an environment supplies a reviewed exact destination set**; `0.0.0.0/0`, anything broader than a `/12`, and the VPC's own CIDR are all refused. Refactoring Rationale: it previously defaulted to `0.0.0.0/0`, which with NAT gave every task an outbound TLS path to any internet address — the reachability SSRF and exfiltration both need. With the empty default, token validation rests on the API Gateway Cognito JWT authorizer at the edge, which reaches the provider natively because it is not in the VPC |
+Assumptions: the two tables are split by **declaring module** rather than merged, and
+the split is the point. A reader auditing the tier reads one module at a time, and a
+single merged table hid the seventh flow entirely for as long as this section claimed to
+enumerate the network module's rules and called that enumeration complete.
+
+**Declared by the network module — six flows, ten rule resources:**
+
+| Flow | Port | Destination form | Rule resources | Why it exists |
+|---|---|---|---|---|
+| Load balancer → application tasks | `var.app_container_port` (**8080**) | group | `alb_to_app` egress on the load-balancer group + `alb_to_app` ingress on the application group | The only ingress to a service; the tasks accept traffic from the load balancer's group and from nothing else |
+| Application tasks → internal load-balancer listener | **443** | group | `app_to_alb` egress on the application group + `app_to_alb` ingress on the load-balancer group | How one migrated context calls another: the delivered synchronous service-to-service edges are addressed through the internal listener, so without this rule each one fails as a connect timeout |
+| Application tasks → database | `var.database_port` (**5432**) | group | `app_to_data` egress on the application group + `app_to_data` ingress on the data group | The only data-tier ingress, and it is sourced from the application group rather than from a CIDR range |
+| Application tasks → interface endpoints | **443** | group (**self-referencing**) | `app_to_endpoints` egress + `app_to_endpoints` ingress, both on the application group | Carries every AWS API call a task makes, which is what keeps that traffic off the public path. Assumptions: the interface endpoints' ENIs are placed in the **application** group rather than a fourth group of their own, so this pair references that group from itself — which is why the destination form reads "self-referencing" and not because two groups were conflated |
+| Application tasks → S3 gateway endpoint | **443** | **prefix list** | `app_to_s3_gateway` egress on the application group | Object-storage reads and writes. A gateway endpoint places no network interface and so has no group to reference, so this rule matches the service's managed prefix list instead. One resource, not a pair: a prefix-list destination has no group on which to write a matching ingress rule |
+| Isolated data tier → S3 gateway endpoint | **443** | **prefix list** | `data_to_s3_gateway` egress on the data group | What makes the data tier's own gateway-endpoint association usable — a snapshot export, for instance — without giving it any internet path |
+
+**Declared by the API Gateway module — one flow, two rule resources:**
+
+| Flow | Port | Destination form | Rule resources | Why it exists |
+|---|---|---|---|---|
+| VPC Link → internal load-balancer listener | **443** | group (**self-referencing**) | `vpc_link_to_alb_https` egress + `alb_from_vpc_link_https` ingress, both on the load-balancer group | The edge's only path into the VPC. Assumptions: the VPC Link's ENIs are placed in the **private-application** subnets and carry the **load-balancer** group, so this pair references that group from itself for the same reason the endpoint pair does — the group is shared rather than duplicated, which is what holds the security-group count at the frozen three |
+
+⚠️ Refactoring Rationale: the network-module table read "**eleven** rule resources
+expressing **seven** flows, of which six create an instance", and it listed
+`Application tasks → load balancer` on **443** **twice** — once as "the internal
+listener, which is how one migrated context calls another" and again, four rows later,
+as "How one migrated context calls another". One flow counted twice is what carried
+the seventh, and the eleventh resource was an
+`Application tasks → identity provider` rule created per entry of an
+`identity_provider_egress_cidrs` input. **Both that rule and that input are withdrawn
+from the module** — `main.tf` now carries, in their place, a comment block headed "The
+application tier has NO public-internet egress rule, and its absence is the control
+rather than an omission", and `variables.tf` no longer accepts the input at all. The
+row is therefore removed rather than marked optional: a row for a rule that cannot be
+expressed would describe a configuration no environment can reach. Its last stated
+justification — that "Cognito has no interface endpoint in the specified eight-service
+set" — had in any case already lapsed, because `cognito-idp` is in the exact endpoint
+set this record enumerates above. Trade-offs: the table now names the resource
+identifiers alongside each flow, which makes it longer, and buys the property the
+previous version lacked — a reader can diff it against the module resource by resource
+instead of matching prose to intent, so a duplicated row cannot survive the next read.
 
 Wherever a group can be named, the rule is written source-group to
 destination-group rather than by address range. Alternatives Considered:
@@ -438,25 +521,53 @@ CIDR-based rules would be equivalent on the day they are written and would drift
 the moment a subnet is resized or re-numbered, because the range and the
 membership are then two facts that have to agree.
 
-Assumptions: the last three rules cannot take that form, and the reason differs
-between them. The two S3 rules cannot because the destination is a gateway
-endpoint with no group to reference; a managed prefix list is the narrowest
-destination available and it still resolves to one service. The identity rule
-cannot because the destination it would name is outside the VPC — which is why
-it names nothing.
+Assumptions: exactly **two** of the twelve rules cannot take that form, and both for the
+same reason — `app_to_s3_gateway` and `data_to_s3_gateway` address a **gateway**
+endpoint, which places no network interface and therefore exposes no group to
+reference. A managed prefix list is the narrowest destination available for them and it
+still resolves to one service rather than to a range of addresses. Every one of the
+other ten names a group on both ends.
 
-Refactoring Rationale: this table listed **six** flows over **ten** rule resources
-and omitted the application-to-load-balancer rule entirely, while its identity row
-said Cognito "has no interface endpoint in the specified eight-service set, so this
-leaves through NAT". Both matter to a reader auditing the tier: an omitted flow makes
-a complete enumeration incomplete in the one direction that hides a permission, and
-the identity row described an open outbound rule as necessary when the endpoint that
-makes it unnecessary is provisioned three sections above. Trade-offs: the identity
-rule is retained rather than deleted, so the topology still contains a way to open
-one 443 destination. What bounds it is the empty default — opening it is an explicit
-tfvars change that appears in a plan diff — together with the single port, the
-egress-only direction, and a module precondition that refuses a value naming the
-VPC's own CIDR.
+⚠️ Refactoring Rationale: this paragraph read "the last **three** rules cannot take
+that form", the third being an identity rule whose destination "is outside the VPC —
+which is why it names nothing". There is no such rule: the identity provider is reached
+through the `cognito-idp` interface endpoint under the existing
+application-to-endpoint pair, so the only rules that cannot name a group are the two
+prefix-list rules. Trade-offs: naming the two resources rather than saying "the last
+two" costs a clause and removes the failure this paragraph had — a positional reference
+into a table silently changes meaning when a row is added or removed, which is exactly
+what happened here.
+
+### The three modules that carry the network boundary, counted from the HCL
+
+The flows above are enforced by resources in three modules, and the resource counts are
+given so that a reader can confirm this record covers each module completely rather than
+sampling it. Every figure below was counted from the module's own `main.tf`:
+
+| Module | Resource declarations | What this record is accountable for |
+|---|---|---|
+| [`infra/modules/network`](../../infra/modules/network) | **37** — 3 `aws_security_group` plus `aws_default_security_group` (stripped of every rule), 10 security-group rules (**6** egress, **4** ingress), `aws_vpc_endpoint.interface` (`for_each` over the **10**-service exact set) and `aws_vpc_endpoint.s3`, 2 endpoint route-table associations, `aws_vpc`, the internet gateway, 3 `aws_subnet` sets, 3 route tables with 3 associations and 2 routes, `aws_nat_gateway.this` and `aws_eip.nat` (both `for_each`ed over the public subnets, so **three of each** in a three-zone environment), and the flow log with its log group, role and role policy | The endpoint set, the security groups and their rules, and the isolated tier's absence of a route |
+| [`infra/modules/alb`](../../infra/modules/alb) | **9** — `aws_lb.this` (`internal = true`), `aws_lb_listener.https`, `aws_lb_listener_rule.service` (`for_each` over `var.service_routes`, so **one rule per routed service**), and the 6 resources that make the access-log bucket private, versioned, encrypted and writable only by the log-delivery principal | That the listener is internal and that access logging exists on it |
+| [`infra/modules/api-gateway-http`](../../infra/modules/api-gateway-http) | **10** — the HTTP API, the **Cognito JWT authorizer**, the VPC Link, the private integration, `aws_apigatewayv2_route.service` and `.public` (both `for_each`ed over route maps), the stage, its access-log group, and the **2 security-group rules** that make up the seventh flow above | The edge's token validation and its single private path into the VPC |
+
+Assumptions: several of these declarations are `for_each`ed rather than fixed — the
+interface endpoints over the service set, the subnets, route tables, NAT gateways and
+addresses over the zone set, and the listener rules and API routes over the service
+inventory — so their *instance* counts follow the environment while their *declaration*
+counts do not. The table gives declarations and names the iteration for each, because a
+declaration count is a property of the module and an instance count is a property of a
+root; conflating them is what makes a published inventory go stale on the next service
+or the next zone.
+Alternatives Considered: publishing instance counts per environment instead. Rejected —
+they would have to be restated in this record every time a service is added, which is
+the maintenance shape that produced the drift this section replaces.
+
+⚠️ Refactoring Rationale: no such inventory existed. Its absence is why the flow table
+above could claim to be complete while omitting the VPC-Link flow declared in a second
+module, and why a reader could not tell whether this record had read the edge modules at
+all. Trade-offs: a count in prose is a claim that goes stale, which is the objection to
+adding this table — answered by giving the file for each row and the iteration for each
+`for_each`, so a reader can re-derive every figure rather than trust it.
 
 ### The edge validates, and so does every request-serving service
 
@@ -806,17 +917,27 @@ closes a different way a credential could otherwise arrive.
    > `CognitoUserProvisioningService` generates a policy-compliant one-time credential
    > with `java.security.SecureRandom` each time `POST /api/v1/auth/users` creates a
    > user, supplies it to the pool as the created account's temporary password, and
-   > returns it once in the create response — its destination is a **response body**,
-   > not Secrets Manager and not a file. It is added here because a reader auditing
-   > where credentials come from would otherwise find a generator this record does not
-   > account for, and because the earlier arrangement — creating the account with no
-   > supplied credential at all — produced accounts nobody could sign on to: the
-   > provider minted one internally, the pool declares no contact attribute to deliver
-   > it over, and `seed_user_bootstrap.py` reaches only the seed identities.
-   > Assumptions: the "no secrets committed" claim is untouched by it. The value is
-   > never written to a file, never persisted (there is no column for it), never
-   > logged, and single-use — the account is in `FORCE_CHANGE_PASSWORD`, exactly as the
-   > seed row above describes, so it buys one sign-in before going inert. The
+   > has **two** destinations for it: the **response body**, which returns it once and
+   > is how the administrator performing the create obtains it, and a per-user
+   > **Secrets Manager** entry encrypted with the secrets CMK, which is how an
+   > administrator whose response was lost recovers it under that store's audit trail.
+   > Neither is a file. It is added here because a reader auditing where credentials
+   > come from would otherwise find a generator this record does not account for, and
+   > because two earlier arrangements each produced accounts nobody could sign on to.
+   > The first created the account with no supplied credential at all: the provider
+   > minted one internally, the pool declares no contact attribute to deliver it over,
+   > and `seed_user_bootstrap.py` reaches only the seed identities. The second
+   > generated and archived the value but returned only the entry's **name**, which
+   > reads as the safer design and is not — the archived entry is readable only with
+   > `secretsmanager:GetSecretValue` and a grant on that CMK, which the task role holds
+   > and a browser session does not, so the principal obliged to hand the credential
+   > over could not read it.
+   > Assumptions: the "no secrets committed" claim is untouched by either destination.
+   > The value is never written to a file, never persisted in this system's own schema
+   > (there is no column for it), never logged, never cached — the response is marked
+   > `Cache-Control: no-store` — and single-use, the account being in
+   > `FORCE_CHANGE_PASSWORD` exactly as the seed row above describes, so it buys one
+   > sign-in before going inert. The
    > divergence is registered as `D-RUNTIME-CREDENTIAL-HANDOVER` in
    > [`cobol-to-service-traceability.md`](../architecture/cobol-to-service-traceability.md)
    > and the mechanism is described in
@@ -946,7 +1067,7 @@ which presumed egress that does not exist. The same correction is recorded besid
 in both places because "we accept this cost for resilience" is exactly the claim a
 cost review takes at face value.
 
-**The eight interface endpoints are worth paying for, and the reason is partly
+**The ten interface endpoints are worth paying for, and the reason is partly
 financial.** The security consequence is stated in [§Rationale](#rationale) —
 every service a task calls has an endpoint, so task-to-AWS traffic stays inside the
 VPC without exception. The
@@ -957,9 +1078,13 @@ hourly per-endpoint-per-zone term is genuinely additive; the data term largely m
 from one line to another. Presenting the endpoints as pure additional cost would
 overstate them, and presenting them as free would understate them.
 
-Assumptions: for **task-to-AWS** traffic the displacement is now complete rather
-than partial, because Cognito identity and X-Ray are in the endpoint set — the two
-services that used to be the residue. What the endpoints do not displace is the
+Assumptions: for **task-to-AWS** traffic the displacement is complete rather than
+partial, because `cognito-idp` and `xray` are both in the endpoint set — the two
+services that used to be the residue. Trade-offs: `xray`'s endpoint-zone-hours are
+paid today against **no consumer**, and that is recorded here rather than netted out
+of the count; see
+[The trace path does not reach a managed backend, and that is an open AAP gap](#the-trace-path-does-not-reach-a-managed-backend-and-that-is-an-open-aap-gap).
+What the endpoints do not displace is the
 egress a task makes to something that is not an AWS API, and this stack has none
 under the rules the network module declares, so the NAT gateways are paid for as
 availability infrastructure and as the path a future non-AWS dependency would take.
@@ -967,10 +1092,9 @@ A reader modelling this tier should therefore treat the three hourly gateway cha
 as a floor that is largely unused rather than as a data-processing line.
 Refactoring Rationale: this paragraph said Cognito and X-Ray "have no endpoint in
 the frozen eight-service set, so their traffic continues to cross the NAT gateways",
-and quantified the residue on that basis. Both have endpoints, added after exactly
-that omission was found, so the residue it described is zero — and leaving the
-sentence in the cost section would have kept a reader believing a public path for
-token operations exists somewhere in this design.
+and quantified the residue on that basis. Both have endpoints, so the residue it
+described is zero — and leaving the sentence in the cost section would have kept a
+reader believing a public path for token operations exists somewhere in this design.
 
 ### Identity, keys and secrets
 
@@ -1024,7 +1148,7 @@ that their limits are visible: **log retention days**, and the
 **deletion-protection** and **final-snapshot** flags.
 
 **The security topology is not a place `dev` saves money, and that is deliberate.**
-The same three tiers across the same three zones, the same eight interface
+The same three tiers across the same three zones, the same ten interface
 endpoints and the same three NAT gateways are deployed to both, so `dev` pays the
 full network floor. The reason is validation: a `dev` environment with one zone, or
 with the database in the application subnets, or reaching AWS services through NAT
@@ -1060,7 +1184,7 @@ were also the cheapest. It is not, and that is the point.
 
 ### Trade-offs accepted
 
-* **Three NAT gateways and eight interface endpoints across three zones are the
+* **Three NAT gateways and ten interface endpoints across three zones are the
   price of zone-independent egress and a private AWS API path.** The charge shape
   is in [§Cost Implications](#cost-implications). Accepted: the hourly terms are
   paid so that no zone depends on another for egress and no task needs internet
@@ -1118,6 +1242,48 @@ were also the cheapest. It is not, and that is the point.
   credential — but it is not a user-management strategy, and a real deployment
   would federate to an existing provider or manage its users through the pool's own
   administration.
+
+### The trace path does not reach a managed backend, and that is an open AAP gap
+
+This record provisions the `xray` interface endpoint and pays for its three
+endpoint-zone-hours, and **nothing sends a span through it.** The gap is stated here,
+in the security record that owns the endpoint set, because that is where a reader
+auditing the ten endpoints against their consumers will look for it.
+
+What exists: `services/common-lib/pom.xml` declares
+`spring-boot-starter-opentelemetry`, so every service creates spans, and
+`CorrelationIdFilter` puts one correlation identifier into the diagnostic context and
+onto the response — so a unit of work is followable **through the logs**, across
+services, without any span export at all. What does not exist: an OTLP exporter.
+[`services/common-lib/src/main/resources/carddemo-common-defaults.yml`](../../services/common-lib/src/main/resources/carddemo-common-defaults.yml)
+sets `management.tracing.export.otlp.enabled: false`, no profile and no task
+definition overrides it, and the task-local collector sidecar that used to receive
+spans is withdrawn from `infra/modules/ecs-service`. **Spans are created and
+discarded.**
+
+Assumptions: AAP §0.1.1.2 lists "centralized logging, metrics and tracing" among the
+cross-cutting concerns, and §0.9.4's Phase F restates it, so tracing is a stated
+requirement and this is a shortfall against it rather than a scope choice. **No claim
+is made anywhere in this record that spans reach a managed tracing backend**, and the
+endpoint's presence must not be read as one — an endpoint is a network path, not a
+consumer.
+
+Trade-offs: the endpoint is retained rather than removed with the sidecar, and the
+cost of that decision is three endpoint-zone-hours for an unexercised path. It is
+accepted because the exact-set validation makes the endpoint list a topology contract:
+removing the entry and restoring it later are two reviewed changes to that contract
+plus a change to the workflow that asserts it, whereas leaving it in place means
+re-enabling export is a configuration change in one file. Alternatives Considered:
+removing `xray` from the exact set until an exporter exists, which is the narrower
+position and the cheaper one. Rejected because it would make the endpoint set
+oscillate with the state of an unrelated deferral, and because the residual charge is
+the smallest quantity named anywhere in [§Cost Implications](#cost-implications).
+
+Refactoring Rationale: an earlier revision of this record resolved the same tension in
+the opposite direction — it declared both `xray` and `cognito-idp` withdrawn from the
+endpoint set while enumerating ten endpoints elsewhere in the same document. That is
+the defect this section replaces: the shortfall is now recorded once, as a shortfall,
+rather than being papered over by a withdrawal the module never made.
 
 ### Assumptions
 
@@ -1211,20 +1377,43 @@ establish that the resulting environment behaves as described.
   of an earlier revision carrying a `0.0.0.0/0` egress rule and became false when
   that rule was withdrawn — and the difference matters, because it turns an omission
   from a cost and privacy defect into an outage. The endpoint set is validated as an
-  exact set for that reason. Refactoring Rationale: this bullet went on to say that
-  "X-Ray and the Cognito identity provider were both added to it after exactly this
-  omission was found". Both additions have since been **withdrawn**, and the sentence
-  is corrected rather than left standing because it recorded a precedent for widening
-  a frozen set. AAP §0.4.1.9 states the endpoint set exactly at eight, so a ninth or
-  tenth entry is a topology change rather than a repaired omission. X-Ray had one
-  consumer, a telemetry collector sidecar that is itself outside the AAP and is
-  withdrawn from `infra/modules/ecs-service`. The Cognito endpoint additionally did
-  not work: the module's shared endpoint policy is scoped to same-account principals
-  while the identity calls on that path are unauthenticated by construction, so they
-  were implicitly denied. In-task issuer resolution is served instead by an opt-in,
-  empty-by-default egress rule naming a reviewed exact destination set. So the rule
-  for a genuinely new AWS dependency is narrower than this bullet implied: it needs an
-  endpoint **within** the stated eight, or an AAP amendment.
+  exact set for that reason — **ten** services, declared identically in the default and
+  in the exact-set validation of `interface_endpoint_services`, so a root cannot add
+  one and cannot omit one.
+  ⚠️ Refactoring Rationale: this bullet went on to say that the X-Ray and Cognito
+  endpoints had both been "**withdrawn**", and it justified the withdrawal on AAP
+  §0.4.1.9 stating the set "exactly at eight". Neither claim describes the module. Both
+  endpoints are in
+  [`infra/modules/network/variables.tf`](../../infra/modules/network/variables.tf) — in
+  the default **and** in the exact-set validation — so the sentence asserting their
+  withdrawal sat in the same document as the ten-endpoint enumeration three sections
+  above, and a reader had two mutually exclusive topologies to choose between. **Ten is
+  the decision, and the two entries beyond §0.4.1.9's eight are named as deliberate,
+  documented additions rather than left to be discovered as a discrepancy.** Their
+  standing is not the same and is not presented as such:
+  * `cognito-idp` is **load-bearing**. Removing it broke sign-on, and the mechanism is
+    specific rather than general: the shared account-scoped endpoint policy denied the
+    OIDC discovery, key-set and sign-on calls, which are unauthenticated by
+    construction and so match no same-account principal. `main.tf` now attaches a
+    **per-endpoint** document to this one endpoint alone, selected by service name so no
+    root can attach the wrong one, admitting exactly five operations by name —
+    `InitiateAuth`, `RespondToAuthChallenge`, `GetTokensFromRefreshToken`, `RevokeToken`
+    and `GlobalSignOut`. The other nine endpoints keep the shared account-scoped
+    document. [`.github/workflows/infra-ci.yml`](../../.github/workflows/infra-ci.yml)
+    asserts that `cognito-idp` appears in both the default and the validation, so this
+    entry cannot be dropped without failing the build.
+  * `xray` has **no consumer today**, and that is stated rather than implied.
+    `services/common-lib/pom.xml` pulls `spring-boot-starter-opentelemetry`, so spans
+    are created and the trace and span identifiers reach the logs through
+    `CorrelationIdFilter` — but **no OTLP exporter is configured anywhere**
+    (`carddemo-common-defaults.yml` sets `management.tracing.export.otlp.enabled:
+    false`, and no profile or task definition overrides it), and the collector sidecar
+    that used to receive spans is withdrawn from `infra/modules/ecs-service`. **Span
+    export therefore does not happen, and no span reaches a managed tracing backend.**
+    See
+    [The trace path does not reach a managed backend, and that is an open AAP gap](#the-trace-path-does-not-reach-a-managed-backend-and-that-is-an-open-aap-gap).
+  So the rule for a genuinely new AWS dependency is: it needs an endpoint **within** the
+  stated ten, or an amendment to that exact set argued the way these two were.
 * **Two behavioural differences are registered rather than absorbed:** the declined
   password parity, and the sign-on sentence emitted for a refused credential. Both
   belong in

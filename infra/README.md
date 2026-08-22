@@ -47,8 +47,8 @@ The completed package is intended to provision, in a single region across three
 availability zones, the whole target platform: a three-tier VPC, an Aurora
 PostgreSQL Serverless v2 cluster, an ECS Fargate cluster running the eight
 bounded-context services, an internal Application Load Balancer behind an API
-Gateway HTTP API, a Cognito user pool, six primary SQS queues with six dead-letter
-queues, a Step Functions state machine replacing the nightly JCL chain, a
+Gateway HTTP API, a Cognito user pool, five primary SQS queues each with a dead-letter
+queue, a Step Functions state machine replacing the nightly JCL chain, a
 versioned S3 bucket for dataset generations, a CloudFront-fronted bucket for the
 single-page application, ten ECR repositories, four KMS customer-managed keys,
 Secrets Manager entries, and the log groups, dashboards and alarms replacing the
@@ -141,7 +141,7 @@ tempted to relax.
 | Constraint | Value | Declared in | Reasoning |
 |---|---|---|---|
 | `required_version` | `>= 1.15.0` | the sixteen modules | Trade-offs: an open-ended floor rather than an exact pin. A module is consumed by a caller whose own CLI version it cannot control, so a floor lets Terraform intersect every constraint in the graph and select one satisfying CLI, where an exact pin in sixteen places would have to be edited in sixteen places. |
-| `required_version` | `~> 1.15.0` | the three roots | Assumptions: a root is the directory an operator actually runs, so it is the right place to bound the minor line as well as the floor. Validated on **1.15.8**. |
+| `required_version` | `>= 1.15.0` | the three roots | Assumptions: the SAME open floor the sixteen modules carry, so the whole graph declares one form and no file can veto another. Refactoring Rationale: this row read `~> 1.15.0` on the reasoning that a root is where a version is selected. The roots declare `>= 1.15.0` -- `infra/bootstrap/versions.tf`, `infra/envs/dev/versions.tf` and `infra/envs/prod/versions.tf` -- and the premise was false anyway: the version is selected by the installer step that fetches the CLI, which pins **1.15.8** in `infra-ci.yml` and `deploy.yml` against a digest. 1.15.8 is therefore the reviewed installer version, not a constraint. `docs/adr/ADR-009-iac-tool.md` records the decision. |
 | `hashicorp/aws` | `~> 6.56` | all nineteen directories | Assumptions: the provider only accepts an Aurora Serverless **minimum capacity of zero** from **5.80.0** onward, and the auto-pause-seconds argument a zero minimum makes mandatory only from **5.81.0**, so the effective floor for the pair is **5.81.0**, and `dev` is the environment permitted to use it, so 5.81.0 is a hard floor rather than a preference. 6.56 clears it with room to spare. Alternatives Considered: a bare `>= 5.81` was rejected because it has no upper bound and would admit a 7.x major whose resource-schema changes would land unreviewed across every module at once; an exact `= 6.56.0` was rejected because it blocks provider patch releases while buying nothing this stack needs. Verified against the Terraform Registry at 6.56.0. |
 | `hashicorp/random` | `~> 3.9` | all seventeen directories that declare a provider set | Assumptions: the constraint is declared uniformly so Terraform resolves **one** release for the whole module graph, rather than only in the directories that currently use it. Four directories use it today, and each uses it as an **`ephemeral`** resource or for a non-secret handle: `modules/secrets` generates each service database credential with `ephemeral "random_password"`, `envs/dev` and `envs/prod` generate the messaging-HMAC, internal-identity and pagination-cursor keys the same way, and `modules/cognito` uses `random_id` only for the opaque 128-bit handle in a secret's NAME. An ephemeral value is never written to state, which is what keeps a generated credential out of both the repository and the state file structurally rather than by reviewer vigilance. Assumptions: this provider does NOT generate the Cognito seed-user credentials — `terraform_data.seed_user_credential` in `modules/cognito` runs `seed_user_bootstrap.py`, which mints each one and writes it straight to Secrets Manager — and it does not generate the Aurora master password either, which `manage_master_user_password = true` delegates to the database service. Refactoring Rationale: this row previously named four directories and asserted the provider was declared "deliberately nowhere else", singling out `infra/bootstrap` as an intentional omission. It is in fact declared in seventeen directories including `infra/bootstrap`, and it generated neither of the two credential kinds the row credited it with. |
 
@@ -212,7 +212,7 @@ resources yet.
 | `cloudfront-spa` | S3 origin with an origin access control, the distribution, and single-page-application error routing | `app/bms/*.bms` — the delivery path that replaces the 3270 terminal |
 | `observability` | Log groups, dashboards, alarms and an SNS topic | the `SYSOUT` and `SYSPRINT` DD statements across the 38 jobs — 116 occurrences of `SYSOUT=*` and 80 `SYSPRINT DD`, which is what the job log actually was |
 
-### 4.1 Why `ecr` provisions exactly ten repositories
+### 4.1 Why `ecr` provisions eleven repositories for ten deployables
 
 Assumptions: an ECR repository is needed per **container image**, not per Maven
 module, and those two counts differ by one. There are **nine** Maven modules under
@@ -223,20 +223,40 @@ images gives **ten** deployables built from this repository: the eight
 bounded-context services plus `ui` plus `data-migration`. Counting Maven modules
 instead would invent a repository that nothing ever pushes to.
 
-Refactoring Rationale: this section briefly read **eleven**, the eleventh being
-`aws-otel-collector`, a mirror of a pinned third-party telemetry image that this
-repository does not build. Both the mirror and the eleventh repository are
-**withdrawn**. The argument for the mirror was sound as far as it went —
-`ecs-service` attached a collector sidecar to every workload, `network` enumerates
-the application tier's egress instead of allowing every destination on 443, and
-Amazon ECR Public is not served by the `ecr.api` and `ecr.dkr` endpoints, so
-without a mirror no task could pull its sidecar. It was the wrong thing to fix.
-Neither the collector nor an eleventh repository appears in the frozen AAP, so the
-resolution is to remove the component rather than to keep defending the repository
-it needed: `ecs-service` no longer composes the sidecar and records there what is
-kept for the observability concern — container logs, the Actuator Prometheus
-surface, `common-lib`'s common metric tags and end-to-end request correlation.
-Ten is therefore both what this repository builds and what the registry holds.
+Assumptions: the **eleventh** repository holds `aws-otel-collector`, a mirror of a
+pinned third-party telemetry image that this repository does not build, and it is
+declared through a separate input for exactly that reason.
+`third_party_mirror_repository_names` is held apart from `repository_names` so the
+ten-deployable count stays assertable — `.github/workflows/infra-ci.yml` asserts the
+ten as an exact set — while `main.tf` unions the two and gives the mirror the same
+scan-on-push, encryption and lifecycle treatment as everything else. So ten is what
+this repository *builds*, eleven is what the registry *holds*, and the two numbers
+are different on purpose rather than by drift.
+
+Assumptions: the mirror exists because a private task cannot reach the public
+registry. `ecs-service` attaches an AWS Distro for OpenTelemetry collector sidecar to
+every workload, the application tier holds no egress rule to any public destination,
+and Amazon ECR Public is not served by the `ecr.api` and `ecr.dkr` interface
+endpoints — so a task pulling its sidecar from `public.ecr.aws` would fail to start
+with no route to fix it. Mirroring the image into this registry is what makes the
+pull an in-VPC call like every other pull. It also pins what runs: the mirror is
+immutable-tagged and its digest is recorded in `image_digests`.
+
+Refactoring Rationale: this section read **ten**, with the mirror and the sidecar
+both **withdrawn** on the grounds that neither appears in the frozen plan's
+repository count. The withdrawal is reversed, because it discharged the count by
+deleting a deliverable: AAP §0.2.1.4 and §0.9.3 require centralised metrics and
+tracing, and with no collector the estate published meters nothing collected and
+spans nothing exported. The count objection is answered instead of ignored — the ten
+deployables §0.4.1.6 enumerates are provisioned from `repository_names` and gated in
+CI as an exact set, and the mirror is a separate input holding a cached third-party
+image that is not one of them.
+
+Trade-offs: an operator has one more step before the first deployment, and it cannot
+be skipped — the sidecar is `essential`, so a task whose collector cannot be pulled
+never reaches `RUNNING`. `docs/runbooks/deploy.md` §2b is that step, and it runs
+after `terraform apply` has created the repository and before any task is rolled onto
+the new image.
 
 ---
 

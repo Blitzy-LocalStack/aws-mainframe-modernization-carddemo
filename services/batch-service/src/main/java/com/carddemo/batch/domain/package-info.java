@@ -37,17 +37,27 @@
  * {@code docs/CODE_DOCUMENTATION_STANDARD.md}, cited by path and never restated.
  * <h2>What this package holds, and which contract each mapping is bound to</h2>
  *
- * <p>Ten entity types belong here and no eleventh; with this charter that makes eleven compilation
+ * <p>Eleven entity types belong here and no twelfth; with this charter that makes twelve compilation
  * units. Each mapping is listed with the schema-qualified table it targets and the baseline
  * record that fixes its field set.
  *
- * <p>Assumptions: eleven is this package's contract as the migration plan assigns it and also a
- * measurement of the directory, because all ten entities have landed -- {@code BatchRun},
- * {@code Account}, {@code CardXref}, {@code DisclosureGroup}, {@code Transaction},
- * {@code DailyTransaction}, {@code TransactionCategoryBalance}, {@code TransactionReject},
- * {@code Customer} and {@code Card} -- so nothing in the roster below is planned. The roster stays
- * closed at ten, which is what keeps the question "which entity owns this table" with a definite
- * answer.
+ * <p>Assumptions: twelve is this package's contract as the migration plan assigns it and also a
+ * measurement of the directory, because all eleven entities have landed -- {@code BatchRun},
+ * {@code DailyFeedWatermark}, {@code Account}, {@code CardXref}, {@code DisclosureGroup},
+ * {@code Transaction}, {@code DailyTransaction}, {@code TransactionCategoryBalance},
+ * {@code TransactionReject}, {@code Customer} and {@code Card} -- so nothing in the roster below is
+ * planned. The roster stays closed at eleven, which is what keeps the question "which entity owns
+ * this table" with a definite answer.
+ *
+ * <p>Refactoring Rationale: the roster read ten and CLOSED at ten while {@code DailyFeedWatermark}
+ * was already mapped in this directory, and the omission was not a miscount -- it left the module's
+ * SECOND owned table undocumented in the very layer that defines it, so a reader auditing what this
+ * module owns found one owned table named and a closed roster telling them to look no further. The
+ * consequence was concrete rather than cosmetic: the table decides where a posting pass RESUMES, and
+ * for as long as this charter denied its existence nothing recorded that it needed an owner, a test
+ * or a grant. Every count in this block, in the boundary section below and in the two ratios further
+ * down is corrected together, because a roster that is right in one paragraph and wrong in the next
+ * is no more usable than one that is wrong throughout.
  *
  * <p>Refactoring Rationale: the roster stood at eight and was CLOSED at eight, and that closure was
  * the direct cause of a data-integrity defect rather than a documentation slip. {@code CBEXPORT}
@@ -75,12 +85,40 @@
  *
  * <dl>
  *   <dt>{@code BatchRun} into {@code batch.batch_run}</dt>
- *   <dd>The one table this module owns, and the only member of this package with no baseline
- *       record behind it. It is the durable step ledger: a row per run and step, carrying the
- *       lifecycle state, the start and end instants and the published exit status. Its columns
- *       are created by {@code services/batch-service/src/main/resources/db/migration/}
+ *   <dd>The FIRST of the two tables this module owns, and one of the two members of this package
+ *       with no baseline record behind it. It is the durable step ledger: a row per run and step,
+ *       carrying the lifecycle state, the start and end instants and the published exit status. Its
+ *       columns are created by {@code services/batch-service/src/main/resources/db/migration/}
  *       {@code V1__batch.sql}, which also declares the uniqueness constraint over the run and
- *       step pair that makes the row an idempotency key.</dd>
+ *       step pair that makes the row an idempotency key. Assumptions: its start instant is mapped
+ *       UPDATABLE, unlike the run identifier and step name beside it, because re-opening a row for a
+ *       further attempt replaces that instant with the new attempt's own -- an operator reading a
+ *       recovered night asks when the attempt now running began, and the attempt counter carries the
+ *       history the earlier instants would otherwise have to.</dd>
+ *
+ *   <dt>{@code DailyFeedWatermark} into {@code batch.daily_feed_watermark}</dt>
+ *   <dd>The SECOND table this module owns, and the second member with no baseline record behind it.
+ *       One row per feed, keyed by the feed's record-layout name, carrying the highest ingestion
+ *       ordinal any run has consumed together with the run, business date and instant that advanced
+ *       it. Its columns are created by
+ *       {@code services/batch-service/src/main/resources/db/migration/}
+ *       {@code V2__batch_feed_watermark.sql}, which also declares the four check constraints that
+ *       keep a negative ordinal, a blank feed name, a blank run identifier and a business-date token
+ *       of the wrong width out of the table.
+ *       <p>Assumptions: it has no baseline record because the reference needed none.
+ *       {@code app/jcl/POSTTRAN.jcl:30-31} supplies the feed as the flat sequential dataset
+ *       {@code AWS.M2.CARDDEMO.DALYTRAN.PS} and {@code app/cbl/CBTRN02C.cbl:202-219} reads it to end
+ *       of file -- and that dataset is REPLACED between runs, so "the whole file" and "tonight's
+ *       transactions" are the same set. The target's feed accumulates, its rows being what the three
+ *       verification passes in {@code docs/runbooks/data-migration.md} compare against, so the
+ *       identity the replaced dataset carried implicitly has to be carried explicitly, and this row
+ *       carries it. The divergence is registered with the step ledger's in
+ *       {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+ *       <p>Assumptions: getting this row wrong is not a one-record fault. A position that advanced
+ *       too far skips those transactions permanently; one that failed to advance re-posts them, and
+ *       under the additive model of {@code app/cbl/CBTRN02C.cbl:202-219} every amount is added to its
+ *       account balance a second time -- each of those postings individually valid, so no reject is
+ *       written and no return code changes.</p></dd>
  *
  *   <dt>{@code Customer} into {@code account.customers}, from {@code app/cpy/CVCUS01Y.cpy}</dt>
  *   <dd>The 500-byte customer record, walked in key order by the export alone -- the first phase of
@@ -199,20 +237,21 @@
  *
  * <h2>The schema-ownership boundary</h2>
  *
- * <p><b>{@code batch.batch_run} is the only table this module owns.</b> The other nine
+ * <p><b>The two tables in the {@code batch} schema -- {@code batch.batch_run} and
+ * {@code batch.daily_feed_watermark} -- are the only tables this module owns.</b> The other nine
  * mappings target tables owned elsewhere: {@code ledger} belongs to {@code transaction-service},
  * {@code account} and {@code card} to {@code account-service} and {@code card-service}, and
  * {@code reference} to {@code reference-service}. This module reaches them through a narrowly-scoped database grant
  * held by a dedicated role, and through nothing else. Reading this package as though it owned
- * ten tables is the single most consequential misreading available here, which is why the
+ * eleven tables is the single most consequential misreading available here, which is why the
  * boundary is stated before any mapping detail rather than after it.</p>
  *
  * <p>Assumptions: the grant graph is not created here, and neither are the tables. The schemas,
  * the per-service roles and the cross-schema grants are created by
- * {@code data-migration/sql/V0__schemas_and_roles.sql};
- * {@code services/batch-service/src/main/resources/db/migration/V1__batch.sql} creates
- * {@code batch} objects and only {@code batch} objects, and issues no grant, no revoke, no role
- * and no schema of its own. <b>This package declares mappings only, and creates, alters or seeds
+ * {@code data-migration/sql/V0__schemas_and_roles.sql}; this module's own migrations --
+ * {@code services/batch-service/src/main/resources/db/migration/V1__batch.sql} and
+ * {@code V2__batch_feed_watermark.sql} -- create {@code batch} objects and only {@code batch}
+ * objects, and issue no grant, no revoke, no role and no schema of their own. <b>This package declares mappings only, and creates, alters or seeds
  * no other service's schema.</b> The tables, columns, types and indexes those nine mappings
  * describe are created by the owning services' own migrations, so an annotation here describes a
  * shape that already exists rather than requesting one that does not.</p>
@@ -221,10 +260,11 @@
  * {@code @Table(indexes = ...)}, none declares {@code @Table(uniqueConstraints = ...)}, and none
  * names a key generation strategy that implies sequence or identity DDL. Hibernate is never
  * permitted to emit DDL in this module: schema evolution is Flyway's, and the JPA setting is at
- * most an assertion against the existing shape, never a generator of it. {@code BatchRun} is the
- * sole exception, because its table is genuinely owned here -- its key is an identity column
- * declared by {@code V1__batch.sql} -- and even for {@code BatchRun} that migration, not
- * Hibernate, is the source of truth.</p>
+ * most an assertion against the existing shape, never a generator of it. {@code BatchRun} and
+ * {@code DailyFeedWatermark} are the two exceptions, because their tables are genuinely owned here
+ * -- the ledger's key is an identity column declared by {@code V1__batch.sql} and the watermark's is
+ * an assigned feed name declared by {@code V2__batch_feed_watermark.sql} -- and even for those two
+ * the migration, not Hibernate, is the source of truth.</p>
  *
  * <p>Assumptions: three indexes this package depends on are declared by other services and must
  * not be re-declared here. {@code idx_card_xref_account_id} is what makes the by-account
@@ -246,11 +286,14 @@
  *
  * <h2>Why the mappings are local rather than borrowed</h2>
  *
- * <p>Nine of the ten tables mapped here already have an entity somewhere else in the reactor,
+ * <p>Nine of the eleven tables mapped here already have an entity somewhere else in the reactor,
  * so declaring a second mapping over the same table looks like duplication and has to be
  * justified as something other than that. Assumptions: the ratio moved from seven-of-eight to
- * nine-of-ten when the customer and card projections landed, and both of those are borrowed tables,
- * so the one exception remains {@code BatchRun} over the single table this module owns.</p>
+ * nine-of-ten when the customer and card projections landed, and it is nine-of-ELEVEN now that
+ * {@code DailyFeedWatermark} is counted -- the denominator moved and the numerator did not, because
+ * the watermark is a table this module owns rather than one it borrows. The exceptions are therefore
+ * the two {@code batch} mappings, and every other mapping here is a second view of a table another
+ * context defines.</p>
  *
  * <p>Alternatives Considered: a Maven dependency on {@code transaction-service},
  * {@code account-service} and {@code card-service}, so that their existing entities could be reused
@@ -308,7 +351,7 @@
  * right to. Keeping the commit atomic needs no coordinator at all, which makes it both the
  * lower-risk option and the one that preserves observable behaviour.</p>
  *
- * <p>Assumptions: the write set is closed and the grant is what closes it. Of the ten mappings
+ * <p>Assumptions: the write set is closed and the grant is what closes it. Of the eleven mappings
  * here, {@code DisclosureGroup}, {@code Customer} and {@code Card} are read-only from this module,
  * and {@code DailyTransaction} is an input stream that no job in this package writes. A mapping in this package that acquired a
  * write path into {@code reference} would be reaching outside the granted set, and would fail on
@@ -459,8 +502,8 @@
  * <h2>What this package exposes, and why every column decision is parity-observable</h2>
  *
  * <p>What consumers get from this package is nine mappings over tables another service owns and
- * one entity over the table this module owns. What makes that a stricter contract than it sounds
- * is that five of the ten land directly on a committed expectation file, so a column type,
+ * two entities over the two tables this module owns. What makes that a stricter contract than it
+ * sounds is that five of the eleven land directly on a committed expectation file, so a column type,
  * length or scale chosen wrongly here does not merely misbehave -- it fails a byte comparison.
  * Under {@code tests/golden/posting/} the pairings are: {@code Account} against
  * {@code acctdat.expected}, {@code Transaction} against {@code tranfile.expected},

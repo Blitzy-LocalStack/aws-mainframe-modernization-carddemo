@@ -328,8 +328,17 @@ export const SURFACE_TOKENS = {
  * Purpose: the companion to {@link BMS_COLOR_TOKENS}. That map answers "which semantic role does
  * this source colour carry"; this one answers "which shade of that role may be read as text on
  * {@link TEXT_CONTRAST_SURFACE}". Both are needed because the design system's semantic colours are
- * mid-ramp palette anchors intended for fills, borders and icons, and only two of the eight reach
- * the AA threshold for normal text at all.
+ * mid-ramp palette anchors intended for fills, borders and icons: measured against that surface,
+ * five of the eight roles fail the AA threshold for normal text through their hue token - blue at
+ * 4.104:1, turquoise 2.205:1, green 2.265:1, yellow 1.900:1 and red 3.268:1 - and only the three
+ * whose hue token is ALREADY a neutral text token clear it.
+ *
+ * ⚠️ Refactoring Rationale: this paragraph said "only two of the eight" and the paragraph below said
+ * two roles keep their hue family while six do not. Both counts were wrong in the same direction and
+ * are corrected from the audit itself: three operands clear the threshold and five roles keep their
+ * family. The numbers are asserted rather than restated - `ui/src/theme/contrast.test.ts` derives the
+ * divergence role by role from these two maps, so a count in prose can no longer disagree with the
+ * data beside it.
  *
  * Refactoring Rationale: screens used to paint text straight from {@link BMS_COLOR_TOKENS}, which
  * shipped measured accessibility failures — the informational role at 2.21:1 for every label and
@@ -339,11 +348,12 @@ export const SURFACE_TOKENS = {
  * icons, so the AAP's measured BLUE-to-primary and TURQUOISE-to-informational bridge stands; this
  * map only decides which shade of it text is allowed to use.
  *
- * Assumptions: two roles keep their hue family and six do not, and which is which was measured
+ * Assumptions: five roles keep their hue family and three do not, and which is which was measured
  * rather than chosen — see {@link BMS_TEXT_CONTRAST_AUDIT} for the per-role numbers. The primary
- * and error ramps each publish a text-grade shade that clears the threshold; the informational,
- * success and warning ramps publish nothing darker than 3.55:1, 3.46:1 and 2.87:1, so a role on
- * one of those ramps cannot be text in its own hue at this version at all.
+ * and error ramps each publish a text-grade shade that clears the threshold, and the neutral,
+ * default and pink roles were already text tokens; the informational, success and warning ramps
+ * publish nothing darker than 3.549:1, 3.463:1 and 2.867:1, so a role on one of those three ramps
+ * cannot be text in its own hue at this version at all.
  *
  * Alternatives Considered: three. Darkening the seeds so the ramps would derive AA shades — this
  * would move every fill, border and background tint derived from them to defend a text case, and
@@ -720,26 +730,14 @@ export const SPACING_TOKENS = {
   AntdTokenName
 >;
 
-/**
- * Token names for BMS colours rendered as PROSE TEXT, and the surface that text sits on.
- *
- * Purpose
- * -------
- * {@link BMS_COLOR_TOKENS} resolves each measured `COLOR=` operand to the semantic ROLE it
- * carries. This map answers a second, narrower question the role cannot: which shade of that
- * role's ramp is legible when the colour is used for a run of text the operator has to READ,
- * rather than for a component state, a border or a fill. Two entries exist, because a review
- * measured two pairings in the delivered tree that fell below the WCAG AA 4.5:1 minimum for
- * normal text, and both were shade-selection problems rather than role-selection ones.
- *
- * What was measured, and what each entry changes
- * ---------------------------------------------
- * Every figure below is a contrast ratio computed from the values the pinned package derives
- * through its own `theme.getDesignToken` accessor under the theme in `antdTheme.ts`:
- *
- * - The shell's title band painted `colorPrimary` `#1677ff` on `Layout.Header`'s default
- *   `headerBg` `#001529`, measured at **4.49:1** across twelve nodes -- the six prompt and value
- *   pairs `ScreenHeader` renders -- plus the skip link. The same/*
+/*
+ * WHY : ⚠️ Refactoring Rationale: TWO withdrawn duplicate declarations are recorded here, and this
+ *       block documents no symbol of its own -- it is a plain comment rather than a JSDoc block
+ *       because the JSDoc block that stood here documented nothing, having been left behind when the
+ *       second declaration it belonged to was withdrawn. Its prose ended mid-sentence, at "The
+ *       same", which is how a reader could tell it had been severed from whatever followed; the
+ *       measurement it was reaching for is the 4.49:1 dark-chrome pairing, and that measurement is
+ *       recorded once, where it is still consumed, at {@link CONTRAST_REFERENCE_SURFACES}.
  * WHY : Refactoring Rationale: a SECOND BMS_TEXT_COLOR_TOKENS stood here declaring only BLUE and
  *       TURQUOISE, and it is withdrawn in favour of the eight-role map above. Two declarations of one
  *       exported name is not something the module system tolerates, and the choice between them is
@@ -752,9 +750,6 @@ export const SPACING_TOKENS = {
  *       same surface, which clears the 4.5:1 AA threshold with more margin than the 6.10:1 the
  *       withdrawn entry claimed. Keeping the audited value is what keeps the assertion and the map
  *       describing one decision.
- */
-
-/*
  * WHY : Refactoring Rationale: a SECOND SURFACE_TOKENS stood here carrying a `titleBand` key, and it is
  *       folded into the map above rather than kept beside it -- one exported name cannot be declared
  *       twice, and the two were describing the same decision from two directions. Both keys are
@@ -786,46 +781,22 @@ export const ADDITIVE_TOKENS = {
   AntdTokenName
 >;
 
-/**
- * The one authored LENGTH the documented G1 resolution needs, and the only one in this module.
- *
- * Purpose
- * -------
- * G1 retires the fixed 24-by-80 character grid but keeps one thing that grid gave for free: the key
- * legend sat on row 24, at the bottom edge of the display, on every screen. Reproducing that
- * requires the frame to be at least as tall as the viewport, and no Ant Design token can express
- * it -- the scales cover colour, spacing, radius, typography, motion and breakpoints, and none of
- * them means "as tall as the window". Measured without it, the legend floated directly beneath a
- * short screen's content with the rest of the window blank.
- *
- * Refactoring Rationale: ⚠️ the length was previously written as a literal inside
- * `ui/src/layout/AppShell.tsx`, carrying a flag that named it as the one unresolved value in the
- * tree. A review named that a violation of the zero-hardcoded-values rule, and it was right for a
- * reason the flag itself missed: the rule's purpose is that every design value has ONE owner, and
- * a value that no token can express still has an owner -- this module, which is where every other
- * design decision is recorded with its evidence. Moving it here does not make it a token and does
- * not pretend to; it gives the one value that cannot be a token the same single home, the same
- * documented rationale and the same review surface as the ones that can.
- *
- * Assumptions: `dvh` and not `vh`. A mobile browser's dynamic toolbar makes `vh` overshoot the
- * visible area, which pushes the legend out of sight on exactly the narrow viewports the G1
- * responsive reflow exists to serve; `dvh` tracks the visible height as that toolbar moves.
- *
- * Assumptions: a MINIMUM and never a fixed height. A screen whose content exceeds the viewport --
- * the 128-field account-update form does at every width -- must grow and scroll; a fixed height
- * would clip it, which is the one failure mode the fixed grid had and G1 exists to remove.
- *
- * Trade-offs: a document that keeps the user agent's default `body { margin: 8px }` becomes 16px
- * taller than its window, so the page scrolls by that much. `ui/index.html` links no stylesheet by
- * a decision it documents, so no reset absorbs it. Subtracting a literal 16px here was rejected:
- * it would encode one document's margin into a value any document may consume, and it would be
- * wrong the moment a reset arrived. A `body` margin reset at whichever layer serves the document
- * removes it entirely.
+/*
+ * WHY : ⚠️ Refactoring Rationale: a LAYOUT_METRICS map stood here holding `frameMinBlockSize:
+ *       '100dvh'`, and it is withdrawn because it was the SECOND registry for one value --
+ *       {@link ADDITIVE_LAYOUT_VALUES} below holds the same `100dvh` under
+ *       `viewportMinimumHeight`. Neither had a consumer anywhere in `ui/src`, so the duplication
+ *       was invisible to the compiler and to every test: two records of one decision, each
+ *       claiming a component read it, and no component did.
+ * WHY : Assumptions: the surviving record is the one below, and the choice between the two names
+ *       is not arbitrary. `frameMinBlockSize` describes the element it was expected to size, and
+ *       that element turned out to be the wrong one -- the value sizes the DOCUMENT's mount point
+ *       in `ui/index.html`, not the frame this module's consumers render.
+ *       `viewportMinimumHeight` describes the VALUE, which stays true whichever layer declares
+ *       it. The reasoning both blocks carried is preserved there in one place: why `dvh` rather
+ *       than `vh`, why a minimum rather than a fixed height, and why the user agent's default
+ *       `body` margin had to be reset rather than subtracted.
  */
-export const LAYOUT_METRICS = {
-  /** Minimum height of the application frame: one viewport, so the key legend reaches the foot. */
-  frameMinBlockSize: '100dvh',
-} as const satisfies Record<'frameMinBlockSize', string>;
 
 /**
  * Responsive breakpoint token names used by the documented G1 resolution.
@@ -877,9 +848,17 @@ export const FIELD_ERROR_TOKENS = {
 /**
  * Contrast ratio WCAG 2.1 asks of normal-sized body text against its background.
  *
- * Purpose: give the four contrast decisions below and the regression assertions in
- * `ui/src/theme/contrast.test.ts` one threshold to be measured against, rather
- * than repeating the number at each site that has to clear it.
+ * Purpose: give the regression assertions in `ui/src/theme/contrast.test.ts` one
+ * threshold to be measured against, rather than repeating the number at each site
+ * that has to clear it.
+ *
+ * Assumptions: this is the same number as {@link TEXT_CONTRAST_THRESHOLD} and the two
+ * are deliberately not merged. That one is the threshold every entry of
+ * {@link BMS_TEXT_COLOR_TOKENS} is REQUIRED to clear, asserted per role in
+ * `ui/src/theme/textContrast.test.ts`; this one is the threshold the G7 evidence set is
+ * measured against, including the pairings that FAIL it and are recorded as the reason a
+ * role snapped. Collapsing them would tie a requirement and a historical measurement to
+ * one symbol, so a change to either would silently restate the other.
  *
  * Assumptions: the normal-text figure is used and the 3:1 large-text allowance is
  * not, because no text this bridge colours qualifies. The allowance needs 24px, or
@@ -892,29 +871,33 @@ export const FIELD_ERROR_TOKENS = {
 export const WCAG_AA_NORMAL_TEXT_MINIMUM = 4.5;
 
 /**
- * The three background colours the delivered screens actually paint text onto.
+ * The one background colour this tree measures text against that no token in it names.
  *
- * Purpose: supply the measured pairs behind {@link ACCESSIBLE_TEXT_TOKENS} and
- * behind design gap G7, so a contrast claim in this tree can be recomputed rather
- * than trusted.
+ * Purpose: supply the surface behind the measurement that RETIRED the design system's
+ * default header fill, so design gap G7's central claim - that the frame had to paint
+ * its own surface rather than resolve text per surface - is recomputed on every run
+ * rather than trusted. `ui/src/theme/contrast.test.ts` reads it.
  *
- * Refactoring Rationale: this map carried two surfaces and a browser audit proved
- * that incomplete in a way that mattered. `documentBody` is `colorBgContainer`,
- * which is what the ONE screen outside the shell paints on - sign-on - while every
- * screen inside the shell paints on `colorBgLayout`, one step darker, because
- * `ui/src/layout/AppShell.tsx` mounts an antd `Layout` whose own fill that is.
- * Measuring a shell-mounted node against the container surface therefore overstated
- * every ratio slightly - the turquoise prompt substitute was recorded here at 7.01:1
- * and measures 6.759:1 where it actually paints - and understated nothing, so no
- * substitution chosen against it was wrong. The third entry closes the gap so a
- * future ratio is computed against the surface the node really has.
+ * ⚠️ Refactoring Rationale: this map held THREE entries and holds one, because the other
+ * two were hex duplicates of tokens the tests can resolve live. `documentBody`
+ * `#ffffff` is what `colorBgContainer` resolves to and `shellSurface` `#f5f5f5` is what
+ * `colorBgLayout` resolves to, so a ratio measured against either literal was a ratio
+ * measured against a copy of a token value - which is the drift this module exists to
+ * prevent, not an instance of preventing it. Both are gone and the cases that used them
+ * now resolve {@link TEXT_CONTRAST_SURFACE} from the theme, which is also the surface
+ * `ui/src/layout/AppShell.tsx` actually paints all three of its zones with.
  *
- * Assumptions: these two hex values are AUDIT DATA and are never applied as a
- * style anywhere - nothing in `ui/src` reads them into a `background` or a
- * `color`. That is what keeps them consistent with the rule that every rendered
- * value resolves to a token: a measurement of what the design system produces is
- * not itself a design value, in the same way {@link BMS_SOURCE_HISTOGRAM} records
- * source operands it never renders.
+ * Assumptions: `colorBgLayout` needed no replacement entry of its own, because the frame
+ * no longer paints it anywhere. The shell states its own fill on the outer `Layout`, on
+ * `Layout.Header` and on `Layout.Footer`, and leaves `Layout.Content` transparent over
+ * that same fill - see {@link SURFACE_TOKENS} - so the layout grey the design system
+ * would otherwise show is behind no text on any screen.
+ *
+ * Assumptions: this hex is AUDIT DATA and is never applied as a style - nothing in
+ * `ui/src` reads it into a `background` or a `color`. That is what keeps it consistent
+ * with the rule that every rendered value resolves to a token: a measurement of what the
+ * design system produces is not itself a design value, in the same way
+ * {@link BMS_SOURCE_HISTOGRAM} records source operands it never renders.
  *
  * Assumptions: `darkChrome` is not this project's choice of colour. It is the
  * design system's own `Layout.headerBg` component-token default, read from the
@@ -927,206 +910,130 @@ export const WCAG_AA_NORMAL_TEXT_MINIMUM = 4.5;
  * Trade-offs: a recorded measurement can go stale when the library moves, which a
  * literal in a screen would too, silently. That risk is closed mechanically rather
  * than by vigilance: {@link CONTRAST_MEASURED_AT_ANTD_VERSION} pins the version
- * these were taken at, and the contrast test asserts that pin still equals the
+ * this was taken at, and the contrast test asserts that pin still equals the
  * version `ui/package.json` declares, so an upgrade fails a test that names
  * re-measurement as the fix instead of quietly invalidating the ratios.
  */
 export const CONTRAST_REFERENCE_SURFACES = {
-  /** The design system's own dark chrome fill, behind `Layout.Header` content. */
+  /** The design system's own dark chrome fill, the default `Layout.Header` fill the shell replaces. */
   darkChrome: '#001529',
-  /** The container surface, `colorBgContainer`: sign-on, cards, tables, buttons. */
-  documentBody: '#ffffff',
-  /** The shell's own `colorBgLayout` fill, behind every screen mounted in the frame. */
-  shellSurface: '#f5f5f5',
-} as const satisfies Record<'darkChrome' | 'documentBody' | 'shellSurface', string>;
+} as const satisfies Record<'darkChrome', string>;
 
 /**
  * Design-system version {@link CONTRAST_REFERENCE_SURFACES} was measured at.
  *
  * Purpose: turn the staleness risk of a recorded measurement into a failing test.
  * `ui/src/theme/contrast.test.ts` compares this against the `antd` entry in
- * `ui/package.json`, so the surfaces cannot outlive the version they describe.
+ * `ui/package.json`, so the recorded fill cannot outlive the version it describes.
  */
 export const CONTRAST_MEASURED_AT_ANTD_VERSION = '6.5.2';
 
-/**
- * Token each measured BMS colour resolves to where it carries TEXT that would
- * otherwise fall below {@link WCAG_AA_NORMAL_TEXT_MINIMUM}.
- *
- * Purpose: keep the accessible substitution in this bridge, applied once for every
- * screen, instead of at the elements where the shortfall happens to have been
- * measured. {@link BMS_COLOR_TOKENS} stays the resolution of the source operand
- * itself and is unchanged; this map is consulted only by code that paints that
- * operand as body text.
- *
- * Refactoring Rationale: the first two entries replace an inline marker that recorded
- * a shortfall and declined to fix it - one in `ui/src/layout/AppShell.tsx` and one in
- * `ui/src/screens/refTypeList/index.tsx` - each stating that the remedy belonged in
- * this module and applied once for all screens. Both were right about where it
- * belonged, so the remedy is here, and both markers are gone rather than left
- * beside a value they no longer describe.
- *
- * Refactoring Rationale: the last two entries exist because fixing the title band on
- * ONE of its two surfaces left the other measurably worse than the shortfall that was
- * reported. `ui/src/layout/ScreenHeader.tsx` renders the same band either delegated
- * into the shell's dark chrome or in a screen's own body, and a browser audit of the
- * built bundle put the body mount at 3.76:1 for the blue slots and 1.74:1 for the two
- * title strings - the second failing even the 3:1 allowance that its 20px semibold
- * heading would qualify for. An accessibility audit of the same page named exactly
- * those ten nodes, and named none on the delegated mount. Both surfaces are therefore
- * resolved here, because a substitution that depends on where a shared component
- * happens to be mounted is a property of the bridge, not of the component.
- *
- * Measured with the design system's own `theme.getDesignToken` accessor under this
- * tree's token overrides, against {@link CONTRAST_REFERENCE_SURFACES}, and confirmed
- * against the rendered bundle by sampling painted pixels:
- *
- * | Role and surface                  | Operand token  | Ratio  | Substitute           | Ratio   |
- * | --------------------------------- | -------------- | ------ | -------------------- | ------- |
- * | `COLOR=BLUE` on dark chrome       | `colorPrimary` | 4.49:1 | `colorPrimaryHover`  | 6.17:1  |
- * | `COLOR=TURQUOISE` on the body     | `colorInfo`    | 2.21:1 | `colorTextLabel`     | 6.76:1  |
- * | `COLOR=BLUE` on the shell surface | `colorPrimary` | 3.76:1 | `colorPrimaryActive` | 5.65:1  |
- * | `COLOR=YELLOW` on the shell face  | `colorWarning` | 1.74:1 | `colorTextHeading`   | 15.97:1 |
- *
- * Assumptions: `COLOR=YELLOW` needs no substitute on the dark chrome, where the same
- * `colorWarning` operand measures 9.70:1, and `COLOR=BLUE` needs a DIFFERENT one on
- * each surface rather than one that serves both. The two directions are opposite: a
- * dark fill wants a lighter blue and a light fill wants a darker one, and no single
- * step of the ramp clears 4.5:1 on both - `colorPrimaryHover` measures 2.74:1 on the
- * shell surface and `colorPrimaryActive` measures 2.99:1 on the chrome. A single
- * "accessible blue" would therefore have had to fail somewhere, which is why the
- * surface is a parameter of the lookup and not a detail the caller may omit.
- *
- * Trade-offs: `colorPrimaryActive` is the substitute for blue on the light surface
- * even though this very entry rejects that token for TURQUOISE a few lines below. The
- * two cases are not the same case. There, the objection is that a distinct source
- * operand would land on the primary ramp and become indistinguishable from the 384
- * blue field definitions; here the source operand IS `COLOR=BLUE`, so the darkest
- * step of its own ramp keeps blue reading as blue and collapses nothing. It is also
- * the only token in the primary and link families that clears 4.5:1 on this surface
- * at all - every lighter step measures between 1.03:1 and 3.76:1.
- *
- * Assumptions: the blue substitute stays inside the primary ramp, four steps
- * lighter, so the operand's own hue family survives the correction - the band still
- * renders blue on navy, one shade brighter. Its token name carries an interaction
- * state it is not being used for, which is the cost of the design system exposing
- * ramp steps under interaction names; the alternative of a lighter blue literal has
- * no origin and would opt the band out of the theme.
- *
- * Trade-offs: the turquoise substitute does NOT stay in the cyan family, and that is
- * a measured impossibility rather than a preference. Every cyan-family token the
- * system derives was computed against the document surface and the best of them -
- * `colorInfoActive` and `colorInfoTextActive`, both `#08979c` - reaches 3.55:1,
- * still short of 4.5:1; the base `colorInfo` reaches 2.21:1 and the remaining seven
- * steps are lighter still. So the turquoise HUE cannot carry normal body text at AA
- * in this palette at all, and the choice is between an accessible colour and a
- * faithful one.
- *
- * Alternatives Considered: four, all rejected with the numbers that reject them.
- * Re-seeding the informational colour dark enough for text (a cyan-8 seed measures
- * 6.09:1) would move the whole informational ramp, including the message band's
- * informational variant, and would contradict the decision `ui/src/theme/antdTheme.ts`
- * records at its `token` block - where the 2.21:1 informational text figure is stated
- * and accepted for a role that is not text. `colorPrimaryActive` (`#0958d9`, 6.16:1)
- * keeps a cool accent but puts a distinct source operand onto the primary ramp, which
- * is exactly the collapse the `PINK` entry of {@link BMS_COLOR_TOKENS} rejects by
- * name. Bold weight plus the darkest cyan was rejected because 14px bold is not the
- * large text the 3:1 allowance requires. And a tinted background from the same ramp
- * makes it worse, not better: `#08979c` on `colorInfoBg` measures 3.39:1.
- *
- * Assumptions: `colorTextLabel` is the substitute because every turquoise TEXT node
- * in the delivery is a field prompt - two filter prompts on the reference-type
- * browse, the account search prompt on the authorization browse, the sign-on prompts
- * and the transaction-capture labels - and this is the one token whose declared role
- * IS prompt text while measuring 7.01:1. At the pinned version its value coincides
- * with the `NEUTRAL` snap, so on a screen carrying both operands the hue distinction
- * is surrendered and the distinction survives on the typographic axis instead: on
- * the reference-type browse the neutral nodes are a `Typography.Title` and the
- * turquoise nodes are normal-weight prompts, so size and weight still separate them,
- * exactly as design gap G3 separates `ATTRB=BRT` by weight rather than by colour.
- * Both originals are retained in {@link BMS_SOURCE_HISTOGRAM} either way.
- *
- * Trade-offs: the title substitute leaves the gold hue behind on the light surface,
- * and as with turquoise that is a measured impossibility rather than a preference.
- * Every token the warning family derives was computed against the shell surface and
- * the darkest of them - `colorWarningActive` and `colorWarningTextActive`, both
- * `#d48806` - reaches 2.63:1; the operand itself reaches 1.74:1 and the remaining
- * nine steps are lighter still. Reaching 4.5:1 on this surface requires the eighth
- * step of the gold ramp, `#874d00` at 6.23:1, which is a dark brown that no longer
- * reads as the mapsets' yellow and is a palette entry rather than a semantic token,
- * so adopting it would trade one kind of infidelity for another AND leave the theme
- * surface. The gold therefore survives where it is legible - the delegated mount, at
- * 9.70:1 - and yields to a text token where it is not.
- *
- * Assumptions: `colorTextHeading` is the substitute because both nodes it applies to
- * ARE headings in the delivered markup - `TITLE02` is the band's `Typography.Title`
- * and `TITLE01` is the attribution line rendered beside it - so this is the one token
- * whose declared role matches what the elements are, at 15.97:1. The BMS distinction
- * the substitution surrenders is recovered on the typographic axis exactly as design
- * gap G3 recovers `ATTRB=BRT`: on the light surface the title reads as the largest,
- * heaviest text in the band while the prompts stay normal-weight blue, so the centre
- * column is still the element that is not a prompt.
- *
- * Alternatives Considered: two structural fixes that would have removed the shortfall
- * without substituting anything, both rejected. Giving the band its own dark fill on
- * the light-surface mount would make one strip of eight screens look like chrome that
- * is not chrome, and would introduce a background decision where the design system
- * already has one. Delegating the band on all ten authored screens so that it only
- * ever paints on chrome is the more attractive of the two and is where this shell is
- * heading, but it would move the band out of seven screens' own render trees at a
- * point where those screens' tests assert it there, and the review that asked for the
- * delegation explicitly accepted a screen rendering this band directly as an equal
- * alternative. Correcting the colour is the change that fits inside what was asked.
- *
- * Assumptions: `ui/src/layout/MessageBand.tsx` deliberately does NOT consult this
- * map. Its informational variant paints the same token on the design system's own
- * informational alert background rather than on the document surface, and that pair
- * is measured, accepted and argued in `antdTheme.ts` on grounds that hold there and
- * not here: the band renders a per-severity icon and a per-severity ARIA role beside
- * the colour, so severity never rests on hue alone.
+/*
+ * WHY : ⚠️ Refactoring Rationale: an ACCESSIBLE_TEXT_TOKENS map stood here resolving COLOR=BLUE,
+ *       COLOR=TURQUOISE and COLOR=YELLOW to a different shade PER SURFACE -- BLUE_ON_DARK_CHROME,
+ *       BLUE_ON_BODY, TURQUOISE_ON_BODY and TITLE_ON_BODY -- and it is withdrawn as SUPERSEDED
+ *       rather than wired into a consumer. It answered a question the rendered application no longer
+ *       asks. It existed because one text token measured a different ratio in each of three zones:
+ *       the design system's dark `Layout.Header` fill, the layout grey behind a screen body, and the
+ *       container surface. `ui/src/layout/AppShell.tsx` now paints ALL THREE of its zones with
+ *       {@link SURFACE_TOKENS}.screen, so there is one surface behind screen text and one
+ *       measurement is the whole answer -- which is what {@link BMS_TEXT_COLOR_TOKENS} and
+ *       {@link BMS_TEXT_CONTRAST_AUDIT} record, per role, against {@link TEXT_CONTRAST_SURFACE}.
+ *       That map is imported by the shell, the message band, the title band and every screen that
+ *       paints prose; the withdrawn one was imported by one test and by no component at all, so it
+ *       was a documented resolution nothing resolved.
+ * WHY : Assumptions: withdrawing beats wiring because two of the four entries named a surface nothing
+ *       paints. BLUE_ON_DARK_CHROME (colorPrimaryHover) corrected blue on `headerBg` #001529, the
+ *       fill the shell replaced; TITLE_ON_BODY (colorTextHeading) corrected the two title strings on
+ *       colorBgLayout, which the frame no longer shows anywhere. Wiring them into styles would have
+ *       reinstated the per-surface distinction the one-surface decision removed, and each consumer
+ *       would then be resolving its colour against a background it is not painted on -- worse than an
+ *       unconsumed map, because it would read as coverage.
+ * WHY : Assumptions: the two entries that were right survive by VALUE under the live map, so no
+ *       measurement is given up in the exchange. TURQUOISE_ON_BODY named colorTextLabel and the
+ *       audit's TURQUOISE row names colorTextLabel; BLUE_ON_BODY named colorPrimaryActive and the
+ *       audit's BLUE row names colorPrimaryTextActive, which the pinned version resolves to the same
+ *       #0958d9. The live names are the ones kept because they are text-role names rather than
+ *       interaction-state names, which is what the elements reading them actually paint.
+ * WHY : Assumptions: the measured IMPOSSIBILITIES that forced two roles out of their own hue families
+ *       are retained rather than discarded with the map, because they are what makes those snaps
+ *       auditable instead of arbitrary. No cyan-family token the system derives reaches the threshold
+ *       as text -- the darkest, colorInfoTextActive, measures 3.549:1 -- and no warning-family token
+ *       does either, the darkest being colorWarningTextActive at 2.867:1. Both censuses are
+ *       exhaustive rather than sampled, because the claim is that NONE of them clears the bar, and
+ *       both are asserted in `ui/src/theme/contrast.test.ts` against the surface the frame paints.
+ *       The per-role shortfall figures the browser audit of the built bundle produced are recorded in
+ *       the G7 entry of {@link DESIGN_GAPS}.
+ * WHY : Alternatives Considered: four ways of keeping the turquoise hue for prompt text, all rejected
+ *       with the numbers that reject them. Re-seeding the informational colour dark enough for text
+ *       (a cyan-8 seed measures 6.09:1) moves every fill, border and alert tint derived from that
+ *       seed to defend a text case, and contradicts the decision `ui/src/theme/antdTheme.ts` records
+ *       at its own `token` block. Putting a distinct source operand onto the primary ramp collapses
+ *       the measured TURQUOISE-versus-BLUE distinction, which {@link BMS_COLOR_TOKENS} rejects by
+ *       name at its PINK entry. Bold weight plus the darkest cyan does not reach the size the 3:1
+ *       large-text allowance requires at a 14px base. And a tinted background from the same ramp
+ *       measures worse rather than better: #08979c on colorInfoBg is 3.39:1.
+ * WHY : Assumptions: `ui/src/layout/MessageBand.tsx` sits outside this reasoning and always did. Its
+ *       severities paint on the design system's own alert tints rather than on the screen surface, so
+ *       the pairing is measured separately -- `ui/src/theme/textContrast.test.ts` asserts the band's
+ *       sentence against colorErrorBg, colorSuccessBg and colorInfoBg -- and the band renders a
+ *       per-severity icon and ARIA role beside the colour, so severity never rests on hue alone.
  */
-export const ACCESSIBLE_TEXT_TOKENS = {
-  /** `COLOR=BLUE` where it paints text on {@link CONTRAST_REFERENCE_SURFACES.darkChrome}. */
-  BLUE_ON_DARK_CHROME: 'colorPrimaryHover',
-  /** `COLOR=BLUE` where it paints text on {@link CONTRAST_REFERENCE_SURFACES.shellSurface}. */
-  BLUE_ON_BODY: 'colorPrimaryActive',
-  /** `COLOR=TURQUOISE` where it paints prompt text on either light surface. */
-  TURQUOISE_ON_BODY: 'colorTextLabel',
-  /** `COLOR=YELLOW` where it paints the two title strings on either light surface. */
-  TITLE_ON_BODY: 'colorTextHeading',
-} as const satisfies Record<
-  'BLUE_ON_DARK_CHROME' | 'BLUE_ON_BODY' | 'TURQUOISE_ON_BODY' | 'TITLE_ON_BODY',
-  AntdTokenName
->;
 
 /**
- * Layout values the browser target needs and no Ant Design token can express.
+ * The one layout value the browser target needs that no Ant Design token can express.
  *
- * Purpose: hold the one non-token layout value the shell requires, so that the
- * design-system rule - every rendered value traces to this bridge - keeps holding
- * without the value being spelled inside a component.
+ * Purpose: give that value a single recorded home with its evidence, so the
+ * design-system rule - every rendered value traces to this bridge - keeps holding for
+ * the one value that cannot be a token. This is a RECORD and not a source of style:
+ * the declaration itself is in `ui/index.html`, for the reason below.
  *
- * Refactoring Rationale: `viewportMinimumHeight` was a literal in
- * `ui/src/layout/AppShell.tsx` under an inline marker admitting it was one. The
- * marker was accurate and the placement was not: a value the token scales cannot
- * express is precisely what this module is for, and leaving it in the component made
- * the shell the second place a design value lived.
+ * ⚠️ Refactoring Rationale: no component consumes this, and that is the accurate
+ * position rather than a gap. The value began as a literal `minHeight: '100dvh'` inside
+ * `ui/src/layout/AppShell.tsx`; it was registered here so the component would stop
+ * spelling a design value; and it then stopped being a component's value at all. A
+ * browser measurement showed the frame sized to exactly one viewport inside a document
+ * keeping the user agent's default `body { margin: 8px }` scrolled permanently by 16px,
+ * so BOTH halves - the margin reset and the viewport sizing - moved to the layer that
+ * owns them. `ui/index.html` sets `body { margin: 0 }` and `#root { min-height: 100dvh }`,
+ * and the design system's own `.ant-layout { flex: auto }` then stretches the frame to
+ * fill that mount point. The fidelity property the declaration existed for is preserved
+ * by that arrangement: the row-24 key legend still sits at the bottom edge of the
+ * display.
  *
- * Assumptions: the value is unresolvable rather than merely unmapped, and that is
- * why it is registered instead of snapped. The system's scales cover colour,
- * spacing, radius, typography, motion and breakpoints; none of them can express
- * "as tall as the window", and the breakpoint scale is the nearest miss - it says
- * where a layout should reflow, never how tall it should be. Recorded as design gap
- * G8.
+ * Assumptions: the DOCUMENT is the right owner, and this is not a matter of taste. The
+ * value sizes the mount point React renders into, which is outside every component's
+ * tree - no component may reach `#root`, and a component that sized itself to the
+ * viewport would be making a claim about a document it does not own, wrong for any
+ * document that mounts it inside other content. Two layers cannot both declare it
+ * without one of them being redundant, so the component declares nothing.
+ *
+ * Assumptions: this record is held to that declaration mechanically rather than by
+ * review. `ui/src/layout/appShell.test.tsx` reads `ui/index.html` and asserts the
+ * document declares exactly this value on the mount point, that it still resets the
+ * body margin - the other half of the measured 16px defect - and that the shell itself
+ * declares no block size of its own. A register that agreed with nothing would be the
+ * same defect in a new place.
+ *
+ * Assumptions: the value is unresolvable rather than merely unmapped, which is why it is
+ * registered instead of snapped. The system's scales cover colour, spacing, radius,
+ * typography, motion and breakpoints; none of them can express "as tall as the window",
+ * and the breakpoint scale is the nearest miss - it says where a layout should reflow,
+ * never how tall it should be. Recorded as design gap G8 in {@link DESIGN_GAPS}.
  *
  * Assumptions: `dvh` and not `vh`. A mobile browser's collapsing toolbar makes `vh`
  * describe a viewport taller than the visible one, which would push the shell's
  * function-key legend below the fold on exactly the narrow viewports the responsive
  * reflow of design gap G1 exists to serve. `dvh` tracks the visible viewport, so the
  * legend stays at the bottom edge of the display the way row 24 always did.
+ *
+ * Assumptions: a MINIMUM and never a fixed height. A screen whose content exceeds the
+ * viewport - the 128-field account-update form does at every width - must grow and
+ * scroll; a fixed height would clip it, which is the one failure mode the fixed
+ * character grid had and design gap G1 exists to remove.
  */
 export const ADDITIVE_LAYOUT_VALUES = {
-  /** Minimum height of the application frame, one visible viewport. */
+  /** Minimum height of the document's mount point, one visible viewport, as `ui/index.html` declares it. */
   viewportMinimumHeight: '100dvh',
 } as const satisfies Record<'viewportMinimumHeight', string>;
 
@@ -1215,7 +1122,7 @@ export const DESIGN_GAPS = [
     sourceValue: 'SIZE=(24,80) with absolute POS=(row,column).',
     measuredCount: '17 of 17 base and 4 of 4 extension mapsets; 902 base and 1166 all-21 fields.',
     resolution:
-      'Use responsive Layout with Descriptions for details and Table for lists, keyed to screenMD and screenLG; preserve grouping, reading order, and tab order rather than absolute character positions. One row position IS preserved, the row-24 key legend at the foot of the display, through the single authored length in LAYOUT_METRICS, because no token expresses viewport height.',
+      'Use responsive Layout with Descriptions for details and Table for lists, keyed to screenMD and screenLG; preserve grouping, reading order, and tab order rather than absolute character positions. One row position IS preserved, the row-24 key legend at the foot of the display: ui/index.html sizes the mount point to one viewport with the value G8 registers in ADDITIVE_LAYOUT_VALUES, and the design system stretches the frame to fill it, because no token expresses viewport height.',
   },
   /*
    * Refactoring Rationale: the original shorthand cited the 6 protected
@@ -1244,7 +1151,7 @@ export const DESIGN_GAPS = [
     sourceValue: 'COLOR=TURQUOISE, COLOR=NEUTRAL, COLOR=GREEN, and COLOR=PINK.',
     measuredCount: 'Base17/all21: TURQUOISE 127/157, NEUTRAL 60/90, GREEN 76/84, PINK 0/4.',
     resolution:
-      'Snap to colorInfo, colorTextSecondary, colorSuccess, and colorTextHeading; retain every source value, count, role, and rejected alternative in BMS_SOURCE_HISTOGRAM. Those names govern fills, borders and icons; TEXT resolves through BMS_TEXT_COLOR_TOKENS instead, because five of the eight semantic ramps publish no shade reaching the 4.5:1 AA threshold for normal text -- the TURQUOISE mid-ramp anchor measured 2.21:1 as text -- and BMS_TEXT_CONTRAST_AUDIT records the measured ratio each role was snapped away from.',
+      'Snap to colorInfo, colorTextSecondary, colorSuccess, and colorTextHeading; retain every source value, count, role, and rejected alternative in BMS_SOURCE_HISTOGRAM. Those names govern fills, borders and icons; TEXT resolves through BMS_TEXT_COLOR_TOKENS instead, because five of the eight roles fail the 4.5:1 AA threshold for normal text through their hue anchor -- the TURQUOISE anchor measures 2.205:1 as text -- and three of the semantic ramps those anchors sit on publish no shade that reaches it at all: informational best 3.549:1, success best 3.463:1 and warning best 2.867:1, against primary 6.159:1 and error 4.618:1 which do. BMS_TEXT_CONTRAST_AUDIT records the measured ratio each role was snapped away from.',
   },
   /*
    * Alternatives Considered: a dedicated underline or no-highlight token. Both
@@ -1286,40 +1193,57 @@ export const DESIGN_GAPS = [
       'Not a system gap: the Figma-to-token mapping table is NOT APPLICABLE, and the measured BMS attributes are the authoritative design source.',
   },
   /*
-   * Refactoring Rationale: two of the snapped colours fall below the WCAG AA
-   * minimum for normal text on the surface they are actually painted on, and
-   * neither shortfall is visible from the mapsets - it exists only once a token
-   * meets a background. The cyan family cannot be corrected within its own hue at
-   * all: the darkest step the system derives reaches 3.55:1. So the resolution
-   * substitutes per surface in ACCESSIBLE_TEXT_TOKENS rather than re-deciding the
-   * operand mapping in BMS_COLOR_TOKENS, which keeps the measured source
-   * resolution intact and confines the correction to text.
+   * Refactoring Rationale: several of the hue-mapped colours fall below the WCAG AA
+   * minimum for normal text, and no shortfall is visible from the mapsets - each
+   * exists only once a token meets a background. THREE of them cannot be corrected
+   * inside their own hue at all, and each family was measured member by member: the
+   * darkest cyan step the system derives reaches 3.549:1, the darkest green step
+   * 3.463:1 and the darkest gold step 2.867:1. The resolution therefore selects a
+   * TEXT-GRADE shade per role in BMS_TEXT_COLOR_TOKENS rather than re-deciding the
+   * operand mapping in BMS_COLOR_TOKENS, which keeps the measured source resolution
+   * intact for fills, borders and icons and confines the correction to text.
+   *
+   * ⚠️ Refactoring Rationale: this entry described a PER-SURFACE substitution and no
+   * longer does, because the second surface was removed rather than resolved against.
+   * The shell painted its header on the design system's dark chrome and its body over
+   * the layout grey, so one text token measured three ratios; ui/src/layout/AppShell.tsx
+   * now paints all three zones with SURFACE_TOKENS.screen, which is what lets one
+   * measurement per role be the whole answer. The per-surface map is withdrawn as
+   * superseded and the reasoning is recorded where it stood, above ADDITIVE_LAYOUT_VALUES.
    */
   {
     id: 'G7',
     description:
-      'Three snapped colours measure below 4.5:1 as normal text on at least one surface they are painted on.',
+      'Five of the eight hue-mapped colours measure below 4.5:1 as normal text on the surface the frame paints, and the design system default header fill fails for the dominant blue as well.',
     sourceValue:
-      'COLOR=BLUE on both the design system dark chrome and the shell surface, COLOR=TURQUOISE on the light surfaces, and COLOR=YELLOW on the shell surface.',
+      'COLOR=BLUE, COLOR=TURQUOISE, COLOR=GREEN, COLOR=YELLOW and COLOR=RED painted as prose text, plus COLOR=BLUE on the design system Layout.Header default fill.',
     measuredCount:
-      'Blue on chrome 4.49:1 across the skip link and both header rows, and 3.76:1 on the shell surface across 8 band slots; turquoise on body 2.21:1 across 6 prompt nodes on 4 screens, every cyan-family token measured, best 3.55:1; yellow on the shell surface 1.74:1 across both title strings, failing even the 3:1 large-text allowance the 20px semibold heading qualifies for, every warning-family token measured, best 2.63:1.',
+      'On the painted surface colorBgContainer: blue operand 4.104:1, turquoise 2.205:1, green 2.265:1, yellow 1.900:1 and red 3.268:1, every one below 4.5:1, while neutral 6.978:1, default 16.558:1 and pink 16.558:1 clear it; three whole families measured member by member, cyan best 3.549:1, success best 3.463:1 and warning best 2.867:1, against primary best 6.159:1 and error best 4.618:1 which do clear it. On the abandoned dark chrome #001529: blue operand 4.491:1 across the skip link and both header rows, against a 4.5:1 requirement, while the yellow operand reached 9.701:1 there and the text-grade blue reaches only 2.993:1.',
     resolution:
-      'Substitute per surface through ACCESSIBLE_TEXT_TOKENS: colorPrimaryHover for blue on chrome at 6.17:1, colorPrimaryActive for blue on the shell surface at 5.65:1, colorTextLabel for turquoise prompt text at 6.76:1, and colorTextHeading for the two title strings on the shell surface at 15.97:1. Yellow keeps its colorWarning operand on the dark chrome, where it measures 9.70:1. Retain every operand in BMS_SOURCE_HISTOGRAM, leave the message band informational variant alone because it pairs against its own alert background with an icon and an ARIA role, and assert every ratio - substitutes clearing the minimum and operands still falling below it - in ui/src/theme/contrast.test.ts.',
+      'Resolve text through BMS_TEXT_COLOR_TOKENS against the one surface SURFACE_TOKENS.screen paints, with the per-role ratio and the in-family shade it beat recorded in BMS_TEXT_CONTRAST_AUDIT: blue keeps its hue at colorPrimaryTextActive 6.159:1 and red at colorErrorTextActive 4.618:1, turquoise snaps to colorTextLabel 6.978:1, and green and yellow snap to colorText 16.558:1. Retain every operand in BMS_SOURCE_HISTOGRAM, leave the message band alone because each severity pairs against its own alert tint with an icon and an ARIA role, and assert the ratios in ui/src/theme/textContrast.test.ts per role plus the three exhaustive family censuses and the retired dark-chrome pairing in ui/src/theme/contrast.test.ts.',
   },
   /*
-   * Trade-offs: the shell needs a frame one viewport tall so the key legend sits at
-   * the bottom edge of the display, as row 24 always did, and no token scale can
-   * express a viewport-relative height. Registering the value here rather than
-   * writing it in the shell keeps this module the single place a rendered value
-   * comes from; the cost is one entry that is a value rather than a token name.
+   * Trade-offs: the display has to be one viewport tall so the key legend sits at its
+   * bottom edge, as row 24 always did, and no token scale can express a
+   * viewport-relative height. The cost is one register entry that is a value rather
+   * than a token name.
+   *
+   * ⚠️ Refactoring Rationale: the element that carries the value is the DOCUMENT's
+   * mount point and not the frame, which is the correction this entry records. A frame
+   * sized to exactly one viewport inside a document keeping the user agent's default
+   * body margin scrolled permanently by 16px, and no component can reset a margin it
+   * does not own - so the sizing and the reset moved together to ui/index.html, and the
+   * component declares no height at all. Compensating inside the component was rejected
+   * outright: subtracting one document's margin from a component's height encodes that
+   * document into every other document that mounts the component.
    */
   {
     id: 'G8',
     description: 'No token scale can express a viewport-relative height.',
     sourceValue: 'DFHMDI SIZE=(24,80) fills the display, with the key legend fixed on row 24.',
     measuredCount:
-      'One value, consumed by one element: the application frame in ui/src/layout/AppShell.tsx.',
+      'One value, declared once, at the document layer: ui/index.html sizes #root with it. No component in ui/src consumes it, because no component owns the mount point.',
     resolution:
-      'Register the value in ADDITIVE_LAYOUT_VALUES and consume it from there; use dvh rather than vh so a collapsing mobile toolbar cannot push the legend out of view.',
+      'Declare it in ui/index.html on the mount point, beside the body margin reset the same measurement required, and let the design system stretch the frame to fill that height; register the value once in ADDITIVE_LAYOUT_VALUES with its evidence, and hold the register to the document in ui/src/layout/appShell.test.tsx. Use dvh rather than vh so a collapsing mobile toolbar cannot push the legend out of view.',
   },
 ] as const satisfies readonly DesignGap[];

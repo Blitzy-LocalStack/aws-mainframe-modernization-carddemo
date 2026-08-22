@@ -5,8 +5,8 @@
 #   The complete public contract of the `observability` module. main.tf
 #   declares one encrypted notification topic, one shared terminal access-log
 #   bucket, a caller-sized set of CloudWatch log groups, one operations
-#   dashboard and THIRTEEN metric alarms. Nothing about them is reachable outside
-#   this directory except through the nine outputs below, so this file -- not
+#   dashboard and FOURTEEN metric alarms. Nothing about them is reachable outside
+#   this directory except through the eleven outputs below, so this file -- not
 #   main.tf -- is what a caller programs against.
 #
 #   The output NAMES are a ONE-WAY CONTRACT rather than an implementation
@@ -31,19 +31,21 @@
 #   label moves with the block it names and is greppable, which a line number is
 #   not.
 #
-#   The other SIX outputs have NO consumer, and saying so is the point of this
-#   paragraph. Three consumed and nine published is not an oversight: a reader who
-#   sees nine outputs beside a claim that renaming one "breaks both environment
-#   roots" would reasonably infer that all nine are wired, and only three are.
-#   `notification_topic_name`, `access_log_bucket_arn`, `managed_log_group_names`,
-#   `dashboard_name`, `dashboard_arn` and `alarm_arns` are published as
+#   The other EIGHT outputs have NO consumer, and saying so is the point of this
+#   paragraph. Three consumed and eleven published is not an oversight: a reader
+#   who sees eleven outputs beside a claim that renaming one "breaks both
+#   environment roots" would reasonably infer that all eleven are wired, and only
+#   three are. `notification_topic_name`, `access_log_bucket_arn`,
+#   `managed_log_group_names`, `state_machine_metric_filter_names`,
+#   `state_machine_execution_failure_alarm_names`, `dashboard_name`,
+#   `dashboard_arn` and `alarm_arns` are published as
 #   OPERATOR AND DISCOVERY contracts: their audience is a human running
 #   `terraform output` or a runbook step, not another Terraform block. That is why
 #   `docs/runbooks/batch-operations.md` can name a dashboard and a log group
 #   without hard-coding either, and why an incident responder can list every alarm
 #   this environment created without reading main.tf.
 #
-#   Trade-offs: the six could be deleted, which would make the output set exactly
+#   Trade-offs: the eight could be deleted, which would make the output set exactly
 #   the wiring surface and let `terraform_unused_declarations` speak for the whole
 #   file. They are kept because a module whose alarms and dashboard are
 #   unnameable from outside forces every runbook to hard-code a constructed name,
@@ -67,14 +69,15 @@
 #   one, because an off-by-one corrected by another off-by-one stays wrong.
 #
 # Return values:
-#   Nine outputs. Six are a single string -- the topic ARN and name, the bucket
-#   name and ARN, and the dashboard name and ARN. Three are maps: two carry the
+#   Eleven outputs. Six are a single string -- the topic ARN and name, the bucket
+#   name and ARN, and the dashboard name and ARN. Five are maps: two carry the
 #   managed log groups' names and ARNs keyed by the same producer key main.tf
-#   iterated, and one carries every alarm ARN keyed by alarm family and
-#   instance. Three of the nine are read by an environment root and six are
+#   iterated, two carry the state machine's metric-filter and execution-failure
+#   alarm names, and one carries every alarm ARN keyed by alarm family and
+#   instance. Three of the eleven are read by an environment root and eight are
 #   operator-facing only, as the section above sets out. Each `description`
 #   states which identifier form it is, what a caller does with it, and -- for
-#   the six -- that no Terraform block reads it, because
+#   the eight -- that no Terraform block reads it, because
 #   infra/.terraform-docs.yml sets its `read-comments` key to false, so a
 #   `description` is the ONLY text that reaches the generated table in
 #   README.md -- a rationale written in a comment beside an output never
@@ -404,7 +407,7 @@ output "dashboard_arn" {
 # -----------------------------------------------------------------------------
 
 output "alarm_arns" {
-  description = "Map of alarm ARNs covering all THIRTEEN alarm families this module creates, keyed <family>/<instance> for the eight families iterated per service, per queue, per rotation function or per terminal batch outcome, and by bare family name for the five single-instance alarms. Three of those five are unconditional (api_5xx, aurora_cpu, aurora_capacity); the remaining two are present only when their gate is open -- aurora_connections when database_connection_threshold is set, and cloudfront_5xx when a distribution id is supplied and the region is us-east-1 -- so their keys are absent rather than null when they are not created. A caller composes a composite alarm over a chosen subset of families, attaches an action beyond this module's notification topic, or scopes an IAM Resource element to these alarms -- each of which needs the ARN and none of which then has to rediscover an alarm by its composed name. No Terraform block in this repository reads this output today -- every alarm here already routes to this module's own notification topic, so no root has needed to attach a second action -- which makes it a discovery contract: it is how an incident responder enumerates what this environment actually alarms on without reading main.tf."
+  description = "Map of alarm ARNs covering all FOURTEEN alarm families this module creates, keyed <family>/<instance> for the nine families iterated per service, per queue, per rotation function or per terminal batch outcome, and by bare family name for the five single-instance alarms. Three of those five are unconditional (api_5xx, aurora_cpu, aurora_capacity); the remaining two are present only when their gate is open -- aurora_connections when database_connection_threshold is set, and cloudfront_5xx when a distribution id is supplied and the region is us-east-1 -- so their keys are absent rather than null when they are not created. A caller composes a composite alarm over a chosen subset of families, attaches an action beyond this module's notification topic, or scopes an IAM Resource element to these alarms -- each of which needs the ARN and none of which then has to rediscover an alarm by its composed name. No Terraform block in this repository reads this output today -- every alarm here already routes to this module's own notification topic, so no root has needed to attach a second action -- which makes it a discovery contract: it is how an incident responder enumerates what this environment actually alarms on without reading main.tf."
   value = merge(
     {
       for service, alarm in aws_cloudwatch_metric_alarm.service_unhealthy :

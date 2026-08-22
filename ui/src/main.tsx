@@ -11,22 +11,26 @@
  *
  * Startup contract
  * ----------------
- * Assumptions: three things must hold for a successful start, and each has a named failure. The
+ * Assumptions: four things must hold for a successful start, and each has a named failure. The
  * document must carry an element with id `root`, or {@link applicationRoot} throws. The runtime
  * configuration document must either resolve or be absent, the absent case falling back to the
- * build-time variable. And the mount must be the LAST step, because the API client memoises its
- * base URL on first construction. A failure at any of the three mounts nothing and reports the
- * reason, which is a deliberate choice recorded at the handler below.
+ * build-time variable. The resolved API base URL must be usable, or {@link resolvedApiBaseUrl}
+ * throws -- see the call below for why that is checked HERE rather than left to the first request.
+ * And the mount must be the LAST step, because the API client memoises its base URL on first
+ * construction. A failure at any of the four mounts nothing and reports the reason, which is a
+ * deliberate choice recorded at the handler below.
  *
  * Configuration boundary
  * ----------------------
- * Assumptions: configuration reaches this bundle only through `import.meta.env`, and `process.env`
- * is not merely discouraged here but does not compile -- `ui/tsconfig.json` sets `types: []`, so no
- * Node global is in scope for browser code, and `ui/vite.config.ts` sets `envPrefix: 'VITE_'`, which
- * is the mechanical boundary deciding which names are inlined into the bundle when it is built.
- * `ui/.env.example` enumerates those names value-free and there are three of them. This module
- * reads none of them: `ui/src/api/client.ts` consumes them, so the entry point carries no
- * configuration surface of its own that could drift from that file.
+ * Assumptions: configuration reaches this bundle only through `import.meta.env` and through the
+ * `config.json` document the deployment publishes beside it. `process.env` is not merely discouraged
+ * here but does not compile -- `ui/tsconfig.json` sets `types: []`, so no Node global is in scope for
+ * browser code, and `ui/vite.config.ts` sets `envPrefix: 'VITE_'`, which is the mechanical boundary
+ * deciding which names are inlined into the bundle when it is built. `ui/.env.example` enumerates
+ * those names value-free and there are three of them. This module spells none of them: it asks
+ * `ui/src/api/runtimeConfig.ts` for the RESOLVED base URL, which is the module that owns both
+ * sources and the precedence between them, so the entry point carries no configuration surface of
+ * its own that could drift from that file.
  *
  * What this module deliberately does NOT do
  * -----------------------------------------
@@ -66,7 +70,7 @@ import { StrictMode } from 'react';
 //       `StrictMode` double invocation below meaningful, since the pre-18 root never performed it.
 import { createRoot } from 'react-dom/client';
 
-import { loadRuntimeConfig } from './api/runtimeConfig';
+import { loadRuntimeConfig, resolvedApiBaseUrl } from './api/runtimeConfig';
 import { App } from './App';
 import { SHARED_MESSAGES } from './messages/messages';
 
@@ -109,17 +113,42 @@ function applicationRoot(): HTMLElement {
  * Trade-offs: a failed load mounts nothing and reports the reason to the console rather than
  * rendering a partial application. An application whose every request is misaddressed is not usable,
  * so failing visibly at start-up is more useful than a shell that appears to work and then refuses
- * every action. A missing document is NOT a failure — `loadRuntimeConfig` resolves for that case and
- * the client falls back to its build-time variable, which is what keeps the development server
- * working.
+ * every action. A missing document is NOT by itself a failure — `loadRuntimeConfig` resolves for that
+ * case and the build-time variable is used instead, which is what keeps the development server
+ * working; what is a failure is neither source producing a usable base URL, which is the state
+ * checked below.
  * @returns {Promise<void>} Resolves once the application is mounted.
  * @throws {Error} Asynchronously, by rejecting: from {@link applicationRoot} when the mount point is
- *   absent, and from `loadRuntimeConfig` when a configuration document is published but cannot be
- *   parsed or fails validation. Both are handled by the single rejection handler attached below,
- *   which is the only reason this function does not catch them itself.
+ *   absent, from `loadRuntimeConfig` when a configuration document is published but cannot be parsed
+ *   or fails validation, and from `resolvedApiBaseUrl` when no source supplied a usable API base URL.
+ *   All three are handled by the single rejection handler attached below, which is the only reason
+ *   this function does not catch them itself.
  */
 async function bootstrap(): Promise<void> {
   await loadRuntimeConfig();
+
+  /*
+   * WHY the resolved base URL is validated HERE — Refactoring Rationale: start-up used to await the
+   * document and mount whatever came back, including when nothing came back. The image publishes no
+   * `VITE_API_BASE_URL` — the bundle is built before any environment exists, which is the whole
+   * reason the runtime document exists — so an absent or unreadable document left the resolved value
+   * empty and this module mounted an application whose every request threw inside the client factory.
+   * What an operator saw was a working sign-on screen answering 'Unable to verify the User ...',
+   * which reads as a rejected credential rather than as an unconfigured deployment, and no credential
+   * had left the browser at all.
+   *
+   * Trade-offs: the call's value is DISCARDED, because nothing here needs the URL — the client
+   * resolves it again on first construction, through the same function, and memoises it then. What is
+   * wanted is the refusal, before anything is mounted, so a misconfigured deployment names itself in
+   * one sentence instead of being reported as a screen behaving oddly.
+   *
+   * Alternatives Considered: letting the first request fail and surfacing a message on the screen.
+   * Rejected because every screen would need it, the message would arrive after an operator had
+   * already typed a credential into a form that could never submit, and the failure is not a
+   * screen's to report: it is the deployment's, and it is fully known before the first paint.
+   */
+  resolvedApiBaseUrl();
+
   createRoot(applicationRoot()).render(
     // Trade-offs: StrictMode is kept, and what it costs is a DOUBLE invocation of every component
     //   body, every state initialiser and every effect in a development build -- effects mount,
@@ -156,9 +185,11 @@ bootstrap().catch(
     // WHY : Refactoring Rationale: the rejection detail goes to the console and NOT to the screen.
     //       This replaces a `CardDemo could not start: <detail>` sentence that was wrong twice over
     //       -- it was invented rather than transcribed, and it published deployment internals to
-    //       whoever was looking at the page. Everything `loadRuntimeConfig` rejects with is
-    //       internal: an HTTP status it could not read past, or the fact that the published
-    //       document was not JSON. `ui/src/messages/messages.ts` already binds that class of value
+    //       whoever was looking at the page. Everything this bootstrap rejects with is internal: an
+    //       HTTP status the loader could not read past, the fact that the published document was not
+    //       JSON, or the API base URL a deployment configured and the shape rule it broke -- and that
+    //       last one names an endpoint, which is exactly the kind of value that belongs in a log
+    //       rather than on a page. `ui/src/messages/messages.ts` already binds that class of value
     //       with `RedactedDiagnostic` -- where the baseline showed an internal value to the
     //       operator, the target shows a verbatim replacement and the value goes to a log instead
     //       -- and its own register rows resolve to the same replacement used below. The rule is

@@ -64,7 +64,9 @@ import org.springframework.transaction.support.SimpleTransactionStatus;
  * {@code CT02}, named "Transaction Add" in the inventory table of the repository root
  * {@code README.md} at line 300. That program carries the largest validation surface of the four
  * this package pins, and this class holds the transcription to five obligations: the three-way key
- * selection and which of two supplied keys wins, the eight validation blocks of the data phase and
+ * selection and which of two supplied keys wins, the eight validation blocks of the data phase --
+ * together with the one added block that has no counterpart there, guarding the free-text character
+ * domain the migration's fixed-width sinks require -- and
  * the single sentence each of them can publish, the derivation of the next identifier from a
  * descending single-row probe, the three outcomes of the append, and the confirmation evaluation
  * that decides whether the append is reached at all.</p>
@@ -217,7 +219,8 @@ import org.springframework.transaction.support.SimpleTransactionStatus;
  * keeps this class safe to run in parallel with any other.</p>
  */
 @ExtendWith(MockitoExtension.class)
-@DisplayName("the capture screen: three key branches, eight validation blocks, three append outcomes")
+@DisplayName("the capture screen: three key branches, eight transcribed validation blocks plus one"
+        + " added, three append outcomes")
 class TransactionAddServiceTest {
 
     /** The eleven-digit account identifier every keyed case submits, already at the key width. */
@@ -807,7 +810,26 @@ class TransactionAddServiceTest {
      * @return a {@link Transaction} carrying all thirteen mapped members, never {@code null}
      */
     private static Transaction storedRow(String tranId) {
-        return new Transaction(tranId, "02", "0002", "ATM TERM", "FUEL PURCHASE",
+        return storedRowDescribing(tranId, "FUEL PURCHASE");
+    }
+
+    /**
+     * Builds a stored row for the copy path to read back, carrying a chosen description.
+     *
+     * <p>Refactoring Rationale: {@link #storedRow(String)} delegates here rather than the two carrying
+     * one row shape each, so a change to any other column is made once. The description is the
+     * substitutable member because it is the widest free-text column the copy block moves and therefore
+     * the one a row written by another writer of the ledger is most likely to carry something
+     * unexpected in.</p>
+     *
+     * @param tranId the identifier the stored row carries, of type {@code String}, at the sixteen
+     *     characters the key column declares
+     * @param description the description the stored row carries, of type {@code String}, which a case
+     *     may set to a value the printable domain refuses
+     * @return a {@link Transaction} carrying all thirteen mapped members, never {@code null}
+     */
+    private static Transaction storedRowDescribing(String tranId, String description) {
+        return new Transaction(tranId, "02", "0002", "ATM TERM", description,
                 Money.of("42.75").amount(), 987654321L, "FUEL STOP", "TACOMA", "98402",
                 RESOLVED_CARD_NUMBER, LocalDateTime.of(2026, 1, 10, 0, 0),
                 LocalDateTime.of(2026, 1, 11, 0, 0));
@@ -1665,6 +1687,149 @@ class TransactionAddServiceTest {
                             .as("a supplied value that was refused is not a blank component")
                             .isEqualTo(arm.expectedState());
                 });
+
+        verify(this.transactions, never()).saveAndFlush(any());
+    }
+
+    /**
+     * Supplies the five free-text fields the added printable-domain block guards, with their sentences.
+     *
+     * <p>Assumptions: this family does NOT reuse {@code ValidationArm}, because that record carries the
+     * line of {@code app/cbl/COTRN02C.cbl} that declares an arm's sentence and this block has no such
+     * line: the reference has no condition to transcribe here, its writer being a 3270 field on a
+     * single-byte code page that could not key these characters at all. Reusing the record would have
+     * required inventing a citation, which is the one thing a citation must never be.</p>
+     *
+     * <p>Assumptions: the order is the reference's own presence order -- lines 266, 272, 302, 308 and
+     * 314 -- because the added block borrows that order rather than inventing a second one, so the field
+     * precedence a screen sees stays single.</p>
+     *
+     * @return one argument pair per guarded field, being the service's field key and the sentence its
+     *     refusal carries
+     */
+    private static Stream<Arguments> printableTextFields() {
+        return Stream.of(
+                Arguments.of(TransactionAddService.FIELD_SOURCE,
+                        TransactionAddRequest.SOURCE_NOT_PRINTABLE),
+                Arguments.of(TransactionAddService.FIELD_DESCRIPTION,
+                        TransactionAddRequest.DESCRIPTION_NOT_PRINTABLE),
+                Arguments.of(TransactionAddService.FIELD_MERCHANT_NAME,
+                        TransactionAddRequest.MERCHANT_NAME_NOT_PRINTABLE),
+                Arguments.of(TransactionAddService.FIELD_MERCHANT_CITY,
+                        TransactionAddRequest.MERCHANT_CITY_NOT_PRINTABLE),
+                Arguments.of(TransactionAddService.FIELD_MERCHANT_ZIP,
+                        TransactionAddRequest.MERCHANT_ZIP_NOT_PRINTABLE));
+    }
+
+    // WHY : Assumptions: this family is at the SERVICE level as well as the boundary because the two
+    //       levels are reached by different callers. A boundary constraint sees only what arrived over
+    //       HTTP, and the copy-last path assembles a capture from a stored row inside this process --
+    //       so without the service block a row written before the domain existed would be copied
+    //       forward and re-persisted unexamined, which is the only remaining way in.
+    /**
+     * Each free-text field refuses every character the fixed-width sinks cannot carry, naming itself.
+     *
+     * <p>Assumptions: the specimens are the two record separators, the horizontal tab, the null, the
+     * delete and two code points above the seven-bit range. The first five round-trip through US-ASCII
+     * and so reach the plain-text statement's fixed-width bands and the 133-column report verbatim,
+     * where a separator becomes a second record that no reader can tell from a real one; the last two
+     * cannot be encoded by those codecs at all and would be refused on a later batch run rather than at
+     * the request that stored them.</p>
+     *
+     * <p>Assumptions: the refusal carries the not-acceptable state rather than the blank one, because
+     * the field HAS a value -- the asterisk {@code app/cpy/CSSETATY.cpy} lines 23 to 25 draw belongs to
+     * a field left empty, and this is the same kind of fault as a value that is not numeric.</p>
+     *
+     * @param field the service field key under test, of type {@code String}
+     * @param sentence the sentence that field's refusal carries, of type {@code String}
+     */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("printableTextFields")
+    @DisplayName("each text field refuses every character the fixed-width sinks cannot carry")
+    void eachTextFieldRefusesTheCharactersTheFixedWidthSinksCannotCarry(String field,
+            String sentence) {
+
+        accountResolvesTo(RESOLVED_CARD_NUMBER);
+        List<String> refused =
+                List.of("\r", "\n", "\t", "\u0000", "\u007F", "\u00E9", "\uD83D\uDCB3");
+
+        for (String specimen : refused) {
+            TransactionAddRequest deficient =
+                    replacing(submission(ACCOUNT_ID, "", "Y"), field, "A" + specimen + "B");
+
+            assertThatThrownBy(() -> this.add(deficient))
+                    .as("%s must refuse U+%04X", field, (int) specimen.charAt(0))
+                    .isInstanceOf(ClientInputException.class)
+                    .hasMessage(sentence)
+                    .satisfies(failure -> {
+                        ClientInputException refusal = (ClientInputException) failure;
+                        assertThat(refusal.field()).isEqualTo(field);
+                        assertThat(refusal.state())
+                                .as("a supplied value that was refused is not a blank component")
+                                .isEqualTo(FieldValidationFlag.NOT_OK);
+                    });
+        }
+
+        verify(this.transactions, never()).saveAndFlush(any());
+    }
+
+    /**
+     * A defect the reference itself names still wins over the added domain block, which runs last.
+     *
+     * <p>Assumptions: this is the case that makes the added block's POSITION observable. The submission
+     * offends both the merchant identifier's digit rule -- the last block the reference writes, at lines
+     * 430 to 436 -- and the description's character domain, which has no reference line at all. The
+     * answer must be the reference's own sentence for the reference's own defect, because the added
+     * block is a boundary the migration needs and not a rule the screen ever had; any position other
+     * than last would let it pre-empt a transcribed refusal and change what an operator is told.</p>
+     */
+    @Test
+    @DisplayName("a reference-defined refusal still precedes the added domain block")
+    void aReferenceDefinedRefusalStillPrecedesTheAddedDomainBlock() {
+        accountResolvesTo(RESOLVED_CARD_NUMBER);
+        TransactionAddRequest offendingBoth = replacing(
+                replacing(submission(ACCOUNT_ID, "", "Y"), TransactionAddService.FIELD_DESCRIPTION,
+                        "FUEL\rPURCHASE"),
+                TransactionAddService.FIELD_MERCHANT_ID, "00000000A");
+
+        assertThatThrownBy(() -> this.add(offendingBoth))
+                .isInstanceOf(ClientInputException.class)
+                .hasMessage(TransactionAddRequest.MERCHANT_ID_NOT_NUMERIC)
+                .satisfies(failure -> assertThat(((ClientInputException) failure).field())
+                        .as("line 432's refusal is transcribed and must not be pre-empted")
+                        .isEqualTo(TransactionAddService.FIELD_MERCHANT_ID));
+
+        verify(this.transactions, never()).saveAndFlush(any());
+    }
+
+    /**
+     * A stored row carrying an inadmissible character is refused by the copy path, not re-persisted.
+     *
+     * <p>Assumptions: this is the path no boundary constraint can see. Lines 480 to 493 of
+     * {@code app/cbl/COTRN02C.cbl} fill the capture from the row that was read, and the migrated copy
+     * does the same in-process, so the capture never passes through bean validation. A row written
+     * before this domain existed -- or by any other writer of the ledger -- is therefore the one
+     * remaining way an inadmissible character could reach the statement and report sinks a second
+     * time.</p>
+     *
+     * <p>Assumptions: the copy is refused rather than repaired, and the answer names the copied field.
+     * Sanitising would append a row differing from the one the operator asked to copy, silently; naming
+     * the field leaves them able to re-key it, which is the remedy the sentence describes.</p>
+     */
+    @Test
+    @DisplayName("a copied row carrying an inadmissible character is refused, and nothing is appended")
+    void aCopiedRowCarryingAnInadmissibleCharacterIsRefused() {
+        accountResolvesTo(RESOLVED_CARD_NUMBER);
+        theTableMaximumIs(STORED_MAXIMUM);
+        when(this.transactions.findById(STORED_MAXIMUM))
+                .thenReturn(Optional.of(storedRowDescribing(STORED_MAXIMUM, "FUEL\nPURCHASE")));
+
+        assertThatThrownBy(() -> this.copyLast(copySubmission(ACCOUNT_ID, "", "Y")))
+                .isInstanceOf(ClientInputException.class)
+                .hasMessage(TransactionAddRequest.DESCRIPTION_NOT_PRINTABLE)
+                .satisfies(failure -> assertThat(((ClientInputException) failure).field())
+                        .as("the copied member is named, so the operator can re-key it")
+                        .isEqualTo(TransactionAddService.FIELD_DESCRIPTION));
 
         verify(this.transactions, never()).saveAndFlush(any());
     }

@@ -4,8 +4,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.carddemo.reporting.repository.StatementCardXrefRepository.StatementHeadingRow;
 import jakarta.persistence.EntityManager;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -47,9 +51,10 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * that class's documented premise is that it creates no relation at all, and creating one there
  * would falsify its own rationale for a second, unrelated purpose.
  *
- * <p>Trade-offs: the three relations are created as plain tables by a harness script rather than as
- * the real views, so this class cannot detect a mismatch between an entity mapping and a view
- * definition. That is accepted and the harness script records why at length: the real views read
+ * <p>Trade-offs: the relations are created as plain tables -- three by a harness script and the
+ * fourth, the per-card identity relation the walk is ordered from, by this class from the harness's
+ * own rows -- rather than as the real views, so this class cannot detect a mismatch between an entity
+ * mapping and a view definition. That is accepted and the harness script records why at length: the real views read
  * base tables four other services' migrations create, and a copy of four migrations would drift from
  * the originals unnoticed. The narrower claim -- that the predicate reproduces its ordering -- is the
  * one this class makes, and it is a claim no other artifact in the repository makes at all.
@@ -136,6 +141,61 @@ class StatementHeadingChunkIT {
     @ServiceConnection
     static final PostgreSQLContainer POSTGRES =
             new PostgreSQLContainer(POSTGRES_IMAGE).withInitScript(HARNESS_SCRIPT);
+
+    /**
+     * Creates and seeds the fourth relation the walk reads, derived from the harness's rows.
+     *
+     * <p>Purpose: {@code findHeadingChunk} drives from {@code reporting.card_identity} -- the
+     * persisted per-card relation whose two ordered columns ARE the walk's ordering tuple -- and the
+     * harness script creates the three relations the walk laterals into but not that one.</p>
+     *
+     * <p>Refactoring Rationale: the query this class exercises used to order a barrier view directly.
+     * It cannot any longer: every reporting projection is declared
+     * {@code WITH (security_barrier = true)}, which confines what may be pushed below it to LEAKPROOF
+     * quals, and a range comparison on text is not leakproof -- so a keyset predicate plus an ordering
+     * could reach no index and each chunk materialised and sorted the whole cardholder population. The
+     * relation seeded here is what the ordering is served from now, so the walk cannot be exercised at
+     * all without it.</p>
+     *
+     * <p>Assumptions: the relation is created HERE rather than in the harness script, and the reason is
+     * a boundary rather than a preference -- this class owns its Java and the shared harness resource
+     * is read by more than one artifact. Seeding it FROM the harness's own rows is also what keeps the
+     * fixture single-sourced: the fingerprints and masked renderings are the harness's chosen values,
+     * so the two relations cannot disagree and the discriminating arrangement the harness documents at
+     * length still holds.</p>
+     *
+     * <p>Assumptions: the whole card number is synthesised from the fingerprint's leading characters,
+     * and nothing in this class reads it. Only two properties of it matter: it is unique, which the
+     * four chosen fingerprints make it, and it is sixteen characters, which the declared type
+     * requires. A plausible card number would be a fiction that reads as data.</p>
+     *
+     * <p>Assumptions: the two ordered columns carry {@code COLLATE "C"} exactly as the real relation
+     * does, so this fixture's order is bytewise for the same reason production's is and does not
+     * depend on the container's {@code lc_collate}.</p>
+     *
+     * <p>This method takes no parameter and returns no value.</p>
+     *
+     * @throws SQLException if the relation cannot be created or seeded, which is an arrangement
+     *     failure and not the property under test
+     */
+    @BeforeAll
+    static void arrangeTheIdentityRelation() throws SQLException {
+        try (Connection connection = POSTGRES.createConnection("");
+                Statement arrange = connection.createStatement()) {
+            arrange.execute("create table reporting.card_identity ("
+                    + " card_fingerprint text collate \"C\" not null,"
+                    + " card_num character(16) not null,"
+                    + " card_num_masked text collate \"C\" not null,"
+                    + " constraint pk_card_identity primary key (card_fingerprint),"
+                    + " constraint uq_card_identity_card_num unique (card_num))");
+            arrange.execute("create index idx_card_identity_masked_fingerprint"
+                    + " on reporting.card_identity (card_num_masked, card_fingerprint)");
+            arrange.executeUpdate("insert into reporting.card_identity"
+                    + " (card_fingerprint, card_num, card_num_masked)"
+                    + " select card_fingerprint, substr(card_fingerprint, 1, 16), card_num"
+                    + " from reporting.v_card_xref");
+        }
+    }
 
     /**
      * The repository under test, injected so the walk goes through the declared query.

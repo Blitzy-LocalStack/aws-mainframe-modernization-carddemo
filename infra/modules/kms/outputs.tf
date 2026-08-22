@@ -369,7 +369,7 @@ output "secrets_key_alias_name" {
 # =============================================================================
 
 output "sqs_key_arn" {
-  description = "ARN of the customer-managed key that encrypts queue message payloads at rest -- the authorization request and reply, the split account/date inquiry requests, the shared inquiry reply and the error sink. A calling environment root passes this into the sqs module's `kms_key_arn` input, which sets it on every queue that module creates. That is five request, reply and error queues per the target messaging design, plus a sixth because the single inquiry request queue is split at the ownership boundary into an account-inquiry and a date-conversion request queue -- a divergence registered in docs/architecture/messaging-contracts.md, not an extra key. Each of the six has its own dead-letter queue, and the key covers those too."
+  description = "ARN of the customer-managed key that encrypts queue message payloads at rest. A calling environment root passes this into the sqs module's `kms_key_arn` input, which sets it on every queue that module creates: the authorization request and reply, the inquiry request and reply, and the error sink -- FIVE primary queues, exactly the count AAP section 0.4.1.8 names, with no fan-out of the inquiry request leg -- and each one's dead-letter queue, so the key covers ten queues. Assumptions: the dead-letter queues are covered deliberately rather than incidentally, because a message that fails delivery carries the same fields as one that succeeded and must not become readable by moving between queues."
   value       = aws_kms_key.sqs.arn
 }
 

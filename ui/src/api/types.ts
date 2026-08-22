@@ -141,9 +141,16 @@ export type PageDirection = 'next' | 'previous';
  * it reads as a value that merely happens to be missing this time.
  *
  * Assumptions: `lastKey` is both the last row's identity and the position a forward request is issued
- * from, and `firstKey` likewise for a backward one. The service seals the direction into each token,
- * so replaying `firstKey` with direction `next` is refused with HTTP 400 rather than answered with
- * the wrong page -- which is what makes one value safe to serve both purposes.
+ * from, and `firstKey` likewise for a backward one. Most services seal the direction into each token, so
+ * replaying `firstKey` with direction `next` is refused with HTTP 400 rather than answered with the wrong
+ * page -- which is what makes one value safe to serve both purposes.
+ *
+ * Refactoring Rationale: that sentence read "the service seals", as though the property were universal,
+ * and one contract states otherwise: `authorization-api.yaml` records at its cursor parameter that its
+ * token is "not sealed per direction", having considered and declined that seal. The claim is attributed
+ * rather than deleted because for every other paged surface it is true and is a real safety property; a
+ * client must simply not rely on the refusal as though every service made it. Nothing here relies on it
+ * -- the envelope carries both keys and each screen sends the one matching the direction it asks for.
  *
  * Refactoring Rationale: whether an EARLIER page exists is deliberately NOT a member here, because the
  * reference does not answer it from the file either. `app/cbl/COCRDLIC.cbl` declares the screen ordinal
@@ -1496,7 +1503,26 @@ export interface UpdateUserRequest {
   readonly userType: UserType;
 }
 
+/**
+ * Criteria a user browse request may narrow or position by.
+ *
+ * Assumptions: `startUserId` and `cursor` are both POSITIONS and are mutually exclusive. The first
+ * opens a browse at or after an identifier the operator typed -- the reference's own search field,
+ * read on the enter turn at `app/cbl/COUSR00C.cbl` L218 to L221 -- and the second continues a browse
+ * already open from a page boundary the service sealed. A request carrying both is refused with 400
+ * naming both members, because it states two positions and cannot say which was meant, so a caller
+ * paging on from a positioned page sends the cursor alone and drops the identifier.
+ *
+ * Assumptions: positioning is INCLUSIVE while the cursor is exclusive. A row whose identifier equals
+ * `startUserId` is the first row of the page, and an identifier no row carries positions on the next
+ * one rather than refusing, so a partial or since-deleted value still yields a page.
+ *
+ * Assumptions: `startUserId` is held to the stored identifier's own domain -- at most eight ASCII
+ * letters and digits, either case, folded by the service -- and an empty value means the same as
+ * omitting it, which opens at the start of the set.
+ */
 export interface UserListQuery {
+  readonly startUserId?: string;
   readonly cursor?: string;
   readonly direction?: PageDirection;
 }
@@ -1595,9 +1621,28 @@ export interface TransactionCreateRequest {
  * migration forbids a credential reaching a place with no audit trail; a resource name is not a secret,
  * so it may travel here. Trade-offs: collecting the value needs a grant on the secret store, which a
  * browser session does not hold, so onboarding ends with one privileged read.
+ *
+ * ⚠️ Assumptions: the member is meant to be RENDERED to the administrator who made the call --
+ * `ui/src/screens/userAdd/index.tsx` publishes it on the create acknowledgement beside the retrieval
+ * step. It is required, and a client that received it and dropped it would leave the account it had just
+ * created unreachable: the account is created in its force-change state with delivery suppressed, so the
+ * credential is mailed to nobody and exists only in the named entry.
  */
 export interface CreatedUserResponse extends UserResponse {
   readonly credentialSecretName: string;
+  /**
+   * The credential the new account was created with, live for exactly one sign-on.
+   *
+   * Assumptions: this is the ONLY place the value exists on this client's side of the wire. The service
+   * stores it in no column and re-issues it from no operation, so a screen that drops it cannot ask for
+   * it again -- which is why the surface rendering it holds it in component state and clears it, rather
+   * than writing it anywhere a later render could read it back.
+   *
+   * Assumptions: it is never written to `sessionStorage`, `localStorage`, a URL, a route parameter, a
+   * form field or a log, and the contract's `Cache-Control: no-store` on this response is the
+   * service-side half of the same obligation.
+   */
+  readonly oneTimeCredential: string;
 }
 
 /**

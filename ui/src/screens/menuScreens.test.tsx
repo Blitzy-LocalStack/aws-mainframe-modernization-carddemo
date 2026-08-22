@@ -47,8 +47,13 @@ import {
   formatMessageTemplate,
 } from '../messages/messages';
 import type { MainMenuOption } from '../messages/messages';
+import { AppShell } from '../layout/AppShell';
 import { PF_KEY_BAR_REGION_LABEL } from '../layout/PfKeyBar';
 import { SIGN_ON_ROUTE } from '../routes/guards';
+// Assumptions: the resolver is imported rather than re-derived, because it is the function both menus
+//   consult and therefore the only place the not-installed arm's precondition can be observed now that
+//   no live option reaches it.
+import { routeForProgram } from '../routes/programRoutes';
 import { installApiHarness, removeApiHarness } from '../test/apiHarness';
 import { endAnySession, establishSession, isSignedOn } from '../test/sessionHarness';
 import { ADMIN_MENU_ROUTE, MAIN_MENU_ROUTE } from '../routes/navigation';
@@ -127,6 +132,13 @@ function armTransport(): void {
  * Assumptions: a memory router with explicit probe routes rather than the shipped table, because these
  * cases assert what the SCREEN decides. Whether the destination is registered is proved separately by
  * `ui/src/routerRoutes.test.tsx`, which renders the shipped table.
+ *
+ * ⚠️ Assumptions: the FRAME is part of the tree, where the menu was previously rendered bare. Both menus
+ * delegate their title, their message line and their function-key legend through `useShellSlot`, so the
+ * legend is painted by the shell and by nothing else -- and {@link submitControl} names the screen's own
+ * control by excluding the identically labelled legend entry, which it cannot do when no legend exists.
+ * A bare render therefore failed on a missing navigation landmark rather than on anything these cases
+ * are about.
  * @param {ReactElement} menu - The menu screen to render.
  * @param {string} at - Route the menu is mounted at.
  * @param {readonly string[]} probes - Destinations that render the arrival marker.
@@ -135,19 +147,21 @@ function armTransport(): void {
 function renderMenu(menu: ReactElement, at: string, probes: readonly string[]): ReactElement {
   return (
     <MemoryRouter initialEntries={[at]}>
-      <Routes>
-        <Route path={at} element={menu} />
-        {probes.map(
-          /**
-           * Mounts one probe route that reports its own arrival.
-           * @param {string} path - Destination to probe.
-           * @returns {ReactElement} The probe route.
-           */
-          (path) => (
-            <Route key={path} path={path} element={<div>{`${ARRIVED} ${path}`}</div>} />
-          ),
-        )}
-      </Routes>
+      <AppShell>
+        <Routes>
+          <Route path={at} element={menu} />
+          {probes.map(
+            /**
+             * Mounts one probe route that reports its own arrival.
+             * @param {string} path - Destination to probe.
+             * @returns {ReactElement} The probe route.
+             */
+            (path) => (
+              <Route key={path} path={path} element={<div>{`${ARRIVED} ${path}`}</div>} />
+            ),
+          )}
+        </Routes>
+      </AppShell>
     </MemoryRouter>
   );
 }
@@ -203,43 +217,87 @@ function refusesEveryEntryOutsideTheOptionDomain(): void {
 }
 
 /**
- * Asserts a mounted option enters its route and an unmounted one takes the reference's own sentence.
+ * Asserts every main-menu option enters a route, including the two addressed only per record.
  *
- * Assumptions: the unavailable-option sentence is compared against the catalog's TEMPLATE applied to
- * the option's own padded name, not against a hand-written string, because the template is what models
- * the reference's `DELIMITED BY` double-space strip of the 35-character padding.
+ * ⚠️ Refactoring Rationale: this case asserted that option 7 reported itself NOT INSTALLED, and it
+ * ratified a defect. `COTRN01C`'s screen is delivered and mounted at `/transactions/:id`; the sentence
+ * reports a program the CICS region does not HOLD, so answering an operator with it named an absence that
+ * does not exist. `ui/src/routes/programRoutes.ts` now resolves that program to the transaction browse --
+ * the screen that selects a transaction and enters the detail screen with it -- so the assertion is
+ * inverted rather than deleted, and the whole option table is checked instead of one entry.
  *
- * ⚠️ Refactoring Rationale: the unmounted case reads option 7 where it previously read option 6. Option 6
- * names `COTRN00C`, whose browse screen is now authored, mounted at the literal `/transactions` and
- * registered in `ui/src/routes/programRoutes.ts`, so it ENTERS a route and can no longer report an absent
- * one. Option 7 names `COTRN01C`, which is the one main-menu option still without a reachable
- * destination: its screen is mounted only at `/transactions/:id`, and a menu option carries no
- * transaction identifier to fill that segment with.
+ * Assumptions: the eleven options are asserted EXHAUSTIVELY rather than by sample. AAP section 0.1.3.1
+ * states that program flow preserves the reachability graph of the eighteen transactions, which is a
+ * property of the WHOLE table rather than of any one entry, so a case naming a single option would leave a
+ * later `null` undetected until an operator met it.
  * @returns {void} Nothing; failure is reported by the expectations.
  */
-function entersAMountedOptionAndReportsAnUnmountedOne(): void {
+function entersEveryMainMenuOption(): void {
   const accountView = resolveMenuOption('1', false);
   expect(accountView.destination).toBe('/account/view');
   expect(accountView.message).toBeNull();
 
   expect(resolveMenuOption('6', false).destination).toBe('/transactions');
 
+  /*
+   * Assumptions: option 7 is named through the option table rather than by its number alone, so the case
+   * fails loudly if the copybook transcription is ever renumbered, instead of quietly asserting the
+   * destination of whatever option sits seventh.
+   */
   const transactionView = MAIN_MENU_OPTIONS[6];
   expect(transactionView?.programName).toBe('COTRN01C');
-  const unmounted = resolveMenuOption('7', false);
-  expect(unmounted.destination).toBeNull();
-  expect(unmounted.message).toBe(
+  const detail = resolveMenuOption('7', false);
+  expect(detail.destination).toBe('/transactions');
+  expect(detail.message).toBeNull();
+
+  for (const option of MAIN_MENU_OPTIONS) {
+    const outcome = resolveMenuOption(String(option.optionNumber), false);
+    expect(
+      outcome.destination,
+      `option ${String(option.optionNumber)} must enter a route`,
+    ).not.toBeNull();
+    expect(outcome.message).toBeNull();
+  }
+}
+
+/**
+ * Asserts the not-installed arm survives for a program no menu carries a route for.
+ *
+ * ⚠️ Refactoring Rationale: this arm used to be reachable through option 7 and no live option reaches it
+ * now, so it is asserted where it still can be: at the resolution the arm depends on, and against the
+ * catalogued template it composes. Deleting the coverage was the alternative and was rejected -- the arm
+ * is the reference's own answer for a target the region cannot load (`app/cbl/COMEN01C.cbl` L147-L168
+ * inspects the program and composes the sentence when the answer is not `NORMAL`), so an option added to
+ * `app/cpy/COMEN02Y.cpy` ahead of its screen still depends on it.
+ *
+ * Assumptions: the probe program name begins `DUMMY`, which is the reference's OWN sentinel for this
+ * condition -- `app/cbl/COADM01C.cbl` L141-L144 tests exactly that prefix before composing the sentence
+ * -- so the case exercises the arm with the value the baseline itself uses rather than an invented one.
+ *
+ * Assumptions: the sentence is composed through the catalog's TEMPLATE applied to a padded option name,
+ * because the template is what models the reference's `DELIMITED BY` double-space strip of the
+ * 35-character padding; a hand-written string would agree with a drifting catalog.
+ * @returns {void} Nothing; failure is reported by the expectations.
+ */
+function keepsTheNotInstalledArmForAnUnservedProgram(): void {
+  expect(routeForProgram('DUMMYPGM')).toBeNull();
+
+  const transactionView = MAIN_MENU_OPTIONS[6];
+  expect(
     formatMessageTemplate(MESSAGE_TEMPLATES.MENU_OPTION_NOT_INSTALLED, {
       'CDEMO-MENU-OPT-NAME': transactionView?.name ?? '',
     }),
-  );
+  ).toBe('This option Transaction View is not installed...');
+
   /*
-   * Assumptions: the severity is `error` for THIS program, because `app/cbl/COMEN01C.cbl` L162 paints
-   * the sentence in `DFHRED`. The administrative menu composes a near-identical sentence in `DFHGREEN`,
-   * which the administrative case below asserts -- so the colour is per-program and cannot be inferred
-   * from the wording.
+   * Assumptions: the administrative template is asserted beside it because the two differ on purpose and
+   * the difference is per-program: `app/cbl/COADM01C.cbl` L153-L154 comments out the insertion of the
+   * option name, so its sentence names no option, and its L151 paints the sentence in `DFHGREEN` where
+   * `app/cbl/COMEN01C.cbl` L162 paints its own in `DFHRED`.
    */
-  expect(unmounted.severity).toBe('error');
+  expect(formatMessageTemplate(MESSAGE_TEMPLATES.ADMIN_OPTION_NOT_INSTALLED, {})).not.toContain(
+    'Transaction View',
+  );
 }
 
 /**
@@ -355,12 +413,25 @@ async function signsOffOnTheThirdFunctionKey(): Promise<void> {
 }
 
 /**
- * Asserts the administrative menu's decision table, including its own message colour.
+ * Asserts the administrative menu's decision table: a refusal, and all six options entered.
  *
- * Assumptions: the severity asserted here is `success`, and it is the one place the two menus
- * measurably differ. `app/cbl/COADM01C.cbl` L149 paints its unavailable-option sentence in `DFHGREEN`
- * where the main menu paints its own in `DFHRED` at L162, so a shared severity would be wrong for one of
- * the two screens.
+ * ⚠️ Refactoring Rationale: options THREE and FOUR are asserted as ENTERED where option 3 previously
+ * resolved to `/users/edit` and option 4 to nothing at all. Both were defects. `/users/edit` is not one
+ * of the paths the route table publishes, so the option that looked reachable resolved to the not-found
+ * surface; and option 4's `null` reported the DELIVERED deletion screen as not installed, which is a
+ * sentence about a program the region does not hold. Both now enter the user browse, which is the screen
+ * that selects the row those two programs act on -- and the reference's own caller for both,
+ * `app/cbl/COUSR00C.cbl` L192-L207 transferring to them with `CDEMO-FROM-PROGRAM` set to itself.
+ *
+ * Assumptions: the six options are asserted exhaustively as well as individually, because the property
+ * under test is that no administrative option answers with an absence -- one `null` anywhere in the table
+ * is one delivered screen an administrator cannot reach, the session being memory-only so a typed URL
+ * bounces to sign-on.
+ *
+ * Assumptions: the unavailable-option sentence and its `success` severity are no longer asserted here,
+ * because no live option can reach that arm. It is retained in the screen for a program added to
+ * `app/cpy/COADM02Y.cpy` ahead of its route, and {@link keepsTheNotInstalledArmForAnUnservedProgram}
+ * covers the template and the resolution it depends on.
  * @returns {void} Nothing; failure is reported by the expectations.
  */
 function decidesTheAdministrativeOptionTable(): void {
@@ -369,24 +440,9 @@ function decidesTheAdministrativeOptionTable(): void {
   expect(refused.message).toBe(SHARED_MESSAGES.PLEASE_ENTER_A_VALID_OPTION_NUMBER);
   expect(refused.severity).toBe('error');
 
-  expect(resolveAdminOption('3').destination).toBe('/users/edit');
   expect(resolveAdminOption('5').destination).toBe('/reference/transaction-types');
   expect(resolveAdminOption('6').destination).toBe('/reference/transaction-types/new');
 
-  /*
-   * WHY : ⚠️ Refactoring Rationale: options ONE and TWO are both asserted as ENTERED and option FOUR now
-   *       carries the unavailable-option case. Option one names `COUSR00C` and option two `COUSR01C`,
-   *       whose screens became mounted at `/users` and `/users/new`, so both entered assertions follow
-   *       the delivery rather than changing what this case tests -- the reference enters the user browse
-   *       from exactly here (`app/cbl/COUSR00C.cbl` L124-L125 returns to `COADM01C` on PF3, making this
-   *       menu its caller).
-   * WHY : Assumptions: option FOUR carries the unavailable case because `COUSR03C` is the one
-   *       administrative option with no reachable destination left. Its screen IS mounted, but only at
-   *       `/users/:id/delete`, which needs a user identifier a menu option does not carry -- so the case
-   *       still proves the sentence AND its `success` severity against a real absence rather than a
-   *       contrived one. Option two could no longer carry it: registering its literal path is what makes
-   *       a delivered screen reachable, so asserting it absent would have ratified the opposite.
-   */
   const userList = ADMIN_MENU_OPTIONS[0];
   expect(userList?.programName).toBe('COUSR00C');
   expect(resolveAdminOption('1').destination).toBe('/users');
@@ -395,14 +451,63 @@ function decidesTheAdministrativeOptionTable(): void {
   expect(userAdd?.programName).toBe('COUSR01C');
   expect(resolveAdminOption('2').destination).toBe('/users/new');
 
-  const unmountedOption = ADMIN_MENU_OPTIONS[3];
-  expect(unmountedOption?.programName).toBe('COUSR03C');
-  const unmounted = resolveAdminOption('4');
-  expect(unmounted.destination).toBeNull();
-  expect(unmounted.message).toBe(
-    formatMessageTemplate(MESSAGE_TEMPLATES.ADMIN_OPTION_NOT_INSTALLED, {}),
-  );
-  expect(unmounted.severity).toBe('success');
+  const userUpdate = ADMIN_MENU_OPTIONS[2];
+  expect(userUpdate?.programName).toBe('COUSR02C');
+  const update = resolveAdminOption('3');
+  expect(update.destination).toBe('/users');
+  expect(update.message).toBeNull();
+
+  const userDelete = ADMIN_MENU_OPTIONS[3];
+  expect(userDelete?.programName).toBe('COUSR03C');
+  const remove = resolveAdminOption('4');
+  expect(remove.destination).toBe('/users');
+  expect(remove.message).toBeNull();
+
+  for (const option of ADMIN_MENU_OPTIONS) {
+    const outcome = resolveAdminOption(String(option.optionNumber));
+    expect(
+      outcome.destination,
+      `administrative option ${String(option.optionNumber)} must enter a route`,
+    ).not.toBeNull();
+    expect(outcome.message).toBeNull();
+  }
+}
+
+/**
+ * Asserts administrative option 3 enters the user browse from the rendered screen.
+ *
+ * Assumptions: this is asserted by ARRIVAL and not by a resolver call, because the two can disagree: the
+ * decision table above proves what the entry MEANS, and this proves the screen acts on it. The probe route
+ * is the only destination declared, so a transfer anywhere else renders nothing and fails the case.
+ * @returns {Promise<void>} Resolves once the browse route has reported its arrival.
+ */
+async function entersTheUserBrowseOnAdministrativeOptionThree(): Promise<void> {
+  await signOnAsUser();
+  render(renderMenu(<AdminMenuScreen />, ADMIN_MENU_ROUTE, ['/users']));
+
+  await userEvent.type(screen.getByLabelText(ADMIN_MENU_PROMPT), '3');
+  await userEvent.click(submitControl(ADMIN_MENU_KEY_LABELS.ENTER));
+
+  expect(await screen.findByText(`${ARRIVED} /users`)).toBeInTheDocument();
+}
+
+/**
+ * Asserts administrative option 4 enters the user browse from the rendered screen.
+ *
+ * Assumptions: option 4 is asserted separately from option 3 even though both land on the same route,
+ * because they reached it for two different reasons -- option 3 was repointed off an unpublished path and
+ * option 4 off a `null` -- and one shared case would leave whichever regressed indistinguishable from the
+ * other.
+ * @returns {Promise<void>} Resolves once the browse route has reported its arrival.
+ */
+async function entersTheUserBrowseOnAdministrativeOptionFour(): Promise<void> {
+  await signOnAsUser();
+  render(renderMenu(<AdminMenuScreen />, ADMIN_MENU_ROUTE, ['/users']));
+
+  await userEvent.type(screen.getByLabelText(ADMIN_MENU_PROMPT), '4');
+  await userEvent.click(submitControl(ADMIN_MENU_KEY_LABELS.ENTER));
+
+  expect(await screen.findByText(`${ARRIVED} /users`)).toBeInTheDocument();
 }
 
 /**
@@ -442,9 +547,10 @@ function menuScreenCases(): void {
   afterEach(clearSession);
 
   it('refuses every entry outside the option domain', refusesEveryEntryOutsideTheOptionDomain);
+  it('enters every main-menu option', entersEveryMainMenuOption);
   it(
-    'enters a mounted option and reports an unmounted one',
-    entersAMountedOptionAndReportsAnUnmountedOne,
+    'keeps the not-installed arm for an unserved program',
+    keepsTheNotInstalledArmForAnUnservedProgram,
   );
   it(
     'refuses an administrator-only option to an ordinary operator',
@@ -454,6 +560,14 @@ function menuScreenCases(): void {
   it('enters the typed option from the submit control', entersTheTypedOptionFromTheSubmitControl);
   it('signs off on the third function key', signsOffOnTheThirdFunctionKey);
   it('decides the administrative option table', decidesTheAdministrativeOptionTable);
+  it(
+    'enters the user browse on administrative option 3',
+    entersTheUserBrowseOnAdministrativeOptionThree,
+  );
+  it(
+    'enters the user browse on administrative option 4',
+    entersTheUserBrowseOnAdministrativeOptionFour,
+  );
   it('paints and enters the administrative options', paintsAndEntersTheAdministrativeOptions);
 }
 

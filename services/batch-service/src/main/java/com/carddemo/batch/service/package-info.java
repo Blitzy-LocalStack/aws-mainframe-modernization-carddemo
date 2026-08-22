@@ -30,11 +30,11 @@
  * real Javadoc rather than merely existing. The plugin is bound to Maven's
  * {@code validate} phase and fails the build at warning severity, so both fire before
  * anything in this directory is compiled. The consequence is worth stating plainly: the
- * absence of this file would fail the nine sibling types, not itself. Refactoring Rationale: that
- * number read six and the directory held nine, so it is restated as a measurement a reader can
- * re-take -- {@code ls} this directory, subtract this charter, and the remainder is what the two
- * checks above would fail. Naming the population rather than a remembered total is the only form of
- * the sentence that survives the next class landing here.</p>
+ * absence of this file would fail the ten sibling types, not itself. Refactoring Rationale: that
+ * number read six, then nine, and the directory now holds ten, so it is restated as a measurement a
+ * reader can re-take -- {@code ls} this directory, subtract this charter, and the remainder is what
+ * the two checks above would fail. Naming the population rather than a remembered total is the only
+ * form of the sentence that survives the next class landing here.</p>
  *
  * <p>Trade-offs: no in-source escape hatch exists here and none is wanted. The
  * annotation-based suppression filter and both comment-based ones are deliberately omitted
@@ -85,17 +85,16 @@
  * be added to this package on the strength of being useful: usefulness is not an
  * authority, and the authorities are the migration plan and the project rules.</p>
  *
- * <p>Assumptions: the directory holds SIX non-charter classes and this roster names four of them, so
- * the closure is over transcriptions and not over files. The other two are
- * {@code BatchStepLedger} and {@code BatchErrorPublisher}; each is named and justified in the
- * orchestration section below, and neither may be read into this roster. Refactoring Rationale: the
+ * <p>Assumptions: the directory holds TEN non-charter classes and this roster names four of them, so
+ * the closure is over transcriptions and not over files. Refactoring Rationale: the
  * word RULE is emphasised here because the previous wording, "Four classes, and no fifth", was true of
  * this roster and false of the directory from the moment {@code BatchStepLedger} landed -- a reader
- * counting files found five, then six, and now finds nine, and had to reach the section three hundred
- * lines below to learn that the closure was never over files. Saying which population is closed is
- * cheaper than the sentence that reconciles two readings of it. The nine are the four transcriptions
+ * counting files found five, then six, then nine, and now finds ten, and had to reach the section three
+ * hundred lines below to learn that the closure was never over files. Saying which population is closed
+ * is cheaper than the sentence that reconciles two readings of it. The ten are the four transcriptions
  * below, {@code BatchStepLedger} and {@code BatchErrorPublisher} named in the orchestration section,
- * {@code DailyFeedWatermarkService} named there with them, {@code BatchStepLedgerWriter} which the
+ * {@code DailyFeedWatermarkService} named there with them, {@code PostingRecordUnitOfWork} named there
+ * with those, {@code BatchStepLedgerWriter} which the
  * invariants section names as the one type carrying an independent transaction, and
  * {@code BatchFailureReporter}, the port {@code BatchStepLedger} reports a failed STEP through and the
  * only interface here -- its adapter is {@code com.carddemo.batch.config.SqsBatchFailureReporter},
@@ -397,6 +396,40 @@
  * delete, the second because the reference's own feed carries a BLANK processing stamp on every one of
  * the 300 records of {@code app/data/ASCII/dailytran.txt}, leaving no date on the record to filter
  * by.</p>
+ *
+ * <p>Refactoring Rationale: an EIGHTH class, {@code PostingRecordUnitOfWork}, sits beside those three
+ * and is not a fifth transcription either, though it is the one whose placement needs the most care to
+ * state. It applies the posting decisions to ONE feed record and issues that record's writes, which is
+ * the migrated form of {@code 2000-POST-TRANSACTION} at {@code app/cbl/CBTRN02C.cbl:424-444} and of
+ * the reject branch at {@code app/cbl/CBTRN02C.cbl:446-465}. What it holds is the ORDER of the three
+ * writes at {@code :440-442}, the account accumulation and its sign convention at
+ * {@code app/cbl/CBTRN02C.cbl:547-552}, and the pairing between those writes and the feed checkpoint.
+ * It decides no reject reason, no category-balance arm and no rate, so the roster above stays closed at
+ * four: a reader asking "which class decides whether a category balance is created" is not sent
+ * here.</p>
+ *
+ * <p>Refactoring Rationale: it arrived here from the job layer rather than being written here, and
+ * the move settled a contradiction this charter already carried. The section above states that a job
+ * "never holds a rule", while the posting job held the account sign convention transcribed from
+ * {@code :547-552} in a private method -- so the rule was one layer above where this charter says
+ * rules live, and being private it was also unreachable by any test that wanted to drive it. Both
+ * facts had one cause and one fix. Assumptions: the transaction boundary did NOT move with it. The
+ * job still opens one transaction per record around {@code applyOneRecord}, and this class carries no
+ * transaction annotation, so invariant 1 above holds over it unchanged.</p>
+ *
+ * <p>Trade-offs: it has a writing surface, and it is the one class here for which that matters most,
+ * because its writes span two business schemas -- {@code ledger} and {@code account} -- in a single
+ * unit. No ordinal is put on that among the writers here, because the count depends on whether a
+ * persisted accrual and a staged dataset are read as writes and two neighbouring paragraphs already
+ * answer that differently; the property that matters is which schemas one class writes, and it is
+ * stated. That is accepted for the reason the
+ * migration plan's section 0.4.1.3 records: the reference commits the three writes together, and any
+ * arrangement that committed them separately would make partial states observable that the reference
+ * cannot produce. Alternatives Considered: leaving the unit private to the job. Rejected on measured
+ * evidence rather than on layering preference -- while it was private, the engine-backed tests that
+ * claim to prove its atomicity re-implemented the sequence in their own helpers, and one of them
+ * omitted the checkpoint write, so a production regression in the write order or in the checkpoint
+ * could not fail them.</p>
  *
  * <p>Trade-offs: it is the second class in this package with a WRITING surface, alongside
  * {@code DatasetGenerationService} and the accrual's persistence noted above, so the "a rule here is a

@@ -26,11 +26,15 @@ import com.carddemo.transaction.service.TransactionViewService;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.http.MediaType;
 import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
 import org.springframework.http.HttpStatus;
@@ -490,6 +494,98 @@ class TransactionCaptureWireContractTest {
         //       refusal from a normalisation. Every one of these four forms previously REACHED the
         //       service, as a value it could not tell apart from the canonical one, so "the body was
         //       refused" and "the append did not happen" are two different facts here and both matter.
+        verify(this.addService, never()).addTransaction(any(), any(), any());
+    }
+
+    /**
+     * Supplies the five free-text members with the accepted value each carries in an admitted body.
+     *
+     * <p>Assumptions: the accepted value is supplied alongside the member name because the case rewrites
+     * the body TEXTUALLY, and the substring it rewrites has to be the one the composer actually wrote.
+     * Deriving it would mean re-implementing the composer, and a mismatch would leave the case sending an
+     * unmodified body and asserting a refusal that never came.</p>
+     *
+     * @return one argument triple per member, being the wire property name, the value the composer writes
+     *     for it and the sentence its refusal carries
+     */
+    private static Stream<Arguments> textMembersAndTheirSentences() {
+        return Stream.of(
+                Arguments.of("source", "POS TERM",
+                        TransactionAddRequest.SOURCE_NOT_PRINTABLE),
+                Arguments.of("description", "GROCERY PURCHASE",
+                        TransactionAddRequest.DESCRIPTION_NOT_PRINTABLE),
+                Arguments.of("merchantName", "CORNER STORE",
+                        TransactionAddRequest.MERCHANT_NAME_NOT_PRINTABLE),
+                Arguments.of("merchantCity", "SEATTLE",
+                        TransactionAddRequest.MERCHANT_CITY_NOT_PRINTABLE),
+                Arguments.of("merchantZip", "98101",
+                        TransactionAddRequest.MERCHANT_ZIP_NOT_PRINTABLE));
+    }
+
+    /**
+     * A JSON escape smuggling a control character or a wider code point into a text member is refused.
+     *
+     * <p>Purpose: this is the boundary the finding behind it names, and it can only be expressed at the
+     * WIRE. JSON carries a carriage return as the two characters {@code \r} and a code point outside the
+     * seven-bit range as {@code \u00e9}, so a producer sends them through a transport that transmits them
+     * as ordinary text and a parser hands the decoded character to the application without comment. What
+     * the character then reaches is a fixed-width sink: the plain-text statement's 80-column bands and the
+     * transaction report's 133-column records have no escaping mechanism, so a stored separator becomes a
+     * second record indistinguishable from a real one; and a code point the US-ASCII fixed-width codecs
+     * cannot encode is stored successfully and refused on a later batch run, where it is attributable to
+     * no request.</p>
+     *
+     * <p>Assumptions: both specimens are asserted for every member rather than one specimen for one
+     * member, because the two fail at different places -- one is admitted by the codec and damages the
+     * artifact, the other is refused by the codec and damages the run -- and because five members with one
+     * shared expression is exactly the arrangement in which four of them can lose the annotation
+     * unnoticed.</p>
+     *
+     * <p>Assumptions: the escape is appended to the value the composer already writes rather than
+     * replacing it, so the member stays within its declared width and the refusal asserted can only be
+     * the character domain's. A replacement long enough to breach the width would draw the size
+     * constraint instead and the case would prove nothing about the domain.</p>
+     *
+     * @param member the wire property name under test, of type {@link String}
+     * @param accepted the value the composer writes for that member, of type {@link String}
+     * @param sentence the sentence the refusal must carry, of type {@link String}
+     * @throws Exception if a request could not be performed
+     */
+    @ParameterizedTest(name = "{0} refuses a smuggled control character and a wider code point")
+    @MethodSource("textMembersAndTheirSentences")
+    @DisplayName("refuse a JSON escape carrying a character the fixed-width sinks cannot represent")
+    void refusesAnEscapedCharacterTheFixedWidthSinksCannotRepresent(String member, String accepted,
+            String sentence) throws Exception {
+
+        for (String escape : List.of("\\r", "\\n", "\\t", "\\u0000", "\\u00e9", "\\ud83d\\udcb3")) {
+            String declared = "\"" + member + "\":\"" + accepted + "\"";
+            String poisoned = body(ACCOUNT_ID, "", "1234.50")
+                    .replace(declared, "\"" + member + "\":\"" + accepted + escape + "\"");
+            assertThat(poisoned)
+                    .as("the composer must still write %s, or nothing was substituted", declared)
+                    .doesNotContain(declared);
+
+            MvcResult refused = this.mockMvc.perform(post(TransactionController.BASE_PATH)
+                            .principal(CALLER)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(poisoned))
+                    .andReturn();
+
+            assertThat(refused.getResponse().getStatus())
+                    .as("[%s] carrying %s must be refused at the boundary", member, escape)
+                    .isEqualTo(HttpStatus.BAD_REQUEST.value());
+            assertThat(refused.getResponse().getContentAsString())
+                    .as("the body names the member and carries its domain sentence, per rule T7")
+                    .contains(ApiError.CODE_VALIDATION)
+                    .contains("\"field\":\"" + member + "\"")
+                    .contains("\"state\":\"NOT_OK\"")
+                    .contains(sentence);
+        }
+
+        // WHY : Assumptions: the capture is asserted untouched, which is the claim that separates a
+        //       refusal from a stored value. The damage this case exists to prevent happens at a SINK on
+        //       a later run, so "the body was refused" and "nothing was appended" are two facts here and
+        //       only the second one is the security property.
         verify(this.addService, never()).addTransaction(any(), any(), any());
     }
 

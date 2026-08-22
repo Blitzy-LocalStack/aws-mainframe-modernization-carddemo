@@ -407,14 +407,16 @@ import jakarta.validation.constraints.Size;
  *     {@code RIDFLD (SEC-USR-ID)} at {@code app/cbl/COUSR01C.cbl} L244, inside the write spanning
  *     L240 to L248. It is required and must not be blank, is checked third at L130, and must not
  *     already be in use: a collision is refused with a 409 rather than overwriting the stored row.
- *     The size constraint below bounds the value as SUBMITTED, and the service adds two rules about the
- *     key it DERIVES from it -- the value trimmed and upper-cased. A character outside the printable
- *     single-byte range {@code PIC X(08)} means is refused, and so is a derived key of more than eight
- *     positions. The first is what makes this component's own bound sufficient for the second, because
- *     upper-casing is length-preserving only inside that range: eight sharp-s characters satisfy the
- *     bound below and fold to sixteen positions, so they are refused for their characters rather than
- *     for their width. Both refusals are a 400 keyed to this component, raised before the duplicate
- *     check and before any pool account is created for it
+ *     The size constraint below bounds the value as SUBMITTED and the pattern beside it states the
+ *     character domain -- ASCII letters and digits, one to eight of them, which is the whole of what this
+ *     operation can create. The service holds the trimmed value to that domain and then folds it to upper
+ *     case to derive the key, so the stored key is drawn from {@code [A-Z0-9]} and is a legal single URI
+ *     path segment: that is what lets the created row be addressed by the location header this operation
+ *     returns and by the read, update and delete routes. A value outside the domain is refused with a 400
+ *     keyed to this component, raised before the duplicate check and before any pool account is created
+ *     for it. Because the fold is length-preserving inside that alphabet, a value that would GROW when
+ *     folded -- eight sharp-s characters becoming sixteen capital S -- is refused for its characters, and
+ *     the derived width never has to catch it
  * @param userType the new user's role, one character, as {@code SEC-USR-TYPE PIC X(01)} declares at
  *     {@code app/cpy/CSUSR01Y.cpy} L22, byte position 56 of that record, and as
  *     {@code USRTYPEI PIC X(1)} presents it at {@code app/cpy-bms/COUSR01.CPY} L84. It is
@@ -425,7 +427,7 @@ import jakarta.validation.constraints.Size;
  *     authority these operations themselves require, so it is the one component here with an
  *     authorisation consequence
  */
-// WHY : Refactoring Rationale: the three text components publish a non-whitespace pattern into the
+// WHY : Refactoring Rationale: the two name components publish a non-whitespace pattern into the
 //       GENERATED document beside their non-blank constraint, because the committed contract declares
 //       that facet on each of them and the generated document did not. A non-blank constraint renders as
 //       a minimum length alone, so the served description of this schema admitted a name of twenty spaces
@@ -434,6 +436,19 @@ import jakarta.validation.constraints.Size;
 //       would add a second violation for one fault and put two entries for one property into an array the
 //       contract declares as one entry per offending field. The expression is declared once, on
 //       SignOnRequest.NON_WHITESPACE_PATTERN, where the full argument is recorded.
+// WHY : ⚠️ Refactoring Rationale: the identifier publishes the ADDRESSABLE DOMAIN instead, and it used to
+//       publish the same non-whitespace expression as the two names. That was the wider half of the
+//       addressability defect: the document told a caller any non-blank eight-character value was a legal
+//       identifier, including one carrying a slash or a percent, while the key those characters produce
+//       cannot be spoken in the URI path segment the read, update and delete routes carry it in. The
+//       expression is a schema-documentation annotation here for the same reason as the two above -- the
+//       service raises the domain refusal with the reference's own field marker and its own sentence, and
+//       a @Pattern beside it would report one fault twice.
+// WHY : Assumptions: the constant lives on THIS record rather than beside the non-whitespace expression on
+//       SignOnRequest, because sign-on deliberately does not share it. A sign-on names an identifier that
+//       may not exist and must answer the reference's own "User not found. Try again ..." rather than a
+//       validation refusal, so its component stays at the presence rule; this record's component is the
+//       one that CREATES a key, which is where the domain has to be enforced.
 // WHY : Assumptions: userType takes no such pattern, and the omission is deliberate rather than an
 //       oversight in the same edit. Its domain constraint below admits exactly "A" and "U", neither of
 //       which is blank, so a presence pattern beside it would restate a rule the domain already states
@@ -446,7 +461,7 @@ public record CreateUserRequest(
         @Schema(pattern = SignOnRequest.NON_WHITESPACE_PATTERN)
         @Size(max = NAME_MAX_LENGTH, message = MESSAGE_LAST_NAME_TOO_LONG) String lastName,
         @NotBlank(message = MESSAGE_USER_ID_REQUIRED)
-        @Schema(pattern = SignOnRequest.NON_WHITESPACE_PATTERN)
+        @Schema(pattern = USER_ID_DOMAIN_PATTERN)
         @Size(max = USER_ID_MAX_LENGTH, message = MESSAGE_USER_ID_TOO_LONG) String userId,
         @NotBlank(message = MESSAGE_USER_TYPE_REQUIRED)
         @Size(min = USER_TYPE_LENGTH, max = USER_TYPE_LENGTH,
@@ -486,6 +501,36 @@ public record CreateUserRequest(
      * published contract declares the same maximum length, so all four agree.
      */
     private static final int USER_ID_MAX_LENGTH = 8;
+
+    /**
+     * The expression the published contract states the addressable identifier domain with.
+     *
+     * <p>Purpose: this is the machine-readable form of the ONE rule
+     * {@code UserService.MESSAGE_USER_ID_DOMAIN} reports in words -- an identifier is ASCII letters and
+     * digits, one to eight of them -- so a caller generating a request from the contract refuses the same
+     * values the service does rather than discovering them as a 400.
+     *
+     * <p>Assumptions: the whole domain is stated by ONE expression, alphabet and width together, even
+     * though the size constraint beside it publishes the width as a separate facet. A JSON Schema pattern
+     * is unanchored, so an expression naming only the alphabet would admit an over-long value on its own
+     * and the domain would have to be assembled from three facets by every reader. Stating it once means
+     * the rule can be quoted, compared against the service and compared against the column guard as a
+     * single string.
+     *
+     * <p>Assumptions: the expression admits BOTH cases while the stored key is upper case, because this
+     * component is the value as SUBMITTED and the service folds it. The reference's own sign-on folds the
+     * identifier too, so admitting a lower-case spelling here is the behaviour being preserved rather
+     * than a looseness; the folded form is drawn from {@code [A-Z0-9]} and is a legal single URI path
+     * segment, which is what the three single-user routes and the created row's location header need.
+     *
+     * <p>Trade-offs: the service additionally TRIMS a surrounding blank, which this expression refuses,
+     * so the runtime accepts a shade more than the contract admits. That direction is deliberate: every
+     * value the contract admits is accepted, which is the guarantee a published contract owes a caller,
+     * while an expression permitting surrounding blanks would tell a caller that a padded identifier is a
+     * normal way to address a row -- and it cannot be one in a URI path segment, where the blank would
+     * have to be percent-encoded to survive.
+     */
+    static final String USER_ID_DOMAIN_PATTERN = "^[A-Za-z0-9]{1,8}$";
 
     /**
      * The number of positions the reference declares for the user type, used as both bounds.

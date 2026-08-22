@@ -128,9 +128,11 @@
  * models all of them; do not assume a single number.
  * Not in this catalog
  * -------------------
- * This catalog holds the painted text of the mapsets whose screen imports its strings
- * from here - `app/bms/COACTVW.bms` and `app/bms/COMEN01.bms` in the delivered tree -
- * and the rest of the painted text is held by the module that renders it. That
+ * This catalog holds the painted text of NINE mapsets - `app/bms/COACTVW.bms` and
+ * `app/bms/COMEN01.bms`, whose screens import their strings from here, plus
+ * `COTRN00`, `COTRN01`, `COBIL00`, `CORPT00`, `COUSR00`, `COUSR01` and `COUSR03`,
+ * whose groups are published ahead of the screen edits that consume them - and the
+ * rest of the painted text is held by the module that renders it. That
  * remainder is real and it is large, so it is measured rather than waved at. The
  * measurement has two halves. The BMS half is one command:
  *
@@ -143,10 +145,10 @@
  * one alphanumeric character; the remaining 19 are blank or pure punctuation used
  * to rule a line. The containment half then tests each of those 194 against this
  * module's CODE - its exported values, with this file's own doc comments excluded -
- * and finds 55: the title-band, menu-option and message text this module already owned
- * and the map merely re-paints, plus the account-view and main-menu strings it now owns
- * outright. That leaves **139 distinct literals, 301 occurrences, that this module does
- * not hold**.
+ * and finds 101: the title-band, menu-option and message text this module already owned
+ * and the map merely re-paints, plus the account-view, main-menu and seven-screen painted
+ * strings it now owns outright. That leaves **93 distinct literals, 205 occurrences, that
+ * this module does not hold**.
  *
  * Refactoring Rationale: the containment half excludes this file's comments, and stating
  * it that precisely is not pedantry. A whole-file substring test is shorter to describe
@@ -154,7 +156,7 @@
  * literals they describe as absent, so `ENTER=Continue  F3=Exit` and its two companions
  * counted as held purely because this paragraph names them, and the list below therefore
  * contradicted the figure above it. Excluding comments makes the figure and the examples
- * agree, and all three legends are outside the 55.
+ * agree, and all three legends are outside the 101.
  *
  * Refactoring Rationale: the three figures read 31, 163 and 344 and were re-measured
  * rather than adjusted, because three independent things had moved since they were
@@ -163,24 +165,60 @@
  * `Please select an option :` and `F3=Exit`); and the containment test changed as just
  * described. Re-running the command and the containment test is the whole method, so a
  * reader who doubts a figure can settle it in one step instead of reconciling three
- * edits. The command above deliberately
- * matches only a literal that opens and closes on one physical line, which is why
- * its output is exact and repeatable; it therefore cannot see the further **18
- * literals that BMS continues across a line boundary** with a non-blank in column
- * 72 (for example `app/bms/COSGN00.bms` line 149, `app/bms/COTRN02.bms` line 279
- * and `app/bms/COUSR02.bms` line 163). None of those 18 is in this catalog either,
- * so the true size of the group is at least 157 distinct literals. Four kinds
- * account for all of them:
+ * edits.
+ *
+ * Refactoring Rationale: they were re-measured once more, from 55, 139 and 301, when the
+ * seven per-screen painted-text groups below were added. Adjusting them by hand would have
+ * been guesswork twice over: containment is a SUBSTRING test, so several of the strings
+ * added there were already held inside a longer value - `Transaction Reports` and
+ * `Bill Payment` sit inside 35-character menu-option names in {@link MAIN_MENU_OPTIONS} -
+ * while others are painted by two mapsets at once, so neither the count of new entries nor
+ * the count of new occurrences predicts the delta. Re-running the two commands is the only
+ * method that yields a figure a reader can reproduce.
+ *
+ * Refactoring Rationale: the continued-literal figure in the next paragraph read `18`
+ * and was replaced rather than adjusted, because it counted the wrong thing twice
+ * over. It was an occurrence count offered as a count of literals - 21 sites carry 16
+ * values, three of them painted by more than one mapset - and it undercounted even the
+ * sites by exactly three, because a doubled apostrophe closes the pattern's character
+ * class early: at `COTRN00` line 448, `COUSR00` line 447 and `COPAU00` line 501 the
+ * pattern matches `INITIAL='Type '` and each prompt reads as a closed one-line
+ * literal. Those three are therefore absent from the blind-spot count AND present in
+ * the 213 as the fragment `Type `, which is the sharpest available reason to measure
+ * this half by rejoining the lines rather than by pattern: on those three the pattern
+ * does not merely miss a literal, it reports a different one in its place.
+ *
+ * The command above deliberately matches only a literal that opens and closes on one
+ * physical line, which is why its output is exact and repeatable; it therefore cannot
+ * see a literal BMS continues across a line boundary - a non-blank in column 72, the
+ * text resuming in column 16. Rejoining those gives **21 occurrence sites carrying 16
+ * distinct literals** (for example `app/bms/COSGN00.bms` line 149,
+ * `app/bms/COTRN02.bms` line 279 and `app/bms/COUSR02.bms` line 163). Three of the 16
+ * are pure punctuation ruling a line, so 13 survive the same alphanumeric filter the
+ * 194 above survived. FOUR of those 13 are now in this catalog - the row-21 selection
+ * prompts on `COTRN00` and `COUSR00`, the bill-payment confirmation on `COBIL00` and
+ * the report-submission confirmation on `CORPT00`, each rejoined and each cited to
+ * both of its lines - leaving 9 distinct literals at 11 occurrences that this module
+ * does not hold. No value occurs in both halves, so the two add: **102 distinct
+ * literals, 216 occurrences**, against the 93 and 205 the one command reports. Four
+ * kinds account for all of them:
  *
  * - Static field labels, one per input or display field: `User ID     :`,
- *   `Password    :`, `Account Number    :`, `Merchant ID:`, `Amount:`.
+ *   `Password    :`, `Account Number    :`, `Name on card      :`,
+ *   `Match Status:`. Two earlier examples, `Merchant ID:` and `Amount:`, are held by
+ *   {@link TRANSACTION_DETAIL_FIELD_LABELS} now and were swapped out so that this
+ *   bullet cannot contradict the figure above it.
  * - The four status-line prompt words every screen paints in its top two rows,
  *   `Tran:`, `Date:`, `Prog:`, `Time:` (20 occurrences each), together with the
  *   `mm/dd/yy` and `hh:mm:ss` placeholder patterns (21 and 20) and `AppID:` /
- *   `SysID:`.
+ *   `SysID:`. `Date:` is the one entry in this bullet the containment test scores as
+ *   held, and it is a substring artefact rather than a move: `Orig Date:` and
+ *   `Proc Date:` in {@link TRANSACTION_DETAIL_FIELD_LABELS} contain it. Ownership is
+ *   unchanged - `ui/src/layout/ScreenHeader.tsx` owns the status-line prompt, and
+ *   only the two `COTRN01` labels belong here.
  * - Function-key legends, painted as one literal per screen rather than assembled
  *   from parts: `ENTER=Sign-on  F3=Exit`, `ENTER=Process F3=Exit`,
- *   `ENTER=Continue  F3=Exit`. The longest of them are among the 18 continued
+ *   `ENTER=Continue  F3=Exit`. The longest of them are among the 16 continued
  *   literals, which is why a legend cannot be recovered reliably by grep alone.
  * - Pure decoration with no counterpart in a browser, chiefly the eight-line
  *   ASCII-art dollar note on `app/bms/COSGN00.bms`.
@@ -207,6 +245,14 @@
  * labels beside the controls they name. A string absent from this catalog is
  * therefore evidence that a `.bms` file holds it and that its renderer has not been
  * brought under this rule yet - it is not evidence that no module owns it.
+ *
+ * Assumptions: for SEVEN of those screens - the transaction browse and detail, bill
+ * payment, reports and the three user screens - the painted text is held here already,
+ * published ahead of the edits that make them import it, so each of those strings has
+ * two spellings in the tree until that edit lands. Presence in this catalog is
+ * consequently not by itself evidence that the renderer takes its text from here; the
+ * account-view and main-menu suites are what establish that, for the two mapsets where
+ * it currently holds.
  *
  * Alternatives Considered: leaving every painted label in its screen, which is where
  * the delivered tree began. It was rejected because AAP section 0.2.1.5 assigns the
@@ -990,6 +1036,23 @@ export const SHARED_MESSAGES = {
   INVALID_SELECTION_VALID_VALUE_IS_S: 'Invalid selection. Valid value is S',
   INVALID_VALUE_VALID_VALUES_ARE_Y_N: 'Invalid value. Valid values are (Y/N)...',
   LAST_NAME_CAN_NOT_BE_EMPTY: 'Last Name can NOT be empty...',
+  /**
+   * Refactoring Rationale: ⚠️ NO SPA SCREEN EMITS THIS STRING, and it is kept anyway.
+   * Both baseline sites are password controls the migration removed rather than
+   * reproduced: the update screen's, withdrawn under divergence `D-10`, and the create
+   * screen's, withdrawn under `D-RUNTIME-CREDENTIAL-HANDOVER` because the field was
+   * collected and never transmitted -- a control that appeared to set a credential and
+   * could not. The credential is generated by the service and returned once instead, so
+   * there is no field left for an emptiness check to guard.
+   *
+   * Assumptions: the entry survives because this catalog is a record of the baseline's
+   * strings and not an index of the ones currently reachable. Deleting it would erase the
+   * evidence that two programs emitted this sentence at
+   * `app/cbl/COUSR01C.cbl` L138 and `app/cbl/COUSR02C.cbl` L200, which is what a reader
+   * comparing the two systems needs and what the divergence entries cite. Two screen
+   * tests assert this sentence is ABSENT, so the constant is still read -- by the checks
+   * that prove the controls are gone.
+   */
   PASSWORD_CAN_NOT_BE_EMPTY: 'Password can NOT be empty...',
   /**
    * Assumptions: this sits in the shared group rather than under `COTRTLIC`, because
@@ -1451,6 +1514,776 @@ export const ACCOUNT_VIEW_PAINTED_TEXT_SOURCES = {
   readonly accountFields: Record<keyof typeof ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS, number>;
   readonly customerFields: Record<keyof typeof ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS, number | null>;
   readonly keyLabels: Record<keyof typeof ACCOUNT_VIEW_KEY_LABELS, number>;
+};
+
+/*
+ * WHY : Refactoring Rationale: the groups below carry the painted text of seven further mapsets -
+ *       `COTRN00`, `COTRN01`, `COBIL00`, `CORPT00`, `COUSR00`, `COUSR01` and `COUSR03`. Each of
+ *       those screens transcribed this text into its own module beside the controls it names, which
+ *       AAP section 0.2.1.5 assigns to this catalog instead, and which rule T8 makes a reviewable
+ *       property of ONE module rather than of seven. Nothing about the values changed in the move:
+ *       leading, interior and trailing runs of spaces are still part of each string, because each
+ *       string is a `DFHMDF INITIAL=` operand filling a declared cell width, and the arithmetic
+ *       proving that is recorded per entry.
+ * WHY : Assumptions: these groups are published AHEAD of their consumers. The seven screens still
+ *       declare their own copies today and are moved onto these exports separately, so a group here
+ *       that no module imports yet is a published contract rather than dead text - the state
+ *       {@link MAIN_MENU_PAINTED_TEXT_SOURCES} is already in. Trade-offs: that leaves one window in
+ *       which two spellings of a string exist. It is accepted because it makes the transcription and
+ *       the seven screen edits reviewable independently, and the transcription is the half that has
+ *       to be checked character by character against `app/bms/**`.
+ * WHY : Trade-offs: the member keys are the SCREENS' own - `title`, `pageLabel`, `firstNameColumn` -
+ *       and are deliberately not renamed to the upper-case form {@link ACCOUNT_VIEW_HEADINGS} uses,
+ *       so this file now holds two key conventions. That cost is taken because a consumer then
+ *       replaces a local declaration with an import and touches no use site; the alternative renames
+ *       roughly fifty members across seven screens, which is precisely the edit that drops a string
+ *       on the way.
+ * WHY : Assumptions: a legend label whose wording is UNIFORM across the measured mapsets is absent
+ *       from every `_KEY_LABELS` group below. `F4=Clear`, `F7=Backward` and `F8=Forward` are owned
+ *       by `ui/src/layout/PfKeyBar.tsx` - the "Not in this catalog" note above states that boundary -
+ *       so a screen binding one of those keys assembles its legend from both sources, and the AIDs
+ *       absent from a group are named in that group's own note. Alternatives Considered: transcribing
+ *       the three here as well, so that one group held a screen's whole legend. Rejected on two
+ *       independent grounds: it would put a second spelling of three strings in the tree with nothing
+ *       keeping the two equal, which is the drift this module exists to remove; and this module
+ *       imports nothing at load time, so it cannot read them from the module that owns them either.
+ * WHY : Assumptions: identical text painted by two different `DFHMDF` fields is TWO entries and
+ *       never one. `ENTER=Continue` is painted by four of these seven mapsets and `F3=Back` by all
+ *       seven; `ENTER=Fetch`, `First Name:`, `Last Name:`, `User Type: `, `(A=Admin, U=User)`,
+ *       `(Y/N)`, `Page:` and `Sel` are each painted by two of them, and `(8 Char)` twice within one.
+ *       Every entry cites its own field, so a later correction lands on the field that needs it,
+ *       and no mapset's text depends on another mapset's - which matters most for ENTER, painted six
+ *       different ways across the population.
+ * WHY : Assumptions: each source citation is an ARRAY of lines rather than a single line, as
+ *       {@link ACCOUNT_UPDATE_FIELD_LABEL_SOURCES} already is. Four of the strings below are
+ *       literals BMS continues across a line boundary with a non-blank in column 72, so they occupy
+ *       two lines and a single number could not cite them; the array form states one shape for all
+ *       entries instead of two.
+ */
+
+/** Mapset file the transaction-browse screen's painted text is transcribed from. */
+export const TRANSACTION_LIST_MAPSET_SOURCE_FILE = 'app/bms/COTRN00.bms';
+
+/**
+ * The four captions and prompts `app/bms/COTRN00.bms` paints on the transaction browse.
+ *
+ * Assumptions: `selectionPrompt` holds single apostrophes and one space before `list`, where the
+ * mapset holds `Type ''S'' to View Transaction details from the-` continued as ` list`. Both the
+ * doubled apostrophes and the continuation are BMS source encoding rather than content - a terminal
+ * displays one apostrophe - and the arithmetic settles the space: the sentence is exactly the 50
+ * characters the field declares as `LENGTH=50`, which it reaches only with that space present.
+ */
+export const TRANSACTION_LIST_LABELS = {
+  /** Row-4 sub-heading, `LENGTH=17` at `POS=(4,30)`, `COLOR=NEUTRAL` with `BRT`. */
+  title: 'List Transactions',
+  /** Row-4 page-ordinal prompt, `LENGTH=5` at `POS=(4,65)`, `COLOR=TURQUOISE` with `BRT`. */
+  pageLabel: 'Page:',
+  /** Row-6 label of the starting-identifier field, `LENGTH=15` at `POS=(6,5)`, `COLOR=TURQUOISE`. */
+  filterLabel: 'Search Tran ID:',
+  /** Row-21 selection prompt, `LENGTH=50` at `POS=(21,12)`, `COLOR=NEUTRAL` with `BRT`. */
+  selectionPrompt: "Type 'S' to View Transaction details from the list",
+} as const;
+
+/**
+ * The five row-8 column headings `app/bms/COTRN00.bms` paints, in the order it paints them.
+ *
+ * Assumptions: the padding inside these values is the mapset centring each heading over the column
+ * beneath it, and it is kept. Each literal fills its field exactly - `' Transaction ID '` is
+ * 1 + 14 + 1 against `LENGTH=16` and `'     Description          '` is 5 + 11 + 10 against
+ * `LENGTH=26` - so trimming them would read as tidier while discarding the alignment the terminal
+ * had. A renderer may collapse the runs visually; nothing may discard them from the value.
+ */
+export const TRANSACTION_LIST_COLUMN_HEADERS = {
+  /** Over the `SEL000n` selection cells, `LENGTH=3` at `POS=(8,2)`, `COLOR=NEUTRAL`. */
+  selection: 'Sel',
+  /** Over the `TRNIDnn` cells, `LENGTH=16` at `POS=(8,8)`, `COLOR=NEUTRAL`. */
+  transactionId: ' Transaction ID ',
+  /** Over the `TDATEnn` cells, `LENGTH=8` at `POS=(8,27)`, `COLOR=NEUTRAL`. */
+  date: '  Date  ',
+  /** Over the `TDESCnn` cells, `LENGTH=26` at `POS=(8,38)`, `COLOR=NEUTRAL`. */
+  description: '     Description          ',
+  /** Over the `TAMT00n` cells, `LENGTH=12` at `POS=(8,67)`, `COLOR=NEUTRAL`. */
+  amount: '   Amount   ',
+} as const;
+
+/**
+ * The two screen-owned parts of the row-24 legend `app/bms/COTRN00.bms` paints.
+ *
+ * Assumptions: the mapset paints ONE literal, `ENTER=Continue  F3=Back  F7=Backward  F8=Forward`,
+ * `LENGTH=48` in `COLOR=YELLOW`, and the separator between parts is TWO spaces: 14 + 2 + 7 + 2 + 11
+ * + 2 + 10 = 48 confirms the split against the declared width. PFK07 and PFK08 are absent because
+ * their wording is uniform across every paging mapset and `ui/src/layout/PfKeyBar.tsx` owns it; a
+ * renderer of this screen takes those two from there and these two from here.
+ */
+export const TRANSACTION_LIST_KEY_LABELS = {
+  /** Submits the entry field and re-reads from the first page. */
+  ENTER: 'ENTER=Continue',
+  /** Returns to the main menu, which `app/cbl/COTRN00C.cbl` L123 names as the transfer target. */
+  PFK03: 'F3=Back',
+} as const;
+
+/** The mapset lines each transaction-browse painted string is transcribed from. */
+export const TRANSACTION_LIST_PAINTED_TEXT_SOURCES = {
+  labels: {
+    title: [79],
+    pageLabel: [84],
+    filterLabel: [94],
+    selectionPrompt: [448, 449],
+  },
+  columnHeaders: {
+    selection: [107],
+    transactionId: [112],
+    date: [117],
+    description: [122],
+    amount: [127],
+  },
+  keyLabels: {
+    ENTER: [458, 459],
+    PFK03: [458, 459],
+  },
+} as const satisfies {
+  readonly labels: Record<keyof typeof TRANSACTION_LIST_LABELS, readonly number[]>;
+  readonly columnHeaders: Record<keyof typeof TRANSACTION_LIST_COLUMN_HEADERS, readonly number[]>;
+  readonly keyLabels: Record<keyof typeof TRANSACTION_LIST_KEY_LABELS, readonly number[]>;
+};
+
+/** Mapset file the transaction-detail screen's painted text is transcribed from. */
+export const TRANSACTION_DETAIL_MAPSET_SOURCE_FILE = 'app/bms/COTRN01.bms';
+
+/**
+ * Row-4 caption `app/bms/COTRN01.bms` paints on the transaction-detail screen.
+ *
+ * Assumptions: this is the map's own `LENGTH=16` field at `POS=(4,30)` in `COLOR=NEUTRAL` with
+ * `BRT`, and not the main menu's option name. The nearest catalogued neighbour is
+ * {@link MAIN_MENU_OPTIONS} entry 7, `'Transaction View                   '` - a different word
+ * order padded to the 35-character option width - so neither trimming nor reordering it could
+ * produce this caption, and deriving one field's text from another field's padding is what this
+ * separate entry avoids.
+ */
+export const TRANSACTION_DETAIL_TITLE = 'View Transaction';
+
+/** Row-6 label of the lookup field, `LENGTH=14` at `POS=(6,6)`, `COLOR=TURQUOISE`. */
+export const TRANSACTION_DETAIL_LOOKUP_LABEL = 'Enter Tran ID:';
+
+/**
+ * The thirteen data-field labels `app/bms/COTRN01.bms` paints, in declaration order.
+ *
+ * Assumptions: thirteen, and the trailing colon on each is part of the literal. Three independent
+ * readings of the baseline agree on the count - the mapset paints thirteen `COLOR=TURQUOISE` labels
+ * against thirteen `COLOR=BLUE` output fields, `app/cpy-bms/COTRN01.CPY` declares thirteen matching
+ * `...I` members, and `app/cbl/COTRN01C.cbl` names exactly thirteen in both of its own field lists.
+ *
+ * Assumptions: the keys are the detail record's member names rather than the mapset's field names,
+ * so a renderer reaches a label and the value it labels with one key. The mapset field each label
+ * belongs to is named per entry, which keeps the correspondence auditable in the direction a reader
+ * checks it - from a rendered label back to the `DFHMDF` that painted it.
+ */
+export const TRANSACTION_DETAIL_FIELD_LABELS = {
+  /** Beside `TRNID`, `LENGTH=15` at `POS=(10,6)`. */
+  transactionId: 'Transaction ID:',
+  /** Beside `CARDNUM`, `LENGTH=12` at `POS=(10,45)`. */
+  cardNumber: 'Card Number:',
+  /** Beside `TTYPCD`, `LENGTH=8` at `POS=(12,6)`. */
+  typeCode: 'Type CD:',
+  /** Beside `TCATCD`, `LENGTH=12` at `POS=(12,23)`. */
+  categoryCode: 'Category CD:',
+  /** Beside `TRNSRC`, `LENGTH=7` at `POS=(12,46)`. */
+  source: 'Source:',
+  /** Beside `TDESC`, `LENGTH=12` at `POS=(14,6)`. */
+  description: 'Description:',
+  /** Beside `TRNAMT`, `LENGTH=7` at `POS=(16,6)`. */
+  amount: 'Amount:',
+  /** Beside `TORIGDT`, `LENGTH=10` at `POS=(16,31)`. */
+  originTimestamp: 'Orig Date:',
+  /** Beside `TPROCDT`, `LENGTH=10` at `POS=(16,57)`. */
+  processTimestamp: 'Proc Date:',
+  /** Beside `MID`, `LENGTH=12` at `POS=(18,6)`. */
+  merchantId: 'Merchant ID:',
+  /** Beside `MNAME`, `LENGTH=14` at `POS=(18,33)`. */
+  merchantName: 'Merchant Name:',
+  /** Beside `MCITY`, `LENGTH=14` at `POS=(20,6)`. */
+  merchantCity: 'Merchant City:',
+  /** Beside `MZIP`, `LENGTH=13` at `POS=(20,53)`. */
+  merchantZip: 'Merchant Zip:',
+} as const;
+
+/**
+ * The three screen-owned parts of the row-24 legend `app/bms/COTRN01.bms` paints.
+ *
+ * Assumptions: the mapset paints ONE literal, `ENTER=Fetch  F3=Back  F4=Clear  F5=Browse Tran.`,
+ * `LENGTH=47` in `COLOR=YELLOW`, with TWO spaces between parts: 11 + 2 + 7 + 2 + 8 + 2 + 15 = 47.
+ * PFK04 is absent because `F4=Clear` is uniform across the population and
+ * `ui/src/layout/PfKeyBar.tsx` owns it. `app/cbl/COTRN01C.cbl` L112-L127 admits exactly these four
+ * attention identifiers, so the painted legend and the accepted key set agree and no fifth entry is
+ * missing.
+ *
+ * Assumptions: `PFK05` reads `Browse Tran.` including the full stop, and it is NAVIGATION rather
+ * than a save even though PF5 saves on most other CardDemo screens - `app/cbl/COTRN01C.cbl`
+ * L125-L127 transfers to `COTRN00C`, the browse program. The painted label is the independent
+ * confirmation of that, which is why the full stop is not tidied away.
+ */
+export const TRANSACTION_DETAIL_KEY_LABELS = {
+  /** Reads the record the lookup field addresses. */
+  ENTER: 'ENTER=Fetch',
+  /** Returns to the caller. */
+  PFK03: 'F3=Back',
+  /** Transfers to the transaction browse. */
+  PFK05: 'F5=Browse Tran.',
+} as const;
+
+/** The mapset lines each transaction-detail painted string is transcribed from. */
+export const TRANSACTION_DETAIL_PAINTED_TEXT_SOURCES = {
+  title: [79],
+  lookupLabel: [84],
+  fieldLabels: {
+    transactionId: [104],
+    cardNumber: [117],
+    typeCode: [131],
+    categoryCode: [143],
+    source: [155],
+    description: [167],
+    amount: [179],
+    originTimestamp: [191],
+    processTimestamp: [203],
+    merchantId: [215],
+    merchantName: [227],
+    merchantCity: [239],
+    merchantZip: [251],
+  },
+  keyLabels: {
+    ENTER: [267, 268],
+    PFK03: [267, 268],
+    PFK05: [267, 268],
+  },
+} as const satisfies {
+  readonly title: readonly number[];
+  readonly lookupLabel: readonly number[];
+  readonly fieldLabels: Record<keyof typeof TRANSACTION_DETAIL_FIELD_LABELS, readonly number[]>;
+  readonly keyLabels: Record<keyof typeof TRANSACTION_DETAIL_KEY_LABELS, readonly number[]>;
+};
+
+/** Mapset file the bill-payment screen's painted text is transcribed from. */
+export const BILL_PAY_MAPSET_SOURCE_FILE = 'app/bms/COBIL00.bms';
+
+/**
+ * Row-4 caption `app/bms/COBIL00.bms` paints on the bill-payment screen.
+ *
+ * Assumptions: the map paints this as its own `LENGTH=12` field at `POS=(4,35)` with
+ * `ATTRB=(ASKIP,BRT)` and `COLOR=NEUTRAL`, and the twelve characters here are that literal exactly.
+ *
+ * Alternatives Considered: `PROGRAM_MESSAGES.COBIL00C.BILL_PAYMENT`, which reads like the obvious
+ * source and is the wrong one - that entry is `'BILL PAYMENT'` in upper case and is the merchant
+ * NAME the program writes into the transaction row at `app/cbl/COBIL00C.cbl` L227, a data value on a
+ * record rather than a caption on a screen. Also considered and rejected: trimming
+ * {@link MAIN_MENU_OPTIONS} entry 10, `'Bill Payment                       '`, which would make this
+ * caption depend on the 35-character padding of a different field.
+ */
+export const BILL_PAY_TITLE = 'Bill Payment';
+
+/**
+ * The three literals `app/bms/COBIL00.bms` paints beside this screen's fields.
+ *
+ * Assumptions: the trailing spaces are part of the values and are not incidental. Each `INITIAL`
+ * fills its declared field exactly - 14, 25 and 53 characters - so the balance label ends with a
+ * space and the confirmation prompt ends with a space, because on the terminal the value followed
+ * immediately in the next column. An editor action that strips trailing whitespace inside these
+ * quotes changes what the screen paints while still reading as correct English.
+ *
+ * Assumptions: `confirmPrompt` ends its first sentence with a FULL STOP and not a question mark,
+ * and it is a BMS continuation across two lines. Both read like transcription slips and neither is:
+ * rule T8 carries user-visible text across character for character, so the stop is never corrected
+ * and the continuation is rejoined without inserting anything the field does not hold - the 53
+ * characters here are the `LENGTH=53` the field declares.
+ */
+export const BILL_PAY_FIELD_LABELS = {
+  /** Beside `ACTIDIN`, `LENGTH=14` at `POS=(6,6)`, `COLOR=GREEN`. */
+  accountId: 'Enter Acct ID:',
+  /** Beside `CURBAL`, `LENGTH=25` at `POS=(11,6)`, `COLOR=TURQUOISE`; trailing space included. */
+  currentBalance: 'Your current balance is: ',
+  /** Beside `CONFIRM`, `LENGTH=53` at `POS=(15,6)`, `COLOR=TURQUOISE`; trailing space included. */
+  confirmPrompt: 'Do you want to pay your balance now. Please confirm: ',
+} as const;
+
+/**
+ * The domain hint `app/bms/COBIL00.bms` paints after the confirmation field, `LENGTH=5` at
+ * `POS=(15,63)` in `COLOR=NEUTRAL`.
+ *
+ * Assumptions: this five-character literal is carried even though the single-character field it
+ * annotated is replaced by a confirmation dialogue, because it still names the two answers that
+ * dialogue offers. Its text is byte-identical to {@link REPORTS_CAPTIONS}`.confirmDomainHint` and is
+ * a separate entry for that reason - two mapsets, two fields, two citations.
+ */
+export const BILL_PAY_CONFIRM_DOMAIN_HINT = '(Y/N)';
+
+/**
+ * The two screen-owned parts of the row-24 legend `app/bms/COBIL00.bms` paints.
+ *
+ * Assumptions: the mapset paints ONE `LENGTH=33` literal in `COLOR=YELLOW`,
+ * `ENTER=Continue  F3=Back  F4=Clear`, whose parts are separated by TWO spaces:
+ * 14 + 2 + 7 + 2 + 8 = 33. PFK04 is absent because `F4=Clear` is uniform across the population and
+ * `ui/src/layout/PfKeyBar.tsx` owns it. The legend advertises three keys and no others, and
+ * `app/cbl/COBIL00C.cbl` L125-L142 dispatches exactly those three before answering everything else
+ * with the shared invalid-key sentence, so the absence of PF5, PF7, PF8 and PF12 here is the
+ * baseline's own and not an omission.
+ *
+ * Assumptions: ENTER reads `Continue` on this mapset where others paint `Process`, and PF3 reads
+ * `Back` where nine others paint `Exit`, which is why both are screen-owned rather than shared.
+ */
+export const BILL_PAY_KEY_LABELS = {
+  /** Reads the account and, once a balance is shown, offers the payment. */
+  ENTER: 'ENTER=Continue',
+  /** Returns to the caller. */
+  PFK03: 'F3=Back',
+} as const;
+
+/** The mapset lines each bill-payment painted string is transcribed from. */
+export const BILL_PAY_PAINTED_TEXT_SOURCES = {
+  title: [79],
+  confirmDomainHint: [126],
+  fieldLabels: {
+    accountId: [84],
+    currentBalance: [102],
+    confirmPrompt: [113, 114],
+  },
+  keyLabels: {
+    ENTER: [135],
+    PFK03: [135],
+  },
+} as const satisfies {
+  readonly title: readonly number[];
+  readonly confirmDomainHint: readonly number[];
+  readonly fieldLabels: Record<keyof typeof BILL_PAY_FIELD_LABELS, readonly number[]>;
+  readonly keyLabels: Record<keyof typeof BILL_PAY_KEY_LABELS, readonly number[]>;
+};
+
+/** Mapset file the transaction-reports screen's painted text is transcribed from. */
+export const REPORTS_MAPSET_SOURCE_FILE = 'app/bms/CORPT00.bms';
+
+/**
+ * Row-4 caption `app/bms/CORPT00.bms` paints on the transaction-reports screen, `LENGTH=19` at
+ * `POS=(4,30)` in `COLOR=NEUTRAL` with `BRT`.
+ *
+ * Assumptions: this is a separate entry from {@link MAIN_MENU_OPTIONS} entry 9,
+ * `'Transaction Reports                '`, even though the two carry the same nineteen characters.
+ * They are different fields in different files - a menu option name in `app/cpy/COMEN02Y.cpy` that
+ * the program moves into a menu row, and a caption the map paints - so deriving this one by trimming
+ * the other would tie a heading to the 35-character option width it has nothing to do with.
+ */
+export const REPORTS_TITLE = 'Transaction Reports';
+
+/**
+ * The three report-type selector captions `app/bms/CORPT00.bms` paints, in the order the program
+ * evaluates them.
+ *
+ * ⚠️ Assumptions: these are the CAPTIONS an operator reads beside each one-character selector and
+ * they are NOT the report names. Each is its own `LENGTH=23 COLOR=TURQUOISE ATTRB=(ASKIP,BRT)`
+ * field, and only `monthly` fills all 23 characters - `yearly` is 21 and `custom` is 19, so COBOL
+ * pads those two at run time. The bare words the program moves into `WS-REPORT-NAME` and
+ * interpolates into two of its sentences are `PROGRAM_MESSAGES.CORPT00C.MONTHLY`, `.YEARLY` and
+ * `.CUSTOM`; both sets exist in the baseline and neither is derivable from the other, so conflating
+ * them would either put `Monthly (Current Month)` inside a message the program spells `Monthly` or
+ * strip the caption an operator uses to choose.
+ *
+ * Assumptions: the key order is load-bearing rather than cosmetic. `app/cbl/CORPT00C.cbl` L212-L256
+ * is one `EVALUATE TRUE` testing monthly, then yearly, then custom, so the first non-blank mark wins
+ * and the operator's own reading order down rows 7, 9 and 11 is the precedence order.
+ */
+export const REPORT_TYPE_PROMPTS = {
+  /** Row-7 caption, `POS=(7,15)`; fills its `LENGTH=23` field exactly. */
+  monthly: 'Monthly (Current Month)',
+  /** Row-9 caption, `POS=(9,15)`; 21 characters in a `LENGTH=23` field. */
+  yearly: 'Yearly (Current Year)',
+  /** Row-11 caption, `POS=(11,15)`; 19 characters in a `LENGTH=23` field. */
+  custom: 'Custom (Date Range)',
+} as const;
+
+/**
+ * The captions and hints `app/bms/CORPT00.bms` paints around the two date bounds and the
+ * confirmation.
+ *
+ * ⚠️ Assumptions: `endDate` carries TWO LEADING spaces. Its literal is `'  End Date :'`, declared
+ * `LENGTH=12` exactly as `'Start Date :'` is, and the two spaces are the mapset's own
+ * right-alignment of the shorter caption against the longer one. Trimming them would be a
+ * one-character-class edit to text a screen suite reads byte for byte.
+ *
+ * Trade-offs: those two spaces reach the DOM verbatim and are then collapsed by HTML's default
+ * whitespace handling, so the caption reads `End Date :` on screen while the string still measures
+ * twelve characters. That is deliberate: the spaces are character-cell alignment on a fixed-pitch
+ * 24x80 grid, which AAP gap G1 declines to reproduce, and forcing them to paint with a preformatted
+ * whitespace rule would indent this caption against its sibling in a proportional face instead of
+ * aligning the two colons. The verbatim guarantee is about the string this module carries, and that
+ * is preserved; the terminal's column arithmetic is not.
+ *
+ * Assumptions: `confirmation` also ends with a space and is a BMS continuation across two lines. It
+ * is a `LENGTH=59 COLOR=TURQUOISE` field, and the trailing blank separated the sentence from the
+ * one-character input that followed it on the same row.
+ *
+ * Assumptions: `dateFormatHint` is ONE entry for a literal the mapset paints TWICE, once per bound
+ * at `POS=(13,46)` and `POS=(14,46)`. Both fields are `LENGTH=12 COLOR=BLUE` and carry identical
+ * text, and a bound is rendered once with its own hint, so one entry citing both lines states the
+ * fact without implying the two could differ - which they cannot, being the same mask.
+ */
+export const REPORTS_CAPTIONS = {
+  /** Row-13 caption, `LENGTH=12` at `POS=(13,15)`, `COLOR=TURQUOISE`. */
+  startDate: 'Start Date :',
+  /** Row-14 caption, `LENGTH=12` at `POS=(14,15)`, `COLOR=TURQUOISE`; two leading spaces in source. */
+  endDate: '  End Date :',
+  /** Painted once per bound, `LENGTH=12` at `POS=(13,46)` and `POS=(14,46)`, `COLOR=BLUE`. */
+  dateFormatHint: '(MM/DD/YYYY)',
+  /** Row-19 prompt, `LENGTH=59` at `POS=(19,6)`, `COLOR=TURQUOISE`; trailing space in source. */
+  confirmation: 'The Report will be submitted for printing. Please confirm: ',
+  /** Row-19 domain hint, `LENGTH=5` at `POS=(19,69)`, `COLOR=NEUTRAL`. */
+  confirmDomainHint: '(Y/N)',
+} as const;
+
+/**
+ * The whole row-24 legend `app/bms/CORPT00.bms` paints, split into its two parts.
+ *
+ * ⚠️ Assumptions: the row-24 field is ONE `LENGTH=23 COLOR=YELLOW` literal,
+ * `ENTER=Continue  F3=Back`, and the two spaces between the parts are in the source:
+ * 14 + 2 + 7 = 23. Splitting it lets each part sit on the control that performs it.
+ *
+ * Assumptions: exactly TWO entries, and unlike the other six groups in this block nothing is absent
+ * from this one - the legend advertises two keys and `EVALUATE EIBAID` at `app/cbl/CORPT00C.cbl`
+ * L184-L195 honours exactly `DFHENTER` and `DFHPF3`, sending every other attention identifier to the
+ * shared invalid-key message. `F4=Clear` is deliberately NOT taken from the uniform set here,
+ * because this mapset does not paint it and this program does not dispatch it.
+ */
+export const REPORTS_KEY_LABELS = {
+  /** Submits the selected report type and, for a custom range, the six keyed date parts. */
+  ENTER: 'ENTER=Continue',
+  /** Returns to the main menu. */
+  PFK03: 'F3=Back',
+} as const;
+
+/** The mapset lines each transaction-reports painted string is transcribed from. */
+export const REPORTS_PAINTED_TEXT_SOURCES = {
+  title: [79],
+  typePrompts: {
+    monthly: [93],
+    yearly: [107],
+    custom: [121],
+  },
+  captions: {
+    startDate: [126],
+    endDate: [165],
+    dateFormatHint: [160, 199],
+    confirmation: [204, 205],
+    confirmDomainHint: [217],
+  },
+  keyLabels: {
+    ENTER: [226],
+    PFK03: [226],
+  },
+} as const satisfies {
+  readonly title: readonly number[];
+  readonly typePrompts: Record<keyof typeof REPORT_TYPE_PROMPTS, readonly number[]>;
+  readonly captions: Record<keyof typeof REPORTS_CAPTIONS, readonly number[]>;
+  readonly keyLabels: Record<keyof typeof REPORTS_KEY_LABELS, readonly number[]>;
+};
+
+/** Mapset file the user-browse screen's painted text is transcribed from. */
+export const USER_LIST_MAPSET_SOURCE_FILE = 'app/bms/COUSR00.bms';
+
+/**
+ * Row-4 caption `app/bms/COUSR00.bms` paints on the user browse, `LENGTH=10` at `POS=(4,35)` in
+ * `COLOR=NEUTRAL` with `BRT`.
+ */
+export const USER_LIST_TITLE = 'List Users';
+
+/**
+ * The eight static literals `app/bms/COUSR00.bms` paints on the user browse, with their padding.
+ *
+ * ⚠️ Assumptions: the padding IS part of each value and none of it may be discarded. `userIdColumn`
+ * carries one TRAILING space and the two name headings are padded on both sides, because the mapset
+ * sizes each heading to the twenty-character column beneath it - `'     First Name     '` is
+ * 5 + 10 + 5 and `'     Last Name      '` is 5 + 9 + 6, both against `LENGTH=20`. The values are
+ * therefore stored padded and only a renderer trims, so a reader comparing this file with the mapset
+ * finds the same bytes.
+ *
+ * Assumptions: `rowActionPrompt` holds single apostrophes. The mapset source reads
+ * `Type ''U'' to Update or ''D'' to Delete a User from the` continued as ` list`, and the doubled
+ * apostrophes are BMS literal escaping rather than content - a terminal displays one apostrophe.
+ * Reproducing the doubled form would be a transcription defect that this module's byte-exactness
+ * rule would then protect; the 56 characters here are the `LENGTH=56` the field declares.
+ */
+export const USER_LIST_LABELS = {
+  /** Row-4 page-ordinal prompt, `LENGTH=5` at `POS=(4,65)`, `COLOR=TURQUOISE` with `BRT`. */
+  pageIndicator: 'Page:',
+  /** Row-6 label of the search field, `LENGTH=15` at `POS=(6,5)`, `COLOR=TURQUOISE`. */
+  searchUserId: 'Search User ID:',
+  /** Row-8 heading of the action column, `LENGTH=3` at `POS=(8,5)`, `COLOR=NEUTRAL`. */
+  selColumn: 'Sel',
+  /** Row-8 heading, `LENGTH=8` at `POS=(8,12)`, `COLOR=NEUTRAL`; one trailing space. */
+  userIdColumn: 'User ID ',
+  /** Row-8 heading, `LENGTH=20` at `POS=(8,24)`, `COLOR=NEUTRAL`; padded to its column. */
+  firstNameColumn: '     First Name     ',
+  /** Row-8 heading, `LENGTH=20` at `POS=(8,48)`, `COLOR=NEUTRAL`; padded to its column. */
+  lastNameColumn: '     Last Name      ',
+  /** Row-8 heading of the user-type column, `LENGTH=4` at `POS=(8,72)`, `COLOR=NEUTRAL`. */
+  typeColumn: 'Type',
+  /** Row-21 action prompt, `LENGTH=56` at `POS=(21,12)`, `COLOR=NEUTRAL` with `BRT`. */
+  rowActionPrompt: "Type 'U' to Update or 'D' to Delete a User from the list",
+} as const;
+
+/**
+ * The two screen-owned parts of the row-24 legend `app/bms/COUSR00.bms` paints.
+ *
+ * Assumptions: the mapset paints ONE `LENGTH=48 COLOR=YELLOW` literal,
+ * `ENTER=Continue  F3=Back  F7=Backward  F8=Forward`, with TWO spaces between parts, and it names
+ * exactly the four keys `app/cbl/COUSR00C.cbl` L121-L133 dispatches - there is no PF4, PF5 or PF12
+ * on this screen. PFK07 and PFK08 are absent from this group because their wording is uniform across
+ * every paging mapset and `ui/src/layout/PfKeyBar.tsx` owns it; ENTER and PF3 are here because
+ * neither key's wording is uniform, that module recording ENTER painted six ways and PF3 three.
+ *
+ * Assumptions: this group's two values are byte-identical to
+ * {@link TRANSACTION_LIST_KEY_LABELS} and are still a separate entry, because they are a separate
+ * mapset's field with its own citation - the same rule the two `Page:` and `Sel` entries follow.
+ */
+export const USER_LIST_KEY_LABELS = {
+  /** Applies the search field and any marked action cell, then re-reads the opening page. */
+  ENTER: 'ENTER=Continue',
+  /** Returns to the administrative menu, replacing `XCTL PROGRAM('COADM01C')`. */
+  PFK03: 'F3=Back',
+} as const;
+
+/** The mapset lines each user-browse painted string is transcribed from. */
+export const USER_LIST_PAINTED_TEXT_SOURCES = {
+  title: [79],
+  labels: {
+    pageIndicator: [84],
+    searchUserId: [94],
+    selColumn: [107],
+    userIdColumn: [112],
+    firstNameColumn: [117],
+    lastNameColumn: [122],
+    typeColumn: [127],
+    rowActionPrompt: [447, 448],
+  },
+  keyLabels: {
+    ENTER: [457, 458],
+    PFK03: [457, 458],
+  },
+} as const satisfies {
+  readonly title: readonly number[];
+  readonly labels: Record<keyof typeof USER_LIST_LABELS, readonly number[]>;
+  readonly keyLabels: Record<keyof typeof USER_LIST_KEY_LABELS, readonly number[]>;
+};
+
+/** Mapset file the add-user screen's painted text is transcribed from. */
+export const USER_ADD_MAPSET_SOURCE_FILE = 'app/bms/COUSR01.bms';
+
+/**
+ * Row-4 caption `app/bms/COUSR01.bms` paints on the add-user screen.
+ *
+ * Assumptions: this is a BODY field and not part of the title band. It is painted at `POS=(4,35)`
+ * with `ATTRB=(ASKIP,BRT)` and `COLOR=NEUTRAL` over `LENGTH=9`, below the two 40-character title
+ * fields the shell owns on rows 1 and 2, so it belongs to the screen rather than to the shell. The
+ * literal is eight characters in that nine-character field, so COBOL pads it with one trailing space
+ * at run time that the source does not contain and this entry therefore does not carry.
+ */
+export const USER_ADD_CAPTION = 'Add User';
+
+/**
+ * The five field labels `app/bms/COUSR01.bms` paints on the add-user screen.
+ *
+ * Assumptions: the trailing space on `userType` is part of the value. That literal is declared
+ * `'User Type: '` at `LENGTH=11` where the visible text is ten characters, so the eleventh is a
+ * space the terminal painted, and trimming it here would be a silent edit to a user-visible string.
+ *
+ * Assumptions: `firstName`, `lastName` and `userType` are byte-identical to their counterparts in
+ * {@link USER_DELETE_FIELD_LABELS} and are separate entries all the same, because they are a
+ * different mapset's fields with their own citations - `First Name:` sits at `POS=(8,6)` here and at
+ * `POS=(11,6)` there, on screens that do different things with it.
+ */
+export const USER_ADD_FIELD_LABELS = {
+  /** `LENGTH=11` at `POS=(8,6)`, `COLOR=TURQUOISE`. */
+  firstName: 'First Name:',
+  /** `LENGTH=10` at `POS=(8,45)`, `COLOR=TURQUOISE`. */
+  lastName: 'Last Name:',
+  /** `LENGTH=8` at `POS=(11,6)`, `COLOR=TURQUOISE`. */
+  userId: 'User ID:',
+  /** `LENGTH=9` at `POS=(11,45)`, `COLOR=TURQUOISE`. */
+  password: 'Password:',
+  /** `LENGTH=11` at `POS=(14,6)`, `COLOR=TURQUOISE`; the trailing space is in source. */
+  userType: 'User Type: ',
+} as const;
+
+/**
+ * The three hints `app/bms/COUSR01.bms` paints beside a control, all in `COLOR=BLUE`.
+ *
+ * Assumptions: the two width hints are BOTH carried and they are separate entries even though their
+ * text is identical, because the mapset paints two distinct fields - one after the identifier at
+ * `POS=(11,24)` and one after the credential at `POS=(11,64)`. Collapsing them into one shared value
+ * would make a later edit to either silently move both.
+ *
+ * Assumptions: the user-type hint is the ONLY place the `'A'`/`'U'` domain is advertised to an
+ * operator on this screen, because `app/cbl/COUSR01C.cbl` carries no domain check for that field -
+ * L142 tests it for blank and nothing else. Dropping the hint would leave the domain undiscoverable.
+ */
+export const USER_ADD_FIELD_HINTS = {
+  /** `LENGTH=8` at `POS=(11,24)`, beside the identifier control. */
+  userId: '(8 Char)',
+  /** `LENGTH=8` at `POS=(11,64)`, beside the credential control. */
+  password: '(8 Char)',
+  /** `LENGTH=17` at `POS=(14,19)`, beside the user-type control. */
+  userType: '(A=Admin, U=User)',
+} as const;
+
+/**
+ * The three screen-owned parts of the row-24 legend `app/bms/COUSR01.bms` paints.
+ *
+ * Assumptions: the mapset paints ONE `LENGTH=43 COLOR=YELLOW` literal,
+ * `ENTER=Add User  F3=Back  F4=Clear  F12=Exit`, with TWO spaces between parts:
+ * 14 + 2 + 7 + 2 + 8 + 2 + 8 = 43. PFK04 is absent because `F4=Clear` is uniform across the
+ * population and `ui/src/layout/PfKeyBar.tsx` owns it, while `ENTER=Add User` is unique to this
+ * mapset - inheriting a generic submit label would mislabel the one control on the screen that
+ * writes.
+ */
+export const USER_ADD_KEY_LABELS = {
+  /** Creates the user from the four submitted values. */
+  ENTER: 'ENTER=Add User',
+  /** Returns to the administrative menu. */
+  PFK03: 'F3=Back',
+  /**
+   * Painted by the mapset in normal intensity, and answered as an unaccepted key.
+   *
+   * Assumptions: the label is carried because `app/bms/COUSR01.bms` L155-L159 paints the whole row-24
+   * legend as ONE `ATTRB=(ASKIP,NORM)` field that includes it, so it is on the glass on every turn.
+   * The KEY, though, is not dispatched: `app/cbl/COUSR01C.cbl` L90-L102 has arms for `DFHENTER`,
+   * `DFHPF3` and `DFHPF4` only, so `DFHPF12` reaches `WHEN OTHER` and is answered with
+   * `CCDA-MSG-INVALID-KEY`. ⚠️ Refactoring Rationale: this member previously read "Signs off", which
+   * described a behaviour the screen used to have and the reference never had; the value is unchanged
+   * and only the claim about it is corrected.
+   */
+  PFK12: 'F12=Exit',
+} as const;
+
+/** The mapset lines each add-user painted string is transcribed from. */
+export const USER_ADD_PAINTED_TEXT_SOURCES = {
+  caption: [79],
+  fieldLabels: {
+    firstName: [83],
+    lastName: [96],
+    userId: [110],
+    password: [125],
+    userType: [140],
+  },
+  fieldHints: {
+    userId: [120],
+    password: [135],
+    userType: [150],
+  },
+  keyLabels: {
+    ENTER: [159],
+    PFK03: [159],
+    PFK12: [159],
+  },
+} as const satisfies {
+  readonly caption: readonly number[];
+  readonly fieldLabels: Record<keyof typeof USER_ADD_FIELD_LABELS, readonly number[]>;
+  readonly fieldHints: Record<keyof typeof USER_ADD_FIELD_HINTS, readonly number[]>;
+  readonly keyLabels: Record<keyof typeof USER_ADD_KEY_LABELS, readonly number[]>;
+};
+
+/** Mapset file the delete-user screen's painted text is transcribed from. */
+export const USER_DELETE_MAPSET_SOURCE_FILE = 'app/bms/COUSR03.bms';
+
+/**
+ * Row-4 caption `app/bms/COUSR03.bms` paints on the delete-user screen.
+ *
+ * Assumptions: this is a BODY field and not part of the title band. It is painted at `POS=(4,35)`
+ * with `ATTRB=(ASKIP,BRT)` and `COLOR=NEUTRAL` over `LENGTH=11`, which the eleven characters fill
+ * exactly, below the two 40-character title fields the shell owns on rows 1 and 2.
+ */
+export const USER_DELETE_CAPTION = 'Delete User';
+
+/**
+ * The four field labels `app/bms/COUSR03.bms` paints on the delete-user screen.
+ *
+ * Assumptions: the trailing space on `userType` is part of the value, declared `'User Type: '` at
+ * `LENGTH=11` where the visible text is ten characters. Rule T8 is character-exact, so trimming it
+ * would be a silent edit to a user-visible string.
+ *
+ * Assumptions: `userId` reads `Enter User ID:` and is painted in `COLOR=GREEN` rather than the
+ * `COLOR=TURQUOISE` of the three display labels, because it names the one enterable control on the
+ * screen. That distinction is recorded per entry so a renderer resolves the two colour roles from
+ * the mapset rather than from the group.
+ */
+export const USER_DELETE_FIELD_LABELS = {
+  /** Beside `USRIDIN`, `LENGTH=14` at `POS=(6,6)`, `COLOR=GREEN`. */
+  userId: 'Enter User ID:',
+  /** Beside `FNAME`, `LENGTH=11` at `POS=(11,6)`, `COLOR=TURQUOISE`. */
+  firstName: 'First Name:',
+  /** Beside `LNAME`, `LENGTH=10` at `POS=(13,6)`, `COLOR=TURQUOISE`. */
+  lastName: 'Last Name:',
+  /** Beside `USRTYPE`, `LENGTH=11` at `POS=(15,6)`, `COLOR=TURQUOISE`; trailing space in source. */
+  userType: 'User Type: ',
+} as const;
+
+/**
+ * The one hint `app/bms/COUSR03.bms` paints beside a value, `LENGTH=17` at `POS=(15,19)` in
+ * `COLOR=BLUE`.
+ *
+ * Assumptions: this is the ONLY place the `'A'`/`'U'` domain is named to an operator on this screen.
+ * `app/cbl/COUSR03C.cbl` performs no domain check on the user type anywhere - the field is read from
+ * the record and displayed - so dropping the hint would leave the two characters undecodable to
+ * somebody reading the screen. Its text is byte-identical to
+ * {@link USER_ADD_FIELD_HINTS}`.userType` and is a separate entry for the reason that group records.
+ */
+export const USER_DELETE_USER_TYPE_HINT = '(A=Admin, U=User)';
+
+/**
+ * The three screen-owned parts of the row-24 legend `app/bms/COUSR03.bms` paints.
+ *
+ * Assumptions: the mapset paints ONE `COLOR=YELLOW` literal,
+ * `ENTER=Fetch  F3=Back  F4=Clear  F5=Delete`, whose 41 characters sit in a `LENGTH=58` field with
+ * TWO spaces between parts: 11 + 2 + 7 + 2 + 8 + 2 + 9 = 41. PFK04 is absent because `F4=Clear` is
+ * uniform across the population and `ui/src/layout/PfKeyBar.tsx` owns it; ENTER, PF3 and PF5 are
+ * here because this mapset says `F3=Back` where its update sibling says `F3=Save&&Exit` and
+ * `F5=Delete` where that one says `F5=Save`, so inheriting a default for either would mislabel a
+ * control.
+ *
+ * Assumptions: there is NO PF12 label, and the absence is the baseline's. `app/cbl/COUSR03C.cbl`
+ * L123-L125 binds `DFHPF12` while the row-24 literal advertises only four actions, so the key works
+ * and is not advertised - a renderer registers that binding with no label rather than inventing one.
+ *
+ * Assumptions: these three values are the DECODED form, which for this mapset is the source form -
+ * BMS is assembler macro source in which `&` opens a variable symbol, so a legend containing an
+ * ampersand is written doubled there, and this legend contains none. `decodeBmsLegendText` in
+ * `ui/src/layout/PfKeyBar.tsx` is documented as idempotent, so a renderer may keep applying it to
+ * these values uniformly and still get these bytes; this module cannot apply it itself, because it
+ * imports nothing at load time.
+ */
+export const USER_DELETE_KEY_LABELS = {
+  /** Reads the user the identifier control addresses. */
+  ENTER: 'ENTER=Fetch',
+  /** Returns to the caller. */
+  PFK03: 'F3=Back',
+  /** Confirms and performs the deletion. */
+  PFK05: 'F5=Delete',
+} as const;
+
+/** The mapset lines each delete-user painted string is transcribed from. */
+export const USER_DELETE_PAINTED_TEXT_SOURCES = {
+  caption: [79],
+  userTypeHint: [139],
+  fieldLabels: {
+    userId: [84],
+    firstName: [102],
+    lastName: [115],
+    userType: [129],
+  },
+  keyLabels: {
+    ENTER: [148],
+    PFK03: [148],
+    PFK05: [148],
+  },
+} as const satisfies {
+  readonly caption: readonly number[];
+  readonly userTypeHint: readonly number[];
+  readonly fieldLabels: Record<keyof typeof USER_DELETE_FIELD_LABELS, readonly number[]>;
+  readonly keyLabels: Record<keyof typeof USER_DELETE_KEY_LABELS, readonly number[]>;
 };
 
 /**
@@ -3917,6 +4750,62 @@ export const CARD_DETAIL_INVALID_LINK_GUIDANCE =
   'Return to the card list and select the record again.';
 
 /**
+ * Explanation shown when the code for a screen could not be loaded or the screen failed to render.
+ *
+ * Purpose
+ * -------
+ * The browser fetches each screen's code on first navigation to it, and that fetch can fail for
+ * reasons no screen can answer for: a redeploy replaces the hashed asset names while a tab is still
+ * holding the previous document, a proxy answers the request with an error page, or the network drops.
+ * The reference application had no equivalent state -- a 3270 program was either in the load library
+ * or the transaction was not defined -- so this sentence is AUTHORED and carries no {@link SourceRef}.
+ *
+ * Assumptions: it states the one action available and nothing about the cause. The cause is a module
+ * path, an HTTP status or a JavaScript error, and each is internal: an operator cannot act on any of
+ * them, and rendering one would publish deployment detail onto a screen and into every screenshot of
+ * it. The detail goes to the browser console instead, exactly as `ui/src/main.tsx` splits a start-up
+ * failure between the two surfaces.
+ *
+ * Assumptions: it is shown BENEATH the transcribed abend sentence rather than replacing it. The
+ * abend wording is what the baseline says for a failure it cannot continue past, and this adds the
+ * recovery a browser makes possible and a terminal did not.
+ */
+export const SCREEN_LOAD_FAILED_DETAIL =
+  'This screen could not be loaded. Reload to try again; the rest of the application is unaffected.';
+
+/**
+ * Label of the control on the failed-screen surface that reloads the document.
+ *
+ * Assumptions: the label names a RELOAD and not a bare retry, because that is what the control does
+ * and the difference is visible to the operator -- the page is re-fetched and any typed input on the
+ * failed screen is gone. Calling it "Try again" would understate that.
+ *
+ * Alternatives Considered: a control that re-renders the screen in place, which is the smaller action
+ * and reads as the friendlier one. It is not offered because it cannot work for the failure it would
+ * be offered for: React caches a rejected lazy import permanently -- `lazyInitializer` in
+ * `react@19.2.8` sets the payload's status to rejected and re-throws the stored error on every later
+ * render -- so a remount presents the same surface again, and for the commonest trigger the asset URL
+ * itself is stale, so only a fresh document can pick up the new one.
+ */
+export const RELOAD_SCREEN_LABEL = 'Reload this screen';
+
+/**
+ * The two strings the shell's failed-screen surface renders, as one group.
+ *
+ * Assumptions: composed from the constants above and from the transcribed abend sentence rather than
+ * restating any literal, for the reason {@link NOT_FOUND_MESSAGES} records: one operator-visible
+ * sentence must have one literal, or the copies drift the first time one is corrected.
+ */
+export const SCREEN_LOAD_FAILURE_MESSAGES = {
+  /** Headline. Transcribed: the baseline's own wording for a failure it cannot continue past. */
+  TITLE: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
+  /** Explanation beneath the headline. Authored; the baseline has no chunk-load state. */
+  EXPLANATION: SCREEN_LOAD_FAILED_DETAIL,
+  /** Label of the single control. Authored. */
+  RELOAD_CONTROL: RELOAD_SCREEN_LABEL,
+} as const;
+
+/**
  * The three strings the router's not-found surface renders, as one group.
  *
  * Purpose
@@ -3952,4 +4841,182 @@ export const NOT_FOUND_MESSAGES = {
    * label reading "Open cards" above a control that returns to the menu is worse than either.
    */
   RETURN_CONTROL: OPEN_CARD_BROWSE_LABEL,
+} as const;
+
+/**
+ * The five strings the created-user credential surface renders, as one group.
+ *
+ * Purpose
+ * -------
+ * A user created at runtime is handed a generated one-time password in the create response, and the
+ * operator has to read it, pass it on, and dismiss it. Nothing in the reference application corresponds
+ * to that moment: its administrator TYPED a password into the create screen -- `PASSWDI` at
+ * `app/cpy-bms/COUSR01.CPY` L78, checked for emptiness at `app/cbl/COUSR01C.cbl` L138 -- so the value
+ * was already known to the person entering it and no screen ever had to disclose one back. Every string
+ * below is therefore AUTHORED, and none carries a {@link SourceRef} because no COBOL source holds it.
+ *
+ * Refactoring Rationale: they live in this catalogue rather than beside the surface that renders them,
+ * on the same reasoning recorded for {@link CARD_DETAIL_EDIT_CONTROL_LABEL}: a reader auditing this file
+ * for completeness cannot tell a deliberately additive string from a forgotten one while it sits at its
+ * point of use.
+ *
+ * Assumptions: the explanation states the credential's three operational properties -- shown once, not
+ * retrievable, changed at first sign-on -- because each is a consequence the operator cannot discover
+ * from the screen and would otherwise learn by losing an account. It does NOT mention the managed-secret
+ * entry the value was archived to: recovering it from there needs a grant a browser session does not
+ * hold, so naming it would offer this operator an action they cannot take.
+ *
+ * Assumptions: ⚠️ no string here interpolates the credential, and none may. These are static labels
+ * around the value, so the value itself lives only in component state and reaches only the element that
+ * displays it -- a message composed WITH it would put a live credential into a catalogue constant, a
+ * shell message band, and any test snapshot that rendered either.
+ */
+export const CREDENTIAL_HANDOVER_MESSAGES = {
+  /**
+   * Heading of the surface, which is also the accessible label of the value beneath it. Authored.
+   */
+  TITLE: 'One-time password',
+  /**
+   * The explanation beneath the heading. Authored.
+   *
+   * Assumptions: it opens with the action rather than the caveats, because the operator's next step is
+   * to pass the value on and the caveats only matter once they have.
+   */
+  EXPLANATION:
+    'Give this to the new user now. It is shown once, cannot be retrieved afterwards, and must be changed at first sign-on.',
+  /**
+   * Accessible name of the copy control. Authored.
+   *
+   * Assumptions: it names the thing copied rather than reading "Copy", because it is the accessible
+   * name of an icon-only control and a screen reader announcing "Copy" beside a row of names would not
+   * say what would land on the clipboard.
+   */
+  COPY_CONTROL: 'Copy one-time password',
+  /**
+   * Confirmation shown on the copy control once it has been used. Authored.
+   */
+  COPIED_CONFIRMATION: 'Copied',
+  /**
+   * Label of the control that dismisses the surface. Authored.
+   *
+   * Assumptions: it reads as the operator's own completion rather than as "Hide" or "Close", because
+   * dismissing is irreversible here -- the value is not recoverable once the surface is gone -- and a
+   * label promising only to hide something would understate that.
+   */
+  DISMISS_CONTROL: 'Done',
+} as const;
+
+/**
+ * The strings the report screen paints while it follows one submitted report run.
+ *
+ * Purpose
+ * -------
+ * Submitting a report starts an asynchronous run, and the baseline could report nothing at all about
+ * one: `SUBMIT-JOB-TO-INTRDR` at `app/cbl/CORPT00C.cbl` L462 writes job-control records to the `JOBS`
+ * transient data queue, and `app/csd/CARDDEMO.CSD` L499-L505 defines that queue with
+ * `ERROROPTION(IGNORE)` -- so even a failed write was silent and an operator learned the outcome by
+ * looking at the job log on a different system. Every string below is therefore AUTHORED and carries
+ * no {@link SourceRef}: there is no reference literal to transcribe, because there was no state to
+ * describe.
+ *
+ * Assumptions: none of these strings is painted on row 23. That line is a parity surface carrying
+ * this program's own nineteen sentences, and `ui/src/screens/reports/index.tsx` already declines to
+ * paint the service's text there for exactly that reason; authored lifecycle text has the same
+ * problem, so it is rendered in the screen's body instead. The band still carries the submission
+ * acknowledgement and every refusal, unchanged.
+ *
+ * Assumptions: the six status labels are the OPERATOR's vocabulary and the contract's six tokens are
+ * the orchestration's. They are mapped rather than shown raw because `PENDING_REDRIVE` and
+ * `ABORTED` name mechanisms rather than outcomes, and an operator acts on the outcome. The run's own
+ * reference is rendered beside them, so an operator quoting a run to support still has the value the
+ * status operation is addressed by.
+ *
+ * Alternatives Considered: one sentence covering all three failure outcomes. Rejected because
+ * `services/reporting-service/src/main/resources/openapi/reporting-api.yaml` states that the
+ * distinctions are ones an operator acts on -- a timed-out run is retried, an aborted run was stopped
+ * deliberately -- so collapsing them would delete the only information the three statuses carry that
+ * a single "it failed" does not.
+ *
+ * Alternatives Considered: declaring each string as its own export and composing this group from
+ * them, which is what {@link NOT_FOUND_MESSAGES} and {@link SCREEN_LOAD_FAILURE_MESSAGES} do.
+ * Rejected here because those two have consumers for BOTH shapes -- a surface that renders the group
+ * and a module that imports one sentence -- while every string below has exactly one call site, so
+ * decomposing would add thirteen exports that nothing imports and two names for each sentence.
+ */
+export const REPORT_RUN_MESSAGES = {
+  /** Heading of the region, naming what it is about rather than repeating the screen title. */
+  HEADING: 'Submitted report run',
+  /** Caption of the run's own reference, which is the value a status read is addressed by. */
+  REFERENCE_CAPTION: 'Run reference',
+  /** Caption of the run's current state. */
+  STATUS_CAPTION: 'Status',
+  /**
+   * Label of the control that reads the run's status now.
+   *
+   * Assumptions: it names a status read and not a resubmission, because the two are a long way
+   * apart -- one costs nothing and one starts a second run over the same range.
+   */
+  REFRESH_CONTROL: 'Refresh status',
+  /**
+   * Label of the control that collects the document a succeeded run produced.
+   *
+   * Assumptions: it names a download because that is what the control does -- the bytes arrive as an
+   * attachment and the browser writes them to the file system. Calling it "View" would promise a
+   * rendering this application deliberately does not perform: the document is 133-column fixed-width
+   * text whose edit masks a golden-master comparison reads byte for byte, so re-rendering it here
+   * would make this a second renderer of a parity artifact.
+   */
+  DOWNLOAD_CONTROL: 'Download report',
+  /** Operator-facing name of each of the six states the contract publishes for a run. */
+  STATUS_LABELS: {
+    /** The run is going. */
+    RUNNING: 'Running',
+    /** The run finished and its document is stored. */
+    SUCCEEDED: 'Completed',
+    /** The run stopped without producing a document. */
+    FAILED: 'Failed',
+    /** The run exceeded the time the orchestration allows it. */
+    TIMED_OUT: 'Timed out',
+    /** The run was stopped deliberately before it finished. */
+    ABORTED: 'Stopped',
+    /** The run has been redriven and is waiting to restart, so it is still going. */
+    PENDING_REDRIVE: 'Restarting',
+  },
+  /** Sentence for a run that stopped without producing a document. */
+  FAILED_DETAIL: 'This report run did not complete. Submit the report again to retry it.',
+  /** Sentence for a run the orchestration stopped for exceeding its time limit. */
+  TIMED_OUT_DETAIL:
+    'This report run exceeded its time limit. Submit the report again, narrowing the date range if it covers a long period.',
+  /** Sentence for a run somebody stopped deliberately. */
+  ABORTED_DETAIL:
+    'This report run was stopped before it completed. Submit the report again to retry it.',
+  /**
+   * Sentence for a completed run whose document is not in the store.
+   *
+   * Assumptions: this state is reachable and is not a defect. The contract states that the result
+   * location is null after a lifecycle rule has expired what the run wrote, so a run that completed
+   * days ago can report success with nothing left to collect.
+   */
+  DOCUMENT_UNAVAILABLE:
+    'This report run completed, but its document is no longer available. Submit the report again to produce it.',
+  /**
+   * Sentence for a status read that did not answer.
+   *
+   * Assumptions: it says nothing about why. The reason is an HTTP status or a network failure, and
+   * an operator can act on neither; the one action available is to read the status again, so that is
+   * the one action named.
+   */
+  STATUS_READ_FAILED: 'The status of this report run could not be read. Refresh to try again.',
+  /** Sentence for a document collection that did not answer, on the same terms as a failed read. */
+  DOCUMENT_COLLECTION_FAILED:
+    'The report document could not be collected. Refresh the status and try again.',
+  /**
+   * Sentence shown once the screen has stopped reading the status on its own.
+   *
+   * Assumptions: the stop is announced rather than silent, which is the whole reason this string
+   * exists. A screen that quietly stopped updating would show a running state indefinitely and an
+   * operator would read it as a run that never finishes.
+   */
+  AUTOMATIC_UPDATES_STOPPED:
+    'Automatic status updates have stopped. Refresh to read the current status.',
 } as const;

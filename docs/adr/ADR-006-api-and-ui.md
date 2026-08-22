@@ -184,11 +184,12 @@ with no HTTP surface cannot validate a bearer token, so writing "every service" 
 would make the document disagree with itself and overstate the number of enforcement
 points by one.
 
-**Interface.** The **21** screens are **to be** re-implemented as one **React 19 +
+**Interface.** The **21** screens are re-implemented as one **React 19 +
 TypeScript** single-page application, one route per mapset, using **Ant Design**
 for every interactive element. Assumptions: this paragraph and the inventory below
-state the **decision**, which is normative and complete; what is **authored so far**
-is a strict subset and is stated separately under
+state the **decision**, which is normative and complete; **all 21 routes are authored
+and mounted**, and the one boundary that remains — the seven screens without a
+per-screen component test — is stated separately under
 [Honest boundary](#honest-boundary--what-this-record-does-not-establish), so that
 neither reading has to be inferred from the other. The built assets are static files served from
 **S3 behind CloudFront**; no application server participates in delivering them.
@@ -489,9 +490,10 @@ Trade-offs: the third row is a real residual risk and it is recorded as one unde
 rather than being presented as solved. Alternatives Considered: generating the
 client from each contract, which would make that row mechanical too. It is not
 adopted in this record because the generator, its pinned version and its output
-location are themselves decisions with a review surface, and adopting one here
-while the majority of screens are unauthored would fix the output shape of a client
-that is still being designed. Assumptions: this is a deferral with a named cost,
+location are themselves decisions with a review surface, and adopting one here would
+replace seven hand-authored modules whose shapes the seven contracts are still adding
+operations to — the account contract's internal-tagged set grew twice inside this
+record's own history. Assumptions: this is a deferral with a named cost,
 not a claim that generation is unnecessary — the obligation is carried in
 [Downstream obligations this decision creates](#downstream-obligations-this-decision-creates).
 
@@ -628,10 +630,10 @@ deferred.** This section is that decision, recorded with its reason so that it i
 never read as an assumption.
 
 **The decision is to bring the interface explicitly into scope.** All **21**
-screens are to be re-implemented, one route per mapset — the decision covers the
-full inventory, and
-[Honest boundary](#honest-boundary--what-this-record-does-not-establish) records how
-much of it is authored.
+screens are re-implemented, one route per mapset — the decision covers the
+full inventory, all of it is authored and mounted, and
+[Honest boundary](#honest-boundary--what-this-record-does-not-establish) records the
+one residual: the seven screens that carry no per-screen component test.
 
 The reason is a consequence, not a preference. **Leaving the screens unreplaced
 would strand every online transaction.** The baseline's online half is reached
@@ -1061,8 +1063,8 @@ client type that stops matching what the screen needs fails there. What neither
 control covers is the join between the contract and the client type, and that is
 the gap.
 
-Trade-offs: accepting this keeps the client free of a generator and its pinned
-version while the majority of screens are still unauthored, at the cost of a
+Trade-offs: accepting this keeps the seven client modules free of a generator and its
+pinned version while the seven contracts are still gaining operations, at the cost of a
 review-time obligation that
 [Downstream obligations this decision creates](#downstream-obligations-this-decision-creates)
 carries — a contract change and its client change land together. Alternatives
@@ -1169,29 +1171,46 @@ the documentation gate, and unit-tested at component level, with the infrastruct
 formatted, validated, linted and planned. What has **not** happened is stated
 plainly, and the first item is the largest:
 
-- **The screen inventory is decided in full but authored in part.** Four routes of
-  the 21 are authored — sign-on, plus the card list, card detail and card update
-  screens — each covered by a component test:
-  [`ui/src/screens/signon/signon.test.tsx`](../../ui/src/screens/signon/signon.test.tsx)
-  for the first and
-  [`ui/src/screens/cardScreens.test.tsx`](../../ui/src/screens/cardScreens.test.tsx)
-  and
-  [`ui/src/screens/cardScreenShell.test.tsx`](../../ui/src/screens/cardScreenShell.test.tsx)
-  for the other three together. The remaining 17 routes are **not authored**, but the
-  service clients they will call are: [`ui/src/api`](../../ui/src/api) holds six client
-  modules — `auth`, `authorization`, `cards`, `reference`, `reporting` and
-  `transactions` — one for each of the six browser-facing contracts, so the boundary is
-  a screen boundary and no longer a client boundary: the typed client layer is complete
-  against the published contracts while the screens that consume it are not, so what
-  remains is composition rather than transcription. The shared shell, the key-binding
-  hook, the message catalog and the token module are authored, and **all four authored
-  screens compose the shell in full** — screen header, message band, and key bar driven
-  by the key-binding hook — with a per-screen test asserting each one does. That
-  obligation still stands for the 17 unauthored routes.
-  Assumptions: the decision above is deliberately written as a decision and not as a
-  report — an ADR records what is chosen, and the delivery boundary belongs here,
-  where a reader looking for it will find it rather than discovering it by counting
-  files.
+- **The screen inventory is decided in full and authored in full; its per-screen test
+  coverage is not.** All **21** routes are authored and mounted:
+  [`ui/src/screens`](../../ui/src/screens) holds 21 screen modules — `accountUpdate`,
+  `accountView`, `admin`, `authDetail`, `authSummary`, `billPay`, `cardDetail`,
+  `cardList`, `cardUpdate`, `menu`, `refTypeEdit`, `refTypeList`, `reports`, `signon`,
+  `transactionAdd`, `transactionDetail`, `transactionList`, `userAdd`, `userDelete`,
+  `userList` and `userUpdate` — and every one of them is mounted in
+  [`ui/src/router.tsx`](../../ui/src/router.tsx). The route table carries **22**
+  entries for those 21 modules, because the user-update screen is mounted at two paths
+  — with and without a pre-selected identifier — and that difference is the only one a
+  reader auditing modules against routes should find. Every declared path is asserted
+  to resolve to a screen inside the shared frame by
+  [`ui/src/routerRoutes.test.tsx`](../../ui/src/routerRoutes.test.tsx) and
+  [`ui/src/routerReachability.test.tsx`](../../ui/src/routerReachability.test.tsx),
+  which render the production router rather than a table of their own, so an unmounted
+  route fails there rather than passing beside a screen test that supplied its own
+  route. The typed client layer is complete against the published contracts:
+  [`ui/src/api`](../../ui/src/api) holds **seven** client modules — `accounts`, `auth`,
+  `authorization`, `cards`, `reference`, `reporting` and `transactions` — one for each
+  of the seven published contracts.
+  **What is not complete is per-screen component testing: 14 of the 21 carry one and
+  seven do not** — `billPay`, `reports`, `transactionDetail`, `transactionList`,
+  `userAdd`, `userDelete` and `userList` are exercised only through the two
+  router-level files above. That is the residual obligation, and it is the whole of it.
+  ⚠️ Refactoring Rationale: this bullet, and two further bullets under
+  [Downstream obligations](#downstream-obligations-this-decision-creates), each
+  published a different authored-screen figure, and no two of the three agreed with
+  each other or with the tree. Every one of them is **withdrawn outright rather than
+  annotated**, and none is reprinted here: a superseded count left beside a current one
+  is itself the defect, because a reader cannot tell which of two numbers the tree
+  holds and the count is the whole reason this bullet exists. What replaces them is the
+  named inventory above, which a reader can check against
+  [`ui/src/screens`](../../ui/src/screens) and
+  [`ui/src/router.tsx`](../../ui/src/router.tsx) directly, plus the two router-level
+  tests that fail when the tree and the inventory disagree.
+  Assumptions: the paragraph above the inventory is deliberately written as a decision
+  and not as a report — an ADR records what is chosen — and this bullet is the delivery
+  boundary, stated where a reader looking for it will find it rather than discovering it
+  by counting files. Both are held to the tree by the two router-level tests named,
+  which is what keeps this bullet from drifting again.
 - **All seven contracts are pinned to a route set, and one of the seven is pinned
   through path constants rather than through mounted handlers.** Six — `transaction`,
   `reference`, `reporting`, `account`, `auth` and `card` — compare the published path
@@ -1304,28 +1323,30 @@ contradicting the paragraph immediately beneath it. Enumerating both surfaces
 explicitly makes the row checkable against the contract and against
 `InternalApiSecurityConfig` rather than against a recollection of either.
 
-Assumptions: `account-api.yaml` is counted as a contract and, for client-module
-purposes, not yet as a browser-facing one — the distinction is load-bearing rather
-than pedantic, and it is a statement about what the SPA has authored rather than
-about what the contract permits. It
-marks its machine-facing operations with an `internal` tag, and every operation so
-tagged is governed by `InternalApiSecurityConfig` in account-service, an ordered
-filter chain requiring a machine token minted by the calling service, and that chain
-refuses the identity-provider token every browser holds. Refactoring Rationale: this
-sentence said the document "titles itself an internal read API" and counted three
-operations. Neither held: the document covers both surfaces and marks each operation
-with the one it belongs to, and the internal-tagged set grew when the customer scan
-and the customer record read landed. The claim this paragraph actually needs is that
-no browser client addresses an internal-tagged operation, and that is asserted
-mechanically by the gate named below rather than by a count here. The SPA therefore
-has **six** client modules for
-seven contracts, and [`ui/src/api/contracts.test.ts`](../../ui/src/api/contracts.test.ts)
-asserts mechanically that no browser client addresses an **internal-tagged**
-operation, rather than leaving the exclusion to prose. The absent seventh module is
-the account one, and that test is explicit about the reason: no `accounts.ts` has
-been written **yet**, not that none may be. Its three end-user operations therefore
-have no client-side gate at present — a gap the test records at its point of use so
-that adding the module is understood to require adding it to that gate.
+Assumptions: `account-api.yaml` carries **both** surfaces in one document and marks
+each operation with the one it belongs to — the distinction is load-bearing rather
+than pedantic. Every machine-facing operation carries an `internal` tag and is
+governed by `InternalApiSecurityConfig` in account-service, an ordered filter chain
+requiring a machine token minted by the calling service, and that chain refuses the
+identity-provider token every browser holds. Refactoring Rationale: this sentence said
+the document "titles itself an internal read API" and counted three operations.
+Neither held: the document covers both surfaces, and the internal-tagged set grew when
+the customer scan and the customer record read landed. The claim this paragraph
+actually needs is that no browser client addresses an internal-tagged operation, and
+that is asserted mechanically by the gate named below rather than by a count here. The
+SPA has **seven** client modules for the **seven** published contracts —
+`accounts`, `auth`, `authorization`, `cards`, `reference`, `reporting` and
+`transactions` — and
+[`ui/src/api/contracts.test.ts`](../../ui/src/api/contracts.test.ts) asserts
+mechanically that no browser client addresses an **internal-tagged** operation, rather
+than leaving the exclusion to prose.
+⚠️ Refactoring Rationale: this read "**six** client modules for seven contracts" and
+named the account module as the absent seventh, on the ground that no `accounts.ts`
+had been written yet. [`ui/src/api/accounts.ts`](../../ui/src/api/accounts.ts) exists
+and exports `ACCOUNT_CONTRACT_OPERATIONS`, which `contracts.test.ts` imports, so the
+account contract's end-user operations are inside the client-side gate rather than
+outside it. The census is corrected to seven and the "gap the test records at its
+point of use" is withdrawn, because the gate now covers what it named.
 
 ### Twenty-one routes, and three transactions with no route
 
@@ -1333,7 +1354,8 @@ The interface is to implement one route per mapset, 21 in total. **`CP00`, `CDRD
 and `CDRA` have no route**, because they have no map: each is driven by a message
 and belongs to [ADR-004](ADR-004-messaging.md). A reader auditing routes against
 the transaction inventory should expect exactly that difference and no other — and
-should expect, separately, that only four of the 21 are authored today, per
+should expect, separately, that **all 21 are authored and mounted today**, with the
+per-screen test coverage boundary and the 22-entry route table recorded under
 [Honest boundary](#honest-boundary--what-this-record-does-not-establish).
 
 ### A shared shell, authored once
@@ -1368,9 +1390,10 @@ available unchanged — the migration adds a path, it does not remove one.
 
 - Every input's maximum length equals its copybook picture width, and every
   user-visible string a baseline source holds is rendered verbatim from that source.
-  Both are assertable, and both are asserted by a per-screen test **for every screen
-  that is authored** — the obligation attaches to each new screen as it lands, and is
-  not a claim that all 21 are covered today.
+  Both are assertable, and both are asserted by a per-screen test **for the 14 of the
+  21 screens that carry one** — the obligation attaches to each of the remaining seven
+  named under [Honest boundary](#honest-boundary--what-this-record-does-not-establish),
+  and is not a claim that all 21 are covered today.
   Assumptions: "from that source" is deliberately not "from the catalog", and the
   distinction is the ownership boundary
   [`ui/src/messages/messages.ts`](../../ui/src/messages/messages.ts) draws for itself
@@ -1388,25 +1411,33 @@ available unchanged — the migration adds a path, it does not remove one.
   them for the reason the catalog states: it carries only text a COBOL source holds.
   Each such constant records at its declaration that it is new and why no baseline
   string could be carried across instead.
-- Each remaining route is authored with its component test and its typed client in
-  the same change, so the delivered state and this record's inventory converge
+- Each of the seven screens without a per-screen component test gains one, in a change
+  that adds nothing else, so the delivered state and this record's inventory converge
   rather than drift further apart.
-- Every screen composes the shared shell in full — screen header, message band and
+- Every screen reaches the shared shell in full — screen header, message band and
   key bar with the key-binding hook — so the function-key contract in
   [The function-key contract](#the-function-key-contract) is reachable from every
-  route and not merely authored beside it. All ten authored screens satisfy this
-  today; the obligation attaches to each remaining route as it lands.
-  Refactoring Rationale: this said "all four authored screens" and the figure has
-  moved to ten. The obligation has also been refined by a delivered mechanism rather
-  than weakened: `ui/src/layout/AppShell.tsx` is now mounted as the layout element of
-  the authenticated branch of the route tree, and a screen may DELEGATE its title
-  band to that frame instead of composing one — which `accountView` and `authSummary`
-  do, and which is how their six header fields reach the screen at all. The frame
-  renders a zone only for a screen that delegates it, so the eight screens composing
-  their own bands are unaffected. What the frame does **not** do is bind a function
-  key: `RETIRED_SHELL_FUNCTION_KEY` records that it used to bind F12 for sign-off and
-  why it stopped — the key-binding hook installs a listener per call site with no
-  ownership registry, and the three update screens bind F12 as cancel, so one
+  route and not merely authored beside it. **All 21 screens satisfy this today**: each
+  one calls the key-binding hook exactly once, and each one either delegates its
+  header, message band and key bar to the frame or composes all three itself.
+  ⚠️ Refactoring Rationale: this obligation carried an authored-screen figure that
+  disagreed with the [Honest boundary](#honest-boundary--what-this-record-does-not-establish)
+  bullet's figure, and then a second, different figure for the screens composing their
+  own bands. Both are withdrawn rather than adjusted, and neither is reprinted, for the
+  reason that bullet gives. The obligation is restated against the delivered tree and
+  against the mechanism that satisfies it:
+  [`ui/src/layout/AppShell.tsx`](../../ui/src/layout/AppShell.tsx) is mounted as the
+  layout element of the authenticated branch of the route tree, and a screen may
+  DELEGATE its title band, message line and key legend to that frame instead of
+  composing them. **Eighteen of the 21 delegate; three — `admin`, `authDetail` and
+  `menu` — compose their own `ScreenHeader`, `MessageBand` and `PfKeyBar`.** The frame
+  renders a zone only for a screen that delegates it, so the three self-composing
+  screens paint exactly one of each band rather than two, which
+  [`ui/src/routerRoutes.test.tsx`](../../ui/src/routerRoutes.test.tsx) asserts by
+  counting title bands and legends per route. What the frame does **not** do is bind a
+  function key: `RETIRED_SHELL_FUNCTION_KEY` records that it used to bind F12 for
+  sign-off and why it stopped — the key-binding hook installs a listener per call site
+  with no ownership registry, and the three update screens bind F12 as cancel, so one
   keypress would have discarded an edit and ended the session. Sign-off is a visible
   control in the frame instead, labelled from the message catalogue.
   Assumptions: a screen's bindings are the attention identifiers **its own program

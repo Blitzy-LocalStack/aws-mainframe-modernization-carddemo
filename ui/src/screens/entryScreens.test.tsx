@@ -11,13 +11,14 @@
  *
  * Assumptions: the two screens are covered together because their opening behaviour is the matched
  * pair that the route table makes observable. The transaction screen is reached with no selector and
- * must therefore read NOTHING on mount; the user screen is reached at `/users/:id/edit` and must read
- * the row that parameter names. Both are entry forms of the same shape, so a change that added a mount
- * read to the first or dropped it from the second would look reasonable in isolation.
+ * must therefore read NOTHING on mount; the user screen is reached with an identifier and must read
+ * the row that parameter names -- and, on the selector-free arrival its route also serves, must read
+ * nothing. Both are entry forms of the same shape, so a change that added a mount read to the first or
+ * dropped it from the second would look reasonable in isolation.
  *
  * Assumptions: the user screen's parameter case is the executable half of a documentation claim. That
- * module's file overview and its component contract both state that the router mounts it at
- * `/users/:id/edit` and that the parameter is spelled `id`; `useParams` resolves an unmatched name to
+ * module's file overview and its component contract both state which route mounts it and that the
+ * parameter is spelled `id`; `useParams` resolves an unmatched name to
  * `undefined` with no diagnostic, so a route declared under any other spelling would compile,
  * type-check and render the screen's no-identifier state on every visit. Rendering the screen at a
  * concrete path and asserting the read carries that identifier is what holds the claim to the code.
@@ -60,7 +61,23 @@ import {
 const ADD_MESSAGES = PROGRAM_MESSAGES.COTRN02C;
 const USER_ID = 'USER0001';
 const USER_UPDATE_ROUTE = '/users/:id/edit';
-const USER_UPDATE_UNSELECTED_ROUTE = '/users/edit';
+/*
+ * WHY : ⚠️ Refactoring Rationale: this path is deliberately OUTSIDE the application's route namespace
+ *       where it was previously `/users/edit`. That value looked like a published route and was one for a
+ *       while, which is the defect: the route table publishes exactly the twenty-one paths AAP section
+ *       0.4.1.4 enumerates and a selector-free second path for the user screen is not among them, so a
+ *       harness route wearing that name asserted a shape the shipped table does not serve.
+ * WHY : Assumptions: the property this route exists to reach is `useParams()` returning no `id`, which is
+ *       a property of the PATTERN having no parameter and not of the pattern's text -- so an obviously
+ *       test-only prefix reaches it identically while being unmistakable for a published path. That state
+ *       is a real arrival to cover: `app/cbl/COUSR02C.cbl` L99-L104 pre-fills the identifier only when
+ *       its selection carrier is non-blank, so the screen has to open cleanly with none.
+ * WHY : Alternatives Considered: rendering the parameterised pattern at the concrete `/users//edit`, so no
+ *       extra route were needed at all. Rejected because an empty path segment matches no route, so
+ *       nothing rendered and the case failed looking for a message band rather than reporting what it
+ *       meant to check.
+ */
+const USER_UPDATE_WITHOUT_A_ROW_HARNESS_ROUTE = '/test-harness/user-update-without-a-row';
 const MENU_MARKER = 'MAIN MENU REACHED';
 
 /**
@@ -253,15 +270,14 @@ function renderUserUpdateAt(path: string): void {
           <Routes>
             <Route path={USER_UPDATE_ROUTE} element={<UserUpdateScreen />} />
             {/*
-            Refactoring Rationale: an UNPARAMETERISED sibling stands in for "reached with no
-            identifier", and the first attempt used the concrete path `/users//edit` against the
-            parameterised pattern instead. That does not work and fails misleadingly: an empty path
-            segment matches no route at all, so nothing rendered and the case failed looking for a
-            message band rather than reporting what it meant to check. A route with no parameter leaves
-            `useParams` returning `undefined` for `id`, which is exactly the state the reference reaches
-            when its selector arrives as spaces.
+            Assumptions: an UNPARAMETERISED harness route stands in for "reached with no identifier",
+            because a route with no parameter leaves `useParams` returning `undefined` for `id` -- which
+            is exactly the state the reference reaches when its selector arrives as spaces. Its path is
+            declared test-only for the reason recorded on
+            {@link USER_UPDATE_WITHOUT_A_ROW_HARNESS_ROUTE}: the shipped table serves no selector-free
+            path for this screen, so this route models an arrival and not a published address.
           */}
-            <Route path={USER_UPDATE_UNSELECTED_ROUTE} element={<UserUpdateScreen />} />
+            <Route path={USER_UPDATE_WITHOUT_A_ROW_HARNESS_ROUTE} element={<UserUpdateScreen />} />
             <Route path="/users" element={<div>USER LIST</div>} />
             <Route path={MAIN_MENU_ROUTE} element={<div>{MENU_MARKER}</div>} />
           </Routes>
@@ -446,7 +462,7 @@ async function theReadRecordPopulatesTheForm(): Promise<void> {
  * @returns {Promise<void>} Resolves once the opening state has been asserted.
  */
 async function withNoIdentifierTheUserScreenReadsNothing(): Promise<void> {
-  renderUserUpdateAt(USER_UPDATE_UNSELECTED_ROUTE);
+  renderUserUpdateAt(USER_UPDATE_WITHOUT_A_ROW_HARNESS_ROUTE);
 
   await screen.findAllByTestId(MESSAGE_BAND_TEST_ID);
   expect(getUser).not.toHaveBeenCalled();

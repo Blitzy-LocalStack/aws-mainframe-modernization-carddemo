@@ -176,9 +176,10 @@ public class AuthReplyOutbox {
      * Refactoring Rationale: a {@code retire} transition set it for a reply whose deadline had passed
      * WITHOUT sending anything, and the effect was a row asserting a publication that never happened --
      * which the retention sweep, whose predicate is this same column, then deleted. Both the transition
-     * and its caller are withdrawn; a reply that cannot be delivered within its attempt budget reaches
-     * {@link #abandon(java.time.LocalDateTime, String)} instead, which leaves this member null and is
-     * excluded from that sweep for exactly this reason.</p>
+     * and its caller are withdrawn, and so is the {@code abandon} transition that replaced them: an
+     * undeliverable reply now stays pending with its failure and its backoff recorded, which leaves this
+     * member null and the row outside that sweep until the send finally succeeds. {@link #abandonedAt}
+     * records why no code path ends a reply any more.</p>
      */
     @Column(name = "published_at")
     private LocalDateTime publishedAt;
@@ -225,12 +226,36 @@ public class AuthReplyOutbox {
     private LocalDateTime nextAttemptAt;
 
     /**
-     * When this reply was abandoned, if it was.
+     * When an operator quarantined this reply after reconciling it by hand, if one did.
      *
      * <p>Assumptions: this is the terminal state and it is deliberately SEPARATE from the publication
-     * instant. A published row was answered and an abandoned row never will be, so recording both in
-     * one column would let a reply that was never sent read as delivered in any audit that joins on
-     * publication.</p>
+     * instant. A published row was answered and a quarantined row never will be by this service, so
+     * recording both in one column would let a reply that was never sent read as delivered in any audit
+     * that joins on publication.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: NO code path writes this column, and one used to.
+     * {@code OutboxPublisher} abandoned a row once its attempts reached a configured ceiling, which lost
+     * a reply the committed decision says is owed -- and, because both claiming statements derive a
+     * group's head from its lowest unpublished, UNQUARANTINED identity, setting this column also
+     * releases the same card's later replies to be published ahead of it. That made an attempt ceiling a
+     * silent reordering of one card's answers, so the ceiling and the mutator that expressed it are both
+     * gone: the publisher now retries a failed reply at its capped backoff for as long as it takes, and
+     * escalates instead of terminating.</p>
+     *
+     * <p>Assumptions: the column and the two claim predicates that read it are RETAINED, because the
+     * release they perform is exactly what an operator needs after they have delivered a stuck reply out
+     * of band -- at that point the card should move on, and nothing else in the schema can say so. It is
+     * therefore set by a governed administrative statement against the table and never from application
+     * code, which is the difference between an operator deciding a reply has been reconciled and a
+     * background loop deciding it has been given up on.</p>
+     *
+     * <p>Assumptions: BOTH transitions that once ended an undelivered reply are withdrawn, and a reader
+     * who finds only one of them named will look for the other. A {@code retire} transition ended a
+     * stale reply by marking it PUBLISHED, which asserted a delivery that had not happened and then let
+     * the retention sweep delete the evidence; an {@code abandon} transition ended an exhausted reply by
+     * setting this column. What survives from both is the pair of properties that make an undelivered
+     * reply investigable -- a null publication instant, and no path by which this service can declare
+     * the reply over -- which now hold for every such row rather than for a subset.</p>
      */
     @Column(name = "abandoned_at")
     private LocalDateTime abandonedAt;
@@ -465,18 +490,23 @@ public class AuthReplyOutbox {
     }
 
     /**
-     * Returns when this reply was abandoned.
+     * Returns when an operator quarantined this reply, having reconciled it out of band.
      *
-     * @return the abandonment instant, or {@code null} while the reply is still being attempted
+     * <p>Assumptions: this is READ-only from the application's side. No method on this type sets the
+     * column and the publisher never does either -- {@link #abandonedAt} records why -- so a non-null
+     * value here always means an operator's governed statement, never a background decision.</p>
+     *
+     * @return the quarantine instant, or {@code null} while the reply is still being attempted, which is
+     *     every row this service produces
      */
     public LocalDateTime getAbandonedAt() {
         return this.abandonedAt;
     }
 
     /**
-     * Reports whether this reply has been abandoned and will never be attempted again.
+     * Reports whether an operator has quarantined this reply, so no publisher will attempt it again.
      *
-     * @return {@code true} when an abandonment instant has been recorded
+     * @return {@code true} when a quarantine instant has been recorded
      */
     public boolean isAbandoned() {
         return this.abandonedAt != null;
@@ -662,40 +692,6 @@ public class AuthReplyOutbox {
      */
     public void recordFailure(String reason, LocalDateTime nextAttemptAt) {
         this.nextAttemptAt = nextAttemptAt;
-        if (reason == null || reason.length() <= LAST_ERROR_MAX_LENGTH) {
-            this.lastError = reason;
-        } else {
-            this.lastError = reason.substring(0, LAST_ERROR_MAX_LENGTH);
-        }
-    }
-
-    /**
-     * Abandons this reply permanently, leaving the reason that ended it on the row.
-     *
-     * <p>Assumptions: abandonment does NOT set the publication instant, so an abandoned reply can
-     * never be counted as delivered. It is removed from the ready set by the terminal column alone,
-     * which is why that column and the publication column are distinct.</p>
-     *
-     * <p>⚠️ Assumptions: this is now the ONLY terminal outcome for a reply that never reached the wire,
-     * and a passed deadline no longer produces one of its own. Refactoring Rationale: a withdrawn
-     * {@code retire} transition ended a stale reply by marking it published, which both asserted a
-     * delivery that had not occurred and exposed the row to the retention sweep. Every undeliverable
-     * reply now arrives here instead, so the two properties that make an undelivered reply investigable
-     * -- a null publication instant and exclusion from the sweep -- hold for all of them rather than for
-     * the subset whose queue was unreachable rather than slow.</p>
-     *
-     * <p>Trade-offs: the payload and the diagnostic are retained rather than cleared, so an operator
-     * can see which reply was given up on and why. The accepted cost is that a row carrying a primary
-     * account number in its payload persists beyond the retention sweep -- which is deliberate: this
-     * is a reply the committed decision says was owed and never delivered, and removing it silently
-     * would destroy the only evidence of that.</p>
-     *
-     * @param abandonedAt the instant the reply was given up on, in coordinated universal time; must
-     *     not be {@code null}
-     * @param reason why it was given up on; may be {@code null}, and is truncated to the column width
-     */
-    public void abandon(LocalDateTime abandonedAt, String reason) {
-        this.abandonedAt = abandonedAt;
         if (reason == null || reason.length() <= LAST_ERROR_MAX_LENGTH) {
             this.lastError = reason;
         } else {

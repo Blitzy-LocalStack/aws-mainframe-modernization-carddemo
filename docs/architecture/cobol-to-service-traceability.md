@@ -702,10 +702,10 @@ assumed.
 | `3000-READ-CHILD-SEG-FILE` | L269–L289 | `LoadService.loadDetails` | Reads one 206-byte prefixed record. Its numeric guard at **L275** has no `ELSE`; registered as [D-LOAD-PREFIX-REFUSED](#d-load-prefix-refused--an-undecodable-parent-key-is-reported-where-the-guard-has-no-else-branch). Its third read branch at **L287** sets no end flag and does not abend; registered as [D-LOAD-READ-BOUNDED](#d-load-read-bounded--the-load-walk-cannot-fail-to-terminate-where-two-read-branches-suspend-it), whose root-side counterpart is **L235** |
 | `3100-INSERT-CHILD-SEG` | L292–L316 | `LoadService.requireParent` | Positions on the child's parent at **L296**–**L299**, terminated by a **period at L299**. **L305** opens the success branch and **L310**'s failure test is nested inside it, closed by one `END-IF.` at **L314**; registered as [D-C](#d-c--an-unresolvable-parent-is-reported-where-the-nested-branch-leaves-it-unreported) |
 | `3200-INSERT-IMS-CALL` | L318–L336 | `LoadService.loadDetails` | Inserts the child. The flat three-way shape a second time: success at L326–L328, the duplicate tolerated at **L329**–**L331**, every other status abending at **L332**–**L336** |
-| the read at L226 and L272 | L226, L272 | `LoadService.records` | Resolves a stream into whole fixed-length records. The strides are taken from the layout descriptors the two mappers own, never restated |
+| the read at L226 and L272 | L226, L272 | `LoadService.RecordStream.nextChunk` | Resolves a stream into whole fixed-length records, five hundred at a time under a stated ceiling. The strides are taken from the layout descriptors the two mappers own, never restated |
 | the prefix decode | L277, and its FD at **L47** | `LoadService.decodeChild` | Decodes the six-byte `PIC S9(11) COMP-3` parent key through `com.carddemo.common.codec.PackedDecimalCodec`, never as text |
 | `4000-FILE-CLOSE` | L341–L356 | *no method* | Closes both files, reporting a bad close without abending. The caller owns the streams, so the target closes neither |
-| `9999-ABEND` | L360–L369 | a propagated exception | Sets return code **16** at **L365**. The target raises instead, and the surrounding transaction discards the load |
+| `9999-ABEND` | L360–L369 | a propagated exception | Sets return code **16** at **L365**. The target raises instead, and the one transaction covering the load discards every record it inserted, including those in chunks already read -- so the reference program's single program-end unit of work is preserved rather than diverged from |
 
 Assumptions: the job stream supplies **no parameters** to any of these paragraphs, and the
 absence is recorded here because a reader looking for a parameter table will otherwise assume
@@ -1061,6 +1061,14 @@ register — eight sibling documents defer to it.
 > **ID** · **Baseline behaviour**, with exact path and line · **Target behaviour** ·
 > **Category** · **Why the difference is accepted** · **Where it is verified.**
 
+Assumptions: the entries of
+[§7.6](#76-provisioned-topology-divergences-from-the-specifications-stated-counts) substitute
+**Specification** and **Delivered** for the first two parts, and vary in nothing else. Their
+subject is a resource count the technical specification states rather than a behaviour the COBOL
+exhibits, so a *"Baseline behaviour"* part on one of them would have to cite a baseline line that
+does not exist — the mainframe has no interface endpoint. The substitution keeps the shape
+readable as one shape while naming what each entry is actually held against.
+
 The entries in [§7.4](#74-divergences-claimed-by-shipped-code) carry one further part,
 **Files**, naming the source files that implement the divergence.
 Refactoring Rationale: those entries exist because shipped source cites them, so the
@@ -1078,6 +1086,61 @@ because none was: the three limitations recorded in
 [§7.1](#71-divergences-arising-from-the-three-known-baseline-limitations) are left
 exactly as they are, and the register is precisely how the resulting difference is
 made honest instead of silent.
+
+**The register's size is derived, not asserted.** Every figure between the two markers
+below is the output of the command beneath them, run against this file. The block is
+delimited the way this repository already delimits a generated region — the
+`BEGIN_TF_DOCS`/`END_TF_DOCS` pair that `infra/.terraform-docs.yml` injects into every
+module README — so a reader can tell a re-derived number from a re-typed one at a glance,
+and an editor who adds an entry re-runs one command instead of reconciling a tally.
+
+<!-- BEGIN_DIVERGENCE_COUNT -->
+| Population | Entries |
+|---|---:|
+| **The whole register — every `####` entry under `## 7`** | **124** |
+| [§7.1](#71-divergences-arising-from-the-three-known-baseline-limitations) — the three known baseline limitations | 3 |
+| [§7.2](#72-divergences-owed-to-this-register-by-its-siblings) — owed by siblings | 8 |
+| [§7.3](#73-structural-divergences-that-are-not-defects) — structural, stated as bolded sentences rather than as identified entries | 0 |
+| [§7.4](#74-divergences-claimed-by-shipped-code) — claimed by shipped code | 106 |
+| [§7.5](#75-withdrawn-divergence-identifiers) — identifiers withdrawn because their subject does not exist | 3 |
+| [§7.6](#76-provisioned-topology-divergences-from-the-specifications-stated-counts) — provisioned-topology divergences from the specification's counts | 4 |
+| Entries anywhere outside `## 7` — the invariant that makes `## 7` the whole register | **0** |
+| Identifiers registered more than once — the invariant that makes an identifier resolve | **0** |
+<!-- END_DIVERGENCE_COUNT -->
+<!--
+  Assumptions: the six subsection figures sum to the register total, and the two
+  invariants are zero. A table whose parts do not sum, or whose invariants are not zero,
+  is wrong on its face without anyone having to know the right answer -- which is the
+  closest a published count can come to checking itself.
+-->
+
+```bash
+# WHAT: re-derive every figure in the table above -- the register total, the six
+#       per-subsection counts and the two invariants -- from this file.
+# WHY : Assumptions: an entry is a level-four heading under `## 7` and nothing else, so
+#       the total counts `^#### ` and NOT `^#### D-`. FOUR headings quote their identifier
+#       in backticks -- `C-ROUNDING`, because it is a correction rather than a divergence,
+#       and the three withdrawn identifiers of §7.5 -- so the narrower pattern omits them
+#       and returns 119. Every superseded figure this block replaced disagreed with the
+#       file for exactly that reason, or for the equally avoidable one that entries had
+#       been appended past *Related documents* where no count of `## 7` could reach them.
+awk '
+  /^## /   { sect = $0 }
+  /^### /  { subs = $0 }
+  /^#### / { total++; per[subs]++; if (sect !~ /^## 7\./) outside++ }
+  END      { printf "register total      %d\n", total
+             printf "outside section 7   %d\n", outside + 0
+             for (s in per) printf "%-64s %d\n", s, per[s] }
+' docs/architecture/cobol-to-service-traceability.md | sort -r
+
+# WHAT: list any identifier registered by more than one entry; silence is the pass.
+# WHY : Assumptions: a heading may carry TWO identifiers, both of them cited from shipped
+#       source, so the extraction takes every uppercase `D-`/`C-` token on a heading line
+#       rather than the first. Taking only the first is what let four identifiers stand
+#       twice while a count of headings still looked right.
+grep '^#### ' docs/architecture/cobol-to-service-traceability.md \
+  | grep -oE '\b[CD]-[A-Z0-9]+(-[A-Z0-9]+)*\b' | sort | uniq -d
+```
 
 ### 7.1 Divergences arising from the three known baseline limitations
 
@@ -1240,13 +1303,18 @@ each produce one registered divergence.
   scope rather than on difficulty. The AAP publishes no administrative
   credential-reset operation, and `auth-api.yaml` declares **eight** operations — sign
   on, refresh, answer challenge, list, create, get, update, delete — none of which is
-  one. The onboarding path's own credential is published as
+  one. Refactoring Rationale: this paragraph read that the onboarding path published
   `CreatedUserResponse.credentialSecretName`, the **name** of a managed-secret entry
-  rather than the credential, precisely so no credential travels in a response body; a
-  reset faithful to that design needs a service endpoint, a user-pool administrative
-  grant and its own contract, which is a capability to plan rather than a control to
-  re-label. Recording the removal and leaving the capability unbuilt is the lower-risk
-  half of that pair.
+  rather than the credential, "precisely so no credential travels in a response body",
+  and offered that as the design a reset would have to be faithful to. That is no longer
+  true and the reasoning it supported was wrong in the first place — the response now
+  carries the credential itself beside that locator, because an administrator's browser
+  session cannot read the managed-secret entry and so could not complete the handover;
+  [`D-RUNTIME-CREDENTIAL-HANDOVER`](#d-runtime-credential-handover--a-created-users-first-credential-is-published-to-a-managed-secret-and-the-response-carries-only-its-name)
+  records that correction in full. What survives it is the part this entry actually rests
+  on: a reset needs a service endpoint, a user-pool administrative grant and its own
+  contract, which is a capability to plan rather than a control to re-label. Recording the
+  removal and leaving the capability unbuilt is the lower-risk half of that pair.
 * **What a human must do if a reset is wanted.** Add the operation to the auth
   contract, grant `auth-service`'s task role the user-pool administrative action it
   needs, and reinstate the control against it. Nothing in this entry blocks that; the
@@ -1523,26 +1591,38 @@ each produce one registered divergence.
   `COBSWAIT`, the retired batch wait utility, which paints none.
 * **Target behaviour.** `ui/src/layout/ScreenHeader.tsx` renders the same two
   formats in the same two slots and takes the instant as an **optional prop**. Every
-  one of the four production call sites now supplies it: `ui/src/api/serverClock.ts`
-  derives the instant from the service's own response, `ui/src/hooks/useServerInstant.ts`
-  hands it to a screen, and each screen passes it as `now={paintedAt}`. **The CLOCK
-  substitution is therefore closed** — the displayed instant is the service's, not
-  the browser's, so two operators reading one record across a midnight boundary read
-  the same date.
+  one of the **twenty-one** delivered screens now supplies a server-derived instant,
+  by one of three routes: `ui/src/api/serverClock.ts` derives the instant from the
+  service's own response and `ui/src/hooks/useServerInstant.ts` hands it to a screen;
+  **eighteen** screens then delegate it to the mounted shell through `useShellSlot`
+  as `now`; the **two menu screens** compose their own `ScreenHeader` and pass the
+  same hook reading to it directly; and `authDetail` passes no instant at all because
+  its own service response carries `currentDate` and `currentTime` already rendered,
+  which it displays rather than re-deriving. **The CLOCK substitution is therefore
+  closed** — the displayed instant is the service's, not the browser's, so two
+  operators reading one record across a midnight boundary read the same date.
 * **What remains.** The **ZONE** substitution. The instant is server-derived but is
   formatted in the **browser's** zone, because the two eight-character slots carry no
   zone designator and nothing in the response conveys the service's own zone. One
   substitution remains rather than two, and the divergence is narrowed to it.
 * Trade-offs: the remaining divergence is bounded to formatting rather than to the
   value, and the fallback path that reads the browser's clock survives in the
-  component for a caller that renders it in isolation — no production caller takes
-  it, and `ui/src/layout/screenHeaderClock.test.tsx` holds all four call sites to
-  supplying the prop, so the fallback cannot silently return.
-* Refactoring Rationale: this entry previously recorded that the shell "is expected
-  to supply" the instant and that omitting it produced two substitutions. The
-  expectation was met by no caller at the time it was written, which is what made the
-  divergence real; it is met by every caller now, so the entry records one
-  substitution rather than two.
+  component for a caller that renders it in isolation. `ui/src/layout/screenHeaderClock.test.tsx`
+  holds every DELEGATING screen to supplying the instant — all eighteen of them, from
+  a list it names rather than globs — and the two menu screens plus `authDetail` are
+  excluded there by construction, because each composes its own header and so fails
+  that file's own prohibition on composing chrome. Their instant is pinned by their
+  own screen tests instead.
+* ⚠️ Refactoring Rationale: this entry twice recorded a call-site count that the tree
+  had already outgrown. It first said the shell "is expected to supply" the instant
+  while no caller did; it then said all **four** production call sites supplied it and
+  that the census held those four — written when ten screens were delivered and the
+  census named four of them. Both readings understated the guard's coverage AND its
+  gap: because the census named a subset, the transaction browse could be delivered
+  with no instant at all and no gate noticed, which is exactly what happened and what
+  a code review found. The count is now stated as the delivered total with the three
+  non-delegating screens named individually, and the census names every delegating
+  screen, so a screen added without an instant fails the gate rather than the reading.
 * **Why the difference is accepted.** **There is no region clock left to read.** The
   baseline's single clock was a property of the single region every terminal attached
   to; the target has no region but a horizontally-scaled set of stateless handlers —
@@ -1811,311 +1891,35 @@ seeding fault. Owned in detail by
 
 ### 7.4 Divergences claimed by shipped code
 
-Every entry below is claimed as registered by a comment or docstring in shipped
-source, and all **ninety-five** are cited **by identifier**, the identifier here being the
-identifier used there character for character. They reached that state by three routes,
-recorded because the routes explain the difference in tone between them. Some were cited
-by identifier from the outset. Others were cited generically as "registered" or
-"documented" without naming anything, or asserted the divergent behaviour while claiming
-nothing at all, so an identifier was assigned here and added at each citing site, because
-a claim of registration that names nothing cannot be checked, and a difference that claims
-nothing cannot be found. The `D-REFDATA-*` entries that close the section were authored
-the other way round — identifier first, then cited from the published reference contract —
-which is the discipline this section asks of everything added after them. Assumptions:
-one hundred and three is a measured count of the `####` headings in **the whole document** and not a
-running tally kept by hand, so a reader adding an entry updates one number here and nothing
-else. Count them document-wide and not within `## 7` alone: the register
-continues past the horizontal rule that follows *Related documents*, where entries were
-appended after this section had already been closed, so a count confined to `## 7` -- its
-five subsections 7.1 through 7.5, which is the quantity the paragraph after next calls the
-section-confined one -- omits those twelve and returns **ninety-one**. Refactoring Rationale:
-that instruction read "the body between this heading and `## 8`", which is a THIRD quantity
-again and returns eighty-seven, because it excludes the seven headings in 7.1 and 7.2.
-Refactoring Rationale: that third figure was quoted as sixty-five, which was never a count of
-any population in this document -- 7.1 and 7.2 hold three and four headings between them, so
-excluding those seven from the section-confined count is what leaves it, which is eighty-seven
-against the ninety-four measured now and was seventy-seven against the eighty-four measured then. It is restated as the measured value for
-the same reason the others are: a figure carried forward without being re-measured is how the
-first two came to be wrong. The
-figure quoted beside it was always the whole of `## 7`, so the instruction is corrected to
-name the population the figure counts rather than the figure being changed to match a
-population nobody meant. Count the `####`
-headings themselves rather than the ones beginning `D-`: one entry is identified
-`C-ROUNDING`, so a count restricted to a `D-` identifier is short by one and returns
-**one hundred and two**. Assumptions: a literal search for lines beginning `#### D-` returns
-**one hundred and one** rather than one hundred and two, because two headings carry their identifier in
-backticks -- `C-ROUNDING` and `D-REJECT-109-DURABLE` -- so the second is a `D-` entry that
-the naive pattern misses. The two figures are stated together so that the search result a
-reader gets is predicted here rather than read as drift.
-Refactoring Rationale, eighteenth recount: `D-ECR-THIRD-PARTY-MIRROR` and
-`D-LAMBDA-PACKAGED-OUTSIDE-TERRAFORM` were added to 7.4, both registering infrastructure
-divergences from the frozen plan's inventories rather than behavioural ones. Every figure in
-this block was re-measured from the file rather than incremented by two, which is the
-discipline the preceding paragraphs exist to enforce: document-wide `####` headings are one
-hundred and six, the `## 7`-confined count is ninety-four, the between-7.4-and-`## 8` count is
-eighty-seven, `D-`-identified entries are one hundred and five, and a literal `^#### D-` search
-returns one hundred and four. The two subtractions still check the first — one hundred and six
-less the twelve appended after *Related documents* is ninety-four, and less the single
-`C-ROUNDING` heading is one hundred and five.
-Refactoring Rationale: the figure read forty-three when the section already held forty-five
-headings, so three entries were added against a number that was already two short. It is
-restated as the measured value rather than incremented from the stale one, because
-incrementing a wrong tally is how the figure came to be wrong. It was then restated twice
-against the wrong population — as fifty-eight, and after `D-AUTH-REQUEST-WINDOW` was
-withdrawn as the same figure again — by counting the whole document while this sentence
-still said "this section", so the number quoted and the number a reader would measure could
-not agree by construction. Both are corrected together: the figure is the document-wide
-count, and the instruction now names that population and names what a section-confined
-count returns instead. It went stale once more at sixty-five, for a reason the naming of the
-population cannot prevent: entries continued to be appended, and an appender who adds a
-heading without recounting leaves every figure here behind. All three numbers are therefore
-re-measured together rather than adjusted by the number of entries anyone believes was added,
-and the two derived figures are stated so that they check the first — the document-wide count
-less the twelve appended after *Related documents* is the section-confined count, and less
-the single `C-ROUNDING` heading is the count of `D-`-identified entries. A figure that disagrees with its own
-two subtractions is wrong on its face, which is the closest a prose count can come to being
-self-checking. It went stale a fourth time at sixty-five while the document held
-seventy-five headings, and the correction is recorded rather than quietly applied because the
-failure repeated in exactly the way this paragraph predicts: entries were appended and no
-figure was recounted. All four were re-measured a fifth time when
-`D-EXPORT-PROTECTED-SPANS-REDACTED`, `D-IMPORT-TRUNCATION-REFUSED` and
-`D-EXPORT-STAGED-THROUGH-A-FILE` were added, and this time the recount was performed as part
-of adding them rather than afterwards. All four were re-measured a sixth time, and this
-time the measurement was taken from the file rather than adjusted: the population of this
-subsection reads eighty-four, the document-wide count ninety-three, the section-confined count
-eighty-two and the count of `D-`-identified entries ninety-two. Assumptions: a naive
-search for `^#### D-` returns ninety-one rather than ninety-two, because two headings
-carry their identifier inside backticks; the figure stated is the count of entries a
-`D-` identifier NAMES, not the count of lines a literal search matches. Assumptions: the
-recount was needed because several entries landed at once from independent work -- two register
-entries were added, one stale entry was withdrawn into the one that supersedes it, four
-headings gained a second identifier, and `D-ADD-KEY-EXCLUSIVE` was withdrawn outright when the
-narrowing it registered was replaced by parity -- and a figure adjusted by the number of entries
-anyone believes was added is exactly how this paragraph's own history reads. Assumptions: those three were placed **inside this
-section's own body**, immediately after the last entry there, rather than appended past
-*Related documents* as the previous eight were. That is deliberate and it is the cheap half of
-the trade-off this paragraph closes with: placing an entry in the body keeps "this section"
-true of it, grows the section-confined count and this section's population by one each so the
-two stay in step, and adds nothing to the eleven the first subtraction has to discount. Every
-figure above is therefore still checkable by the same two subtractions, and the population of
-the appended continuation was unchanged at eleven at that recount, because nothing had been
-appended to it. All four numbers here — this section's own population, the document-wide
-count, the section-confined count and the `D-`-prefixed count — were re-measured together
-against the current file when `D-EXPORT-RECORD-TYPES` and `D-IMPORT-TRUNCATED-ARTEFACT` were
-appended, and the two subtractions above were
-evaluated to confirm they agree. Assumptions: this section's population and the
-section-confined count are DIFFERENT quantities and they have now DIVERGED, at eighty-four
-against eighty-two, exactly as the sentence after next predicts they would: the two entries
-named above were appended after *Related documents*, so they join this section's population
-without joining the whole of `## 7`. The gap has stayed at two while both figures moved,
-because the entries added after them — `D-BILLPAY-AMOUNT-WIDTH-REFUSED` and
-`D-REPORT-SUBMISSION-DEDUPLICATED` — were added INSIDE this
-section's body and therefore joined both counts, and because the withdrawal of
-`D-ADD-KEY-EXCLUSIVE` from that same body took one off both of them together; all four figures
-here were re-measured together against the current file when they
-were added, and the two subtractions were evaluated to confirm they still agree. The paragraph is left standing rather than rewritten
-because its prediction coming true is the most useful thing it says --
-this section's entries are its own body plus the appended continuation while the
-section-confined count is the whole of `## 7`. They will diverge again the moment an entry is
-added to 7.1, 7.2, 7.3 or 7.5, so a reader must not treat one as a check on the other. Trade-offs: the alternative was to move the appended entries back
-inside this section's body so that "this section" became true. That was rejected as the
-larger and riskier change for the smaller gain — it relocates several hundred lines and
-every anchor a reader may have bookmarked, to fix a sentence rather than a fact — and it
-would leave the same trap for the next appender, whereas naming the population removes the
-trap whether or not the entries are ever moved. All four figures were re-measured together
-against the file a seventh time when `D-AUTH-SUMMARY-MONEY-DOMAIN` was added, and the two
-subtractions were evaluated to confirm they still agree. They were re-measured an eighth time
-when `D-TRAN-PAD-PROVENANCE` was added, and a ninth time when
-`D-INTEREST-ROW-DISPLAY-WITHHELD` was added, taken from the file rather than adjusted on both
-occasions, and the two subtractions were evaluated again: ninety-three less the eleven appended
-after *Related documents* is eighty-two, and ninety-three less the single `C-ROUNDING` heading is
-ninety-two. Assumptions: both entries were placed INSIDE this section's body, so each joins
-both this section's population and the section-confined count and the gap between them stays at
-two -- which is the cheap half of the trade-off recorded above, taken deliberately rather than
-by default. Refactoring Rationale: the ninth re-measurement also corrected the population of the
-appended continuation, which this paragraph twice stated as eight while the file held ELEVEN
-headings past *Related documents*. The figure was stale in precisely the way this paragraph
-predicts of any figure nobody recounts -- three entries were appended after it was written -- and
-the first subtraction beside it had already been re-measured to eleven, so the two statements
-contradicted each other. Both are now the measured value. All four were re-measured a tenth time,
-from the file, when `D-PREFLIGHT-LOOKUP-PAST-END-OF-FILE` was added inside this section's body, and
-the two subtractions were evaluated again: ninety-three less the eleven appended after *Related
-documents* is eighty-two, and ninety-three less the single `C-ROUNDING` heading is ninety-two.
-Assumptions: that entry was added for a reason this paragraph has no counterpart for, and it is
-worth distinguishing. Every previous recount followed an entry that registered a difference nobody
-had registered before. This one followed a difference that shipped source **claimed** was
-registered here and was not: two citations named `D-7`, which is a §7.3 heading belonging to a
-different program, so the claim resolved to the wrong entry and the difference itself appeared
-nowhere. A dangling citation is worse than a missing one, because the reader who follows it stops
-looking. All five figures were re-measured an eleventh time, from the file, when a batch of
-entries authored independently of one another landed together and one entry was WITHDRAWN from this
-section's body -- `D-COMBINE-DESC-PAD`, whose difference another change closed while it stood. The
-measured values are: this section's population **ninety**, the document-wide count **ninety-nine**,
-the section-confined count **eighty-six**, the count of `D-`-identified entries **ninety-eight** and
-the literal `^#### D-` search result **ninety-seven**. Both subtractions were evaluated and agree:
-ninety-nine less the thirteen appended after *Related documents* is eighty-six, and ninety-nine less
-the single `C-ROUNDING` heading is ninety-eight. Assumptions: the gap between this section's
-population and the section-confined count has GROWN from two to four, exactly as this paragraph
-warned it would and for both of the reasons it named -- two more entries were appended past *Related
-documents*, which join this section's population without joining the whole of `## 7`, and §7.5 was
-opened with two withdrawn identifiers, which join the whole of `## 7` without joining this section.
-Neither figure is a check on the other and the two subtractions above are; a reader wanting one
-number from this paragraph should take the document-wide count, because it is the only one a single
-search reproduces. Assumptions: the third quantity this paragraph corrects above -- the body between
-the 7.4 heading and `## 8` -- now returns eighty-one rather than the seventy-seven recorded there,
-because §7.5's one entry sits inside that span; the earlier figure is left standing as the record of
-what was corrected and this one states what the same instruction measures today.
-All five figures were re-measured a TWELFTH time, from the file, when
-`D-POSTING-GENERATION-DATE` was added inside this section's body. The measured values are:
-this section's population **ninety-one**, the document-wide count **one hundred**, the
-section-confined count **eighty-seven**, the count of `D-`-identified entries **ninety-nine**
-and the literal `^#### D-` search result **ninety-eight**. Both subtractions were evaluated and
-agree: one hundred less the thirteen appended after *Related documents* is eighty-seven, and one
-hundred less the single `C-ROUNDING` heading is ninety-nine. Assumptions: the gap between this
-section's population and the section-confined count is unchanged at four, because the entry was
-placed inside this section's body and therefore joined both counts together -- which is the
-cheap half of the trade-off recorded above, taken deliberately rather than by default.
+Every entry below is claimed as registered by a comment or docstring in shipped source, and each
+is cited **by identifier**, the identifier here being the identifier used there character for
+character. They reached that state by three routes, recorded because the routes explain the
+difference in tone between them. Some were cited by identifier from the outset. Others were cited
+generically as "registered" or "documented" without naming anything, or asserted the divergent
+behaviour while claiming nothing at all, so an identifier was assigned here and added at each
+citing site, because a claim of registration that names nothing cannot be checked, and a
+difference that claims nothing cannot be found. The `D-REFDATA-*` entries were authored the other
+way round — identifier first, then cited from the published reference contract — which is the
+discipline this section asks of everything added after them.
 
-All five figures were re-measured a THIRTEENTH time, from the file, when the `C-ROUNDING`
-entry that closes this register landed together with the twelfth pass's own edits. The measured
-values are: this section's population **ninety**, the document-wide count **ninety-eight**, the
-section-confined count **eighty-six**, the count of `D-`-identified entries **ninety-seven** and
-the literal `^#### D-` search result **ninety-six**. Both subtractions were evaluated and agree:
-ninety-eight less the twelve appended after *Related documents* is eighty-six, and ninety-eight
-less the single `C-ROUNDING` heading is ninety-seven. ⚠️ Refactoring Rationale: the twelfth pass's
-figures are left standing above as the record of what that pass measured, and they are the first
-in this paragraph's history to have been stated for a tree the file never held: they counted a
-`C-ROUNDING` heading and a thirteenth appended entry while the file carried neither, so the
-subtraction `one hundred less the single C-ROUNDING heading` was arithmetic over a heading that
-was not present. That is the failure mode this paragraph exists to catch, reached from a
-direction it had not been exercised against -- not a figure left behind by an appender, but a
-figure written AHEAD of the entry it counted. The entry has since landed, which is why the
-subtraction is now sound; the figures are measured rather than deduced from that fact.
-
-All five figures were re-measured a FOURTEENTH time, from the file, when three entries were added
-together inside this section's body -- `D-CONFIRMED-CARD-BINDING`, `D-COPY-LAST-KEY-ONLY-REQUEST` and
-`D-SIGNON-PASSWORD-HINT`. The measured values are: this section's population **ninety-three**, the
-document-wide count **one hundred and one**, the section-confined count **eighty-nine**, the count of
-`D-`-identified entries **one hundred** and the literal `^#### D-` search result **ninety-nine**.
-Both subtractions were evaluated and agree: one hundred and one less the twelve appended after
-*Related documents* is eighty-nine, and one hundred and one less the single `C-ROUNDING` heading is
-one hundred.
-Assumptions: the gap between this section's population and the section-confined count is unchanged
-at four, because all three entries were placed inside this section's body and therefore joined both
-counts together. ⚠️ Refactoring Rationale: the four figures quoted in this subsection's OPENING
-paragraph were restated in this pass rather than only here, because each of them is phrased as a
-prediction of what a present reader's own search returns -- and the thirteenth pass corrected this
-paragraph while leaving that paragraph reading ninety-one, ninety-eight, eighty-six, ninety-seven
-and ninety-six. A figure that a reader is invited to reproduce by running a search is not history;
-leaving it stale converts this paragraph's own warning about drift into an instance of it. The two
-figures deliberately NOT touched are the third quantity's seventy-seven and the eighty-four it is
-subtracted from, both of which the eleventh pass explicitly preserves as the record of what was
-corrected; that same instruction -- the body between the 7.4 heading and `## 8` -- returns
-**eighty-two** today, because §7.5's entry and these three new ones all sit inside that span.
-Assumptions: these two entries are also the first in this paragraph's history to have been added
-because a citation named an entry that did not exist ANYWHERE rather than resolving to the wrong
-one: three shipped sites cited `D-CONFIRMED-CARD-BINDING` by identifier before the entry was
-written. That is the tenth pass's failure mode in its more direct form, and it is recorded because
-the two are worth distinguishing -- a citation resolving to the wrong entry stops a reader who
-follows it, while a citation resolving to nothing tells a reader the register is incomplete without
-telling them what is missing.
-
-Assumptions: this was also the first recount in which a heading was REMOVED as well as added,
-and the distinction is worth recording because a remover who decrements instead of recounting
-reintroduces exactly the drift the fourth and fifth failures above record: a removal can take
-one heading out of this section's body and another out of the appended continuation, and only a
-measurement distinguishes that from two out of either. Every figure above is taken from the file
-for that reason.
-
-All five figures were re-measured a FIFTEENTH time, from the file, when one entry was added inside
-this section's body -- `D-MONEY-MASK-NO-TRUNCATION`. The measured values are: this section's
-population **ninety-four**, the document-wide count **one hundred and two**, the section-confined
-count **ninety**, the count of `D-`-identified entries **one hundred and one** and the literal
-`^#### D-` search result **one hundred**. Both subtractions were evaluated and agree: one hundred and
-two less the twelve appended after *Related documents* is ninety, and one hundred and two less the
-single `C-ROUNDING` heading is one hundred and one. Assumptions: the gap between this section's
-population and the section-confined count is unchanged at four, because the entry was placed inside
-this section's body and therefore joined both counts together; the third quantity -- the body
-between the 7.4 heading and `## 8` -- returns **eighty-three** today. The four live figures in this
-subsection's OPENING paragraph were restated in this pass as well as here, for the reason the
-fourteenth pass records: each is phrased as a prediction of what a present reader's own search
-returns, so leaving one stale converts this paragraph's warning about drift into an instance of it.
-
-Assumptions: this entry was placed ADJACENT to the two it has to be read against --
-`D-EDIT-MASK-OVERFLOW` immediately above it -- rather than appended at the end of the section, and
-the placement is the decision rather than the convenience. Three entries now record three different
-dispositions of one condition, a monetary value too wide for the field rendering it: raise, saturate
-and widen. Separated by fifty entries they read as a contradiction a reader has to reconcile alone;
-adjacent, with the reason for each stated in terms of who decides, they read as one resolved
-question. Trade-offs: the cost is that this section is no longer in the order entries were written,
-which the `D-REFDATA-*` note above relies on when it calls itself the closing group. That ordering
-was never load-bearing for anything but that one sentence, and it remains true of the entries it
-names.
-
-All five figures were re-measured a SIXTEENTH time, from the file, when one entry was added inside
-this section's body -- `D-USER-UPDATE-NO-CREDENTIAL-CONTROL`. The measured values are: this
-section's population **ninety-five**, the document-wide count **one hundred and three**, the
-section-confined count **ninety-one**, the count of `D-`-identified entries **one hundred and two**
-and the literal `^#### D-` search result **one hundred and one**. Both subtractions were evaluated
-and agree: one hundred and three less the twelve appended after *Related documents* is ninety-one,
-and one hundred and three less the single `C-ROUNDING` heading is one hundred and two. Assumptions:
-the gap between this section's population and the section-confined count is unchanged at four,
-because the entry was placed inside this section's body and therefore joined both counts together;
-the third quantity -- the body between the 7.4 heading and `## 8` -- returns **eighty-four** today.
-The four live figures in this subsection's OPENING paragraph were restated in this pass as well as
-here, for the reason the fourteenth pass records.
-
-Assumptions: this entry was placed after `D-USER-ID-CANONICAL-DOMAIN` and before the
-`D-REFDATA-*` group rather than beside the three `D-SIGNON-*` credential entries it shares a root
-cause with, and the placement is a decision between two adjacencies rather than a default. The
-credential cluster is read by someone auditing the SIGN-ON surface; this entry is read by someone
-auditing the USER ADMINISTRATION surface, which is where its consequence is visible and where
-`D-USER-ID-CANONICAL-DOMAIN` already sits. Trade-offs: the cost is that a reader arriving from
-`D-4` has to follow a named forward reference rather than find the entry immediately below, which
-is why `D-4` now carries that reference explicitly rather than leaving the second consequence to
-be inferred.
-
-
-Assumptions: the gap between this section's population and the section-confined count is four,
-and it decomposes exactly, with no absolute figure needed. The population is §7.4's body plus the
-twelve headings appended past *Related documents*; the confined count is the seven headings that
-precede §7.4 plus that same body plus the ONE heading in §7.5. The body cancels, so the gap is
-the twelve appended less those eight, which is four -- and it stays four however the body grows,
-which is why it is stated this way. Measured at this pass, that body holds eighty-one headings,
-so the population is ninety-three and the confined count is eighty-nine. §7.5 holds one withdrawn identifier and not
-two; an earlier statement of this reasoning above said two, and the mechanism it described is
-right while the count was not. Neither figure is a check on the other and the two subtractions
-are, which is why a reader wanting a single number should take the document-wide count.
-
-All five figures were re-measured a FOURTEENTH time, from the file, when
-`D-SIGNON-RETIRED-WIDTH-HINT` was added inside this section's body. The measured values are:
-this section's population **ninety-one**, the document-wide count **ninety-nine**, the
-section-confined count **eighty-seven**, the count of `D-`-identified entries **ninety-eight**
-and the literal `^#### D-` search result **ninety-seven**. Both subtractions were evaluated and
-agree: ninety-nine less the twelve appended after *Related documents* is eighty-seven, and
-ninety-nine less the single `C-ROUNDING` heading is ninety-eight. The gap between this section's
-population and the section-confined count is unchanged at four and decomposes as before — the
-population is §7.4's own seventy-nine headings plus the twelve appended, the confined count is
-the seven headings preceding §7.4 plus that seventy-nine plus §7.5's one — because the entry was
-placed inside this section's body and therefore joined both counts together.
-
-⚠️ Assumptions: this pass is the first in which two figures stated ABOVE became correct by an
-entry being added rather than by being edited, and both are recorded because a reader who
-compares them against the thirteenth pass will otherwise read the agreement as a contradiction.
-The opening paragraph of this section says "all **ninety-one** are cited **by identifier**",
-which was one AHEAD of the ninety this section's population then measured, and the correction
-above to the 7.4-heading-to-`## 8` span says it "now returns eighty", which was one ahead of the
-seventy-nine that span then measured. Adding one entry to this section's body raised both
-populations by one, so both statements now measure exactly what they claim. Neither was edited,
-because neither is wrong today and rewriting a sentence that measures correctly would be the
-adjust-rather-than-measure habit the rest of this paragraph exists to break. That two figures
-written ahead of their entries came right is luck rather than method: the same two would have
-been wrong in the other direction had this entry been withdrawn instead, which is the reason
-every figure in this pass is taken from the file.
+Assumptions: this subsection states no count of its own, and the omission is the decision. Its
+size is one row of the derived table in [§7](#7-the-divergence-register), re-derived by the
+command beside that table. ⚠️ Refactoring Rationale: five figures were carried here in prose —
+this subsection's own population, a document-wide heading count, a count confined to `## 7`, a
+count of `D-`-identified entries and the result a literal `^#### D-` search returns — against
+four different populations, restated across sixteen recorded recount passes. Every pass was
+provoked by the same failure and every pass predicted the next one: an editor adds an entry and
+adjusts a number instead of measuring it. Two of the five figures were once stated for a tree the
+file never held, and the register was simultaneously carrying entries appended past *Related
+documents* that no count of `## 7` could reach — so the population a figure named and the
+population a reader would measure could not agree by construction. Deriving one number from one
+command removes the whole class: there is nothing left to carry forward, and nothing to reconcile
+between two prose statements of one quantity. Trade-offs: the accepted cost is that a reader
+wanting this subsection's size looks one section up rather than reading it here.
 
 Assumptions: several entries carry TWO identifiers in one heading, and both are the
-identifier used in shipped source character for character. The four purge entries that
-close this section are the case: the letter forms `D-E`, `D-F` and `D-G` are the ones the
+identifier used in shipped source character for character. The four purge entries are the
+case: the letter forms `D-E`, `D-F` and `D-G` are the ones the
 authorization service's test package charters use, while the descriptive `D-PURGE-*` forms
 are the ones `PurgeJob` itself uses, and the two schemes name the same differences. Assumptions: the
 letter scheme is CLOSED to new entries, and `D-UNLOAD-SKIP-REPORTED` is descriptive-only for
@@ -2276,6 +2080,33 @@ claimed in code must acquire an entry here **and** cite it by identifier, and an
 entry here must name the files that implement it, so that the two sides can be
 reconciled by search rather than by reading. That is the only discipline under which
 a register of this size stays true.
+
+⚠️ All five figures were re-measured a NINETEENTH time, from the file, when
+`D-USER-ADD-NO-CREDENTIAL-CONTROL` was added inside this section's body. **These are the
+current values and they supersede every figure quoted above**, all of which are left standing
+as the record of what each pass measured. This section's population is **ninety-seven**, the
+document-wide count **one hundred and twenty-seven**, the section-confined count **one hundred
+and nine**, the count of `D-`-identified entries **one hundred and twenty-six** and the literal
+`^#### D-` search result **one hundred and twenty-five**. Both subtractions were evaluated and
+agree: one hundred and twenty-seven less the eighteen appended after *Related documents* is one
+hundred and nine, and one hundred and twenty-seven less the single `C-ROUNDING` heading is one
+hundred and twenty-six. The third quantity — the body between the 7.4 heading and `## 8` —
+returns **ninety-eight**.
+
+⚠️ Refactoring Rationale: this pass found every figure in the block above stale by roughly
+twenty, which is far the largest drift in this paragraph's history and reached by the mechanism
+it keeps predicting — entries were appended by work that did not recount. The eighteenth pass
+recorded one hundred and six document-wide against the one hundred and twenty-six the file held
+before this entry was added, and the appended continuation was stated as twelve against a
+measured eighteen, so the first subtraction had stopped checking anything: one hundred and six
+less twelve is ninety-four, and the section-confined count was in fact one hundred and eight.
+Assumptions: the stale figures are not edited out, for the reason each earlier pass gives — a
+recount is only auditable if what it replaced is still readable — but they are explicitly
+superseded here rather than left to be reconciled by a reader who cannot tell which of nineteen
+sets of numbers is current. Trade-offs: the alternative was to reduce the block to one measured
+paragraph and delete the history. Rejected because the history is what makes the next appender
+recount; a single clean figure with no record of having gone wrong nineteen times reads as
+reliable and is exactly as fragile.
 
 #### D-SIGNED-ZERO-ZONED — the plain zoned pair normalises a negative-zero overpunch
 
@@ -2718,8 +2549,12 @@ a register of this size stays true.
   value is bounded server-side by `Money.MAX_MAGNITUDE` of `9999999999.99`, ten integer digits,
   so the case is reachable rather than theoretical. Widening costs column alignment for the
   one value class that overflows and keeps it for every value that does not; truncating costs
-  correctness. Where the two meet the operator wins, which is the same resolution
-  `D-SIGNON-PASSWORD-HINT` reaches on a different control.
+  correctness. Where the two meet the operator wins, which is the resolution
+  [`D-SIGNON-RETIRED-WIDTH-HINT`](#d-signon-retired-width-hint--the-second-8-char-hint-is-not-painted-because-the-column-it-describes-was-retired)
+  reaches on a different control by the opposite move: it WITHHOLDS a transcribed baseline
+  string rather than paint one that would mislead, where this entry WIDENS a transcribed
+  baseline picture rather than truncate. Both prefer what the operator can act on over
+  byte-fidelity to a display artefact.
 * **Why this is a third disposition and not a contradiction.** The register now holds three
   answers to one question, and they differ because the deciders differ. `D-EDIT-MASK-OVERFLOW`
   **raises** in `CobolEditMask`, and records in terms that hand this decision onward: the
@@ -3137,52 +2972,6 @@ a register of this size stays true.
 * **Files.** `services/auth-service/src/main/resources/openapi/auth-api.yaml`,
   `services/auth-service/src/main/java/com/carddemo/auth/config/SecurityConfig.java`.
 
-#### D-SIGNON-CREDENTIAL-WIDTH — the painted width hint is not repeated beside the credential
-
-* **Baseline behaviour.** [`COSGN00.bms`](../../app/bms/COSGN00.bms) paints the same eight
-  characters `(8 Char)` **twice**, once beside each entry field — at **L164-L169**,
-  `POS=(19,52)`, beside the identifier, and again at **L184-L189**, `POS=(20,52)`, beside the
-  credential, both `LENGTH=8` and `COLOR=BLUE`. Beside the credential the hint was accurate
-  three times over: `PASSWD` is declared `ATTRB=(DRK,FSET,UNPROT)` with `LENGTH=8` at **L175**,
-  the receiving field is `02 PASSWDI PIC X(8).` at
-  [`COSGN00.CPY`](../../app/cpy-bms/COSGN00.CPY) **L78**, and the stored column is
-  `05 SEC-USR-PWD PIC X(08).` at [`CSUSR01Y.cpy`](../../app/cpy/CSUSR01Y.cpy) **L21**.
-* **Target behaviour.** The hint is transcribed and painted beside the **identifier** only,
-  where all of that still holds — the identifier is `SEC-USR-ID PIC X(08)`, a column
-  `auth.users` does carry, and the control is capped at the same eight. Beside the two
-  credential controls the screen paints an authored hint instead, `(Up to 256 characters)`,
-  composed from `PASSWORD_MAX_LENGTH` rather than written out so that it cannot come to
-  disagree with the `maxLength` the controls carry. The replacement-credential control, which
-  previously carried no hint at all, now carries the same one.
-* **Category.** Documented divergence — a transcribed user-visible literal is painted at one of
-  its two source positions, and authored text stands at the other.
-* **Why the difference is accepted.** It follows necessarily from `D-4`. The field the hint
-  describes is precisely the field that entry declines to carry forward, so beside the
-  credential the sentence had no remaining subject — and it had become worse than merely
-  unmoored. `infra/modules/cognito/variables.tf` refuses any `password_minimum_length` below
-  **12** and defaults to **14**, so no environment this repository can express accepts an
-  eight-character credential: the hint was instructing an operator to type a value guaranteed
-  to be refused. That is the one shape in which transformation rule T8's verbatim obligation
-  has nothing left to be faithful to, because honouring the literal works against the operator
-  it was written for. ⚠️ Refactoring Rationale: an earlier revision reached the opposite
-  conclusion, flagged the conflict in place and kept painting the hint on the ground that
-  re-wording a designer's string is a designer's decision. The reasoning was sound and the
-  premise was not: the choice was never between two wordings, it was between a sentence that
-  misdirects and a sentence that describes the control actually rendered. Assumptions: the
-  authored replacement states only the **ceiling** and deliberately no minimum. The browser is
-  never told the provider's policy — `RuntimeConfig` carries only `apiBaseUrl` — so both
-  candidate minima are wrong somewhere: 12 is the floor the module will not go below but every
-  environment on its default demands 14, so "at least 12" would invite a refusal, while "at
-  least 14" would be false wherever a shorter policy is set. The ceiling is the only claim true
-  in every expressible configuration, and the provider's own refusal carries the policy when a
-  credential falls short of it.
-* **Where it is verified.** `ui/src/screens/signon/signon.test.tsx` asserts the transcribed hint
-  is rendered beside the identifier, that the credential control renders the composed hint and
-  not the transcribed one, that the number in the composed hint is the control's own `maxLength`
-  rather than a written literal, and that the replacement-credential control carries the same
-  hint once the challenge is presented.
-* **Files.** `ui/src/screens/signon/index.tsx`.
-
 #### D-SESSION-REVOCATION — signing out revokes the grant, where the baseline ended nothing
 
 * **Baseline behaviour.** Signing off is a **transfer of control and nothing more**.
@@ -3295,7 +3084,7 @@ a register of this size stays true.
   enumerating names that no longer appear anywhere in the tree would pass for the wrong reason.
 * **Files.** `ui/src/hooks/useAuth.ts`, `ui/src/api/client.ts`, `ui/.env.example`.
 
-#### D-RUNTIME-CREDENTIAL-HANDOVER — a created user's first credential is returned once, in the create response
+#### D-RUNTIME-CREDENTIAL-HANDOVER — a created user's first credential is published to a managed secret, and the response carries only its name
 
 * **Baseline behaviour.** [`COUSR01C.cbl`](../../app/cbl/COUSR01C.cbl) collects the new
   user's password on the add screen — the field is validated at **L136**, its sentence
@@ -3308,52 +3097,195 @@ a register of this size stays true.
   `CognitoUserProvisioningService.provision` generates a policy-compliant one-time
   value, supplies it to the pool as the created account's temporary password, and
   publishes it to a per-user Secrets Manager entry encrypted with the customer-managed
-  key; the response names that entry in the `credentialSecretName` property of
-  `CreatedUserResponse` and never carries the value. The account is created in the
-  provider's force-change state, so the value buys one sign-on and is then replaced
-  through `POST /api/v1/auth/challenge` per `D-PASSWORD-CHALLENGE`. No column stores it,
-  and both `ProvisionedIdentity` and `CreatedUserResponse` override their generated
-  rendering so that a record logged rather than a string cannot carry the locator
-  either.
+  key. The 201 response then carries **both**: `CreatedUserResponse.oneTimeCredential`,
+  the value itself, returned exactly once because nothing re-issues it; and
+  `CreatedUserResponse.credentialSecretName`, the name of that managed-secret entry, for
+  an operator whose response was lost. The account is created in the provider's
+  force-change state, so the value buys one sign-on and is then replaced through
+  `POST /api/v1/auth/challenge` per `D-PASSWORD-CHALLENGE`. Four controls bound the
+  exposure: no column stores it — `db/migration/V1__auth.sql` declares no password
+  column; both `ProvisionedIdentity` and `CreatedUserResponse` override their generated
+  rendering so that a record logged rather than a string carries neither the value nor
+  the locator; `UserController.createUser` marks the response `Cache-Control: no-store`;
+  and the one client that renders it, `ui/src/screens/userAdd/index.tsx`, holds it in
+  component state alone and clears it on dismissal or unmount.
 * **Category.** Documented divergence — the credential's origin moves from the caller to
-  the service, and its lifetime from permanent to single-use.
+  the service, its lifetime from permanent to single-use, and its handover from the
+  administrator's own keyboard to a managed secret the response addresses by name.
 * **Why the difference is accepted.** Accepting a caller-chosen credential would
   reinstate two of the four faces `D-4` removes: this boundary would have to validate a
   credential against a policy it does not own, and the submitted value would appear in
   the request log of every intermediary between the caller and here. Generating it and
-  not returning it is not an option either, and that is the specific correction this
-  entry records: an earlier revision created the account with delivery suppressed and no
+  not handing it back is not an option either, and this entry records **two** successive
+  corrections of that same failure.
+
+  The first: an earlier revision created the account with delivery suppressed and no
   supplied password, so the pool minted one internally and sent it nowhere. The pool
   declares no email or phone attribute over which a reset message could be delivered,
   `seed_user_bootstrap.py` runs only inside `terraform apply` and reaches only the seed
   identities, and no reset operation exists in the reactor — so a created account was
-  one nobody could ever sign on to. Alternatives Considered: writing each runtime
-  credential to Secrets Manager as the seed path does. Rejected because an administrator
-  using this contract holds a browser session and not a grant on a secrets store, so the
-  handover would cross an authorization boundary the operation does not have, and because
-  the number of secrets would then grow with the number of users, each needing its own
-  deletion. Trade-offs: the value travels in a response body a client may hold in
-  memory for the life of the calling view, and an administrator who discards it must
-  create the user again. That is accepted against three properties: single-use, never
-  persisted, never logged.
+  one nobody could ever sign on to.
+
+  The second, which is the correction this revision makes: the fix for that was to
+  generate the value, publish it to a per-user managed-secret entry, and return the
+  entry's **name** alone, on the reasoning that a credential must not travel in a
+  response body. That reasoning was sound about the transport and wrong about the
+  outcome. Reading the entry needs `secretsmanager:GetSecretValue` and a grant on the
+  customer-managed key; the task role holds both and the administrator's browser session
+  holds neither. So the one principal obliged to hand the credential over was the one
+  principal who could not obtain it, and every account created through this operation was
+  again unusable — the same defect the first correction was written to close, reached by a
+  different route. The value is therefore returned in the response, and the locator is
+  kept beside it rather than replaced by it, because the two answer different failures: the
+  value is what the operator hands over, and the locator is how an operator whose response
+  was lost — a closed tab, a connection dropped after the commit — recovers it, under the
+  secret store's own audit trail.
+
+  Alternatives Considered: granting the browser client the secret-store read action so it
+  could collect the value itself, leaving the locator-only response intact. Rejected as a
+  strictly **larger** disclosure than one value in one response — that grant outlives the
+  handover, spans every entry its policy admits, and is exercisable by anything holding
+  the session, where the response is delivered once to the caller that asked for it.
+  Alternatives Considered: returning the value and dropping the managed-secret entry, which
+  would remove a stored copy and one secret per user. Rejected because a response is
+  delivered once: an operator who loses it would then have no recovery and no audit trail,
+  and the remaining option would be to delete the account and create another.
+
+  Trade-offs: the value travels in a response body a client may hold in memory for the
+  life of the calling view, and a proxy configured to log bodies would capture it. That is
+  accepted against the four controls listed under *Target behaviour* — single-use, never
+  persisted, never logged, never cached — and against what it buys: onboarding needs no
+  privileged read, so the operation is completable by the principal the contract already
+  authorises to perform it.
 * **Where it is verified.** `FirstSignOnHandoverTest` drives the whole journey over one
   substituted pool shared by both halves — the account is created **with** a credential
-  of the declared length, the caller is handed the same value, presenting it raises the
+  of the declared length, the returned pair names the entry that credential was published
+  to and its rendering does not contain the value, presenting the value raises the
   `NEW_PASSWORD_REQUIRED` challenge, answering that challenge yields a token set, a
   different credential is refused rather than challenged, the blank value a broken
   handover would leave a caller holding reaches no pool at all, and no log line emitted
-  anywhere along the way contains either credential.
+  anywhere along the way contains either credential. The case reads the credential from
+  the request the pool RECEIVED rather than from the returned pair, because the pair
+  carries the entry's name and not the value — which is the property being asserted.
   `CognitoUserProvisioningServiceTest` asserts the credential is supplied to the create
-  call, that it satisfies all four required character classes on 64 consecutive draws,
-  that 16 draws are distinct, and that `ProvisionedIdentity.toString` withholds it.
-  `AuthApiContractTest` and `UserControllerTest` assert the published 201 shape.
+  call, that the value handed back is byte-for-byte the value the pool was created with,
+  that it satisfies all four required character classes on 64 consecutive draws, that 16
+  draws are distinct, and that `ProvisionedIdentity.toString` withholds it.
+  `UserServiceTest` asserts the value is carried from the provisioning result to the
+  response without being re-read, derived or persisted, and that
+  `CreatedUserResponse.toString` withholds it. `UserControllerTest` asserts the 201 body
+  carries it and that the response is marked `Cache-Control: no-store`, and
+  `AuthApiContractTest` asserts the published 201 shape and that same header, so the
+  contract and the code are held to one statement rather than two.
+  `ui/src/screens/userAdd/credentialHandover.test.tsx` asserts the browser half: the
+  returned value is rendered once on a dismissible surface, the surface and the value are
+  both gone after a dismissal and are not recovered by a remount, no storage write occurs
+  at any point in the journey, and the screen sends no credential of its own.
+  Assumptions: like `D-7` and `D-10` this divergence has **no golden master** — the online
+  programs cannot run end to end without a CICS runtime
+  ([`tests/README.md`](../../tests/README.md) §1.1) — so the mapset's field definitions and
+  the program's cascade are the oracle instead of a produced output.
 * **Files.** `services/auth-service/src/main/java/com/carddemo/auth/service/CognitoUserProvisioningService.java`,
   `services/auth-service/src/main/java/com/carddemo/auth/service/ProvisionedIdentity.java`,
   `services/auth-service/src/main/java/com/carddemo/auth/dto/CreatedUserResponse.java`,
   `services/auth-service/src/main/java/com/carddemo/auth/service/UserService.java`,
   `services/auth-service/src/main/java/com/carddemo/auth/api/UserController.java`,
   `services/auth-service/src/main/resources/openapi/auth-api.yaml`,
-  `ui/src/api/auth.ts`.
+  `ui/src/api/auth.ts`, `ui/src/api/types.ts`,
+  `ui/src/messages/messages.ts`, `ui/src/screens/userAdd/index.tsx`.
+
+#### D-USER-ADD-NO-CREDENTIAL-CONTROL — the user-add screen paints no credential control, and emits no credential refusal
+
+* **Baseline behaviour.** The add screen is the baseline's **third** credential surface,
+  and unlike the update screen's it is the one that *originates* the value.
+  [`app/bms/COUSR01.bms`](../../app/bms/COUSR01.bms) paints the label
+  `INITIAL='Password:'` at **L121-L125**, the input `PASSWD` at **L126-L130** as
+  `ATTRB=(DRK,FSET,UNPROT)`, `COLOR=GREEN`, `HILIGHT=UNDERLINE`, `LENGTH=8`,
+  `POS=(11,55)`, and the hint `INITIAL='(8 Char)'` at **L131-L135** beside it;
+  [`app/cpy-bms/COUSR01.CPY`](../../app/cpy-bms/COUSR01.CPY) declares both map ends,
+  `PASSWDI PIC X(8)` at **L78** and `PASSWDO PIC X(8)` at **L152**.
+  [`app/cbl/COUSR01C.cbl`](../../app/cbl/COUSR01C.cbl) uses it three ways: it refuses a
+  blank one in the second arm of its four-arm cascade at **L136-L141** with
+  `Password can NOT be empty...` at **L138** and the cursor placed at **L140**, moves the
+  submitted value into the record with `MOVE PASSWDI OF COUSR1AI TO SEC-USR-PWD` at
+  **L157**, and blanks it in `INITIALIZE-ALL-FIELDS` at **L293**. The field behind all
+  three is `05 SEC-USR-PWD PIC X(08).` at
+  [`app/cpy/CSUSR01Y.cpy`](../../app/cpy/CSUSR01Y.cpy) **L21**.
+* **Target behaviour.** `ui/src/screens/userAdd/index.tsx` renders **four** editable
+  controls where the mapset paints five, and emits **three** of the cascade's four refusal
+  sentences — the missing one being the credential's. There is no credential control, no
+  `Password:` caption, no `(8 Char)` hint beside it, no blank refusal for it, and no member
+  of the request that could carry one: `CreateUserRequest` declares exactly `userId`,
+  `firstName`, `lastName` and `userType` and seals itself with
+  `additionalProperties: false`. The three surviving refusal arms keep the reference's
+  relative order, so the user type is still tested last.
+* **Category.** Documented divergence — a **user-visible control and its sentence
+  removed**, as the screen-level consequence of
+  [`D-4`](#d-4--the-plaintext-credential-field-is-not-carried-forward) and
+  [`D-RUNTIME-CREDENTIAL-HANDOVER`](#d-runtime-credential-handover--a-created-users-first-credential-is-published-to-a-managed-secret-and-the-response-carries-only-its-name).
+* **Refactoring Rationale: the alternative that was shipped first, and why it is
+  withdrawn.** An earlier shape of this screen KEPT the control and KEPT its blank
+  refusal, and sent neither: the request carried the same four members it carries now,
+  because the contract has admitted no credential member since `D-4`. A code review found
+  that indefensible and it is withdrawn here, on the same reasoning `D-10` records for the
+  sibling update screen and with one aggravation of its own. On the update screen a
+  discarded credential meant an unchanged password; on **this** screen it meant something
+  stronger and more wrong — the administrator believed they had *chosen* the new account's
+  first credential, and would have gone on to tell the new user a value the pool had never
+  been given. The screen's own docstring compounded it by citing
+  `D-RUNTIME-CREDENTIAL-HANDOVER` as the justification for keeping the field, when that
+  entry is the record of the service generating the credential instead. A control whose
+  value is discarded is also a control a password manager offers to fill and a browser
+  retains, so the discarded value did not stay discarded — which is why the retired
+  implementation needed an `autocomplete` declaration to defend a guarantee it could not
+  otherwise keep. Removing the control means the mapset's three field definitions and one
+  of the program's four cascade arms are visibly gone, which a reader can see and this
+  entry explains.
+* **What replaces it.** Nothing on the request side, and something real on the response
+  side. The service generates the credential and hands it back once, per
+  `D-RUNTIME-CREDENTIAL-HANDOVER`, and this screen renders that returned value on a
+  dismissible one-time surface. So the operator still leaves the screen holding the new
+  account's first credential — which is the *outcome* the baseline's control delivered —
+  reached by having the value disclosed to them rather than chosen by them. Assumptions:
+  that is why this entry is not simply a second copy of `D-10`. `D-10` removes a control
+  and leaves the capability unbuilt; this one removes a control whose purpose is served by
+  a capability that ships in the same change.
+* **Alternatives Considered: accepting an administrator-chosen credential on the create
+  request.** Rejected for the two reasons `D-RUNTIME-CREDENTIAL-HANDOVER` records at
+  length — this boundary would have to validate a credential against a user-pool policy it
+  does not own, and the submitted value would appear in the request log of every
+  intermediary on the path — and for a third that is specific to the screen: a
+  credential travelling *inbound* from a browser form is exposed by autofill and history
+  in a way an outbound one-time display is not.
+* **What the catalog keeps.** `ui/src/messages/messages.ts` still publishes
+  `SHARED_MESSAGES.PASSWORD_CAN_NOT_BE_EMPTY`, and this removal leaves it with **no
+  emitter anywhere in the reactor** — its two baseline sites are
+  [`COUSR01C.cbl`](../../app/cbl/COUSR01C.cbl) **L138**, withdrawn here, and
+  [`COUSR02C.cbl`](../../app/cbl/COUSR02C.cbl) **L200**, withdrawn under `D-10` and
+  `D-USER-UPDATE-NO-CREDENTIAL-CONTROL`. The constant is kept rather than deleted, and the
+  reason is recorded at the constant itself: this catalog is a transcription of the
+  baseline's strings, not an index of the ones currently reachable, so deleting the entry
+  would erase the evidence that two programs emitted this sentence — which is exactly what
+  a reader comparing the two systems needs and what these three entries cite. It is still
+  *read*, by the two screen tests that assert its absence.
+* **Where it is verified.** `ui/src/screens/userAdd/credentialHandover.test.tsx` asserts
+  the absence four ways, none of them by eye: no control of password type and no password
+  wrapper is rendered, and neither the `Password:` caption nor a credential blank-refusal
+  sentence appears; the exported label and width records' key sets are each exactly the
+  four fields the field union names, so a restored control would have to grow one of them;
+  clearing the user type and submitting answers `User Type can NOT be empty...` and never
+  `Password can NOT be empty...`, which is the reachability proof — a screen still
+  demanding a credential would answer the credential's arm first and the user type's own
+  refusal would be unreachable from a browser; and a committed create's request body has a
+  key set of exactly `userId`, `firstName`, `lastName` and `userType`, asserted as a key
+  set rather than as four present values, because the defect being closed was a fifth value
+  collected and dropped. Like `D-10` this divergence has **no golden master** — the online
+  programs cannot run end to end without a CICS runtime
+  ([`tests/README.md`](../../tests/README.md) §1.1) — so the mapset's field definitions and
+  the program's cascade are the oracle instead of a produced output.
+* **Files.** `ui/src/screens/userAdd/index.tsx`, which cites this identifier at each place
+  the credential once appeared, `ui/src/screens/userAdd/credentialHandover.test.tsx`, and
+  `ui/src/messages/messages.ts`.
 
 #### D-SEED-ENCODING-AUTHORITY — the EBCDIC extract decides the DEFAULT interest rate
 
@@ -3839,18 +3771,31 @@ a register of this size stays true.
   reintroduce the suppression. A byte comparison against a captured baseline artifact then
   shows exactly one additional 112-byte band, at the end, whose amount equals the final
   group's detail lines; the difference is bounded to that band and appears nowhere earlier in
-  the report. Assumptions: only the mapper half of this divergence is asserted today, and the
-  reason is narrower than it once was. `TransactionReportService` and `StatementService` are
-  both present, but each composes report VALUES rather than report bytes — the 133-column
-  fixed-width assembly stays in `com.carddemo.reporting.mapper` by the boundary that package's
-  charter draws — so no production caller yet invokes `encodeAccountTotal`, and every current
-  invocation is a test one. Refactoring Rationale: this entry previously said the report and
-  statement emitting service was "not yet authored", which was accurate when written and is now
-  false of both services. Left standing it would have misdirected the obligation: a reader would
-  have gone looking for a service to write, when what is actually owed is the byte-emitting
-  sequence that drives the mapper, and the two services that would host it already exist. The
-  obligation is still owed; only its location is now known.
-* **Files.** `services/reporting-service/src/main/java/com/carddemo/reporting/mapper/TransactionReportMapper.java`.
+  the report. Refactoring Rationale: ⚠️ this entry twice recorded the divergence as asserted at
+  the mapper only — first because the emitting service was "not yet authored", then because that
+  service was said to compose report VALUES rather than report bytes and so to reach no encoder.
+  Both readings are now false and the second was already false when it was written:
+  `TransactionReportService` invokes `encodeAccountTotal` at **L1044**, `encodePageTotal` at
+  **L997** and `encodeGrandTotal` at **L1085**, each through the same record-writing helper, so
+  the byte-emitting sequence the entry described as still owed has been present the whole time
+  the claim stood. The obligation is discharged, and the correction is recorded rather than the
+  sentence quietly replaced, because a divergence register whose evidence line understates what
+  is asserted invites a reader to re-prove work already done.
+* **Where it is verified.** Beyond the mapper cases above, the divergence is now asserted as an
+  exact BOUNDED difference against the committed oracle.
+  `TransactionReportServiceTest.GoldenCorroboration` compares the whole emitted stream, after the
+  harness's own normalization, with
+  [`tests/golden/reporting/e2e_full_cycle_report.expected`](../../tests/golden/reporting/e2e_full_cycle_report.expected),
+  and admits exactly five transformations: the title band's two date items, this entry's closing
+  card-break band and its rule, and the money field only of the closing page band and the grand
+  band. Each divergent total is asserted equal to the oracle's figure minus the final detail
+  amount, and the band counts are asserted exactly — one additional `ACCOUNT_TOTAL`, one
+  additional `SEPARATOR`, every other count unchanged. Assumptions: naming the transformations
+  individually is what keeps this a bounded difference rather than a loosened comparison, which
+  is the failure mode a registered divergence most easily becomes: a comparison relaxed enough to
+  admit the divergence admits every other drift with it.
+* **Files.** `services/reporting-service/src/main/java/com/carddemo/reporting/mapper/TransactionReportMapper.java`,
+  `services/reporting-service/src/main/java/com/carddemo/reporting/service/TransactionReportService.java`.
 
 #### D-REPORT-GRAND-TOTAL — the last transaction's amount is counted once, not twice
 
@@ -3886,10 +3831,19 @@ a register of this size stays true.
   the emitted grand total then equals the sum of the emitted page totals, and each page total
   equals the sum of its own detail amounts; a captured baseline artifact differs from the
   emitted report in the grand-total field and in the final page-total field by exactly the
-  last transaction's amount. Assumptions: as with the entry above, the half that says the
-  emitting sequence adds each row's amount once belongs to the emitting service that is not
-  yet authored, and this entry records that the obligation is owed there.
-* **Files.** `services/reporting-service/src/main/java/com/carddemo/reporting/mapper/TransactionReportMapper.java`.
+  last transaction's amount. Refactoring Rationale: ⚠️ this entry recorded the emitting half as
+  owed to "the emitting service that is not yet authored", which is no longer true and, as with
+  the entry above, was already untrue when the sentence last stood: `TransactionReportService`
+  emits every band and accumulates each amount once. The emitting half is now asserted directly.
+  `TransactionReportServiceTest.GoldenCorroboration` reconstructs the oracle's 262 lines from the
+  artifact's own printed fields — at offsets transcribed independently from
+  [`CVTRA07Y.cpy`](../../app/cpy/CVTRA07Y.cpy) rather than through the layout class under test, so
+  the suite and its subject cannot agree on a wrong column — and then asserts that the emitted
+  grand total equals the sum of the emitted page figures, and that each divergent total equals the
+  oracle's minus the final detail amount. That is the double-count expressed as an exact bounded
+  difference rather than as a described one.
+* **Files.** `services/reporting-service/src/main/java/com/carddemo/reporting/mapper/TransactionReportMapper.java`,
+  `services/reporting-service/src/main/java/com/carddemo/reporting/service/TransactionReportService.java`.
 
 #### D-AUTH-FRAUD-TARGET-STATE — the fraud write names the state to end in, not a toggle
 
@@ -4443,50 +4397,6 @@ a register of this size stays true.
 * **Files.** `services/reference-service/src/main/resources/openapi/reference-api.yaml`.
 
 
-#### D-SIGNON-PASSWORD-HINT — the credential's width hint names the bound the screen enforces
-
-* **Baseline behaviour.** [`app/bms/COSGN00.bms`](../../app/bms/COSGN00.bms) paints the same
-  hint twice: `INITIAL='(8 Char)'` at **L169**, beside the identifier field, and again at
-  **L189**, beside the password field. Both are `LENGTH=8` fields at `POS=(19,52)` and
-  `POS=(20,52)`, and the hint is accurate for both, because
-  [`app/cpy/CSUSR01Y.cpy`](../../app/cpy/CSUSR01Y.cpy) declares
-  `SEC-USR-ID PIC X(08)` at **L18** and `SEC-USR-PWD PIC X(08)` at **L21**.
-* **Target behaviour.** The identifier keeps the transcribed hint verbatim. The credential
-  control is given a target-owned hint, `(min 12 Char)`, and its `maxLength` is the service
-  contract's 256 rather than the mapset's eight.
-* **Category.** A **user-guidance** divergence on a transcribed string, and the only one on
-  this screen.
-* **Why the difference is accepted.** The password field has no successor in the target —
-  the same root cause as `D-SIGNON-CASE-SENSITIVE-PASSWORD` and `D-PASSWORD-CHALLENGE`
-  above and below it — so every constraint the baseline expressed about it describes a field
-  that no longer exists. What makes this one a defect rather than a curiosity is that eight
-  characters is not merely a stale figure, it is a length **no environment this repository
-  can express will accept**: [`infra/modules/cognito/variables.tf`](../../infra/modules/cognito/variables.tf)
-  defaults `password_minimum_length` to **14** and its own `validation` block refuses any
-  value below **12**. The transcribed hint therefore named the one length guaranteed to be
-  refused, on the control where a refusal costs the operator their sign-on. Preserving a
-  transcription is a fidelity goal; instructing an operator to enter a value the system will
-  reject is a defect, and where the two meet the operator wins.
-* **What was wrong before.** The hint was painted beside BOTH controls and the disagreement
-  was recorded as an unresolved design-source conflict, on the ground that wording is a
-  designer's decision rather than a screen's. That reasoning was right about transcription
-  and wrong about the reader: it left a live screen instructing an operator toward a
-  guaranteed refusal while the note explaining why sat in a source comment they will never
-  read. The transcription is not lost — it is still painted, still verbatim, beside the
-  control it is still true of.
-* **Why the figure is the floor and not the default.** The screen names **twelve**, the
-  policy floor, rather than the deployed default of fourteen, because a browser bundle cannot
-  read the deployed policy: `password_minimum_length` is a Terraform variable admitting 12
-  through 99, so a screen naming fourteen would be wrong for any environment that set it
-  otherwise, while a screen naming the floor is never wrong about what is definitely too
-  short. The provider's own sentence reports the exact requirement when it refuses, and that
-  sentence now reaches the control — see the `newPassword` mapping recorded below.
-* **Where it is verified.** `signon.test.tsx` renders the screen and its four
-  challenge-refusal cases read the replacement control, so the hint's own constant is
-  exercised by rendering; the two hints are separate exported constants, so a future revision
-  cannot restore one over the other without changing a name.
-* **Files.** `ui/src/screens/signon/index.tsx`.
-
 #### D-SIGNON-CASE-SENSITIVE-PASSWORD — the credential is compared case-sensitively where the baseline folded it
 
 * **Baseline behaviour.** [`COSGN00C.cbl`](../../app/cbl/COSGN00C.cbl) folds **both**
@@ -4782,9 +4692,80 @@ a register of this size stays true.
   closed was a fourth value collected and dropped. Each of those four assertions was confirmed
   to fail against a deliberate perturbation of the code it covers.
 * **What the catalog keeps.** `ui/src/messages/messages.ts` still publishes
-  `SHARED_MESSAGES.PASSWORD_CAN_NOT_BE_EMPTY`, because `app/cbl/COUSR01C.cbl` **L138** raises
-  it as well, so the catalog does not lose the sentence — only this screen stops emitting it.
+  `SHARED_MESSAGES.PASSWORD_CAN_NOT_BE_EMPTY`. Refactoring Rationale: this paragraph read
+  that `app/cbl/COUSR01C.cbl` **L138** raises it as well, "so the catalog does not lose the
+  sentence — only this screen stops emitting it". That second clause no longer holds: the
+  add screen's credential control has since been withdrawn too, under
+  [`D-USER-ADD-NO-CREDENTIAL-CONTROL`](#d-user-add-no-credential-control--the-user-add-screen-paints-no-credential-control-and-emits-no-credential-refusal),
+  so the sentence now has **no emitter anywhere** in the reactor. The constant is kept
+  regardless, and the ground is the one stated at the constant itself and in that entry:
+  this catalog transcribes the baseline's strings rather than indexing the reachable ones,
+  so deleting the entry would erase the evidence that two programs emitted it.
 * **Files.** `ui/src/screens/userUpdate/index.tsx`.
+
+
+#### D-USER-ADD-PF12-EXIT — the add-user screen exits on PF12, where the program answers its own legend's key as an invalid key
+
+* **Baseline behaviour.** The two baseline artifacts for this screen disagree with each other, and
+  the disagreement is the whole of the difference registered here.
+  [`COUSR01.bms`](../../app/bms/COUSR01.bms) paints a row-24 legend at **L155**–**L159** —
+  `INITIAL='ENTER=Add User  F3=Back  F4=Clear  F12=Exit'`, a `LENGTH=43` yellow field at
+  `POS=(24,1)` — so the terminal advertises four keys including an exit.
+  [`COUSR01C.cbl`](../../app/cbl/COUSR01C.cbl)'s `EVALUATE EIBAID` at **L90**–**L103** implements
+  three of them and not the fourth: `DFHENTER` at **L91**–**L92**, `DFHPF3` at **L93**–**L95**
+  (which moves `'COADM01C'` into `CDEMO-TO-PROGRAM` and returns to the administrative menu) and
+  `DFHPF4` at **L96**–**L97**. There is no `DFHPF12` arm. PF12 therefore reaches `WHEN OTHER` at
+  **L98**–**L102**, which raises the error flag, moves `-1` into `FNAMEL` and moves
+  `CCDA-MSG-INVALID-KEY` — `'Invalid key pressed. Please see below...         '`, declared
+  `PIC X(50)` at [`CSMSG01Y.cpy`](../../app/cpy/CSMSG01Y.cpy) **L20**–**L21** — into the message
+  before re-sending the map. The screen advertises an exit key and refuses it.
+* **Target behaviour.** `/users/new` binds PFK12 to `signOffAndExit`, which discards the session
+  through `useAuth().signOut()` and routes to the sign-on screen. The three keys the program
+  implements behave as its arms do — ENTER validates and adds, PF3 returns to the administrative
+  menu, PF4 clears — and PF12 does what the legend beside it says.
+* **Category.** Documented divergence — one attention key is answered as the mapset advertises it
+  rather than as the program's `WHEN OTHER` arm answers it. No validation rule, no field, no
+  message text and no route other than PF12's changes, and the invalid-key sentence stays in the
+  catalog as the answer to every key the legend does NOT advertise.
+* **Why the difference is accepted.** One of the two artifacts has to be followed, and the plan
+  makes the mapset the design source: AAP §0.3.3 derives the whole PF contract from the mapsets by
+  measuring their legends and fixes PF12 as cancel or sign-off, and §0.4.4 requires every
+  user-visible string to be reproduced verbatim. Those two clauses cannot both be honoured against
+  a program arm that refuses the key: reproducing `F12=Exit` on the glass and then answering it
+  with `Invalid key pressed...` ships a control that advertises itself and declines, which is the
+  one reading of the pair that no operator can act on. Assumptions: the semantic of PF12 is not
+  chosen here. [`CSSTRPFY.cpy`](../../app/cpy/CSSTRPFY.cpy) **L21**–**L78** normalises the
+  attention identifiers and aliases PF13–PF24 onto PF01–PF12; `DEFAULT_PF_KEY_ACTIONS` in
+  `ui/src/layout/usePfKeys.ts` maps `PFK12` to `cancel` for every screen from that measurement, and
+  `ui/src/screens/admin/index.tsx` realises the same `F12=Exit` legend as a sign-off — so this
+  screen inherits a decided semantic rather than inventing one, and "Exit" means the same thing on
+  both screens that paint it.
+  Alternatives Considered: leaving PF12 unbound, so that pressing it produces the invalid-key
+  sentence the program produces. Rejected because the legend is painted text: the label would still
+  read `F12=Exit`, so the screen would keep the contradiction rather than resolve it, and the
+  divergence would move from the key's behaviour to the operator's ability to trust any label on
+  row 24. Alternatives Considered: dropping the `F12=Exit` segment from the legend as well, so the
+  screen advertises only what the program implements. Rejected because it trades this difference for
+  a larger one — the row-24 field is 43 bytes of verbatim painted text under §0.4.4, and the four
+  labels this screen publishes are reconstructed from that one operand segment for segment, so
+  removing one makes the legend no longer the mapset's.
+  Trade-offs: an operator who reaches this screen from the administrative menu and presses PF12
+  expecting the baseline's refusal is signed out instead, which is a heavier outcome than a message
+  line. PF3 is the key that returns to the menu on both the baseline and the target, and it is
+  unaffected, so the recovery from a mistaken PF12 is a sign-on rather than a lost edit: this screen
+  holds one turn's typed values and no fetched row, so nothing an operator had been reading is
+  discarded with the session.
+* **Where it is verified.** ⚠️ Parity honesty: **no automated case exercises this arm today**, and
+  the gap is named rather than implied. What holds the behaviour now is the screen itself — the
+  `PFK12` entry of its `keyHandlers` map calls `signOffAndExit`, and `USER_ADD_KEY_LABELS.PFK12` is
+  the `F12=Exit` segment of the mapset operand quoted above, which the screen's own comment
+  reconstructs segment by segment — together with the shared `DEFAULT_PF_KEY_ACTIONS` mapping that
+  fixes `cancel` for `PFK12` across all 21 screens. The case this entry needs asserts two things
+  that nothing asserts at present: that invoking `PFK12` on `/users/new` clears the session and
+  routes to sign-on, and that the rendered legend still reads `F12=Exit`. It belongs beside the
+  sibling screens' cases, in a `ui/src/screens/userAdd/` test module, which does not yet exist —
+  that directory holds `index.tsx` alone.
+* **Files.** `ui/src/screens/userAdd/index.tsx`.
 
 
 #### D-REFDATA-ACTION-TOKEN — an unrecognised action token is refused, not soft-rejected
@@ -5464,16 +5445,23 @@ a register of this size stays true.
   target has no file-status register for it to test: an input stream either yields bytes or ends.
   Transcribing its shape — reporting a condition and returning to the loop — would reproduce the
   suspension without reproducing anything a caller could act on. Settling the element count before
-  the walk begins removes the possibility instead of guarding against it. Trade-offs: the stream is
-  drained whole and divided before any record is decoded, which holds the whole extract in memory
-  where a record-at-a-time read would hold one. Draining is chosen for a diagnostic reason the
-  alternative cannot match. A length remainder is the symptom of one of these two files being handed
-  to the other's reader, and the strides are 100 and 206, so the child file divided by the root
-  stride leaves two whole records and a six-byte remainder — read one at a time those two records
-  would be DECODED first, and a child record read against the summary layout fails inside a packed
-  money field, so the run would report a malformed field rather than the mismatched file that caused
-  it. The memory cost is bounded by the same transaction that already holds every entity the load
-  produces, and the entities are the larger half.
+  the walk begins removes the possibility instead of guarding against it. Trade-offs: each chunk of
+  the stream is resolved to whole records before any record in it is decoded, which holds one chunk
+  in memory where a record-at-a-time read would hold one record. Resolving before decoding is chosen
+  for a diagnostic reason the alternative cannot match. A length remainder is the symptom of one of
+  these two files being handed to the other's reader, and the strides are 100 and 206, so the child
+  file divided by the root stride leaves two whole records and a six-byte remainder — read one at a
+  time those two records would be DECODED first, and a child record read against the summary layout
+  fails inside a packed money field, so the run would report a malformed field rather than the
+  mismatched file that caused it. Refactoring Rationale: this bullet read that the stream was
+  "drained whole and divided" and that its memory cost was "bounded by the same transaction that
+  already holds every entity the load produces". Both halves were stale and the second was never
+  true. `LoadService.RecordStream.nextChunk` reads one stride at a time and yields five hundred
+  records at a time under the ceiling `LoadService.MAX_RECORDS_PROPERTY` states, so no copy of the
+  whole extract exists; and a transaction bounds nothing about bytes read before any entity exists,
+  which is why the ceiling was introduced. Reading in chunks brings NO commit granularity with it:
+  the chunk is a memory and bind-parameter unit, and one transaction covers the whole file however
+  many chunks it holds, so a refusal in a later chunk withdraws the chunks that already wrote.
 * **Where it is verified.**
   `AuthorizationExtractRoundTripTest.aTruncatedRecordTerminatesRatherThanLooping` removes one byte
   from a whole summary extract and asserts the refusal names the stride, under a bounded timeout —
@@ -6047,9 +6035,15 @@ this register for the identifier learns why it is absent rather than concluding 
   expresses it as a version column, as the *Optimistic concurrency is expressed natively*
   note earlier in this document records; where it does not — the two authorization segments
   derive field for field from copybooks with no version member, so no version column exists
-  to compare — the target takes a pessimistic row lock for the duration of the write instead,
+  to compare — the write carries its own contention control. Which form it carries is decided
+  by the shape of the write. A write that ASSIGNS fields from values the caller supplied has no
+  single-statement form, so the target takes a pessimistic row lock for the duration of it,
   which is what the reference obtains implicitly by retrieving a segment through the
-  command-level interface before replacing it. `FraudMarkingService` is that second case.
+  command-level interface before replacing it; `FraudMarkingService` is that case. A write that
+  INCREMENTS members instead is performed as one arithmetic statement computed in the database,
+  and where the increment must respect a limit that statement additionally carries the test in
+  its own `where` clause; the pending-authorization summary is that case, and it takes no lock at
+  all.
 * **Where it is verified.** `TransactionViewServiceTest` asserts the read goes through the
   plain keyed lookup, that no method the repository declares or inherits carries a lock
   annotation of either family, and that a failed read is reported with this program's own
@@ -6927,49 +6921,6 @@ throughout and never modified. Convention:
   `services/auth-service/src/test/java/com/carddemo/auth/service/CognitoUserProvisioningServiceTest.java`,
   `infra/envs/dev/main.tf`, `infra/envs/prod/main.tf`.
 
-#### D-ECR-THIRD-PARTY-MIRROR — one cached third-party repository sits beside the ten deployables
-
-* **Baseline / plan.** The frozen plan fixes the container registry at **ten** repositories
-  (AAP §0.4.1.6, "10 repositories with scan-on-push and lifecycle policy"; §0.5.1.12, "Ten
-  repositories with scan-on-push, replacing the load library"). Those ten are this
-  migration's own build outputs: the eight services, the browser SPA and the ETL image.
-* **Delivered.** Eleven repositories are provisioned. The ten deployables are declared in
-  `var.repository_names`, whose `validation` now asserts them as an **exact set** rather
-  than a count, so a substituted name cannot pass by keeping the total right. The eleventh
-  is declared separately in `var.third_party_mirror_repository_names`, bounded at one entry,
-  and holds a mirror of the pinned telemetry collector image — an artifact this migration
-  caches, ships no source for and builds nothing into.
-* **Why the eleventh cannot simply be removed.** Two other plan requirements produce it
-  jointly. The plan requires tracing as a cross-cutting concern (§0.1.1.2, and Phase F's
-  "centralized logging, metrics, tracing"), which `infra/modules/ecs-service` delivers with
-  an OTLP collector sidecar created for every workload — `enable_telemetry_collector`
-  defaults to `true` and neither root overrides it. The plan also requires an application
-  tier whose egress is enumerated rather than open (§0.4.1.9, §0.7.8), and the public
-  registry the collector is published to has neither an interface endpoint nor a managed
-  prefix list. With that egress enumerated no task could pull its sidecar, so no task could
-  start at all — an outage that plans cleanly. Mirroring the image into this registry puts
-  the pull on the `ecr.api` and `ecr.dkr` endpoints the tasks already reach.
-* **Alternatives considered and rejected.** Re-opening `0.0.0.0/0` egress on 443 for the
-  pull — rejected outright, as that is the allow-all the enumerated egress replaced.
-  Pushing the collector into one of the ten repositories under a distinct tag — rejected
-  because a repository's lifecycle policy expires images by count, so ordinary service
-  releases would expire the third-party image. Dropping the sidecar and exporting straight
-  to the X-Ray OTLP endpoint, which needs no image — rejected because it requires an `xray`
-  interface endpoint and an ADOT SDK dependency in every service, and neither appears in
-  the plan's endpoint list (§0.4.1.9) or its dependency inventory (§0.6.1.1), trading a
-  one-repository divergence for a larger multi-component one. An ECR pull-through cache —
-  rejected because the registry still materialises a cache repository on first pull, so the
-  provisioned total is unchanged while digest-pinned references stop resolving until a tag
-  pull has warmed the cache.
-* **What is asserted.** `local.repository_names` unions the two lists, so every output key
-  and all fifteen consuming files are unchanged. The ten are held by the module's own
-  `validation` at plan time and, independently, by the "Verify hand-written Terraform prose
-  counts against the declarations" gate in `.github/workflows/infra-ci.yml`, which reads the
-  literal default and compares the **whole** list — a prefix comparison was tried first and
-  let a smuggled eleventh entry pass, so the gate is mutation-verified from both sides.
-* **Files.** `infra/modules/ecr/variables.tf`, `infra/modules/ecr/main.tf`,
-  `infra/modules/ecr/outputs.tf`, `.github/workflows/infra-ci.yml`.
-
 #### D-LAMBDA-PACKAGED-OUTSIDE-TERRAFORM — operational Lambda archives are built by a script, not a provider
 
 * **Baseline / plan.** The plan's provider inventory for the environment roots is
@@ -6997,535 +6948,6 @@ throughout and never modified. Convention:
   `infra/envs/prod/main.tf`, `infra/envs/dev/versions.tf`, `infra/envs/prod/versions.tf`,
   `.github/workflows/infra-ci.yml`, `.github/workflows/deploy.yml`,
   `docs/runbooks/deploy.md`, `.gitignore`.
-
-### 7.5 Withdrawn divergence identifiers
-
-ONE identifier has been withdrawn, because the behaviour it registered was never built. It is
-recorded here, outside §7.4, so that the register above contains only live differences while
-the identifier still resolves to something for a reader who meets it in an older comment or
-commit message. Assumptions: the heading level and the placement are both deliberate — a
-withdrawn identifier kept as a `####` entry inside §7.4 would be counted by that section's own
-measured heading count as though it registered a live difference, which is the one thing it
-must not be read as.
-
-Refactoring Rationale: this subsection held TWO entries and now holds one. `C-ROUNDING`, the
-interest-accrual rounding difference, was withdrawn here on the reading that the accrual should
-reduce as the baseline does; that disposition is reversed and the entry is LIVE again in §7.4,
-because transformation rule T3 states half up for the money path with no exception for the
-accrual and the plan is frozen. A reader arriving from a comment that describes `C-ROUNDING` as
-withdrawn is reading a citation from that intervening period; the live entry in §7.4 is
-authoritative, and it records the reversal in its own reasoning rather than leaving the two
-readings to be reconciled from the outside.
-
-#### `D-REJECT-109-DURABLE` — the durable reason-109 reject row was never built
-
-This identifier is withdrawn because the behaviour it registered **does not exist and was
-never implemented**, which is a different failure from a difference that was registered and
-then reversed: this one described a design that no code ever carried. The live difference at that paragraph is registered as
-[`D-POSTING-ATOMIC-NO-REJECT-109`](#d-posting-atomic-no-reject-109--a-failed-account-rewrite-discards-the-whole-post-and-reason-109-still-reaches-no-stream),
-which states the atomicity that IS shipped and states plainly that no reject row is written.
-
-* **What it claimed.** That a failed account rewrite both discarded the partial post AND
-  wrote one row to `ledger.transaction_rejects` under reason code **109** with the
-  description `ACCOUNT RECORD NOT FOUND`, from outside the rolled-back unit of work so the
-  rollback could not take it away.
-* **What is actually shipped.** The first half only. `PostTransactionsJob` owns one transaction
-  boundary PER FEED RECORD and wraps the account write in no handler, so the failure propagates
-  and that record's three writes roll back together; there is no second boundary and no writer
-  outside it. Reason 109 is written nowhere:
-  `RejectReason.isPersistedToRejectStream()` returns `false` for
-  `ACCOUNT_NOT_FOUND_ON_REWRITE` alone, `PostingValidationResult` refuses to accept it, and
-  `TransactionRejectRecordMapper` declares the persisted domain as {100, 101, 102, 103}. A
-  search of every main source for `ACCOUNT_NOT_FOUND_ON_REWRITE` returns the constant, that
-  predicate and that refusal, and nothing that persists anything.
-* **How the claim survived.** The one test that appeared to demonstrate the row —
-  `TransactionRejectRepositoryIT.aFailingAccountRewriteIsRecordedAsADurableReasonOneHundredAndNineRow`
-  — constructed and saved the row itself and then asserted it was there. It never invoked the
-  posting job, the validation rule or any producer, so it could not have failed if no
-  producer existed, which is exactly what happened. That test is deleted rather than
-  repaired: what it could honestly assert is that the reason-code COLUMN admits the value,
-  and the case beside it already asserts precisely that, under a name that says so.
-* **What was still carrying the claim, and is not any more.** This record and the case that
-  survived the deletion both described the withdrawal in the past tense before the artifacts
-  matched it. Three things did not: the test named above was still present and still running;
-  and section 7.4 -- whose subject is divergences CLAIMED BY SHIPPED CODE -- still carried a
-  full live entry under this identifier, once in its own body and once again in the
-  continuation appended after *Related documents*, the two byte-identical to each other and
-  both citing the deleted test as where the behaviour was verified. All three are now gone,
-  and section 7.4's four heading counts were re-measured rather than decremented, which that
-  section's own count paragraph records as its eighth pass. Refactoring Rationale: prose that
-  describes a deletion is not a deletion, and the gap between the two is invisible to every
-  gate this repository runs -- the test compiled, passed and proved nothing, and the stale
-  entry read as authoritative to anyone who reached section 7.4 before reaching this one.
-  Assumptions: the entry removed is not replaced, because the difference that IS shipped at
-  that paragraph already has its own entry,
-  [`D-POSTING-ATOMIC-NO-REJECT-109`](#d-posting-atomic-no-reject-109--a-failed-account-rewrite-discards-the-whole-post-and-reason-109-still-reaches-no-stream),
-  and a second entry beside it would recreate exactly the contradiction being removed.
-* **Why it is withdrawn rather than implemented.** The three grounds are recorded in full in
-  the live entry: a second transaction boundary would qualify the atomicity that the same
-  file exists to guarantee; a row the baseline's stream does not carry would break the
-  byte-for-byte reject-stream comparison [§9.1](#91-the-comparison-contract) depends on; and
-  the failure is already observable as a failed batch state with the task's own logged
-  exception, so nothing is lost by not tabling it. Assumptions: this is a case where honouring
-  the plan's parity requirement and declining an apparent improvement point the same way,
-  which is why the decision needed no trade-off between them.
-* **Files.**
-  `services/batch-service/src/main/java/com/carddemo/batch/dto/RejectReason.java`,
-  `services/batch-service/src/main/java/com/carddemo/batch/job/PostTransactionsJob.java`,
-  `services/transaction-service/src/test/java/com/carddemo/transaction/repository/TransactionRejectRepositoryIT.java`,
-  `services/transaction-service/src/test/resources/fixtures/reject_109_rewrite_invalid_key/README.md`.
-
-## 8. Inventory caveats a reader will otherwise contradict
-
-The inventory in [§1](#1-the-verified-baseline-inventory) counts repository
-artifacts. It does not claim that every `COPY` statement resolves from the
-repository, that every catalogued access path is a base dataset, or that every
-member of a scheduler listing belongs in the one curated target state machine.
-Those distinctions are load-bearing: changing any one of them changes a plausible
-count without changing the repository.
-
-### 8.1 Repository copybooks are not the whole compiler include path
-
-[`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl) includes
-`CMQPMOV` at **L167** and `CMQGMOV` at **L170**. Neither member exists under
-[`app/cpy`](../../app/cpy), in an extension copybook directory or anywhere else in
-this repository; both are vendor-supplied MQ copybooks resolved from the platform's
-compiler library.
-
-Assumptions: the figures **30** under `app/cpy` and **62** repository-wide are
-therefore counts of copybook *files held by this repository*, not counts of every
-include a compiler needs in order to build every program. Treating the two vendor
-members as omissions from the 62 would mix a source-repository inventory with an
-installed-toolchain inventory. Conversely, adding them to 62 would make the result
-depend on which MQ distribution happened to be installed. The target does not
-transcribe those option structures into application-owned classes;
-[`messaging-contracts.md`](messaging-contracts.md) owns the field-by-field message
-contract and the transport-client configuration that replaces them.
-
-### 8.2 Ten persistent base clusters and three alternate indexes
-
-The persistent VSAM population is **ten base KSDS clusters plus three alternate
-indexes**:
-
-| Population | Members | Target disposition |
-|---|---|---|
-| 10 base clusters | `ACCTDATA`, `CARDDATA`, `CARDXREF`, `CUSTDATA`, `TRANSACT`, `USRSEC`, `DISCGRP`, `TRANTYPE`, `TRANCATG`, `TCATBALF` | Tables in the eight canonical schemas, mapped field by field in [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) |
-| 3 alternate indexes | `CARDAIX`, `CXACAIX`, `TRANSACT.VSAM.AIX` | `idx_cards_account_id`, `idx_card_xref_account_id`, `idx_transactions_proc_ts` |
-
-A list of **eight** is answering a different question: the base CICS definition has
-eight `DEFINE FILE` resources, but two of those are `CARDAIX` and `CXACAIX`
-*paths*, leaving six base clusters. A repository grep can instead return
-**eleven** KSDS names because the statement job creates a `TRXFL` work cluster,
-loads it with the transaction master in card order, reads it, and discards it. That
-work cluster is a non-persistent projection, not an eleventh master. The three
-figures are not alternatives:
-
-```text
-  8  CICS FILE resources       = 6 base clusters + 2 AIX paths
- 10  persistent base clusters  = the datastore population
- 11  KSDS names found in JCL   = 10 persistent + 1 statement work cluster
-```
-
-Assumptions: the word *cluster* in the ten-count means a persistent base dataset.
-It excludes both catalogued alternate-index objects and the statement work cluster.
-[`context-and-container-diagrams.md`](context-and-container-diagrams.md) owns the
-current-state picture and the reproducible count commands; the present table owns
-the disposition.
-
-### 8.3 `samples/**` is reference material, not migration scope
-
-[`samples`](../../samples) contains **15** artifacts: 9 JCL examples, 4 procedure
-examples and 2 packaged runtime archives. The tree is **REFERENCE** material. It is
-not included in the 38-member base JCL count, its jobs and procedures do not create
-extra matrix rows, and its packaged runtimes are not target build inputs. Every file
-under `samples/**` is preserved exactly as supplied.
-
-Trade-offs: counting the nine sample JCL members in the repository-wide JCL total
-is useful — it explains how 38 base members plus 8 extension members plus 9 samples
-produce 55 repository files — while treating them as migration targets would be
-wrong. The accepted distinction is therefore *counted for reconciliation, excluded
-from ownership scope*. That lets a repository-wide search close arithmetically
-without turning examples into deployables.
-
-### 8.4 Scheduler membership does not imply membership in the curated state machine
-
-[`batch-orchestration.md`](batch-orchestration.md) consolidates the write-path work
-into one state machine and explicitly defers the work outside that consolidation to
-this register. Every deferred job has a disposition:
-
-| Deferred scheduler work | Why it is not a state of the curated machine | Disposition |
-|---|---|---|
-| `READACCT`, `READCARD`, `READCUST`, `READXREF` | Read-only unloads, not write-path transitions | Service-owned read/export operations and migration-verification inputs for the account and card data they expose |
-| `TRANTYPE`, `TRANCATG`, `TCATBALF` | Dataset refresh/load utilities | Idempotent data-load operations for `reference.transaction_types`, `reference.transaction_categories` and `ledger.transaction_category_balances` |
-| `DISCGRP` | Disclosure-group dataset refresh | Idempotent load of `reference.disclosure_groups`, including the required `DEFAULT` rows |
-| `CBPAUP0J` | Authorization-extension maintenance | `authorization-service` `PurgeJob`, mapped from `CBPAUP0C` in [§2.7](#27-authorization-service) |
-| `MNTTRDB2` | Transaction-type maintenance | `reference-service` transaction-type maintenance, mapped from `COBTUPDT` in [§2.5](#25-reference-service) |
-| `TRANEXTR` | Db2-to-flat reference extraction | Reference-data export/migration interface for transaction types and categories; it is not part of the posting unit of work |
-| `TXT2PDF1` | The utility itself has no target | The no-target retirement and both consequences are recorded in [§5.2](#52-retired-with-no-target-at-all--exactly-two) |
-
-Assumptions: the scheduler artifacts prove that these jobs were connected to other
-jobs; they do not define the target's service boundaries. Grouping all of them into
-one machine merely because one scheduler listing contains them would merge read-only
-exports, reference maintenance, authorization retention and statement rendering
-into the posting transaction. The owning data and behaviour determine the
-disposition instead.
-
-
-## 9. The parity oracle and why warn is green
-
-The existing three-layer suite documented by
-[`tests/README.md`](../../tests/README.md) is the **functional-parity oracle**. It is
-REFERENCE material for this migration: its fixtures, golden masters, dependency
-pins, runner semantics and expected aggregate result are not rewritten or re-pinned
-to make a target implementation pass. Target-side Java, TypeScript and Python tests
-are strictly additive.
-
-### 9.1 The comparison contract
-
-The parity protocol has four explicit steps:
-
-1. run the COBOL pipeline over the controlled fixtures and retain its golden outputs;
-2. run the equivalent target job over the same logical data after migration;
-3. apply the **same timestamp normalisation** to both sides; and
-4. compare the reject stream, posted transaction records, updated master records and
-   return code.
-
-The comparison is intentionally wider than a final row count. A job can preserve the
-number of rows while changing which transactions posted, which rejects were
-emitted, which account balances moved or which condition code was returned. Those
-are observable business outcomes, so all four surfaces belong to the oracle.
-[`batch-orchestration.md`](batch-orchestration.md) owns the state-by-state use of the
-comparison, and [`observability.md`](observability.md) owns how parity results appear
-in logs, metrics and CI reporting.
-
-Trade-offs: golden masters are retained rather than regenerated from the target.
-Regenerating them from target output would make the implementation define its own
-expected result and would silently bless a divergence. The accepted cost is that an
-intentional difference must be registered here and asserted explicitly rather than
-made invisible by replacing the oracle.
-
-This is the comparison **contract**. It is not a claim that an end-to-end comparison
-has run against a provisioned target environment; the deployment boundary remains
-the one stated in [§11](#11-deployment-and-reversibility-boundaries).
-
-### 9.2 The return-code rubric
-
-[`tests/README.md`](../../tests/README.md) §8 defines the suite's graded return codes,
-and [`.github/workflows/tests.yml`](../../.github/workflows/tests.yml) **L28–L38**
-defines their CI interpretation:
-
-| Aggregate RC | Meaning | CI interpretation |
-|---:|---|---|
-| **0** | Pass | Green |
-| **4** | Warn / soft reject | **Green — non-blocking warn** |
-| **≥8** | Failure | Red |
-| **16** | Fatal / unrecoverable | Red |
-
-The runner aggregates the **highest** code observed. RC 2 is a usage error that
-aborts immediately and does not enter aggregation, so it is not a fifth result
-grade.
-
-**Warn is green.** The documented aggregate of **4** is the expected non-blocking
-state because [D-1](#d-1--the-exportimport-record-key-declaration)
-prevents `CBEXPORT` and `CBIMPORT` from compiling under the open-source compiler:
-ten of the twelve batch programs build, the export/import integration test is
-skipped with that reason, and the suite reports the condition rather than hiding it.
-The workflow deliberately lets `rc <= 4` succeed and makes `rc >= 8` fail.
-
-Assumptions: that warn is a property of the immutable baseline and **must not be
-read as a regression introduced by the migration**. A new target-side failure still
-raises the aggregate to at least 8 and fails CI; the known 4 neither masks nor
-downgrades it. [`observability.md`](observability.md) carries the same interpretation
-so that dashboard colour, workflow colour and this traceability register cannot
-disagree.
-
-
-## 10. Out of scope, including the baseline's own stated future work
-
-This section records absences, not deliverables. None of the following has a target
-artifact in the matrix, none is implied by a sibling diagram, and none should be
-inferred from the presence of a related managed service:
-
-| Out of scope | Boundary recorded by this matrix |
-|---|---|
-| Multi-region topology and disaster recovery | The target design is single-region; no cross-region data plane, failover path or recovery objective is delivered |
-| Blue-green and canary deployment | No parallel production colour, weighted cutover or canary analysis is delivered |
-| Kafka and Kinesis | The baseline's asynchronous requirement is request/reply, and [`messaging-contracts.md`](messaging-contracts.md) maps it to queues; no streaming platform is added |
-| Redis and ElastiCache | The baseline has no application cache tier and parity does not require one |
-| Read replicas | Reporting reads use read-only cross-schema views against the writer; no replica topology is delivered |
-| Db2 rewards extension | Listed in the root [`README.md`](../../README.md) **L381–L384** as roadmap material, not present as an implemented source program or a migration target |
-| IMS DC implementation | Listed in `README.md` **L384** as roadmap material, not part of the supplied authorization IMS database extension |
-| SFTP integration | Listed in `README.md` **L386–L389** as roadmap material; the existing FTP-to-JES tunnel is separately accounted for as a retired mechanism in [§5.3](#53-also-retired-as-mechanisms-with-no-cloud-analogue) |
-| Exposure of transactions for distributed application integration | Listed in `README.md` **L389** as roadmap material; it is not the same thing as eliminating the internal two-resource commit in [D-6](#d-6--the-distributed-commit-is-eliminated-not-emulated) |
-| External point-of-sale / authorization client | The baseline supplies no request producer, only [`tests/mocks/mq_request_stub.py`](../../tests/mocks/mq_request_stub.py), a deterministic test double; building a production client is not requested |
-
-The absent external client explains why there is no program-to-service row for a
-point-of-sale producer. The queue consumer, request and response copybooks, routing
-metadata and authorization decision are all mapped; the actor that originates the
-request is outside the supplied system boundary. Adding a row for it would falsely
-turn a test instrument into a production component.
-
-Assumptions: the root README's roadmap is evidence of exclusion, not an instruction
-to implement those items in this migration. Four entries — Db2 rewards, IMS DC,
-SFTP and distributed-application transaction exposure — are called out because the
-baseline itself names them, while the first five are architecture choices excluded
-consistently by all eight sibling documents. Recording them here prevents a reader
-from treating an unlisted capability as an accidental omission or an implied
-delivery.
-
-
-## 11. Deployment and reversibility boundaries
-
-The matrix records **traceability and ownership**, not evidence of a live
-deployment. Target modules may be authored or statically validated, but
-`terraform apply` against a real account is an operator action outside this scope.
-Consequently:
-
-* no row asserts that a service, table, queue, state machine, dashboard, alarm or
-  user interface has run in a provisioned environment;
-* no target count is presented as a runtime measurement, benchmark, service-level
-  objective or production observation;
-* no absence listed in [§10](#10-out-of-scope-including-the-baselines-own-stated-future-work)
-  is presented as delivered; and
-* target names identify the owner of migrated behaviour even where environment
-  composition remains an operator concern.
-
-Assumptions: an ownership mapping is useful before deployment because it closes
-architectural gaps without pretending to close operational ones. Conflating the two
-would make a source-to-target row look like execution evidence, which it is not.
-The honest statement is narrower: every baseline artifact has a disposition, and
-every intentional behavioural difference has an owner and a verification contract.
-
-The reverse boundary is equally explicit. Every baseline artifact cited in this
-document remains in place, unmodified and runnable on its existing path. The test
-suite remains its oracle, the job and region definitions remain available, and none
-of the target mappings deletes or rewrites them. **Reverting to the mainframe path
-requires no un-migration**, because there is no destructive migration step to undo.
-**The migration adds a path; it does not remove one.**
-
-Trade-offs: preserving both paths means the repository carries two expressions of
-the business rules and must keep their differences visible. The alternative —
-describing the target as a replacement and the baseline as retired — was rejected
-because it would contradict the repository state and remove the independent oracle
-needed for parity. The accepted cost is the divergence register in [§7](#7-the-divergence-register):
-differences are explicit and reviewable rather than hidden behind a claim that one
-path supersedes the other.
-
-
-## 12. Completeness and the single-authority contract
-
-This document is complete when, and only when, all four of these statements remain
-true:
-
-1. the service matrix accounts for all **44** migration-scope programs, with its
-   arithmetic printed in [§2.11](#211-coverage-arithmetic);
-2. [§4](#4-non-program-artifact-coverage) accounts for every non-program asset
-   class, with inventory traps recorded in [§8](#8-inventory-caveats-a-reader-will-otherwise-contradict);
-3. [§5](#5-the-retirement-register) gives every retirement a named analogue or
-   places it in the exactly-two no-target population, while [§6](#6-the-dangling-programcocrdsec)
-   keeps the source-less CSD definition distinct from retirement; and
-4. [§7](#7-the-divergence-register) is the single register of every intentional
-   behavioural difference, with [§9](#9-the-parity-oracle-and-why-warn-is-green)
-   defining the oracle that detects unregistered ones.
-
-If a count, mapping, retirement or divergence in another document disagrees with
-this file, **this file remains the authority and the other document must be aligned
-to it**. Siblings own the details of their domains; this document owns the
-cross-domain set. That division is what allows a reviewer to ask both *"how does
-this work?"* in the owning sibling and *"is this the complete set?"* here without
-maintaining nine competing inventories.
-
-Refactoring Rationale: the former short-form matrix mixed ownership rows and
-divergences without the coverage arithmetic, retirement populations, paragraph
-pairs or inventory caveats needed to prove completeness. Expanding it into one
-authoritative index makes omissions mechanically visible: a program is either in a
-service subtotal, a UI-route subtotal or the retirement subtotal; an asset class has
-a disposition; and a behavioural difference has a six-part register entry. The
-accepted cost is document length, which is bounded by citing the owning sibling
-rather than duplicating its implementation detail.
-
-
-## Related documents
-
-All eight architecture siblings and the documentation standard are present and
-linked. Each sibling owns detail that this index cites rather than restates.
-
-| Document | What it owns that this document indexes |
-|---|---|
-| [`service-catalog.md`](service-catalog.md) | The canonical eight service names, responsibilities, owned data, dependency edges and reconciliation of the four component populations |
-| [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) | Field-by-field copybook-to-column lineage, fixed-record decoding, the ten-cluster and three-index storage mapping, and data-model-specific divergences |
-| [`context-and-container-diagrams.md`](context-and-container-diagrams.md) | Current-state and target-state boundaries, actors, containers, resource populations and control-flow placement |
-| [`batch-orchestration.md`](batch-orchestration.md) | Job-to-state mapping, condition-code semantics, generation datasets, scheduler curation and the `TXT2PDF1` edge-collapse consequence |
-| [`messaging-contracts.md`](messaging-contracts.md) | Queue mapping, positional wire format, correlation, ordering, deduplication, expiry handling and the transactional-outbox obligation |
-| [`security-and-identity.md`](security-and-identity.md) | Identity mapping, authorization policy, credential non-carry-forward, encryption and network isolation |
-| [`observability.md`](observability.md) | Logs, metrics, traces, alarms, the fourteen error-emission call sites and the warn-is-green interpretation |
-| [`design-token-reference.md`](design-token-reference.md) | The mapset-to-route and field-to-token presentation mapping, including the response-driven field-error highlight |
-| [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) | The documentation convention this document follows, including the four rationale labels and the paired what-and-why comment idiom |
-
-The root [`README.md`](../../README.md) and
-[`MIGRATION_README.md`](../../MIGRATION_README.md) are this document's declared
-consumers. The in-repository precedent for the explainability convention is
-[`tests/README.md`](../../tests/README.md) §12, and
-[`CONTRIBUTING.md`](../../CONTRIBUTING.md) states the convention for the migrated
-trees.
-
----
-
-
-#### D-BROWSE-PREDICATE-STATED — the paging comparison is stated in the query, not left to the access method
-
-* **Baseline behaviour.** [`COTRN00C.cbl`](../../app/cbl/COTRN00C.cbl) positions its
-  browse in `STARTBR-TRANSACT-FILE` at **L591**, naming the dataset, the record
-  identification field and the key length at **L594-L596**. The line that would state
-  the comparison — the greater-or-equal option at **L597** — is **commented out**, so
-  which rows the position admitted was decided by the access method's default rather
-  than by anything a reader of the source can determine. The same program's forward and
-  backward reads then walk from wherever that position landed.
-* **Target behaviour.** `TransactionListService` states the comparison explicitly in the
-  query: strictly greater than the trailing key when paging forward, strictly less than
-  the leading key when paging backward, each with the matching sort direction and a
-  limit of one more row than the page holds.
-* **Category.** Documented divergence — browse boundary.
-* **Why the difference is accepted.** A predicate that is written down is a predicate
-  that can be tested, and the strict form is the one that makes a cursor a cursor: an
-  inclusive comparison re-delivers the row the cursor names, so a client paging forward
-  would receive its own last row again as the first row of the next page. The baseline
-  cannot exhibit that because its own key-capture and its next-page probe happen to
-  advance past the boundary row, so the strict predicate reproduces the rows the
-  terminal displayed. What changes is only that the rule is now legible at the call
-  site rather than inherited from an access method's default.
-* **Where it is verified.** `TransactionRepositoryIT`'s
-  `theCardFilteredKeysetPathsStepForwardAndBackwardStrictly` steps a live page boundary in
-  both directions and asserts the boundary row is not re-delivered, and
-  `theKeysetPageBoundaryIsUnaffectedByAnInsertBehindTheCursor` asserts the stated
-  predicate is what makes that hold under a concurrent insert.
-  `KeysetPaginationGateProofTest` separately forbids any offset-paging construct in the
-  list-handling packages, so the stated predicate cannot be replaced by one.
-* **Files.**
-  `services/transaction-service/src/main/java/com/carddemo/transaction/service/TransactionListService.java`,
-  `services/transaction-service/src/main/java/com/carddemo/transaction/repository/TransactionRepository.java`.
-
-#### D-BROWSE-TRAILING-KEY-ON-SHORT-PAGE — a short page still names the last row it carried
-
-* **Baseline behaviour.** [`COTRN00C.cbl`](../../app/cbl/COTRN00C.cbl) captures the
-  trailing browse key **inside** the branch that fills the tenth screen slot, at
-  **L438-L439**, so a page that returned fewer than ten rows leaves the previously
-  captured trailing key standing. Its leading key is captured unconditionally at
-  **L393**, and **L315** sets the no-further-page condition whenever the fill read
-  nothing at all.
-* **Target behaviour.** The page envelope's `lastKey` names the last row the page
-  actually carried, whether the page is full or short, and a page carrying no rows names
-  no boundary at all and reports no further page.
-* **Category.** Documented divergence — cursor identity on a short page.
-* **Why the difference is accepted.** A stale trailing key is a cursor that names a row
-  from an earlier page, so a client paging forward from it silently re-reads rows it has
-  already seen. Because the baseline only refreshes the key on a full page, the
-  condition is reachable exactly when the last page is short — which is every browse
-  whose row count is not a multiple of ten. Naming the row actually carried removes the
-  repetition without changing which rows any page contains, and it keeps the envelope's
-  two facts independent in the same way
-  [`D-LASTKEY-RECEIVED`](#d-lastkey-received--the-page-cursor-names-only-rows-the-caller-received)
-  does for the card browse.
-* **Where it is verified.** `PageResponseTest`'s `emptyPageNamesNoBoundary` asserts a page
-  with no rows names neither boundary and reports no further page, and
-  `finalPageMayNameItsTrailingBoundary` asserts a short final page still names the key of
-  its own last row; `TransactionRepositoryIT`'s
-  `theSurplusRowRevealsAFurtherPageWithoutBecomingPartOfIt` asserts the look-ahead row
-  never becomes the boundary.
-* **Files.**
-  `services/transaction-service/src/main/java/com/carddemo/transaction/service/TransactionListService.java`,
-  `services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java`.
-
-#### D-VIEW-READ-WITHOUT-LOCK — the detail read acquires no lock, because nothing rewrites
-
-* **Baseline behaviour.** [`COTRN01C.cbl`](../../app/cbl/COTRN01C.cbl) reads the
-  transaction record with the **UPDATE** option at **L275**, which acquires an exclusive
-  read-for-update lock. The program contains no `REWRITE` and no `WRITE` anywhere in its
-  330 lines, so the lock it takes is never used, and it is held until the task's own
-  syncpoint.
-* **Target behaviour.** `TransactionViewService` performs a plain read-only lookup with
-  no lock mode requested, inside a read-only transaction boundary.
-* **Category.** Documented divergence — locking and contention semantics.
-* **Why the difference is accepted.** The lock protected nothing: no statement in the
-  program modifies the record it locked, so its only observable effect was to exclude
-  other readers-for-update and any writer for the duration of a screen read. Removing it
-  cannot change what the screen displays — the row read is the same row — and it removes
-  a contention point between a detail view and the posting job, which does write the same
-  table. The direction of the change is worth stating plainly: this target holds *fewer*
-  locks than the baseline, so a concurrent writer that the baseline would have blocked
-  now proceeds, and a detail view is therefore a snapshot rather than a pin. That is the
-  correct reading for a screen that displays and does not edit. The contexts that DO edit
-  hold contention one of two ways, and which one is decided by the copybook rather than by
-  preference: where the baseline record carries a before-image comparison the target
-  expresses it as a version column, as the *Optimistic concurrency is expressed natively*
-  note earlier in this document records; where it does not — the two authorization segments
-  derive field for field from copybooks with no version member, so no version column exists
-  to compare — the write carries its own contention control. Which form it carries is decided
-  by the shape of the write. A write that ASSIGNS fields from values the caller supplied has no
-  single-statement form, so the target takes a pessimistic row lock for the duration of it,
-  which is what the reference obtains implicitly by retrieving a segment through the
-  command-level interface before replacing it; `FraudMarkingService` is that case. A write that
-  INCREMENTS members instead is performed as one arithmetic statement computed in the database,
-  and where the increment must respect a limit that statement additionally carries the test in
-  its own `where` clause; the pending-authorization summary is that case, and it takes no lock at
-  all.
-* **Where it is verified.** `TransactionViewServiceTest` asserts the read goes through the
-  plain keyed lookup, that no method the repository declares or inherits carries a lock
-  annotation of either family, and that a failed read is reported with this program's own
-  capitalised failed-read sentence rather than as a contention refusal.
-* **Files.**
-  `services/transaction-service/src/main/java/com/carddemo/transaction/service/TransactionViewService.java`.
-
-#### D-REFERENCE-UPSERT-NOT-EXPOSED — the maintenance screen's insert-on-miss has no single operation
-
-* **Baseline behaviour.** Three baseline programs write `TRANSACTION_TYPE` with three
-  different behaviours, and the difference is in what each does when the update matches no
-  row. The maintenance screen is an **upsert**:
-  [`COTRTUPC.cbl`](../../app/app-transaction-type-db2/cbl/COTRTUPC.cbl)
-  `9600-WRITE-PROCESSING` at **L1531-L1592** issues the update and, on `SQLCODE +100`,
-  performs `9700-INSERT-RECORD` instead of reporting a miss. The list screen's inline edit
-  is a **strict update**:
-  [`COTRTLIC.cbl`](../../app/app-transaction-type-db2/cbl/COTRTLIC.cbl)
-  `9200-UPDATE-RECORD` at **L1837-L1894** issues the same update and, on `SQLCODE +100`,
-  reports not found and inserts nothing. The batch driver **soft rejects and continues**:
-  [`COBTUPDT.cbl`](../../app/app-transaction-type-db2/cbl/COBTUPDT.cbl)
-  `10032-UPDATE-DB` at **L166-L195** routes every failure to `9999-ABEND`, which despite its
-  name only displays the message and sets return code 4 at **L230-L233**, leaving the
-  sequential read loop at **L93-L96** free to take the next record.
-* **Target behaviour.** Two of the three are delivered as their own operation and the third
-  is not. `PUT /api/v1/reference/transaction-types/{typeCd}` is the **strict** update: it
-  answers 404 on a miss and inserts nothing, which is what the published contract declares by
-  carrying 404 among that operation's answers. `POST /api/v1/reference/maintenance-actions` is
-  the **soft-reject** run: each action commits in its own transaction and the reply carries one
-  outcome per action with the worst condition code seen. There is **no operation whose single
-  call is an upsert**; a client reaching for the maintenance screen's behaviour issues the
-  create and, if it is refused as a duplicate, the replace.
-* **Category.** Documented divergence — operation granularity, not rule content.
-* **Why the difference is accepted.** The published contract decided it, and it decided it
-  the same way in both directions: the create operation carries 409 among its answers and the
-  replace operation carries 404, so a duplicate and a miss are each reportable conditions
-  rather than silent branches. An upsert cannot report either — that is precisely what makes
-  it an upsert — so exposing one would give this interface a third write whose reply could not
-  distinguish a row it created from a row it replaced. Two alternatives were weighed. Adding
-  an upsert operation to the contract was rejected because the document is the frozen
-  agreement between this service and its clients, and widening it to recover a screen
-  behaviour no migrated client performs is a change to the contract rather than to the code.
-  Making `PUT` an upsert was rejected outright: it would take the 404 the contract publishes
-  and make it unreachable, so a client that mistyped a code would silently create a type
-  instead of being told the code does not exist. The cost is stated plainly: a caller
-  reproducing the maintenance screen makes two calls where the baseline operator made one,
-  and observes an intermediate 409 the baseline never surfaced.
-* **Where it is verified.** `ReferenceApiRoutingContractTest` asserts in both directions that
-  the delivered handlers and the declared operations are the same set and that the count is
-  nineteen, so an upsert added later without a contract entry — or an entry without a handler
-  — fails the build. `ReferenceWriteBehaviourTest` asserts that the strict replace reports the
-  miss rather than inserting, and that the batch run applies later actions after an earlier one
-  is rejected.
-* **Files.**
-  `services/reference-service/src/main/java/com/carddemo/reference/service/TransactionTypeService.java`,
-  `services/reference-service/src/main/java/com/carddemo/reference/service/ReferenceBatchUpdateService.java`,
-  `services/reference-service/src/main/java/com/carddemo/reference/api/TransactionTypeController.java`,
-  `services/reference-service/src/main/resources/openapi/reference-api.yaml`.
 
 #### D-REFERENCE-TRIM-TRAILING-ONLY — stored descriptions keep a leading blank the baseline would have dropped
 
@@ -8017,116 +7439,252 @@ trees.
   `services/reporting-service/src/main/java/com/carddemo/reporting/service/CategoryBalanceReportService.java`,
   `services/reporting-service/src/main/java/com/carddemo/reporting/task/CategoryBalanceArtifactPublisher.java`.
 
-### 7.1 Provisioned-topology divergences from the specification's stated counts
 
-The entries above record differences between the BASELINE's behaviour and the target's. The
-five below record a different kind: places where the delivered infrastructure holds a
-different COUNT of a resource than the technical specification states, or provisions a
-control the specification asks for that no request path yet exercises. They are collected
-here rather than argued only at their declaration sites, because a count is the one figure a
-reviewer checks against the specification and finding a mismatch with no register entry is
-indistinguishable from finding drift.
+#### D-REPORT-PRESET-RANGE-SERVICE-CLOCK — a preset report's bounds are resolved by the service, not by the screen that submits it
 
-Assumptions: in every one of the first four, the count was not chosen freely. Each is forced
-by ANOTHER clause of the same specification, and closing the count would violate that clause
--- so the difference is recorded with the clause that forces it rather than resolved by
-matching the number. Where a reader wants the full argument it is stated at the declaration
-site in Terraform; what is here is the divergence, the forcing clause, and what bounds the
-cost.
+* **Baseline behaviour.** The report screen resolves its own preset ranges and puts the
+  results into the job control it submits.
+  [`CORPT00C.cbl`](../../app/cbl/CORPT00C.cbl) reads the clock at **L215** and, for the
+  monthly option, sets the start bound from the current year and month with a literal day
+  of one at **L217-L219** and derives the end bound at **L223-L234** with the
+  last-day-of-month idiom; the yearly option does the same at **L240-L255**. Its whole
+  edit chain sits inside the CUSTOM arm at **L256-L436**, so a preset range is never
+  edit-checked — it is computed. Both computed bounds then travel to the batch job in the
+  submitted control statements, which is what makes the PRESENTATION side the authority
+  for a preset range.
+* **Target behaviour.** For the two preset report types the SPA submits no bounds at all.
+  `ui/src/screens/reports/index.tsx` resolves the custom arm only, and
+  `services/reporting-service/.../service/ReportExecutionService.resolveRange` dispatches
+  the two preset report names to `resolveMonthlyRange()` and `resolveYearlyRange()`, each
+  of which reads `LocalDate.now(clock)` and reproduces the reference's own four steps in
+  the reference's own order. The custom type is unchanged: there the caller's validated
+  bounds ARE the authority and the service honours them.
+* **Category.** Documented divergence — the same range is computed on the other side of
+  the boundary. No range VALUE changes for any submission that does not straddle a
+  boundary instant.
+* **Why the difference is accepted.** The service already resolved preset bounds from its
+  own clock and discarded whatever the caller sent, so the delivered system had TWO
+  authorities and honoured one. A comment on the screen asserted the opposite — that
+  transmitting the bounds removed a midnight race the service-side default carried — which
+  a code review established as false. Two authorities that can disagree is the defect;
+  which one survives is the smaller question, and the service is the one that survives
+  because it is the only party present when the batch job actually runs, it is the party
+  whose clock the rest of the nightly chain is already keyed to, and it needs no trust in
+  a caller-supplied bound for a range the caller did not have to justify. **Alternatives
+  considered.** Making the service honour submitted preset bounds, which would have been
+  the more faithful port — the reference genuinely resolves them presentation-side. It was
+  rejected because it widens the accepted input surface of a report submission for a
+  reproducibility property that is recoverable another way: `ReportSubmissionResponse`
+  reports the resolved `startDate` and `endDate`, so a caller that must reproduce a
+  document re-submits those as a CUSTOM range and gets exactly the same bounds.
+* **The cost, stated rather than hidden.** A monthly or yearly run submitted seconds
+  either side of midnight on the last day of a month is bounded by the service's clock
+  rather than by the clock of the browser the operator was looking at, so two submissions
+  an operator experiences as simultaneous can resolve to two ranges. The window is the
+  request's own latency, once a month, on a report whose bounds the acknowledgement
+  reports back.
+* **Where it is verified.** `ui/src/screens/reports/rangeAuthority.test.tsx` asserts that a
+  monthly submission's request body carries neither bound — by comparing its key set, so a
+  bound reintroduced under any value fails — and that the custom arm still carries both.
+  `ui/src/api/reporting.test.ts` asserts the transport half. On the service side
+  `ReportExecutionServiceTest` asserts both preset ranges against a fixed clock, including
+  the month-end and year-end boundaries.
+* **Files.** `ui/src/screens/reports/index.tsx`, `ui/src/api/reporting.ts`,
+  `ui/src/screens/reports/rangeAuthority.test.tsx`,
+  `services/reporting-service/src/main/java/com/carddemo/reporting/service/ReportExecutionService.java`.
 
-#### D-NETWORK-ENDPOINT-SECURITY-GROUP -- the application group permits task-to-task 443
+#### D-STMT-ARTIFACT-ADMIN-ONLY — the rendered statement artifact is administrative, where the reporting surface is open to both user kinds
 
-* **Specification.** &sect;0.4.1.9 states that the security groups permit only
-  balancer-to-application on the container port, application-to-Aurora on the database port
-  and application-to-endpoint on 443. &sect;0.5.1.12 states that the module creates three
-  security groups.
-* **Delivered.** Three security groups -- the load-balancer group, the application group and
-  the isolated-data group -- with the interface-endpoint elastic network interfaces carrying
-  the APPLICATION group. The application-to-endpoint flow is therefore a self-referencing
-  443 rule pair on that group, which as a side effect also permits task-to-task 443.
-* **Category.** Documented flow divergence -- one permitted flow beyond the three stated,
-  arising from the group count being held at the stated three.
-* **Why the difference is accepted.** The two clauses cannot both be satisfied exactly: an
-  interface endpoint must carry a security group, so the task-to-endpoint flow has to
-  terminate on one, and every three-group arrangement adds a permitted flow beyond
-  &sect;0.4.1.9's three. A fourth, dedicated endpoint group was the arrangement for a period
-  and is the narrower rule set, but it exceeds &sect;0.5.1.12's stated count. The count is
-  held and the flow is registered here, because the extra flow reaches nothing: the module
-  validates `app_container_port` to exclude 443, so no service listens on it, and the only
-  443 listener in this VPC carries the load-balancer group. The divergence is therefore
-  visible in a plan rather than exploitable at run time.
-* **Where it is verified.** `infra/modules/network/main.tf` declares exactly three
-  `aws_security_group` resources and `outputs.tf` publishes all three, so a fourth
-  reappearing is visible in both the plan and the module's published contract; the port
-  validation that bounds the widened flow is asserted by that variable's own `validation`
-  block, so removing it fails the plan rather than silently widening the flow.
-* **Files.** `infra/modules/network/main.tf`, `infra/modules/network/variables.tf`.
+* **Baseline behaviour.** Reporting is an ORDINARY option. The main-menu option table
+  [`COMEN02Y.cpy`](../../app/cpy/COMEN02Y.cpy) declares option **9** at **L74**, names it
+  `'Transaction Reports'` at **L76**, points it at `CORPT00C` at **L77** and marks its
+  user type `'U'` on the line after; and
+  [`COMEN01C.cbl`](../../app/cbl/COMEN01C.cbl) **L136-L137** refuses an option to a
+  user-kind caller only when that option is marked `'A'`. The resource definitions agree:
+  [`CARDDEMO.CSD`](../../app/csd/CARDDEMO.CSD) **L409-L410** defines transaction `CR00`
+  over `CORPT00C` with no user-kind qualification at all. An ordinary operator therefore
+  reaches the whole reporting surface.
+* **Target behaviour.** The reporting surface stays open to both admitted kinds with ONE
+  exception: the address that streams a rendered statement artifact is restricted to the
+  administrative group. `SecurityConfig` declares `STATEMENT_ARTIFACT_PATH` as the
+  narrowest pattern covering the declared route, binds it with
+  `.requestMatchers(STATEMENT_ARTIFACT_PATH).access(statementArtifactAccess())`, and
+  `statementArtifactAccess()` returns
+  `AuthorityAuthorizationManager.hasAuthority(JwtRoleConverter.ADMIN_AUTHORITY)`. Every
+  other address on the surface — the submission, the descriptions, and the transaction rows
+  the artifacts were built from — remains reachable by either group claim.
+* **Category.** Documented divergence, and a deliberate security correction rather than a
+  port. It narrows an authority the baseline granted; it changes no value, no layout and
+  no message.
+* **Why the difference is accepted.** The artifacts this address serves are not per-card
+  documents. As `StatementController` records, the two artifacts hold **every cardholder's
+  statement in the run**, so admitting an ordinary group claim made one cardholder's
+  entitlement a handle on the whole portfolio. The baseline never had to answer this
+  question, because a 3270 operator who selected option 9 submitted a job and read its
+  printed output through the spool — there was no addressable object holding the run's
+  statements that a caller could ask for by name. The target creates that object, so it
+  also has to decide who may collect it, and the narrower answer is the only one that does
+  not turn a single entitlement into a bulk export. **Alternatives considered.** Admitting
+  the ordinary group, which is the more faithful reading of option 9's `'U'` marking, and
+  filtering the artifact per caller. The first was rejected on the disclosure above. The
+  second was rejected because an artifact is rendered once by the nightly chain and stored
+  whole — filtering it per caller would mean re-rendering on read, which would make a
+  statement's bytes depend on who asked for them and would defeat the parity comparison
+  the rendered form exists to support.
+* **The cost, stated rather than hidden.** An ordinary operator who could obtain the
+  printed report on the baseline must now ask an administrator for the rendered file. The
+  loss is bounded: the rows behind the artifact stay readable at the transaction address
+  for either kind, so the DATA remains available to the same population the baseline
+  served, and only the pre-rendered whole-run document is withheld.
+* **Where it is verified.** `StatementControllerTest` asserts both halves of the rule as
+  separate cases — *the administrative authority reaches the artifact collection* and *the
+  ordinary group authority is refused the artifact collection* — and keeps *either group
+  authority reaches the rows operation* beside them, so a future change that widened the
+  artifact rule or narrowed the rows rule fails a named case rather than passing quietly.
+* **Files.**
+  `services/reporting-service/src/main/java/com/carddemo/reporting/config/SecurityConfig.java`,
+  `services/reporting-service/src/main/java/com/carddemo/reporting/api/StatementController.java`,
+  `services/reporting-service/src/test/java/com/carddemo/reporting/api/StatementControllerTest.java`.
 
-#### D-SQS-PRIMARY-QUEUE-COUNT -- six primary queues where the specification tabulates five
+### 7.5 Withdrawn divergence identifiers
 
-* **Specification.** &sect;0.4.1.8 tabulates five primary queues, each with a dead-letter
-  companion.
-* **Delivered.** Six primary queues and six dead-letter queues.
-* **Category.** Documented topology divergence -- one primary queue more than the stated
-  count.
-* **Why the difference is accepted.** The specification assigns the two inquiry flows to two
-  DIFFERENT services: &sect;0.5.1.3 places the account-inquiry consumer (`COACCT01`) in
-  `account-service`, and &sect;0.5.1.6 places the date-conversion consumer (`CODATE01`) in
-  `reference-service`. One shared request queue cannot serve two independently-owned
-  consumers, because a queue offers no per-consumer selection: each receive removes whatever
-  message is next, so either service would destroy requests intended for the other and the
-  sender would observe a silent loss rather than an error. Splitting the shared request queue
-  into one per owning service is what makes &sect;0.5.1.3 and &sect;0.5.1.6 satisfiable at
-  once. The reply direction is split the same way, so a reply is never delivered to the
-  service that did not answer.
-* **Where it is verified.** Each consuming service names only its own queue in its
-  configuration, so a crossed wiring fails that service's own configuration closure test
-  rather than being discovered in production.
-* **Files.** `infra/modules/sqs/main.tf`, `infra/envs/dev/main.tf`, `infra/envs/prod/main.tf`.
+**THREE** identifiers are collected here, and one test decides membership: the difference the
+identifier registered **does not exist** — either it was never built, or the delivered artifact
+matches the specification the entry claimed it diverged from. They sit outside the live
+subsections so that those subsections carry only live differences while each identifier still
+resolves to something for a reader who meets it in an older comment, a review note or a commit
+message. Every heading here quotes its identifier in backticks, which is the signal
+distinguishing this subsection's entries from live ones at a glance and in a search.
 
-#### D-ECR-REPOSITORY-COUNT -- eleven repositories where the specification states ten
+Assumptions: three is this subsection's population and NOT a count of every withdrawn identifier
+in the register, because one withdrawal is recorded in place instead.
+[`D-12`](#d-12--withdrawn-the-account-view-information-line-no-longer-announces-a-successful-read)
+opens with its own `**Status.** **Withdrawn.**` line and stays in
+[§7.2](#72-divergences-owed-to-this-register-by-its-siblings), where it is reached by an ordered
+run of sibling-owed identifiers and cited from that section's own opening; moving it would
+renumber nothing but would break that run's reading order for the one entry in it a reader is
+most likely to arrive at from an outside citation. Trade-offs: the accepted cost is that
+withdrawal is discoverable in two places rather than one — mitigated because `D-12` announces its
+own status in its first part, which is the form this subsection's heading convention exists to
+substitute for and not a weaker version of it.
 
-* **Specification.** &sect;0.4.1.6 and &sect;0.5.1.12 state ten container-image repositories.
-* **Delivered.** Eleven. The eleventh, `aws-otel-collector`, holds a MIRROR of a pinned
-  third-party image rather than an artifact this repository builds.
-* **Category.** Documented topology divergence -- one repository more than the stated count,
-  holding no first-party artifact.
-* **Why the difference is accepted.** Two other clauses force it together. &sect;0.1.1.2 and
-  the cross-cutting requirements in &sect;0.9.4 mandate distributed tracing, delivered by a
-  collector sidecar in every task; and &sect;0.4.1.9 states that task traffic to AWS services
-  never leaves the private network and that the application tier has no internet route. With
-  no egress path a task cannot pull a sidecar image from a public registry, so without the
-  mirror no task could start -- from a plan that reported nothing wrong.
-* **Where it is verified.** The deployment workflow pushes only the first-party repositories
-  and performs the mirror as its own step, so an empty mirror is a failed deployment step
-  rather than a repository that silently never reports.
-* **Files.** `infra/modules/ecr/main.tf`, `infra/envs/dev/main.tf`, `infra/envs/prod/main.tf`,
-  `.github/workflows/deploy.yml`.
+Assumptions: withdrawal is for an identifier whose difference has no subject, and it is NOT the
+disposition for a superseded duplicate. Where two entries registered ONE difference and the
+difference is still live, the surviving entry is the whole record and the loser is deleted
+outright — a withdrawal record beside a live entry for the same difference would be a third
+statement of one fact, and the register would then contradict itself in the direction it is least
+able to detect. Two sign-on width-hint entries were removed on exactly that reading; the
+difference they competed to describe is registered once, as
+[`D-SIGNON-RETIRED-WIDTH-HINT`](#d-signon-retired-width-hint--the-second-8-char-hint-is-not-painted-because-the-column-it-describes-was-retired).
 
-#### D-NETWORK-INTERFACE-ENDPOINT-COUNT -- ten interface endpoints where the specification lists eight
+Assumptions: the heading level and the placement are both deliberate — a withdrawn identifier
+kept as a `####` entry inside §7.4 would be counted in that subsection's row of the derived table
+as though it registered a live difference, which is the one thing it must not be read as. The
+derived table in [§7](#7-the-divergence-register) therefore gives this subsection its own row.
 
-* **Specification.** &sect;0.4.1.9 lists eight interface endpoints -- the two
-  container-registry endpoints, logs, Secrets Manager, KMS, the queue service, the
-  orchestrator and the parameter store -- plus an object-store gateway endpoint.
-* **Delivered.** Ten interface endpoints. The two beyond the list are the tracing endpoint and
-  the identity-provider endpoint.
-* **Category.** Documented topology divergence -- two endpoints more than the stated list.
-* **Why the difference is accepted.** Both are the minimum private path for a capability the
-  same specification requires, under the constraint that the application tier has no internet
-  route. Tracing is mandated by &sect;0.1.1.2 and &sect;0.9.4 and the collector must reach the
-  tracing service; sign-on is an acceptance criterion in &sect;0.9.4 and the resource servers
-  must fetch the identity provider's signing keys to validate a token. Without these two
-  endpoints the only way to satisfy either requirement is an egress route from the application
-  tier, which &sect;0.4.1.9 forbids. Note the direction of the trade: adding them is precisely
-  what allowed a blanket application-tier egress rule to `0.0.0.0/0` to be deleted outright
-  rather than narrowed, so this count divergence buys a strictly SMALLER reachable surface
-  than the eight-endpoint arrangement it replaces.
-* **Where it is verified.** The endpoint set is asserted by name, and the continuous-integration
-  gate refuses any application-tier egress rule carrying a CIDR block, so a reintroduced public
-  route fails the pipeline rather than review.
-* **Files.** `infra/modules/network/main.tf`, `.github/workflows/infra-ci.yml`.
+Refactoring Rationale: one identifier has moved OUT of this subsection rather than into it.
+`C-ROUNDING`, the
+interest-accrual rounding difference, was withdrawn here on the reading that the accrual should
+reduce as the baseline does; that disposition is reversed and the entry is LIVE again in §7.4,
+because transformation rule T3 states half up for the money path with no exception for the
+accrual and the plan is frozen. A reader arriving from a comment that describes `C-ROUNDING` as
+withdrawn is reading a citation from that intervening period; the live entry in §7.4 is
+authoritative, and it records the reversal in its own reasoning rather than leaving the two
+readings to be reconciled from the outside.
 
-#### D-AUTHORIZATION-MESSAGING-TOKENISER-UNUSED -- WITHDRAWN: the unexercised tokeniser is retired rather than recorded
+#### `D-REJECT-109-DURABLE` — the durable reason-109 reject row was never built
+
+This identifier is withdrawn because the behaviour it registered **does not exist and was
+never implemented**, which is a different failure from a difference that was registered and
+then reversed: this one described a design that no code ever carried. The live difference at that paragraph is registered as
+[`D-POSTING-ATOMIC-NO-REJECT-109`](#d-posting-atomic-no-reject-109--a-failed-account-rewrite-discards-the-whole-post-and-reason-109-still-reaches-no-stream),
+which states the atomicity that IS shipped and states plainly that no reject row is written.
+
+* **What it claimed.** That a failed account rewrite both discarded the partial post AND
+  wrote one row to `ledger.transaction_rejects` under reason code **109** with the
+  description `ACCOUNT RECORD NOT FOUND`, from outside the rolled-back unit of work so the
+  rollback could not take it away.
+* **What is actually shipped.** The first half only. `PostTransactionsJob` owns one transaction
+  boundary PER FEED RECORD and wraps the account write in no handler, so the failure propagates
+  and that record's three writes roll back together; there is no second boundary and no writer
+  outside it. Reason 109 is written nowhere:
+  `RejectReason.isPersistedToRejectStream()` returns `false` for
+  `ACCOUNT_NOT_FOUND_ON_REWRITE` alone, `PostingValidationResult` refuses to accept it, and
+  `TransactionRejectRecordMapper` declares the persisted domain as {100, 101, 102, 103}. A
+  search of every main source for `ACCOUNT_NOT_FOUND_ON_REWRITE` returns the constant, that
+  predicate and that refusal, and nothing that persists anything.
+* **How the claim survived.** The one test that appeared to demonstrate the row —
+  `TransactionRejectRepositoryIT.aFailingAccountRewriteIsRecordedAsADurableReasonOneHundredAndNineRow`
+  — constructed and saved the row itself and then asserted it was there. It never invoked the
+  posting job, the validation rule or any producer, so it could not have failed if no
+  producer existed, which is exactly what happened. That test is deleted rather than
+  repaired: what it could honestly assert is that the reason-code COLUMN admits the value,
+  and the case beside it already asserts precisely that, under a name that says so.
+* **What was still carrying the claim, and is not any more.** This record and the case that
+  survived the deletion both described the withdrawal in the past tense before the artifacts
+  matched it. Three things did not: the test named above was still present and still running;
+  and section 7.4 -- whose subject is divergences CLAIMED BY SHIPPED CODE -- still carried a
+  full live entry under this identifier, once in its own body and once again in the
+  continuation appended after *Related documents*, the two byte-identical to each other and
+  both citing the deleted test as where the behaviour was verified. All three are now gone, and
+  the register's size is no longer a figure anyone decrements: it is the derived table in
+  [§7](#7-the-divergence-register), so a deletion is measured rather than adjusted, and the
+  continuation that once held the second copy no longer exists — every entry it carried sits in
+  §7 and the invariant row of that table is what holds it there. Refactoring Rationale: prose that
+  describes a deletion is not a deletion, and the gap between the two is invisible to every
+  gate this repository runs -- the test compiled, passed and proved nothing, and the stale
+  entry read as authoritative to anyone who reached section 7.4 before reaching this one.
+  Assumptions: the entry removed is not replaced, because the difference that IS shipped at
+  that paragraph already has its own entry,
+  [`D-POSTING-ATOMIC-NO-REJECT-109`](#d-posting-atomic-no-reject-109--a-failed-account-rewrite-discards-the-whole-post-and-reason-109-still-reaches-no-stream),
+  and a second entry beside it would recreate exactly the contradiction being removed.
+* **Why it is withdrawn rather than implemented.** The three grounds are recorded in full in
+  the live entry: a second transaction boundary would qualify the atomicity that the same
+  file exists to guarantee; a row the baseline's stream does not carry would break the
+  byte-for-byte reject-stream comparison [§9.1](#91-the-comparison-contract) depends on; and
+  the failure is already observable as a failed batch state with the task's own logged
+  exception, so nothing is lost by not tabling it. Assumptions: this is a case where honouring
+  the plan's parity requirement and declining an apparent improvement point the same way,
+  which is why the decision needed no trade-off between them.
+* **Files.**
+  `services/batch-service/src/main/java/com/carddemo/batch/dto/RejectReason.java`,
+  `services/batch-service/src/main/java/com/carddemo/batch/job/PostTransactionsJob.java`,
+  `services/transaction-service/src/test/java/com/carddemo/transaction/repository/TransactionRejectRepositoryIT.java`,
+  `services/transaction-service/src/test/resources/fixtures/reject_109_rewrite_invalid_key/README.md`.
+
+#### `D-SQS-PRIMARY-QUEUE-COUNT` — the sixth primary queue was never provisioned
+
+This identifier is withdrawn because the topology it registered is not the topology delivered,
+and the delivered one matches the specification exactly — so no difference is left to register.
+
+* **What it claimed.** That the queue module provisions **six** primary queues and six
+  dead-letter companions where AAP §0.4.1.8 tabulates five, on the reasoning that the two
+  inquiry flows are owned by two different services — §0.5.1.3 places `COACCT01` in
+  `account-service` and §0.5.1.6 places `CODATE01` in `reference-service` — so one shared
+  request queue could not serve two independently-owned consumers without one destroying the
+  other's messages.
+* **What is actually shipped.** **Five** primary queues and five dead-letter queues, as **ten**
+  explicit `aws_sqs_queue` resources in
+  [`infra/modules/sqs/main.tf`](../../infra/modules/sqs/main.tf): `pauth_request` and
+  `pauth_reply`, both FIFO, plus `inquiry_request`, `inquiry_reply` and `error`, each with its
+  own dead-letter companion. There is no sixth primary and no per-service inquiry fan-out. The
+  module's own `inquiry_request_queue_url` output states why one queue suffices — it "carries
+  BOTH inquiry flows … and exactly one service binds a consumer to it, dispatching on the
+  four-character function code in the request's first field" — and the premise the entry rested
+  on lapsed with the second consumer: the date-inquiry listener in `reference-service` is
+  retired, which both environment roots record at the queue-access policy that used to name a
+  `date_inquiry_request_queue_arn` output the module has since withdrawn.
+* **Why it is withdrawn rather than corrected.** A register entry records a difference, and five
+  against five is not one. Softening the entry to say "five, as specified" would leave a heading
+  in the live register whose whole subject is that nothing differs, which is precisely the state
+  this register exists to keep distinguishable from drift. Nothing is lost: the single-queue
+  dispatch that makes one destination serve two flows is itself a difference, and it is
+  registered where it belongs, as
+  [`D-INQUIRY-UNRECOGNISED-FUNCTION`](#d-inquiry-unrecognised-function--an-unrecognised-inquiry-function-code-is-refused-rather-than-answered-with-the-date).
+* **Files.** `infra/modules/sqs/main.tf`, `infra/modules/sqs/outputs.tf`,
+  `infra/envs/dev/main.tf`, `infra/envs/prod/main.tf`.
+
+#### `D-AUTHORIZATION-MESSAGING-TOKENISER-UNUSED` — the unexercised tokeniser is retired rather than recorded
 
 * **Specification.** &sect;0.4.1.9 requires a primary account number to be masked wherever it
   would otherwise be exposed, and &sect;0.4.1.8 maps the message-descriptor correlation
@@ -8169,6 +7727,484 @@ cost.
   `services/authorization-service/src/test/java/com/carddemo/authorization/config/EnvironmentClosureTest.java`,
   `services/authorization-service/src/test/java/com/carddemo/authorization/config/InjectedPropertyClosureTest.java`.
 
+### 7.6 Provisioned-topology divergences from the specification's stated counts
+
+Every entry above records a difference between the BASELINE's behaviour and the target's. The
+four below record a different kind: places where the delivered infrastructure holds a different
+COUNT of a resource than the technical specification states, or provisions a capability the
+specification requires and does not carry it all the way to a consumer. They are collected here
+rather than argued only at their declaration sites, because a count is the one figure a reviewer
+checks against the specification, and finding a mismatch with no register entry is
+indistinguishable from finding drift.
+
+Assumptions: this subsection is numbered 7.6 and sits after the withdrawal register rather than
+being numbered 7.5 with the withdrawals moved down. §7.5's anchor is cited from shipped source —
+`services/reference-service/src/main/java/com/carddemo/reference/domain/DisclosureGroup.java`
+names "a withdrawal record in 7.5" — so renumbering it would break a citation in a file that has
+no reason to change. Trade-offs: the cost is that a subsection of withdrawn identifiers now sits
+between two subsections of live ones, which reads oddly for the length of one sentence; the
+alternative cost was a dangling reference from code, which reads as an incomplete register.
+
+Assumptions: the three entries are not three of a kind, and the difference matters to how each is
+read. In the FIRST TWO the difference was not chosen freely: each is forced by ANOTHER clause of
+the same specification, and closing it would violate that clause — the security-group entry
+records a permitted flow beyond the three stated, forced by holding the stated group count, and
+the endpoint entry records two endpoints beyond the eight stated, forced by what the delivered
+sign-on and tracing paths actually reach. Each is therefore recorded together with the clause
+that forces it rather than resolved by matching the number, and each states what bounds the cost.
+Where a reader wants the full argument it is stated at the declaration site in Terraform.
+
+The THIRD is not a forced trade and must not be read as one. It records a required capability
+delivered part of the way and no further, with nothing in the specification forcing the shortfall
+— an **unresolved gap**, open until a change closes it. It is registered here rather than in
+§7.4 because its subject is provisioned topology rather than baseline behaviour, and it is stated
+as a gap rather than as an accepted difference because accepting it would be a decision this
+register has no standing to take on the specification's behalf.
+
+#### D-ECR-REPOSITORY-COUNT -- eleven repositories where the specification states ten
+
+* **Specification.** &sect;0.4.1.6 and &sect;0.5.1.12 state ten container-image repositories.
+* **Delivered.** Eleven. Ten hold artifacts this repository builds -- the eight Spring Boot
+  services, the browser SPA and the ETL image, which is exactly the number of Dockerfiles the
+  repository holds -- and they are declared in `var.repository_names`, whose `validation` asserts
+  the set is *exactly* those ten (`length(...) == 10` together with a `setunion` equality), so a
+  substituted name cannot pass by keeping the total right. The eleventh is declared apart, in
+  `var.third_party_mirror_repository_names`, bounded at one entry, and holds a mirror of the pinned
+  telemetry collector image.
+* **Why the eleventh is provisioned.** Two other clauses produce it jointly. &sect;0.1.1.2 and
+  &sect;0.9.4 mandate distributed tracing, which `infra/modules/ecs-service` delivers as a
+  collector sidecar composed for every workload -- `enable_telemetry_collector` defaults to `true`
+  and neither environment root overrides it. &sect;0.4.1.9 and &sect;0.7.8 require an application
+  tier whose egress is enumerated rather than open, and the public registry that image is published
+  to has neither an interface endpoint nor a managed prefix list, so with that egress enumerated no
+  task could pull its sidecar and none could start.
+* **Status.** ⚠️ **Live.** An earlier revision of this entry recorded the difference as WITHDRAWN on
+  the grounds that the sidecar and the mirror had both been retired. Neither retirement is in this
+  tree: the sidecar is composed, both environment roots resolve
+  `module.ecr.repository_urls["aws-otel-collector"]` when they compose their task definitions, and
+  `main.tf` still projects its iteration collection from `setunion(var.repository_names,
+  var.third_party_mirror_repository_names)`. The withdrawal is reversed rather than softened,
+  because a register that reports a live difference as resolved is the one document a reviewer
+  trusts instead of re-measuring.
+* **Where it is verified.** `.github/workflows/infra-ci.yml` asserts the ten as an exact set, that
+  the iteration collection is projected from that pinned expression, and that the module declares
+  both collection-typed inputs in declaration order; `.github/workflows/deploy.yml` pushes a
+  repository-built image to each of the ten and mirrors the eleventh as its own step, so an empty
+  mirror is a failed deployment step rather than a repository that silently never reports.
+* **Files.** `infra/modules/ecr/main.tf`, `infra/modules/ecr/variables.tf`,
+  `infra/modules/ecs-service/main.tf`, `infra/envs/dev/main.tf`, `infra/envs/prod/main.tf`,
+  `.github/workflows/deploy.yml`, `.github/workflows/infra-ci.yml`.
+
+#### D-ECR-THIRD-PARTY-MIRROR — one cached third-party repository sits beside the ten deployables
+
+* **Baseline / plan.** The frozen plan fixes the container registry at **ten** repositories
+  (AAP §0.4.1.6, "10 repositories with scan-on-push and lifecycle policy"; §0.5.1.12, "Ten
+  repositories with scan-on-push, replacing the load library"). Those ten are this
+  migration's own build outputs: the eight services, the browser SPA and the ETL image.
+* **Delivered.** Eleven repositories are provisioned. The ten deployables are declared in
+  `var.repository_names`, whose `validation` now asserts them as an **exact set** rather
+  than a count, so a substituted name cannot pass by keeping the total right. The eleventh
+  is declared separately in `var.third_party_mirror_repository_names`, bounded at one entry,
+  and holds a mirror of the pinned telemetry collector image — an artifact this migration
+  caches, ships no source for and builds nothing into.
+* **Why the eleventh cannot simply be removed.** Two other plan requirements produce it
+  jointly. The plan requires tracing as a cross-cutting concern (§0.1.1.2, and Phase F's
+  "centralized logging, metrics, tracing"), which `infra/modules/ecs-service` delivers with
+  an OTLP collector sidecar created for every workload — `enable_telemetry_collector`
+  defaults to `true` and neither root overrides it. The plan also requires an application
+  tier whose egress is enumerated rather than open (§0.4.1.9, §0.7.8), and the public
+  registry the collector is published to has neither an interface endpoint nor a managed
+  prefix list. With that egress enumerated no task could pull its sidecar, so no task could
+  start at all — an outage that plans cleanly. Mirroring the image into this registry puts
+  the pull on the `ecr.api` and `ecr.dkr` endpoints the tasks already reach.
+* **Alternatives considered and rejected.** Re-opening `0.0.0.0/0` egress on 443 for the
+  pull — rejected outright, as that is the allow-all the enumerated egress replaced.
+  Pushing the collector into one of the ten repositories under a distinct tag — rejected
+  because a repository's lifecycle policy expires images by count, so ordinary service
+  releases would expire the third-party image. Dropping the sidecar and exporting straight
+  to the X-Ray OTLP endpoint, which needs no image — rejected because it requires an `xray`
+  interface endpoint and an ADOT SDK dependency in every service, and neither appears in
+  the plan's endpoint list (§0.4.1.9) or its dependency inventory (§0.6.1.1), trading a
+  one-repository divergence for a larger multi-component one. An ECR pull-through cache —
+  rejected because the registry still materialises a cache repository on first pull, so the
+  provisioned total is unchanged while digest-pinned references stop resolving until a tag
+  pull has warmed the cache.
+* **What is asserted.** `local.repository_names` unions the two lists, so every output key
+  and all fifteen consuming files are unchanged. The ten are held by the module's own
+  `validation` at plan time and, independently, by the "Verify hand-written Terraform prose
+  counts against the declarations" gate in `.github/workflows/infra-ci.yml`, which reads the
+  literal default and compares the **whole** list — a prefix comparison was tried first and
+  let a smuggled eleventh entry pass, so the gate is mutation-verified from both sides.
+* **Files.** `infra/modules/ecr/variables.tf`, `infra/modules/ecr/main.tf`,
+  `infra/modules/ecr/outputs.tf`, `.github/workflows/infra-ci.yml`.
+
+#### D-NETWORK-ENDPOINT-SECURITY-GROUP — the application group permits task-to-task 443
+
+* **Specification.** &sect;0.4.1.9 states that the security groups permit only
+  balancer-to-application on the container port, application-to-Aurora on the database port
+  and application-to-endpoint on 443. &sect;0.5.1.12 states that the module creates three
+  security groups.
+* **Delivered.** Three security groups -- the load-balancer group, the application group and
+  the isolated-data group -- with the interface-endpoint elastic network interfaces carrying
+  the APPLICATION group. The application-to-endpoint flow is therefore a self-referencing
+  443 rule pair on that group, which as a side effect also permits task-to-task 443.
+* **Category.** Documented flow divergence -- one permitted flow beyond the three stated,
+  arising from the group count being held at the stated three.
+* **Why the difference is accepted.** The two clauses cannot both be satisfied exactly: an
+  interface endpoint must carry a security group, so the task-to-endpoint flow has to
+  terminate on one, and every three-group arrangement adds a permitted flow beyond
+  &sect;0.4.1.9's three. A fourth, dedicated endpoint group was the arrangement for a period
+  and is the narrower rule set, but it exceeds &sect;0.5.1.12's stated count. The count is
+  held and the flow is registered here, because the extra flow reaches nothing: the module
+  validates `app_container_port` to exclude 443, so no service listens on it, and the only
+  443 listener in this VPC carries the load-balancer group. The divergence is therefore
+  visible in a plan rather than exploitable at run time.
+* **Where it is verified.** `infra/modules/network/main.tf` declares exactly three
+  `aws_security_group` resources and `outputs.tf` publishes all three, so a fourth
+  reappearing is visible in both the plan and the module's published contract; the port
+  validation that bounds the widened flow is asserted by that variable's own `validation`
+  block, so removing it fails the plan rather than silently widening the flow.
+* **Files.** `infra/modules/network/main.tf`, `infra/modules/network/variables.tf`.
+
+#### D-NETWORK-INTERFACE-ENDPOINT-COUNT — ten interface endpoints where the specification lists eight
+
+* **Specification.** AAP §0.4.1.9 lists eight interface endpoints — the two container-registry
+  endpoints, logs, Secrets Manager, KMS, the queue service, the orchestrator and the parameter
+  store — plus an object-store gateway endpoint.
+* **Delivered.** **Ten** interface endpoints plus the S3 gateway endpoint. The set is declared
+  identically twice in
+  [`infra/modules/network/variables.tf`](../../infra/modules/network/variables.tf) — once as the
+  `default` of `interface_endpoint_services` and once inside that variable's exact-set
+  `validation` — as `ecr.api`, `ecr.dkr`, `logs`, `secretsmanager`, `kms`, `sqs`, `states`,
+  `ssm`, `xray` and `cognito-idp`. The two beyond the specification's eight are therefore
+  **`xray` and `cognito-idp`**, and they are the two documented additions.
+* **Category.** Documented topology divergence — two endpoints more than the stated list.
+* **Why the difference is accepted.** ⚠️ Refactoring Rationale: this entry previously justified
+  both additions by the OTLP collector sidecar — the endpoint set existed so a collector in every
+  task could pull its image and export its spans. That component is withdrawn from
+  `infra/modules/ecs-service` in full, so the rationale it rested on no longer describes anything
+  in this repository, and the two names are defended here on their own delivered grounds instead.
+  **`cognito-idp` is load-bearing and its absence is not theoretical.** It was withdrawn from the
+  set for a period and sign-on broke: every service resolves the issuer and the JSON web key set
+  at start-up, and `auth-service` performs the user-pool operations, all of which are
+  UNAUTHENTICATED by construction and therefore carry no principal for the shared,
+  account-scoped endpoint policy to admit — so that policy denied them, and the symptom was every
+  sign-on refused at the endpoint rather than an error naming a policy.
+  [`infra/modules/network/main.tf`](../../infra/modules/network/main.tf) answers that with a
+  **per-endpoint** document that sources the shared one, keeping the account condition for the
+  signed administrative calls, and adds one statement admitting exactly five operations by name —
+  `InitiateAuth`, `RespondToAuthChallenge`, `GetTokensFromRefreshToken`, `RevokeToken` and
+  `GlobalSignOut` — with no principal condition. `xray` is retained as the private path AAP
+  §0.9.3's tracing requirement needs; what does NOT yet reach it is span export, and that gap is
+  registered on its own below rather than claimed as closed here. Note the direction of the
+  trade: naming both endpoints is what allowed a blanket application-tier egress rule to
+  `0.0.0.0/0` to be deleted outright rather than narrowed, so this count divergence buys a
+  strictly SMALLER reachable surface than the eight-endpoint arrangement it replaces.
+* **Where it is verified.** The set is asserted twice inside the variable block, so a name
+  present in only one of the two fails either the plan or the module's own default.
+  `.github/workflows/infra-ci.yml` independently requires `"cognito-idp"` to appear at least
+  twice inside that block — the pair IS the assertion, because a name in the default alone is
+  unvalidated and a name in the validation alone makes the module's own default fail the rule it
+  declares — and the same gate refuses any security-group egress rule naming a CIDR block, so a
+  reintroduced public path fails the pipeline rather than review.
+* **Files.** `infra/modules/network/variables.tf`, `infra/modules/network/main.tf`,
+  `.github/workflows/infra-ci.yml`.
+
+## 8. Inventory caveats a reader will otherwise contradict
+
+The inventory in [§1](#1-the-verified-baseline-inventory) counts repository
+artifacts. It does not claim that every `COPY` statement resolves from the
+repository, that every catalogued access path is a base dataset, or that every
+member of a scheduler listing belongs in the one curated target state machine.
+Those distinctions are load-bearing: changing any one of them changes a plausible
+count without changing the repository.
+
+### 8.1 Repository copybooks are not the whole compiler include path
+
+[`COPAUA0C.cbl`](../../app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl) includes
+`CMQPMOV` at **L167** and `CMQGMOV` at **L170**. Neither member exists under
+[`app/cpy`](../../app/cpy), in an extension copybook directory or anywhere else in
+this repository; both are vendor-supplied MQ copybooks resolved from the platform's
+compiler library.
+
+Assumptions: the figures **30** under `app/cpy` and **62** repository-wide are
+therefore counts of copybook *files held by this repository*, not counts of every
+include a compiler needs in order to build every program. Treating the two vendor
+members as omissions from the 62 would mix a source-repository inventory with an
+installed-toolchain inventory. Conversely, adding them to 62 would make the result
+depend on which MQ distribution happened to be installed. The target does not
+transcribe those option structures into application-owned classes;
+[`messaging-contracts.md`](messaging-contracts.md) owns the field-by-field message
+contract and the transport-client configuration that replaces them.
+
+### 8.2 Ten persistent base clusters and three alternate indexes
+
+The persistent VSAM population is **ten base KSDS clusters plus three alternate
+indexes**:
+
+| Population | Members | Target disposition |
+|---|---|---|
+| 10 base clusters | `ACCTDATA`, `CARDDATA`, `CARDXREF`, `CUSTDATA`, `TRANSACT`, `USRSEC`, `DISCGRP`, `TRANTYPE`, `TRANCATG`, `TCATBALF` | Tables in the eight canonical schemas, mapped field by field in [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) |
+| 3 alternate indexes | `CARDAIX`, `CXACAIX`, `TRANSACT.VSAM.AIX` | `idx_cards_account_id`, `idx_card_xref_account_id`, `idx_transactions_proc_ts` |
+
+A list of **eight** is answering a different question: the base CICS definition has
+eight `DEFINE FILE` resources, but two of those are `CARDAIX` and `CXACAIX`
+*paths*, leaving six base clusters. A repository grep can instead return
+**eleven** KSDS names because the statement job creates a `TRXFL` work cluster,
+loads it with the transaction master in card order, reads it, and discards it. That
+work cluster is a non-persistent projection, not an eleventh master. The three
+figures are not alternatives:
+
+```text
+  8  CICS FILE resources       = 6 base clusters + 2 AIX paths
+ 10  persistent base clusters  = the datastore population
+ 11  KSDS names found in JCL   = 10 persistent + 1 statement work cluster
+```
+
+Assumptions: the word *cluster* in the ten-count means a persistent base dataset.
+It excludes both catalogued alternate-index objects and the statement work cluster.
+[`context-and-container-diagrams.md`](context-and-container-diagrams.md) owns the
+current-state picture and the reproducible count commands; the present table owns
+the disposition.
+
+### 8.3 `samples/**` is reference material, not migration scope
+
+[`samples`](../../samples) contains **15** artifacts: 9 JCL examples, 4 procedure
+examples and 2 packaged runtime archives. The tree is **REFERENCE** material. It is
+not included in the 38-member base JCL count, its jobs and procedures do not create
+extra matrix rows, and its packaged runtimes are not target build inputs. Every file
+under `samples/**` is preserved exactly as supplied.
+
+Trade-offs: counting the nine sample JCL members in the repository-wide JCL total
+is useful — it explains how 38 base members plus 8 extension members plus 9 samples
+produce 55 repository files — while treating them as migration targets would be
+wrong. The accepted distinction is therefore *counted for reconciliation, excluded
+from ownership scope*. That lets a repository-wide search close arithmetically
+without turning examples into deployables.
+
+### 8.4 Scheduler membership does not imply membership in the curated state machine
+
+[`batch-orchestration.md`](batch-orchestration.md) consolidates the write-path work
+into one state machine and explicitly defers the work outside that consolidation to
+this register. Every deferred job has a disposition:
+
+| Deferred scheduler work | Why it is not a state of the curated machine | Disposition |
+|---|---|---|
+| `READACCT`, `READCARD`, `READCUST`, `READXREF` | Read-only unloads, not write-path transitions | Service-owned read/export operations and migration-verification inputs for the account and card data they expose |
+| `TRANTYPE`, `TRANCATG`, `TCATBALF` | Dataset refresh/load utilities | Idempotent data-load operations for `reference.transaction_types`, `reference.transaction_categories` and `ledger.transaction_category_balances` |
+| `DISCGRP` | Disclosure-group dataset refresh | Idempotent load of `reference.disclosure_groups`, including the required `DEFAULT` rows |
+| `CBPAUP0J` | Authorization-extension maintenance | `authorization-service` `PurgeJob`, mapped from `CBPAUP0C` in [§2.7](#27-authorization-service) |
+| `MNTTRDB2` | Transaction-type maintenance | `reference-service` transaction-type maintenance, mapped from `COBTUPDT` in [§2.5](#25-reference-service) |
+| `TRANEXTR` | Db2-to-flat reference extraction | Reference-data export/migration interface for transaction types and categories; it is not part of the posting unit of work |
+| `TXT2PDF1` | The utility itself has no target | The no-target retirement and both consequences are recorded in [§5.2](#52-retired-with-no-target-at-all--exactly-two) |
+
+Assumptions: the scheduler artifacts prove that these jobs were connected to other
+jobs; they do not define the target's service boundaries. Grouping all of them into
+one machine merely because one scheduler listing contains them would merge read-only
+exports, reference maintenance, authorization retention and statement rendering
+into the posting transaction. The owning data and behaviour determine the
+disposition instead.
+
+
+## 9. The parity oracle and why warn is green
+
+The existing three-layer suite documented by
+[`tests/README.md`](../../tests/README.md) is the **functional-parity oracle**. It is
+REFERENCE material for this migration: its fixtures, golden masters, dependency
+pins, runner semantics and expected aggregate result are not rewritten or re-pinned
+to make a target implementation pass. Target-side Java, TypeScript and Python tests
+are strictly additive.
+
+### 9.1 The comparison contract
+
+The parity protocol has four explicit steps:
+
+1. run the COBOL pipeline over the controlled fixtures and retain its golden outputs;
+2. run the equivalent target job over the same logical data after migration;
+3. apply the **same timestamp normalisation** to both sides; and
+4. compare the reject stream, posted transaction records, updated master records and
+   return code.
+
+The comparison is intentionally wider than a final row count. A job can preserve the
+number of rows while changing which transactions posted, which rejects were
+emitted, which account balances moved or which condition code was returned. Those
+are observable business outcomes, so all four surfaces belong to the oracle.
+[`batch-orchestration.md`](batch-orchestration.md) owns the state-by-state use of the
+comparison, and [`observability.md`](observability.md) owns how parity results appear
+in logs, metrics and CI reporting.
+
+Trade-offs: golden masters are retained rather than regenerated from the target.
+Regenerating them from target output would make the implementation define its own
+expected result and would silently bless a divergence. The accepted cost is that an
+intentional difference must be registered here and asserted explicitly rather than
+made invisible by replacing the oracle.
+
+This is the comparison **contract**. It is not a claim that an end-to-end comparison
+has run against a provisioned target environment; the deployment boundary remains
+the one stated in [§11](#11-deployment-and-reversibility-boundaries).
+
+### 9.2 The return-code rubric
+
+[`tests/README.md`](../../tests/README.md) §8 defines the suite's graded return codes,
+and [`.github/workflows/tests.yml`](../../.github/workflows/tests.yml) **L28–L38**
+defines their CI interpretation:
+
+| Aggregate RC | Meaning | CI interpretation |
+|---:|---|---|
+| **0** | Pass | Green |
+| **4** | Warn / soft reject | **Green — non-blocking warn** |
+| **≥8** | Failure | Red |
+| **16** | Fatal / unrecoverable | Red |
+
+The runner aggregates the **highest** code observed. RC 2 is a usage error that
+aborts immediately and does not enter aggregation, so it is not a fifth result
+grade.
+
+**Warn is green.** The documented aggregate of **4** is the expected non-blocking
+state because [D-1](#d-1--the-exportimport-record-key-declaration)
+prevents `CBEXPORT` and `CBIMPORT` from compiling under the open-source compiler:
+ten of the twelve batch programs build, the export/import integration test is
+skipped with that reason, and the suite reports the condition rather than hiding it.
+The workflow deliberately lets `rc <= 4` succeed and makes `rc >= 8` fail.
+
+Assumptions: that warn is a property of the immutable baseline and **must not be
+read as a regression introduced by the migration**. A new target-side failure still
+raises the aggregate to at least 8 and fails CI; the known 4 neither masks nor
+downgrades it. [`observability.md`](observability.md) carries the same interpretation
+so that dashboard colour, workflow colour and this traceability register cannot
+disagree.
+
+
+## 10. Out of scope, including the baseline's own stated future work
+
+This section records absences, not deliverables. None of the following has a target
+artifact in the matrix, none is implied by a sibling diagram, and none should be
+inferred from the presence of a related managed service:
+
+| Out of scope | Boundary recorded by this matrix |
+|---|---|
+| Multi-region topology and disaster recovery | The target design is single-region; no cross-region data plane, failover path or recovery objective is delivered |
+| Blue-green and canary deployment | No parallel production colour, weighted cutover or canary analysis is delivered |
+| Kafka and Kinesis | The baseline's asynchronous requirement is request/reply, and [`messaging-contracts.md`](messaging-contracts.md) maps it to queues; no streaming platform is added |
+| Redis and ElastiCache | The baseline has no application cache tier and parity does not require one |
+| Read replicas | Reporting reads use read-only cross-schema views against the writer; no replica topology is delivered |
+| Db2 rewards extension | Listed in the root [`README.md`](../../README.md) **L381–L384** as roadmap material, not present as an implemented source program or a migration target |
+| IMS DC implementation | Listed in `README.md` **L384** as roadmap material, not part of the supplied authorization IMS database extension |
+| SFTP integration | Listed in `README.md` **L386–L389** as roadmap material; the existing FTP-to-JES tunnel is separately accounted for as a retired mechanism in [§5.3](#53-also-retired-as-mechanisms-with-no-cloud-analogue) |
+| Exposure of transactions for distributed application integration | Listed in `README.md` **L389** as roadmap material; it is not the same thing as eliminating the internal two-resource commit in [D-6](#d-6--the-distributed-commit-is-eliminated-not-emulated) |
+| External point-of-sale / authorization client | The baseline supplies no request producer, only [`tests/mocks/mq_request_stub.py`](../../tests/mocks/mq_request_stub.py), a deterministic test double; building a production client is not requested |
+
+The absent external client explains why there is no program-to-service row for a
+point-of-sale producer. The queue consumer, request and response copybooks, routing
+metadata and authorization decision are all mapped; the actor that originates the
+request is outside the supplied system boundary. Adding a row for it would falsely
+turn a test instrument into a production component.
+
+Assumptions: the root README's roadmap is evidence of exclusion, not an instruction
+to implement those items in this migration. Four entries — Db2 rewards, IMS DC,
+SFTP and distributed-application transaction exposure — are called out because the
+baseline itself names them, while the first five are architecture choices excluded
+consistently by all eight sibling documents. Recording them here prevents a reader
+from treating an unlisted capability as an accidental omission or an implied
+delivery.
+
+
+## 11. Deployment and reversibility boundaries
+
+The matrix records **traceability and ownership**, not evidence of a live
+deployment. Target modules may be authored or statically validated, but
+`terraform apply` against a real account is an operator action outside this scope.
+Consequently:
+
+* no row asserts that a service, table, queue, state machine, dashboard, alarm or
+  user interface has run in a provisioned environment;
+* no target count is presented as a runtime measurement, benchmark, service-level
+  objective or production observation;
+* no absence listed in [§10](#10-out-of-scope-including-the-baselines-own-stated-future-work)
+  is presented as delivered; and
+* target names identify the owner of migrated behaviour even where environment
+  composition remains an operator concern.
+
+Assumptions: an ownership mapping is useful before deployment because it closes
+architectural gaps without pretending to close operational ones. Conflating the two
+would make a source-to-target row look like execution evidence, which it is not.
+The honest statement is narrower: every baseline artifact has a disposition, and
+every intentional behavioural difference has an owner and a verification contract.
+
+The reverse boundary is equally explicit. Every baseline artifact cited in this
+document remains in place, unmodified and runnable on its existing path. The test
+suite remains its oracle, the job and region definitions remain available, and none
+of the target mappings deletes or rewrites them. **Reverting to the mainframe path
+requires no un-migration**, because there is no destructive migration step to undo.
+**The migration adds a path; it does not remove one.**
+
+Trade-offs: preserving both paths means the repository carries two expressions of
+the business rules and must keep their differences visible. The alternative —
+describing the target as a replacement and the baseline as retired — was rejected
+because it would contradict the repository state and remove the independent oracle
+needed for parity. The accepted cost is the divergence register in [§7](#7-the-divergence-register):
+differences are explicit and reviewable rather than hidden behind a claim that one
+path supersedes the other.
+
+
+## 12. Completeness and the single-authority contract
+
+This document is complete when, and only when, all four of these statements remain
+true:
+
+1. the service matrix accounts for all **44** migration-scope programs, with its
+   arithmetic printed in [§2.11](#211-coverage-arithmetic);
+2. [§4](#4-non-program-artifact-coverage) accounts for every non-program asset
+   class, with inventory traps recorded in [§8](#8-inventory-caveats-a-reader-will-otherwise-contradict);
+3. [§5](#5-the-retirement-register) gives every retirement a named analogue or
+   places it in the exactly-two no-target population, while [§6](#6-the-dangling-programcocrdsec)
+   keeps the source-less CSD definition distinct from retirement; and
+4. [§7](#7-the-divergence-register) is the single register of every intentional
+   behavioural difference, with [§9](#9-the-parity-oracle-and-why-warn-is-green)
+   defining the oracle that detects unregistered ones.
+
+If a count, mapping, retirement or divergence in another document disagrees with
+this file, **this file remains the authority and the other document must be aligned
+to it**. Siblings own the details of their domains; this document owns the
+cross-domain set. That division is what allows a reviewer to ask both *"how does
+this work?"* in the owning sibling and *"is this the complete set?"* here without
+maintaining nine competing inventories.
+
+Refactoring Rationale: the former short-form matrix mixed ownership rows and
+divergences without the coverage arithmetic, retirement populations, paragraph
+pairs or inventory caveats needed to prove completeness. Expanding it into one
+authoritative index makes omissions mechanically visible: a program is either in a
+service subtotal, a UI-route subtotal or the retirement subtotal; an asset class has
+a disposition; and a behavioural difference has a six-part register entry. The
+accepted cost is document length, which is bounded by citing the owning sibling
+rather than duplicating its implementation detail.
+
+
+## Related documents
+
+All eight architecture siblings and the documentation standard are present and
+linked. Each sibling owns detail that this index cites rather than restates.
+
+| Document | What it owns that this document indexes |
+|---|---|
+| [`service-catalog.md`](service-catalog.md) | The canonical eight service names, responsibilities, owned data, dependency edges and reconciliation of the four component populations |
+| [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md) | Field-by-field copybook-to-column lineage, fixed-record decoding, the ten-cluster and three-index storage mapping, and data-model-specific divergences |
+| [`context-and-container-diagrams.md`](context-and-container-diagrams.md) | Current-state and target-state boundaries, actors, containers, resource populations and control-flow placement |
+| [`batch-orchestration.md`](batch-orchestration.md) | Job-to-state mapping, condition-code semantics, generation datasets, scheduler curation and the `TXT2PDF1` edge-collapse consequence |
+| [`messaging-contracts.md`](messaging-contracts.md) | Queue mapping, positional wire format, correlation, ordering, deduplication, expiry handling and the transactional-outbox obligation |
+| [`security-and-identity.md`](security-and-identity.md) | Identity mapping, authorization policy, credential non-carry-forward, encryption and network isolation |
+| [`observability.md`](observability.md) | Logs, metrics, traces, alarms, the fourteen error-emission call sites and the warn-is-green interpretation |
+| [`design-token-reference.md`](design-token-reference.md) | The mapset-to-route and field-to-token presentation mapping, including the response-driven field-error highlight |
+| [`../CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md) | The documentation convention this document follows, including the four rationale labels and the paired what-and-why comment idiom |
+
+The root [`README.md`](../../README.md) and
+[`MIGRATION_README.md`](../../MIGRATION_README.md) are this document's declared
+consumers. The in-repository precedent for the explainability convention is
+[`tests/README.md`](../../tests/README.md) §12, and
+[`CONTRIBUTING.md`](../../CONTRIBUTING.md) states the convention for the migrated
+trees.
+
+---
 
 <sub>Apache-2.0 · Authoritative artifact-to-target matrix, retirement register and
 behavioural-divergence register for CardDemo. The baseline under `app/**` is cited

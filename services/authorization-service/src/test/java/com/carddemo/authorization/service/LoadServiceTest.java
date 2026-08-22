@@ -37,7 +37,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
-import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -172,6 +171,15 @@ class LoadServiceTest {
     private static final Long ACCOUNT_TWO = Long.valueOf(10_000_000_002L);
 
     /**
+     * The first account a synthetic multi-chunk extract names.
+     *
+     * <p>Assumptions: the range is placed well clear of the two fixture accounts so that a case building
+     * its own extract cannot collide with one loading the committed fixture, and it stays inside eleven
+     * digits so every generated key packs into the segment's six bytes.
+     */
+    private static final long SYNTHETIC_ACCOUNT_BASE = 20_000_000_000L;
+
+    /**
      * The summary segment's own length, one hundred bytes.
      *
      * <p>Assumptions: from {@code cpy/CIPAUSMY.cpy} <strong>L19 to L31</strong>, thirteen declarations
@@ -248,6 +256,19 @@ class LoadServiceTest {
     /** How many children the detail fixture holds. */
     private static final int CHILD_COUNT = 4;
 
+    /**
+     * How many records the subject reads before it goes back to the stream for more.
+     *
+     * <p>⚠️ Assumptions: this repeats a figure the subject holds privately, and the duplication is
+     * deliberate. A case that spans more than one chunk has to build an extract larger than the chunk, and
+     * the subject publishes no accessor for it -- reflecting one out would assert against a field name
+     * rather than against behaviour. Trade-offs: if the subject's chunk ever shrinks, the case still spans
+     * more than one chunk and still holds; if it ever GROWS, the first-chunk count below stops matching
+     * and the case fails loudly rather than silently degrading into a single-chunk case that proves
+     * nothing. Failing loudly is the reason this is a stated constant and not an inline literal.
+     */
+    private static final int CHUNK_RECORDS = 500;
+
     /** The summary rows the loader probes and writes. */
     private PendingAuthSummaryRepository summaries;
 
@@ -255,7 +276,7 @@ class LoadServiceTest {
     private PendingAuthDetailRepository details;
 
     /**
-     * The transaction manager each chunk's unit of work is opened against.
+     * The transaction manager a load's unit of work is opened against.
      *
      * <p>Assumptions: this is held as a FIELD rather than created inside a helper, because the rollback
      * assertions below interrogate it after the call under test has returned or raised. A manager created
@@ -350,10 +371,13 @@ class LoadServiceTest {
      * @return a loader at that ceiling, writing the two repository doubles; never {@code null}
      */
     private LoadService loader(int maxRecords) {
-        // WHY : Assumptions: the template propagates REQUIRES_NEW so that each chunk's unit of work is
-        //       its own, which is what makes a rollback attributable to the chunk that raised. Joining an
-        //       outer transaction would leave the rollback assertions below unable to say WHICH unit of
-        //       work was discarded.
+        // WHY : ⚠️ Assumptions: REQUIRES_NEW is set so this manager observes a load's boundary DIRECTLY
+        //       rather than through a suspended outer one, which is what lets the cases below count
+        //       openings, commits and rollbacks at all. Refactoring Rationale: this said the propagation
+        //       made "each chunk's unit of work its own"; a chunk no longer has one. The subject holds no
+        //       inner execute for any propagation setting to split, which is what the single-opening
+        //       assertion in TransactionBoundary now pins -- so this setting can no longer mask a nested
+        //       boundary having crept back in.
         TransactionTemplate template = new TransactionTemplate(this.transactionManager);
         template.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
         return new LoadService(this.summaries, this.details, template, maxRecords);
@@ -433,6 +457,35 @@ class LoadServiceTest {
         } catch (IOException unreadable) {
             throw new AssertionError("fixture " + name + " could not be read", unreadable);
         }
+    }
+
+    /**
+     * Builds a summary extract of a stated size, every record naming a different account.
+     *
+     * <p>Assumptions: the accounts are made DISTINCT rather than the fixture being repeated, so that every
+     * record of the first chunk is a real insert. Repeating one record would leave the chunk with one
+     * insert and four hundred and ninety-nine counted duplicates, and a case asserting that a rolled-back
+     * chunk had written would then be asserting almost nothing.
+     *
+     * <p>Assumptions: the account is overwritten IN PLACE at offset zero, which is where
+     * {@code cpy/CIPAUSMY.cpy} L19 puts {@code PA-ACCT-ID PIC S9(11) COMP-3} -- six packed bytes ahead of
+     * the customer identifier. Every other field keeps the committed fixture's bytes, so each record stays
+     * a valid segment image and the case cannot pass or fail for a decoding reason.
+     *
+     * @param records how many records the extract should hold; must be positive
+     * @return an extract of exactly that many well-formed summary images; never {@code null}
+     */
+    private static byte[] manySummaries(int records) {
+        byte[] template = Arrays.copyOfRange(bytes(SUMMARY_FIXTURE), 0, SUMMARY_STRIDE);
+        byte[] extract = new byte[records * SUMMARY_STRIDE];
+        for (int index = 0; index < records; index++) {
+            int at = index * SUMMARY_STRIDE;
+            System.arraycopy(template, 0, extract, at, SUMMARY_STRIDE);
+            byte[] account = PackedDecimalCodec.encodePacked(
+                    BigDecimal.valueOf(SYNTHETIC_ACCOUNT_BASE + index), PREFIX_DIGITS, 0, true);
+            System.arraycopy(account, 0, extract, at, account.length);
+        }
+        return extract;
     }
 
     /**
@@ -1344,18 +1397,22 @@ class LoadServiceTest {
          * The tolerated skip commits its unit of work rather than aborting it.
          *
          * <p>Assumptions: this is the transaction-level counterpart of the count assertions above, and it
-         * is what stops the duplicate tolerance being tolerant in name only. A chunk in which every record
+         * is what stops the duplicate tolerance being tolerant in name only. A load in which every record
          * was already present must still COMMIT: a service that marked such a unit of work rollback-only,
          * or let the conflict abort it, would report the right counts to its caller and leave a re-run
          * unable to make progress through a partly loaded extract. The reference program's equivalent is
          * that L256 to L258 reaches no abend, so the transaction monitor commits at program end exactly as
          * it would have on a clean load.
          *
-         * @throws AssertionError if a wholly duplicate chunk is rolled back rather than committed
+         * <p>Assumptions: the two commits expected are the two SEPARATE calls this case makes, not two
+         * chunks of one call. Each entry point opens exactly one unit of work, so a second invocation is a
+         * second transaction; the fixture is well inside one chunk either way.
+         *
+         * @throws AssertionError if a load of nothing but duplicates is rolled back rather than committed
          */
         @Test
-        @DisplayName("a chunk of nothing but duplicates commits, and is never rolled back")
-        void aWhollyDuplicateChunkCommits() {
+        @DisplayName("a load of nothing but duplicates commits, and is never rolled back")
+        void aWhollyDuplicateLoadCommits() {
             givenSummariesRemember();
             LoadService subject = loader();
             subject.loadSummaries(open(SUMMARY_FIXTURE));
@@ -1949,12 +2006,25 @@ class LoadServiceTest {
      * and a JSON STRING on the wire. This class asserts the Java and wire halves at this service's own
      * boundary, for every amount the load decodes.
      *
-     * <p>Assumptions: this module is NOT covered by the shared kernel's arithmetic rule through
-     * inheritance, which is why the cases exist here at all. The layering test's prohibition on
-     * {@code float} and {@code double} is scoped to {@code com.carddemo.common.money..}, so nothing outside
-     * that package inherits it, and the load path is where an extract's packed amounts first become Java
-     * values. Asserting it here is therefore not a duplicate of an inherited rule; it is the only place the
-     * rule is applied to this path.
+     * <p>Refactoring Rationale: this paragraph read that the module is NOT covered by the shared kernel's
+     * arithmetic rule, on the ground that rule A3 is scoped to {@code com.carddemo.common.money..}. It is
+     * not: {@code LayeringRulesTest} imports the root {@code com.carddemo} and scopes A3 to
+     * {@code com.carddemo..}, and the parent POM runs that one class inside every module through a
+     * Surefire execution declaring {@code dependenciesToScan} on the shared kernel's test artifact -- so
+     * this module's production types sit inside A3's subject set and inherit the repository-wide
+     * prohibition on {@code float} and {@code double}. The correction matters in both directions: the
+     * false reading understated the gate, and a reader who believed nothing outside the money package was
+     * covered would reasonably add a declaration-shaped assertion here, duplicating a rule the build
+     * already fails on and leaving two statements of one invariant to drift.
+     *
+     * <p>Assumptions: what these cases contribute is the half A3 cannot express. A3 is a
+     * DECLARATION-site rule -- it rejects a {@code float} or {@code double} in a field, parameter or
+     * return position, including as a generic type argument -- and it says nothing about the VALUE or the
+     * SCALE a {@code BigDecimal} holds at run time. Every case below asserts a decoded value at the one
+     * boundary where an extract's packed bytes first become Java values: that each stored amount is
+     * present, and that it carries scale two. A decoder answering {@code BigDecimal.ZERO} for a
+     * {@code 0.00} field satisfies A3 completely and still breaks the {@code NUMERIC(p,2)} column
+     * contract, which is exactly what the first case below is written to catch.
      *
      * <p>Assumptions: the zoned sign-overpunch convention does NOT apply to either of these layouts, and
      * saying so avoids a wrong reading of the sign handling. Every numeric in the two segments is packed
@@ -2081,6 +2151,12 @@ class LoadServiceTest {
          * those. Both the parameter types and the return types are examined, since either direction would
          * admit a float into the money path.
          *
+         * <p>Assumptions: this case overlaps rule A3 deliberately and the overlap is stated rather than
+         * denied. A3 reaches this package -- it is scoped to {@code com.carddemo..} -- so a
+         * {@code double} on this service would fail that gate too; what this case adds is a failure that
+         * names THIS class and THIS outcome carrier in the module whose suite is running, which the
+         * repository-wide rule reports as one violation among the whole reactor's.
+         *
          * @throws AssertionError if any published member of the service or its outcome carrier declares a
          *     binary floating-point type
          */
@@ -2088,8 +2164,8 @@ class LoadServiceTest {
         @DisplayName("neither the service nor its outcome carrier publishes a float or a double")
         void nothingPublishedIsABinaryFloat() {
             assertThat(binaryFloatsIn(LoadService.class))
-                    .as("AAP Rule T3 (money never leaves fixed point) forbids these on this path, and the"
-                            + " shared kernel's layering rule does not reach this package")
+                    .as("AAP Rule T3 (money never leaves fixed point) forbids these on this path, which"
+                            + " the shared kernel's layering rule A3 also gates reactor-wide")
                     .isEmpty();
             assertThat(binaryFloatsIn(LoadService.LoadOutcome.class))
                     .as("the counts a load reports are whole records, so nothing here is fractional at all")
@@ -2098,24 +2174,34 @@ class LoadServiceTest {
     }
 
     /**
-     * Asserts a failure part-way through a pass leaves no mixture the schema would refuse.
+     * Asserts a failure anywhere in a load withdraws the whole load rather than part of it.
      *
-     * <p><b>Purpose.</b> This service owns its own transaction boundary -- the repository interfaces in this
-     * module declare none -- so the atomicity of a chunk is a property of this class's subject rather than
-     * of its collaborators.
+     * <p><b>Purpose.</b> This service owns its own transaction boundary -- the repository interfaces in
+     * this module declare none, and each says the caller owns the transaction -- so the atomicity of a
+     * LOAD is a property of this class's subject rather than of its collaborators, and these cases are
+     * where it is asserted.
+     *
+     * <p>⚠️ Assumptions: the unit of work is the load, not the chunk. Refactoring Rationale: the subject
+     * committed once per five hundred records while promising one atomic load, so a refusal in a later
+     * chunk left the earlier ones visible and a refusal in the child file left the whole summary file
+     * standing. Both are asserted against below, because a mocked repository cannot undo what it recorded
+     * and the only observable that distinguishes the two designs is how many units of work were opened
+     * and how each ended. The engine-level counterpart -- that no summary row is VISIBLE after a refused
+     * load -- is {@code LoadServiceAtomicityRepositoryIT}, which reads through a second connection.
      */
     @Nested
-    @DisplayName("a failure part-way through a pass leaves no partial parent and child mixture")
+    @DisplayName("a failure anywhere in a load withdraws every row that load wrote")
     class TransactionBoundary {
 
         /**
-         * A failure in the child pass discards that pass's work and never touches the summaries.
+         * A separately invoked child load discards its own work and leaves an earlier load standing.
          *
-         * <p>Assumptions: the two passes are asserted to be separately atomic rather than jointly so. A
-         * child pass that fails must discard its own unit of work, and it must NOT undo the summaries an
-         * earlier pass committed -- because those summaries are exactly what makes the corrective re-run
-         * succeed. Undoing them would turn a recoverable failure into a full reload, which is the opposite
-         * of the property the duplicate tolerance was built for.
+         * <p>Assumptions: this case makes TWO calls, and each is its own unit of work, so the summaries
+         * the first call committed are untouched by the second call failing. That is the contract for a
+         * caller who loads the two files separately: what it committed stays committed, and the corrective
+         * action is to re-run the child file. It is NOT the contract for the combined entry point, where
+         * both files share one transaction -- the case below asserts that shape, and the two must not be
+         * read as contradicting each other.
          *
          * <p>Assumptions: the mixture the schema would refuse is an authorization with no parent, and the
          * reverse -- a parent with no authorization -- is legitimate and is not asserted against. The
@@ -2123,12 +2209,12 @@ class LoadServiceTest {
          * relational form keeps that: {@code fk_pending_auth_detail_summary} constrains the child and says
          * nothing about a childless parent.
          *
-         * @throws AssertionError if a failed child pass leaves an authorization stored, or if it discards
-         *     summaries an earlier pass had committed
+         * @throws AssertionError if a failed child load leaves an authorization stored, or if it discards
+         *     summaries a separate earlier load had committed
          */
         @Test
-        @DisplayName("a failed child pass discards its own work and leaves the summaries standing")
-        void aFailedChildPassLeavesTheSummariesStanding() {
+        @DisplayName("a separately invoked child load discards its own work and only its own")
+        void aFailedChildLoadDiscardsOnlyItsOwnWork() {
             givenSummariesRemember();
             LoadService subject = loader();
             subject.loadSummaries(open(SUMMARY_FIXTURE));
@@ -2141,41 +2227,139 @@ class LoadServiceTest {
                     .isThrownBy(() -> subject.loadDetails(open(DETAIL_FIXTURE)));
 
             assertThat(LoadServiceTest.this.storedChildren)
-                    .as("no authorization may survive a failed child pass")
+                    .as("no authorization may survive a failed child load")
                     .isEmpty();
             assertThat(LoadServiceTest.this.storedRoots)
-                    .as("the summaries an earlier pass committed are what make the re-run succeed, so they"
-                            + " must not be discarded with the failed pass")
+                    .as("a separate earlier load's summaries are what make the re-run succeed, so the"
+                            + " failed call must not reach back into them")
                     .hasSize(ROOT_COUNT);
             verify(LoadServiceTest.this.transactionManager)
                     .rollback(LoadServiceTest.this.transactionStatus);
         }
 
         /**
-         * The whole-extract load opens a unit of work per pass rather than one spanning both.
+         * The whole-extract load runs both files inside exactly one unit of work.
          *
-         * <p>Assumptions: the count is asserted as a floor rather than an exact figure, because the number
-         * of units of work is a function of the chunk size and of how many records each file holds -- both
-         * of which are implementation decisions this class does not own. What it does own is that the two
-         * passes are not run inside ONE unit of work, since a single transaction spanning the whole extract
-         * is the shape whose memory grows with the file. Two or more openings is the observable form of that
-         * claim; asserting exactly two would freeze the chunk size.
+         * <p>⚠️ Assumptions: the count is asserted EXACTLY rather than as a floor, and that is the point
+         * of the case. Refactoring Rationale: this asserted {@code atLeast(2)} openings on the reasoning
+         * that a single transaction spanning the extract "is the shape whose memory grows with the file".
+         * That reasoning was wrong -- the writes are native conflict-tolerant statements, so no managed
+         * entity accumulates, and the bytes are bounded by the chunk reader rather than by the commit --
+         * and the assertion positively required the behaviour the class contract forbids. One opening is
+         * now the claim, because it is what makes a refused load leave nothing behind.
          *
-         * @throws AssertionError if the whole load runs inside a single unit of work
+         * @throws AssertionError if the whole load opens more than one unit of work, does not commit it,
+         *     or rolls it back
          */
         @Test
-        @DisplayName("the whole-extract load opens at least one unit of work per pass")
-        void theWholeLoadOpensAUnitOfWorkPerPass() {
+        @DisplayName("the whole-extract load opens exactly one unit of work and commits it")
+        void theWholeLoadRunsInOneUnitOfWork() {
             givenSummariesRemember();
             givenDetailsRemember();
             LoadService subject = loader();
 
             subject.load(open(SUMMARY_FIXTURE), open(DETAIL_FIXTURE));
 
-            verify(LoadServiceTest.this.transactionManager, atLeast(2))
+            verify(LoadServiceTest.this.transactionManager, times(1))
                     .getTransaction(any(TransactionDefinition.class));
+            verify(LoadServiceTest.this.transactionManager, times(1))
+                    .commit(LoadServiceTest.this.transactionStatus);
             verify(LoadServiceTest.this.transactionManager, never())
                     .rollback(LoadServiceTest.this.transactionStatus);
+        }
+
+        /**
+         * A refusal in a later chunk withdraws the chunks that already wrote, because they share its
+         * transaction.
+         *
+         * <p>⚠️ Assumptions: the extract is deliberately built LARGER than one chunk -- five hundred and
+         * one records against a five-hundred-record chunk -- because a fixture inside one chunk cannot
+         * tell the two designs apart. Refactoring Rationale: the subject committed per chunk, so this
+         * extract produced two units of work and the first was committed before the second was even read;
+         * an operator was then left with a summary table holding five hundred rows of a load that had
+         * failed, which no count in the caller's outcome records and no re-run can distinguish from a
+         * load that was meant to stop there.
+         *
+         * <p>Assumptions: what is asserted is the SHAPE of the boundary -- one opening, one rollback, no
+         * commit -- rather than the absence of rows, because a mocked repository has no transaction to
+         * undo and keeps whatever it recorded. The case therefore also asserts that the first chunk really
+         * did write, so that "rolled back" is a statement about work that existed; the engine-level
+         * assertion that the rows are then invisible is {@code LoadServiceAtomicityRepositoryIT}.
+         *
+         * @throws AssertionError if the load opens more than one unit of work, commits any of them, or
+         *     fails to roll back
+         */
+        @Test
+        @DisplayName("a refusal in the second chunk rolls back the first chunk's writes with it")
+        void aRefusalInALaterChunkWithdrawsTheEarlierOnes() {
+            byte[] extract = manySummaries(CHUNK_RECORDS + 1);
+            when(LoadServiceTest.this.summaries.insertSummaryIfAbsent(any(PendingAuthSummary.class)))
+                    .thenAnswer(call -> {
+                        LoadServiceTest.this.storedRoots.add(call.getArgument(0));
+                        return Integer.valueOf(1);
+                    });
+            // WHY : Assumptions: the presence query is what fails, and it fails on its SECOND call. That
+            //       is one call per chunk, so the refusal lands after the first chunk has written every
+            //       one of its rows and before the second writes any -- which is exactly the moment a
+            //       per-chunk commit boundary would have become visible.
+            when(LoadServiceTest.this.summaries.findExistingAccountIds(anyCollection()))
+                    .thenReturn(List.of())
+                    .thenThrow(new IllegalStateException("summary store unavailable"));
+            LoadService subject = loader();
+
+            assertThatExceptionOfType(IllegalStateException.class)
+                    .isThrownBy(() -> subject.loadSummaries(new ByteArrayInputStream(extract)));
+
+            assertThat(LoadServiceTest.this.storedRoots)
+                    .as("the first chunk must have written, or 'rolled back' would be vacuous")
+                    .hasSize(CHUNK_RECORDS);
+            verify(LoadServiceTest.this.transactionManager, times(1))
+                    .getTransaction(any(TransactionDefinition.class));
+            verify(LoadServiceTest.this.transactionManager, times(1))
+                    .rollback(LoadServiceTest.this.transactionStatus);
+            verify(LoadServiceTest.this.transactionManager, never())
+                    .commit(LoadServiceTest.this.transactionStatus);
+        }
+
+        /**
+         * A refusal in the child file of a combined load withdraws the summary file with it.
+         *
+         * <p>⚠️ Assumptions: the combined entry point is ONE unit of work across both files, so a child
+         * refusal leaves no summary row behind. Refactoring Rationale: the subject ran the two files as
+         * two transactions, so a malformed child extract committed the whole summary file first -- the
+         * half-loaded database the class contract says a load never leaves, and the state that makes the
+         * duplicate tolerance load-bearing for correctness rather than convenience.
+         *
+         * <p>Assumptions: the refusal is raised by the child STORE rather than by malformed child bytes,
+         * because a malformed record is refused while its chunk is decoded and a store failure is refused
+         * after rows have been written -- and it is the second that a commit boundary between the files
+         * would have exposed.
+         *
+         * @throws AssertionError if the combined load opens more than one unit of work, commits it, or
+         *     fails to roll it back
+         */
+        @Test
+        @DisplayName("a child-file refusal rolls back the summary file of the same combined load")
+        void aChildRefusalWithdrawsTheSummariesOfTheSameLoad() {
+            givenSummariesRemember();
+            when(LoadServiceTest.this.details.findExistingIds(anyCollection())).thenReturn(List.of());
+            when(LoadServiceTest.this.details.insertDetailIfAbsent(any(PendingAuthDetail.class)))
+                    .thenThrow(new IllegalStateException("authorization store unavailable"));
+            LoadService subject = loader();
+
+            assertThatExceptionOfType(IllegalStateException.class)
+                    .isThrownBy(() -> subject.load(open(SUMMARY_FIXTURE), open(DETAIL_FIXTURE)));
+
+            assertThat(LoadServiceTest.this.storedRoots)
+                    .as("the summary pass must have written inside the transaction the child refusal"
+                            + " discards, or the case proves nothing about their sharing it")
+                    .hasSize(ROOT_COUNT);
+            verify(LoadServiceTest.this.transactionManager, times(1))
+                    .getTransaction(any(TransactionDefinition.class));
+            verify(LoadServiceTest.this.transactionManager, times(1))
+                    .rollback(LoadServiceTest.this.transactionStatus);
+            verify(LoadServiceTest.this.transactionManager, never())
+                    .commit(LoadServiceTest.this.transactionStatus);
         }
     }
 

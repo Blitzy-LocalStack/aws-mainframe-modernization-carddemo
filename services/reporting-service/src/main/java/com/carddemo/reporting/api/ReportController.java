@@ -21,9 +21,9 @@ import java.security.Principal;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.util.Objects;
-import org.springframework.http.HttpStatus;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -258,6 +258,21 @@ public class ReportController {
     private static final String SCOPE_FORWARD = "forward";
 
     /**
+     * Disposition set on an artifact response.
+     *
+     * <p>Assumptions: stated WITHOUT a filename, matching the statement surface. A filename composed from
+     * a type and a range would be harmless, and omitting it keeps one convention for both artifact routes
+     * rather than two that differ for no reason a reader could infer.</p>
+     */
+    private static final String ATTACHMENT_DISPOSITION = "attachment";
+
+    /** Header forbidding content-type sniffing on an artifact response. */
+    private static final String CONTENT_TYPE_OPTIONS_HEADER = "X-Content-Type-Options";
+
+    /** Value of that header. */
+    private static final String NOSNIFF = "nosniff";
+
+    /**
      * Verbatim fragment the reference appends to the report name on a successful submission.
      *
      * <p>Assumptions: reproduced character for character from {@code app/cbl/CORPT00C.cbl} L449 to
@@ -347,6 +362,17 @@ public class ReportController {
      * confirmation first would let a request that selected no report type at all be answered as a
      * successful cancellation, which is a success reported for a request that could never have run.
      *
+     * <p>Assumptions: marking MORE THAN ONE report type is admitted rather than refused, and the type
+     * that runs is decided by FIRST-MATCH PRECEDENCE in the order monthly, yearly, custom. That is the
+     * reference's own condition chain -- {@code app/cbl/CORPT00C.cbl} evaluates the monthly arm at L213,
+     * the yearly arm at L239 and the custom arm at L256 under one {@code EVALUATE TRUE}, so the first
+     * marked type is the only one reached -- and {@link ReportExecutionService#resolveReportName} applies
+     * exactly that chain. The response's report name is what tells a caller which type ran, and
+     * {@code reporting-api.yaml} states the same precedence on this operation and on
+     * {@code ReportRequest}. Recorded here because the opposite reading is the plausible one: this block
+     * previously documented a refusal for a second mark, which would have answered 400 where the
+     * baseline produces a report, and functional parity is a non-negotiable constraint of this migration.
+     *
      * @param request the report request the caller submitted; validated declaratively before this
      *     method is entered
      * @param idempotencyKey the caller's optional submission key, sent in the
@@ -355,10 +381,13 @@ public class ReportController {
      *     abandoned call avoids starting a second run; omitting it makes every submission a distinct
      *     run, which is what lets the same report be produced again over the same range
      * @return the outcome, reporting either the accepted run or the cancellation; never {@code null}
-     * @throws ClientInputException if no report type is selected or more than one is, if a custom
-     *     range omits or misstates a bound, if the confirmation answer is neither of the two the
-     *     reference recognises, or if a supplied submission key carries a character or a length an
-     *     execution name may not hold
+     * @throws ClientInputException if NO report type is marked at all, carrying the reference's own
+     *     sentence from {@code app/cbl/CORPT00C.cbl} L438; if a custom range omits a bound, states a
+     *     bound the shared date edit rejects, or states an upper bound below its lower bound; if the
+     *     confirmation answer is supplied and is neither of the two the reference recognises; or if a
+     *     supplied submission key carries a character or a length an execution name may not hold. An
+     *     ABSENT confirmation answer is not among them -- it is answered 200 with the reference's
+     *     prompt, as the branch below records
      */
     // WHY : Refactoring Rationale: the method name is the published operation identifier verbatim,
     //       and an earlier revision named it submitReport. The documentation library derives an
@@ -804,21 +833,6 @@ public class ReportController {
                     ReportArtifactLocator.TYPE_PARAMETER, unknownType.getMessage());
         }
     }
-
-    /**
-     * Disposition set on an artifact response.
-     *
-     * <p>Assumptions: stated WITHOUT a filename, matching the statement surface. A filename composed from
-     * a type and a range would be harmless, and omitting it keeps one convention for both artifact routes
-     * rather than two that differ for no reason a reader could infer.</p>
-     */
-    private static final String ATTACHMENT_DISPOSITION = "attachment";
-
-    /** Header forbidding content-type sniffing on an artifact response. */
-    private static final String CONTENT_TYPE_OPTIONS_HEADER = "X-Content-Type-Options";
-
-    /** Value of that header. */
-    private static final String NOSNIFF = "nosniff";
 
     /**
      * Parses one query bound, refusing an unparseable value against its own parameter name.

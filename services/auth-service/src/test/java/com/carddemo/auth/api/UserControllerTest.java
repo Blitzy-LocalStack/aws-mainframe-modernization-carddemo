@@ -533,6 +533,21 @@ class UserControllerTest {
             "carddemo/dev/auth/runtime-user/9f2c4a7b1e6d05384c9a1b2d3e4f5061";
 
     /**
+     * The one-time credential the substituted service reports on a successful create.
+     *
+     * <p>Assumptions: it is deliberately UNLIKE the locator above and unlike every other literal in
+     * this class, so a case asserting the body carries the credential cannot pass by finding the
+     * locator, and a case asserting a refusal body does not echo it cannot pass by coincidence.</p>
+     *
+     * <p>Assumptions: the value is a literal rather than a generated draw. The provisioning
+     * collaborator is substituted here, so nothing in this class exercises the generator, and a
+     * per-run value would make the comparisons below unreproducible from the source. The generator's
+     * own properties -- length, character classes, distinctness -- are asserted in
+     * {@code CognitoUserProvisioningServiceTest}, where the generator actually runs.</p>
+     */
+    private static final String CREATED_ONE_TIME_CREDENTIAL = "Qx7$mZp2Wr9!Kt4vBn6&";
+
+    /**
      * The opaque value a request presents in its authorization header.
      *
      * <p>Assumptions: it is not a token of any provider and cannot be one, since the decoder that
@@ -729,7 +744,7 @@ class UserControllerTest {
     @DisplayName("the administrator authority admits all five routes to their handlers")
     void theAdministratorAuthorityAdmitsAllFiveRoutes() throws Exception {
         stubDecoderWithGroups(List.of(JwtRoleConverter.ADMIN_AUTHORITY));
-        when(users.list(any(), any(), anyString())).thenReturn(pageOfOneRow());
+        when(users.list(any(), any(), any(), anyString())).thenReturn(pageOfOneRow());
         when(users.create(any(CreateUserRequest.class))).thenReturn(createdRow());
         when(users.read(STORED_IDENTIFIER)).thenReturn(storedRow());
         when(users.update(eq(STORED_IDENTIFIER), any(UpdateUserRequest.class)))
@@ -825,7 +840,7 @@ class UserControllerTest {
     @DisplayName("the list route answers 200 with the whole page envelope and no other member")
     void theListRouteAnswersTheWholePageEnvelope() throws Exception {
         stubDecoderWithGroups(List.of(JwtRoleConverter.ADMIN_AUTHORITY));
-        when(users.list(isNull(), isNull(), eq(TOKEN_SUBJECT))).thenReturn(pageOfOneRow());
+        when(users.list(isNull(), isNull(), isNull(), eq(TOKEN_SUBJECT))).thenReturn(pageOfOneRow());
 
         String body = mockMvc.perform(listRequest()
                         .header(HttpHeaders.AUTHORIZATION, bearerHeader()))
@@ -865,7 +880,7 @@ class UserControllerTest {
     @DisplayName("the cursor, the direction and the authenticated caller reach the service unaltered")
     void theCursorAndDirectionReachTheServiceUnaltered() throws Exception {
         stubDecoderWithGroups(List.of(JwtRoleConverter.ADMIN_AUTHORITY));
-        when(users.list(any(), any(), anyString())).thenReturn(PageResponse.empty());
+        when(users.list(any(), any(), any(), anyString())).thenReturn(PageResponse.empty());
 
         mockMvc.perform(listRequest()
                         .param("cursor", SEALED_SUPPLIED_CURSOR)
@@ -873,7 +888,7 @@ class UserControllerTest {
                         .header(HttpHeaders.AUTHORIZATION, bearerHeader()))
                 .andExpect(status().isOk());
 
-        verify(users).list(SEALED_SUPPLIED_CURSOR, DIRECTION_BACKWARD, TOKEN_SUBJECT);
+        verify(users).list(null, SEALED_SUPPLIED_CURSOR, DIRECTION_BACKWARD, TOKEN_SUBJECT);
     }
 
     /**
@@ -901,19 +916,54 @@ class UserControllerTest {
                 //   and read in a different voice from every other refusal this adapter emits.
                 .andExpect(jsonPath("$.fieldErrors[0].message").value(MESSAGE_DIRECTION_DOMAIN));
 
-        verify(users, never()).list(any(), any(), any());
+        verify(users, never()).list(any(), any(), any(), any());
+    }
+
+    /**
+     * Asserts an over-wide opening position is keyed to that parameter and not to a row's identifier.
+     *
+     * <p>Purpose: the published parameter states that this refusal arrives "keyed startUserId -- the key
+     * names this search input rather than a row's identifier, so a form marks the control the operator
+     * filled in". That is a claim about the FIELD KEY and not about the sentence, and the sentence it
+     * shares with the path selector is exactly why: an assertion on the message alone passes whichever
+     * of the two names the key carries.</p>
+     *
+     * <p>Assumptions: the key is the handler's own parameter name, which the shared advice reads from the
+     * method parameter, so this case also pins that the request parameter name and the Java parameter
+     * name agree. Renaming one without the other would key the refusal to a control no client declares.
+     * </p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("an over-wide opening position is keyed to that parameter")
+    void anOverWideOpeningPositionIsKeyedToThatParameter() throws Exception {
+        stubDecoderWithGroups(List.of(JwtRoleConverter.ADMIN_AUTHORITY));
+
+        mockMvc.perform(listRequest()
+                        .param("startUserId", "A".repeat(USER_ID_WIDTH + 1))
+                        .header(HttpHeaders.AUTHORIZATION, bearerHeader()))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors.length()").value(1))
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("startUserId"))
+                .andExpect(jsonPath("$.fieldErrors[0].message").value(MESSAGE_IDENTIFIER_TOO_LONG));
+
+        verify(users, never()).list(any(), any(), any(), any());
     }
 
     /**
      * Asserts every parameter refusal carries an authored sentence and none carries constraint grammar.
      *
-     * <p>⚠️ Refactoring Rationale: this case exists because the four parameter constraints on the adapter
+     * <p>⚠️ Refactoring Rationale: this case exists because the parameter constraints on the adapter
      * carried no sentence of their own while every member of every request record beside them carried
      * one, so bean validation's own default text reached callers in the same {@code fieldErrors} array as
-     * the reference's authored wording. Measured against the running service, the five refusals below
+     * the reference's authored wording. Measured against the running service, the refusals below
      * answered {@code 'must match "next|previous"'}, {@code 'size must be between 0 and 256'},
      * {@code 'size must be between 0 and 8'}, {@code 'must not be null'} and {@code 'must be true'}.
-     * Two of those disclosed an internal bound and one disclosed the expression enforcing a domain.</p>
+     * Two of those disclosed an internal bound and one disclosed the expression enforcing a domain. The
+     * counts that were written out here are now left to the map below, which is the thing being
+     * measured: the opening-position parameter joined the set afterwards and would have falsified
+     * them.</p>
      *
      * <p>Assumptions: the assertion has two halves and needs both. Asserting the authored sentence proves
      * the message reaches the body; asserting the ABSENCE of the framework's vocabulary proves no second
@@ -938,6 +988,17 @@ class UserControllerTest {
         refusals.put(listRequest().param("direction", DIRECTION_UNSUPPORTED), MESSAGE_DIRECTION_DOMAIN);
         refusals.put(listRequest().param("cursor", "c".repeat(CursorToken.MAX_TOKEN_LENGTH + 1)),
                 MESSAGE_CURSOR_TOO_LONG);
+        // Assumptions: the opening position shares the identifier's width sentence, because the value
+        //   is an identifier and the fault is the same one -- the adapter bounds the width and the
+        //   service applies the character domain, exactly as it does for the identifier in a path.
+        refusals.put(listRequest().param("startUserId", "A".repeat(USER_ID_WIDTH + 1)),
+                MESSAGE_IDENTIFIER_TOO_LONG);
+        // Assumptions: the padded case is here to pin the ORDER of the two checks, which the published
+        //   parameter states: the width is applied to the value as sent and the service trims afterwards,
+        //   so blanks that push a value past the width are refused rather than trimmed into range. The
+        //   trimmed form of this value would be accepted, which is what makes the case worth asserting.
+        refusals.put(listRequest().param("startUserId", " " + "A".repeat(USER_ID_WIDTH) + " "),
+                MESSAGE_IDENTIFIER_TOO_LONG);
         refusals.put(readRequest("A".repeat(USER_ID_WIDTH + 1)), MESSAGE_IDENTIFIER_TOO_LONG);
         refusals.put(delete(UserController.COLLECTION_PATH + "/" + STORED_IDENTIFIER),
                 MESSAGE_CONFIRMATION_REQUIRED);
@@ -959,33 +1020,70 @@ class UserControllerTest {
                             "must be true", DIRECTION_DOMAIN_EXPRESSION);
         }
 
-        verify(users, never()).list(any(), any(), any());
+        verify(users, never()).list(any(), any(), any(), any());
         verify(users, never()).read(any());
         verify(users, never()).delete(any());
     }
 
     /**
-     * Asserts the list route declares exactly the two cursor parameters and no positional one.
+     * Asserts the list route declares exactly the three key-positioning parameters and no ordinal one.
      *
-     * <p>Alternatives Considered: asserting the absence of a positional parameter by name was
+     * <p>Alternatives Considered: asserting the absence of an ORDINAL parameter by name was
      * evaluated and rejected, because an absence check can only refuse the names it happens to
      * enumerate and a differently spelled one would slip past. The declared set is asserted as an
-     * EQUALITY instead, so any third request parameter fails this case whatever it is called. Paging
+     * EQUALITY instead, so any fourth request parameter fails this case whatever it is called. Paging
      * by ordinal position is what is being kept out: under concurrent inserts it skips rows and
      * repeats rows, since the ordinal of a row moves when a row before it is inserted, whereas
      * reading by key from the identifier the reference browsed at {@code app/cbl/COUSR00C.cbl} L240,
      * L242, L263 and L265 cannot skip or repeat.</p>
      *
+     * <p>⚠️ Refactoring Rationale: the census reads three where it read two, and the addition is a KEY
+     * and not an ordinal, so the exclusion above is untouched. {@code startUserId} carries the
+     * identifier the reference's own search field carried at {@code app/cbl/COUSR00C.cbl} L218 to
+     * L221, and it positions a read by comparing that key -- the very thing the rejected shape does
+     * not do. The count is re-measured from the handler here rather than incremented, which is what
+     * this case is for.</p>
+     *
      * @throws Exception if the handler method cannot be resolved, which a rename would cause and which
      *     should surface here rather than as a silently narrowed assertion
      */
     @Test
-    @DisplayName("the list route declares exactly the two cursor parameters")
-    void theListRouteDeclaresExactlyTheTwoCursorParameters() throws Exception {
+    @DisplayName("the list route declares exactly the three key-positioning parameters")
+    void theListRouteDeclaresExactlyTheThreeKeyPositioningParameters() throws Exception {
         Method handler = UserController.class.getDeclaredMethod(
-                "listUsers", String.class, String.class, Principal.class);
+                "listUsers", String.class, String.class, String.class, Principal.class);
 
-        assertThat(requestParameterNamesOf(handler)).containsExactly("cursor", "direction");
+        assertThat(requestParameterNamesOf(handler))
+                .containsExactly("startUserId", "cursor", "direction");
+    }
+
+    /**
+     * Asserts the opening position reaches the service exactly as the caller sent it.
+     *
+     * <p>Purpose: this is the parameter the browser client sends for the reference's search field, and
+     * the property under test is that positioning happens on the SERVER. The client used to filter the
+     * page it already held, so an identifier sorting beyond that page produced an empty table; the
+     * adapter passing the value through is the first half of the fix, and the service positioning on it
+     * is the second.</p>
+     *
+     * <p>Assumptions: the case also proves the value is passed UNFOLDED. Trimming and folding it is the
+     * service's, beside the check that refuses a value outside the identifier domain, so an adapter
+     * that normalised it here would put one rule in two places.</p>
+     *
+     * @throws Exception if the request cannot be performed
+     */
+    @Test
+    @DisplayName("the opening position reaches the service unaltered and unfolded")
+    void theOpeningPositionReachesTheServiceUnaltered() throws Exception {
+        stubDecoderWithGroups(List.of(JwtRoleConverter.ADMIN_AUTHORITY));
+        when(users.list(any(), any(), any(), anyString())).thenReturn(PageResponse.empty());
+
+        mockMvc.perform(listRequest()
+                        .param("startUserId", "user0005")
+                        .header(HttpHeaders.AUTHORIZATION, bearerHeader()))
+                .andExpect(status().isOk());
+
+        verify(users).list("user0005", null, null, TOKEN_SUBJECT);
     }
 
     /**
@@ -1004,7 +1102,7 @@ class UserControllerTest {
     @DisplayName("a cursor naming no row answers 200 with an empty page rather than 404")
     void aCursorNamingNoRowAnswers200() throws Exception {
         stubDecoderWithGroups(List.of(JwtRoleConverter.ADMIN_AUTHORITY));
-        when(users.list(eq(SEALED_SUPPLIED_CURSOR), any(), anyString()))
+        when(users.list(any(), eq(SEALED_SUPPLIED_CURSOR), any(), anyString()))
                 .thenReturn(PageResponse.empty());
 
         mockMvc.perform(listRequest()
@@ -1036,7 +1134,7 @@ class UserControllerTest {
         // equality to an instance test recorded at L1640 to L1643 -- and it consults only the message,
         // never the cause. Thrown as a subclass, this case would receive the generic internal sentence
         // and would then assert nothing about the sentence the reference itself writes.
-        when(users.list(any(), any(), anyString())).thenThrow(
+        when(users.list(any(), any(), any(), anyString())).thenThrow(
                 new IllegalStateException(MESSAGE_UNABLE_TO_LOOKUP,
                         new IllegalStateException(STORE_DIAGNOSTIC)));
 
@@ -1609,7 +1707,7 @@ class UserControllerTest {
     @DisplayName("no route creates a session and no answer carries a session cookie")
     void noRouteCreatesASession() throws Exception {
         stubDecoderWithGroups(List.of(JwtRoleConverter.ADMIN_AUTHORITY));
-        when(users.list(any(), any(), anyString())).thenReturn(PageResponse.empty());
+        when(users.list(any(), any(), any(), anyString())).thenReturn(PageResponse.empty());
         when(users.create(any(CreateUserRequest.class))).thenReturn(createdRow());
         when(users.read(STORED_IDENTIFIER)).thenReturn(storedRow());
         when(users.update(eq(STORED_IDENTIFIER), any(UpdateUserRequest.class)))
@@ -1864,7 +1962,7 @@ class UserControllerTest {
         return CreatedUserResponse.of(
                 new UserResponse(CREATED_IDENTIFIER, SUBMITTED_FIRST_NAME, SUBMITTED_LAST_NAME,
                         ADMIN_TYPE_CODE, ROW_SUBJECT),
-                CREATED_CREDENTIAL_SECRET_NAME);
+                CREATED_CREDENTIAL_SECRET_NAME, CREATED_ONE_TIME_CREDENTIAL);
     }
 
     /**

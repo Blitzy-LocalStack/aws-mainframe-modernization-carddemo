@@ -235,7 +235,7 @@ export const SIGN_ON_FIELD_LABELS = {
  * verbatim, beside the control it is still true of.
  *
  * Assumptions: this is a divergence rather than a correction to the baseline, and it is registered as
- * `D-SIGNON-PASSWORD-HINT` in `docs/architecture/cobol-to-service-traceability.md` alongside
+ * `D-SIGNON-RETIRED-WIDTH-HINT` in `docs/architecture/cobol-to-service-traceability.md` alongside
  * `D-SIGNON-CASE-SENSITIVE-PASSWORD` and `D-PASSWORD-CHALLENGE`, the two entries recording the same
  * root cause: the credential field has no successor in the target, so every constraint the baseline
  * expressed about it describes a field that no longer exists.

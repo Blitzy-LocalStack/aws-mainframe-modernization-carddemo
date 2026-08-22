@@ -164,8 +164,8 @@ class OutboxMetadataConfidentialityTest {
         //       head per group and advances that group only once its head has been accepted, so a stub of
         //       the older shape would leave drain() with nothing to send and this class would assert
         //       nothing while still passing.
-        when(outbox.claimGroupHeads(eq(25), any(), any(), anyInt())).thenReturn(List.of(row));
-        when(outbox.claimGroupFollowers(anyString(), anyLong(), anyInt(), any(), any(), anyInt()))
+        when(outbox.claimGroupHeads(eq(25), any(), any())).thenReturn(List.of(row));
+        when(outbox.claimGroupFollowers(anyString(), anyLong(), anyInt(), any(), any()))
                 .thenReturn(List.of());
         // WHY : Assumptions: the outcome re-read is answered with the same row, because the publisher no
         //       longer mutates the instance it claimed -- it re-reads by identity inside a second short

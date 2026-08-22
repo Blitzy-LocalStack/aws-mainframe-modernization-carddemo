@@ -67,7 +67,7 @@
 #     container image or a configuration file and the same image is promotable
 #     from dev to prod unchanged. ecs-service records the receiving half of
 #     that same contract on its `ssm_parameter_arns` input.
-#   - Trade-offs: thirty-six flat outputs AND three maps carrying the same values,
+#   - Trade-offs: thirty flat outputs AND three maps carrying the same values,
 #     rather than one shape or the other. The duplication is real and is
 #     accepted; the section on shape below states what each shape buys and what
 #     the duplication costs.
@@ -171,8 +171,16 @@
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
-# Shape: thirty-six flat outputs, three maps over the same values, then one
+# Shape: thirty flat outputs, three maps over the same values, then one
 # per-service IAM-boundary map.
+#
+# WHY : Refactoring Rationale: this figure read thirty-six in three places here,
+#       which was three forms times the TWELVE queues of the withdrawn
+#       six-primary topology. main.tf declares ten queues, so the flat surface is
+#       thirty and the Purpose block above already counted the file at
+#       thirty-four including the four maps. The stale figure mattered more than
+#       an off-by-six looks: a reader auditing the contract against the resources
+#       would have gone looking for six published identifiers that name no queue.
 #
 # WHY : Alternatives Considered: three maps alone -- queue_urls, queue_arns and
 #       queue_names keyed by logical name -- and nothing else. It is a third of
@@ -186,7 +194,7 @@
 #       a `description` is the only text that reaches that README -- a
 #       rationale written in a comment beside a map key would not appear in it
 #       at all.
-# WHY : Alternatives Considered: thirty-six flat outputs alone, with no maps. It
+# WHY : Alternatives Considered: thirty flat outputs alone, with no maps. It
 #       documents perfectly and iterates not at all. Two consumers genuinely
 #       iterate: the calling root creates one Parameter Store entry per queue
 #       URL, and the observability module creates one dead-letter depth alarm

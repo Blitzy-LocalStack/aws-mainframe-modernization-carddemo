@@ -3,15 +3,31 @@
 -- -----------------------------------------------------------------------------
 -- Purpose:
 --   Create the eight read-only views the reporting bounded context reads, plus the
---   one protected table and the one lookup function they depend on, in the
---   `reporting` schema, owned by carddemo_reporting_owner. reporting-service owns
---   no table, no index and no relational object of its own; the role it connects
---   as holds USAGE on this schema, SELECT on the eight views named here and
---   EXECUTE on the function named below, and nothing else -- notably not on the
---   one table this file creates. Those eight views ARE that context's entire
---   readable data surface, so the JPA projections in
---   services/reporting-service/src/main/java/com/carddemo/reporting/domain map
+--   two protected tables, the one lookup function and the one maintenance procedure
+--   they depend on, in the `reporting` schema, owned by carddemo_reporting_owner.
+--   reporting-service owns no relational object of its own; the role it connects as
+--   holds USAGE on this schema, SELECT on the eight views named here, SELECT on TWO
+--   NAMED COLUMNS of reporting.card_identity, and EXECUTE on the function and the
+--   procedure named below, and nothing else -- notably not on
+--   reporting.card_grouping_key at all, and not on card_identity.card_num, which is
+--   the one whole card number this schema stores. Those eight views plus those two
+--   columns ARE that context's entire readable data surface, so the JPA projections
+--   in services/reporting-service/src/main/java/com/carddemo/reporting/domain map
 --   one relation each and map nothing outside this file.
+--
+--   Refactoring Rationale: the sentence above read "reporting-service owns no table,
+--   no index and no relational object of its own" and ended "and nothing else --
+--   notably not on the one table this file creates". Both halves were falsified by
+--   the same change, and the change is the subject of the block at
+--   reporting.card_identity below: the per-card grouping token used to be COMPUTED by
+--   every view that published it, over a value read from another table, which makes
+--   the expression non-IMMUTABLE and therefore un-indexable -- so a predicate on the
+--   token was a sequential scan of ledger.transactions per card and an ORDER BY on it
+--   was a sort of the whole cross-reference per chunk. The token is now persisted in
+--   an indexed relation, so this file creates one index and one more table, and the
+--   reporting role reads two of that table's three columns. What has NOT changed is
+--   the token's VALUE: it is the same keyed digest, over the same single-row secret,
+--   for the reason recorded under v_report_transactions.
 --
 --   Refactoring Rationale: this header opened with "Create the four read-only
 --   relations" and then enumerated seven, which is a count left behind by the
@@ -20,9 +36,10 @@
 --   enumeration is deliberate: the enumeration is what a reader checks against the
 --   file, and the sentence is what a reader reads first and carries away.
 --   V3__verification_surfaces.sql adds two further views to this same schema, so
---   the schema's whole population is ten views, this one table and this one
---   function -- stated here because a reader auditing the reporting role's read
---   surface arrives at this file and must not conclude the surface stops with it.
+--   the schema's whole population is ten views, the two tables this file creates,
+--   this one function and this one procedure -- stated here because a reader
+--   auditing the reporting role's read surface arrives at this file and must not
+--   conclude the surface stops with it.
 --
 --   Refactoring Rationale: every view figure in this header, and the enumeration
 --   below it, said SEVEN and listed seven, while this file has created EIGHT since
@@ -63,10 +80,12 @@
 --   of SEVEN projections is complete. The ORDERING that made the earlier state
 --   necessary has not gone away and is stated under "Prerequisites" below.
 --
---   This file additionally creates ONE table, reporting.card_grouping_key, which
---   is not a projection and is not readable by the reporting service role. It
---   holds the secret described at the statement view, and it is the single
---   relation in this schema that role may not select from.
+--   This file additionally creates TWO tables. reporting.card_grouping_key is not a
+--   projection and is not readable by the reporting service role at all: it holds the
+--   secret described at the statement view, and it is the single relation in this
+--   schema that role may not select from. reporting.card_identity is not a projection
+--   either -- it is the ACCESS PATH for the token that secret produces, one row per
+--   card, and the reporting role may select exactly two of its three columns.
 --
 -- WHY this file lives HERE and not in a service migration:
 --   - Assumptions: data-migration/sql/V0__schemas_and_roles.sql establishes the
@@ -109,9 +128,14 @@
 -- =============================================================================
 
 -- WHY : Trade-offs: one explicit transaction for the whole file. CREATE TABLE,
---       CREATE VIEW and GRANT are all transactional in PostgreSQL, so an
---       interrupted run leaves no half-built surface -- either the grouping-key
---       table, all eight views and all eight grants exist, or none of them do.
+--       CREATE INDEX, INSERT, CREATE VIEW, CREATE PROCEDURE and GRANT are all
+--       transactional in PostgreSQL, so an interrupted run leaves no half-built
+--       surface -- either both tables, the identity backfill, all eight views, the
+--       function, the procedure and every grant exist, or none of them do. That
+--       property is what makes the identity relation safe to introduce: a run that
+--       created the table and failed before the backfill would leave an EMPTY access
+--       path behind, and an empty access path answers every lookup with no rows
+--       rather than with an error.
 --       The alternative, letting each object commit independently, can leave
 --       reporting able to read some relations and not others, which presents as a
 --       partly-working report rather than as a failed migration.
@@ -262,13 +286,30 @@ SET LOCAL ROLE carddemo_reporting_owner;
 -- WHY : Trade-offs: the token is a KEYED DIGEST rather than a random surrogate
 --       per card. A surrogate -- one generated identifier per distinct card, held
 --       in a mapping table -- is unconditionally unlinkable and therefore
---       stronger, and it was rejected on operational cost rather than on strength:
---       it needs a row inserted for every card that appears, which means a write
---       path and a refresh step inside a context whose entire point is that it
---       holds no writable relation and no maintenance job. The keyed digest needs
---       neither, is computed on read, and covers cards that appear after this file
---       ran. What it gives up is that the mapping is recoverable BY the holder of
---       the key, which is the database owner and no one else.
+--       stronger, and it was rejected on strength being the only axis on which it
+--       wins: it is recoverable BY the holder of the key, which is the database
+--       owner and no one else, and that is the same party a surrogate mapping table
+--       would be readable by. Keeping the digest also keeps the token's VALUE
+--       unchanged across this file's revisions, which the report's join between two
+--       relations depends on.
+-- WHY : Refactoring Rationale: the paragraph above rejected the surrogate on
+--       OPERATIONAL cost -- "it needs a row inserted for every card that appears,
+--       which means a write path and a refresh step inside a context whose entire
+--       point is that it holds no writable relation and no maintenance job" -- and
+--       closed by claiming the digest "needs neither, is computed on read, and covers
+--       cards that appear after this file ran". Every clause of that was accurate and
+--       the conclusion drawn from it was wrong, because "computed on read" is not free:
+--       the expression reads reporting.card_grouping_key, so it is not IMMUTABLE, so
+--       PostgreSQL cannot build an expression index over it and no predicate or
+--       ordering on the token can be served by any index at all. Measured on 20 000
+--       cards and 200 000 transactions, a single-card statement lookup was a parallel
+--       sequential scan of ledger.transactions and one heading chunk was a hash join
+--       over two full relations plus a top-N sort of 18 999 rows -- per chunk, so a
+--       whole run was quadratic in the cardholder population. The write path and the
+--       refresh step the paragraph above was unwilling to pay for are therefore paid,
+--       at reporting.card_identity below: the digest is unchanged and is now STORED
+--       once per card and indexed, which is what makes the same two queries an index
+--       scan of the identity relation followed by an index scan of the ledger.
 -- WHY : Assumptions: the value is stable for the life of the database, and
 --       ON CONFLICT DO NOTHING is what keeps it so. Re-running this file must not
 --       rotate the key: the token would change, and a statement run spanning the
@@ -306,6 +347,279 @@ COMMENT ON TABLE reporting.card_grouping_key IS
 
 
 -- -----------------------------------------------------------------------------
+-- 0b. reporting.card_identity -- the persisted, INDEXED access path for the token.
+--
+-- One row per card in account.card_xref, holding the whole card number, the keyed
+-- digest of it, and the masked rendering every card-bearing relation in this schema
+-- publishes. It is a physical access structure and not a projection: it copies no
+-- money, no customer attribute and no transaction, and the three columns below are the
+-- whole of it.
+--
+-- WHY : Assumptions: the digest expression here is CHARACTER-FOR-CHARACTER the one
+--       every view in this file used to compute inline, over the same single-row
+--       secret, in the same concatenation order, through the same explicit UTF8
+--       conversion. That identity is the whole reason this table can be introduced
+--       without a data migration: the token a statement already grouped by, and the
+--       token the report already joined on, keep the values they had. A digest
+--       computed even slightly differently here would not fail -- it would join
+--       nothing, and an empty report is the failure mode this file's header warns
+--       about twice.
+-- WHY : Trade-offs: this is DERIVED state, and derived state can be stale. The cost is
+--       stated plainly because it is the real cost of the fix: a card inserted into
+--       account.card_xref after this file ran has no row here until
+--       reporting.refresh_card_identity() runs, and a card with no row here produces no
+--       statement -- silently, because a statement run has nothing to compare its
+--       cardholder count against. The mitigations are all three of: the backfill below,
+--       which covers every card present at creation; the procedure below, which is
+--       idempotent, cheap and callable by the two roles that need it; and
+--       carddemo_migration's loader, which calls it in the SAME transaction as every
+--       load of account.card_xref, so the ETL cannot create a gap it does not close.
+-- WHY : Alternatives Considered: a TRIGGER on account.card_xref, which would make the
+--       relation self-maintaining and remove the staleness window entirely. Rejected on
+--       two independent grounds, either sufficient. It is not authorised: this file runs
+--       as carddemo_reporting_owner, CREATE TRIGGER requires the TRIGGER privilege on
+--       the table, and V0__schemas_and_roles.sql grants that owner SELECT on the account
+--       schema and nothing else -- so the statement would fail and take this whole
+--       migration with it, and granting the privilege would widen a cross-context
+--       boundary in the direction the schema-per-service split exists to prevent. And it
+--       should not be done even if it were authorised: a trigger makes every
+--       account-service write to the cross-reference depend on a reporting relation being
+--       writable, so a fault in reporting maintenance would begin refusing card
+--       issuance. Availability of the writing context outranks freshness of a reporting
+--       access path.
+-- WHY : Alternatives Considered: a MATERIALIZED VIEW, which is the reflex form for
+--       "persisted result of a query". Rejected because REFRESH MATERIALIZED VIEW
+--       rewrites the whole relation and, without CONCURRENTLY, takes an ACCESS EXCLUSIVE
+--       lock that blocks every reader for the duration -- so the refresh either blocks
+--       statement runs or needs a unique index and a second copy of the data. The
+--       procedure below inserts only the cards that are missing and deletes only the
+--       cards that are gone, which on a steady-state population writes nothing at all.
+-- WHY : Assumptions: card_num is stored here in FULL, which is the one place in this
+--       schema that is true of, and the reporting role cannot read it. The column-level
+--       grant below names the two columns that role may select and card_num is not among
+--       them, so the masking control is not weakened by this table's existence: the
+--       views join on card_num as the OWNER, because they are non-security_invoker, and
+--       the role reading through them still sees only the masked rendering. Storing the
+--       whole number is unavoidable -- it is what the digest is a function of and what
+--       the join to the ledger and the cross-reference is on -- and storing it once here
+--       adds no readable copy of anything account.card_xref does not already hold.
+-- WHY : Assumptions: the two ORDERED columns carry COLLATE "C" and the stored card
+--       number does not. The two walks over this schema's cards must agree on order --
+--       the heading chunk walks card_num_masked here, and the statement window walks the
+--       masked rendering the ledger-derived view computes -- and
+--       services/transaction-service/src/main/resources/db/migration/
+--       V3__ledger_bytewise_collation.sql made ledger.transactions.card_num bytewise for
+--       exactly that reason, so the ordered columns here are bytewise too and neither
+--       walk's order depends on the database's lc_collate. card_num is left at the
+--       database default because its counterpart, account.card_xref.card_num, is: an
+--       equality join between two differently collated columns is not index-eligible,
+--       and that join is the one this table exists to make fast.
+-- WHY : Assumptions: card_num_masked is `text` and not `character(16)`, and the width is
+--       asserted by a CHECK instead of by the type. A bpchar column compared against the
+--       varchar parameter a JDBC driver binds resolves through the implicit bpchar-to-text
+--       cast, so no index on a bpchar column can serve the comparison; casting the
+--       parameter to bpchar instead would turn the empty-string start sentinel both
+--       cursors use into sixteen blanks, whose order against an asterisk is a property of
+--       the collation rather than of the data. `text` keeps the comparison semantics the
+--       repository contract already has and makes the index usable, and the views cast
+--       back to character(16) so no consumer sees a type change.
+CREATE TABLE IF NOT EXISTS reporting.card_identity (
+    card_fingerprint text          COLLATE "C" NOT NULL,
+    card_num         character(16)             NOT NULL,
+    card_num_masked  text          COLLATE "C" NOT NULL,
+    CONSTRAINT pk_card_identity PRIMARY KEY (card_fingerprint),
+    CONSTRAINT uq_card_identity_card_num UNIQUE (card_num),
+    CONSTRAINT ck_card_identity_masked_width CHECK (length(card_num_masked) = 16)
+);
+
+-- WHY : Assumptions: this composite index is the ORDER the two card walks traverse, and
+--       it exists so that a chunk of that walk is a seek rather than a sort. The leading
+--       column alone would not do: the masked rendering is twelve constant asterisks and
+--       four digits, so it is not unique, and a keyset continuation over a non-unique
+--       key needs the tie-breaker IN the index or the engine must sort every row sharing
+--       a rendering. Measured: with this index a continuation chunk is an index-only scan
+--       returning exactly its limit; without it the same chunk sorts 18 999 rows.
+-- WHY : Alternatives Considered: adding INCLUDE (card_num) so the join to the ledger
+--       could also be served index-only. Rejected as measured waste: the walk selects
+--       only the two indexed columns, so it is already index-only, and the ledger join is
+--       reached by primary key from the fingerprint rather than from this index.
+CREATE INDEX IF NOT EXISTS idx_card_identity_masked_fingerprint
+    ON reporting.card_identity (card_num_masked, card_fingerprint);
+
+-- WHY : Assumptions: the backfill reads account.card_xref, which is the per-card master
+--       -- one row per card, primary key card_num -- so this insert cannot multiply rows
+--       and needs no DISTINCT. The CROSS JOIN to the key table cannot multiply them
+--       either, for the reason stated at that table: its primary key is fixed to one
+--       value.
+-- WHY : Assumptions: ON CONFLICT DO NOTHING on the card number rather than on the
+--       fingerprint, so a re-run of this file is a no-op instead of an error. The
+--       fingerprint is a function of the card number and the key, and the key does not
+--       rotate on a re-run, so the two conflict targets identify the same rows today;
+--       card_num is named because it is the column whose uniqueness is a property of the
+--       SOURCE rather than of the digest.
+INSERT INTO reporting.card_identity (card_fingerprint, card_num, card_num_masked)
+SELECT
+    encode(sha256(convert_to(k.key_value || rtrim(x.card_num), 'UTF8')), 'hex'),
+    x.card_num,
+    '************' || right(rtrim(x.card_num), 4)
+FROM account.card_xref AS x
+CROSS JOIN reporting.card_grouping_key AS k
+ON CONFLICT (card_num) DO NOTHING;
+
+ALTER TABLE reporting.card_identity OWNER TO carddemo_reporting_owner;
+
+-- WHY : Assumptions: this REVOKE is required for the same reason the grouping key's is
+--       -- V0__schemas_and_roles.sql sets a default privilege granting SELECT on TABLES
+--       in this schema to carddemo_reporting, and a default privilege cannot distinguish
+--       a table from a view -- and it is required MORE strongly here, because this table
+--       holds whole card numbers. It is issued before the column grant below so that the
+--       role's privilege on this relation is built up from nothing rather than trimmed
+--       down from everything: the order is what makes the outcome independent of what the
+--       default privilege happened to grant.
+REVOKE ALL ON reporting.card_identity FROM carddemo_reporting;
+
+-- WHY : Assumptions: a COLUMN-LEVEL grant, naming two of three columns. This is what
+--       lets the statement heading walk read the ordered index directly -- a
+--       security_barrier view cannot be walked by a keyset predicate without the planner
+--       materialising the whole of it, which is the defect this table fixes -- while
+--       leaving the whole card number unreadable by the role that walks it. An attempt to
+--       select card_num as carddemo_reporting fails with SQLSTATE 42501, which
+--       services/reporting-service/src/test/java/com/carddemo/reporting/repository/
+--       ReportingDeployedRelationIT.java asserts by name rather than by inference.
+-- WHY : Alternatives Considered: granting SELECT on the whole table and relying on the
+--       repository never selecting card_num. Rejected: that makes a masking control a
+--       property of application code that a later query could change silently, where the
+--       column grant makes it a property of the database that fails loudly.
+-- WHY : Alternatives Considered: a second view over this table exposing only the two
+--       columns, granted instead of the columns. Rejected because a view is exactly what
+--       cannot be walked: the barrier the other projections carry is what blocks the
+--       ordered index path, and a view WITHOUT the barrier beside eight views with it
+--       would be the one relation in this schema whose predicates are pushed
+--       unrestricted.
+GRANT SELECT (card_fingerprint, card_num_masked) ON reporting.card_identity
+    TO carddemo_reporting;
+
+COMMENT ON TABLE reporting.card_identity IS
+    'One row per card in account.card_xref, holding the whole card number, the keyed per-card '
+    'fingerprint derived from it through reporting.card_grouping_key, and the masked rendering the '
+    'card-bearing views publish. Exists so that the fingerprint can be INDEXED: computed inline it '
+    'is not IMMUTABLE, so no predicate or ordering on it could be served by an index. Owned by '
+    'carddemo_reporting_owner; carddemo_reporting holds SELECT on card_fingerprint and '
+    'card_num_masked only, never on card_num. Maintained by reporting.refresh_card_identity().';
+
+
+-- -----------------------------------------------------------------------------
+-- 0c. reporting.refresh_card_identity -- the idempotent delta maintenance step.
+--
+-- WHY : Assumptions: a PROCEDURE and not a function, and the difference is forced from
+--       the calling side rather than chosen. The repository invokes it through Spring
+--       Data's @Modifying, which executes the statement with
+--       PreparedStatement.executeUpdate(), and the PostgreSQL driver refuses that for a
+--       statement returning a result set -- "A result was returned when none was
+--       expected". CALL of a procedure without output parameters returns none, so the one
+--       shape works from the service, from psql and from the ETL alike.
+-- WHY : Assumptions: SECURITY DEFINER, because the role that holds EXECUTE can neither
+--       write this table nor read the source. carddemo_reporting holds SELECT on two of
+--       this relation's three columns and nothing at all on the account schema, so a body
+--       running with the CALLER's authority could do none of the work. Executing as the
+--       owner is what lets that role reconcile without being granted either privilege.
+-- WHY : Assumptions: definer rights raise the PRIVILEGE the body runs with and do not lift
+--       a transaction's read-only state, which decides who can really call this. The
+--       reporting service opens its pool read-only, so PostgreSQL refuses this body's
+--       writes through it whatever this grant says -- the service's repository method is
+--       therefore a contract and a diagnostic rather than a usable maintenance path, and
+--       the ETL, which holds a writable migration connection, is the caller that matters.
+--       The grant is kept because it is the privilege half of the contract, and because a
+--       deployment that gave the service a writable datasource would need nothing else.
+-- WHY : Assumptions: search_path is pinned, for the reason stated at
+--       reporting.resolve_card: an unqualified name resolved through a caller-controlled
+--       search_path is the classic escalation route out of a SECURITY DEFINER body, and
+--       pinning it also makes the schemas this body may reach a reviewable list.
+-- WHY : Assumptions: the insert is an ANTI-JOIN and the delete is its mirror, so the
+--       procedure is idempotent and cheap: on a population that has not changed it writes
+--       nothing, and on one that has it touches only the difference. Re-computing the
+--       whole table -- DELETE then INSERT, or TRUNCATE then INSERT -- was the simpler body
+--       and is rejected because it rewrites every row on every call, and because a reader
+--       concurrently walking the identity relation would see it empty.
+-- WHY : Assumptions: departed cards are DELETED rather than left behind. A card removed
+--       from the cross-reference must stop producing a statement, and a row left here
+--       would keep the fingerprint resolvable while the join that renders it returns
+--       nothing -- which presents as a statement with no cardholder rather than as no
+--       statement.
+-- WHY : Trade-offs: no advisory lock is taken, so two concurrent calls can both attempt
+--       the same insert. That is accepted rather than overlooked: the unique constraint on
+--       card_num makes the second attempt a no-op through ON CONFLICT, and the delete is
+--       expressed as a NOT EXISTS over the source, so it is convergent whichever call
+--       commits first. A lock would serialise a maintenance step whose worst outcome is
+--       already only a wasted write.
+-- WHY : Assumptions: the caller must NOT be inside a read-only transaction. PostgreSQL
+--       refuses a write in a transaction marked READ ONLY regardless of SECURITY DEFINER,
+--       so a Spring @Transactional(readOnly = true) around the call fails with SQLSTATE
+--       25006 -- documented on the repository method as well, because that is where a
+--       caller makes the mistake.
+CREATE OR REPLACE PROCEDURE reporting.refresh_card_identity()
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, reporting, account
+AS $$
+    INSERT INTO reporting.card_identity (card_fingerprint, card_num, card_num_masked)
+    SELECT
+        encode(sha256(convert_to(k.key_value || rtrim(x.card_num), 'UTF8')), 'hex'),
+        x.card_num,
+        '************' || right(rtrim(x.card_num), 4)
+    FROM account.card_xref AS x
+    CROSS JOIN reporting.card_grouping_key AS k
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM reporting.card_identity AS held
+        WHERE held.card_num = x.card_num
+    )
+    ON CONFLICT (card_num) DO NOTHING;
+
+    DELETE FROM reporting.card_identity AS held
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM account.card_xref AS x
+        WHERE x.card_num = held.card_num
+    );
+$$;
+
+COMMENT ON PROCEDURE reporting.refresh_card_identity() IS
+    'Brings reporting.card_identity level with account.card_xref: inserts the cards it does not '
+    'hold, deletes the cards the cross-reference no longer holds, and writes nothing when the two '
+    'already agree. Idempotent and safe to call concurrently. Must be called outside a read-only '
+    'transaction, which is a property of the transaction and not of the privilege: SECURITY '
+    'DEFINER does not lift it. Must be run after the last load into account.card_xref and before '
+    'any statement run; carddemo_migration publishes that step as '
+    'loaders.aurora.refresh_card_identity(connection), over a writable migration connection.';
+
+ALTER PROCEDURE reporting.refresh_card_identity() OWNER TO carddemo_reporting_owner;
+
+-- WHY : Assumptions: EXECUTE is revoked from PUBLIC first, for the reason stated at
+--       reporting.resolve_card -- a newly created routine is executable by every login in
+--       the database -- and it matters more for this one, because this one WRITES.
+REVOKE ALL ON PROCEDURE reporting.refresh_card_identity() FROM PUBLIC;
+
+-- WHY : Assumptions: EXECUTE is granted to ONE runtime role, and every other caller
+--       reaches this procedure as its owner. carddemo_reporting holds it because the
+--       reporting service declares the reconciliation on its cross-reference repository,
+--       and that declaration is the contract a writable deployment of that service would
+--       use. The ETL needs no grant of its own: it authenticates as the reporting schema's
+--       migration login, which is a member of carddemo_reporting_owner, and issues SET
+--       ROLE before the call -- the same authority that created this procedure.
+-- WHY : Alternatives Considered: granting carddemo_account EXECUTE as well, so that a load
+--       of account.card_xref could reconcile inside its own transaction and leave no window
+--       in which a card exists without an identity. Rejected because no caller does that:
+--       loaders.aurora.load_records is contracted to one dataset in exactly one transaction
+--       and holds the ACCOUNT schema's connection, which has no privilege in this schema,
+--       so the reconciliation is a separate step over the reporting migration connection.
+--       An unexercised EXECUTE on a writing routine is privilege granted for nothing, and
+--       this schema's whole posture is that a role holds only what a caller of its uses.
+GRANT EXECUTE ON PROCEDURE reporting.refresh_card_identity()
+    TO carddemo_reporting;
+
+
+-- -----------------------------------------------------------------------------
 CREATE VIEW reporting.v_report_transactions
     WITH (security_barrier = true) AS
 SELECT
@@ -320,18 +634,46 @@ SELECT
     t.merchant_city,
     t.merchant_zip,
     ('************' || right(rtrim(t.card_num), 4))::character(16) AS card_num,
-    -- WHY : Assumptions: the same keyed digest the statement projection publishes, for
+    -- WHY : Assumptions: the same keyed token the statement projection publishes, for
     --       the reason recorded in the header block: the report joins this relation to
     --       reporting.v_card_xref to obtain the account identifier its layout prints,
     --       and the mask is four digits behind a constant filler so a join on it is a
-    --       join on four digits. The CROSS JOIN cannot multiply rows, because the key
-    --       table's primary key is fixed to a single value.
-    encode(sha256(convert_to(k.key_value || rtrim(t.card_num), 'UTF8')), 'hex')
-                                                                  AS card_fingerprint,
+    --       join on four digits.
+    -- WHY : Refactoring Rationale: the token is now READ from reporting.card_identity
+    --       instead of being computed here from reporting.card_grouping_key. The value is
+    --       identical -- the identity relation stores the output of this exact expression
+    --       -- and the change is what makes a predicate on the token index-eligible: a
+    --       digest computed over a column of another table is not IMMUTABLE, so no
+    --       expression index could ever serve it and every lookup by token was a
+    --       sequential scan of this table.
+    ci.card_fingerprint                                           AS card_fingerprint,
     t.orig_ts,
     t.proc_ts
 FROM ledger.transactions AS t
-CROSS JOIN reporting.card_grouping_key AS k;
+-- WHY : Assumptions: a LEFT JOIN, so this relation still returns EVERY row of
+--       ledger.transactions. That is not a preference: TransactionReportRepository
+--       counts the report's driving rows from this relation and compares that count
+--       against the rows its dimension joins resolved, which is how a transaction whose
+--       card has no cross-reference row is detected and reported. An inner join here
+--       would remove such a row before the count could see it, so the report would come
+--       out short and consistent -- the one failure this arrangement is built to make
+--       impossible. ledger.transactions.card_num is nullable and carries no foreign key
+--       to account.card_xref, so an unresolvable card is representable in the data rather
+--       than hypothetical.
+-- WHY : Assumptions: the outer join costs the fast path nothing, which is why row
+--       inclusion and index eligibility are both available here. A strict equality on
+--       card_fingerprint filters nulls, so PostgreSQL reduces this outer join to an inner
+--       one and plans it as an index scan of pk_card_identity followed by an index scan
+--       of the ledger -- measured on 20 000 cards and 200 000 transactions.
+-- WHY : Assumptions: the join is written with an explicit COLLATE "C" because the two
+--       columns are deliberately collated differently -- ledger.transactions.card_num is
+--       bytewise by V3__ledger_bytewise_collation.sql, and card_identity.card_num follows
+--       account.card_xref's default so its own join to the cross-reference stays
+--       index-eligible. Naming the collation on the comparison is what keeps the index on
+--       the ledger column usable and what stops the outcome depending on the database's
+--       lc_collate.
+LEFT JOIN reporting.card_identity AS ci
+       ON ci.card_num COLLATE "C" = t.card_num;
 
 COMMENT ON VIEW reporting.v_report_transactions IS
     'Row source for the 133-column transaction report (app/cbl/CBTRN03C.cbl, app/jcl/TRANREPT.jcl). '
@@ -382,19 +724,24 @@ CREATE VIEW reporting.v_statement_transactions
     WITH (security_barrier = true) AS
 SELECT
     ('************' || right(rtrim(t.card_num), 4))::character(16) AS card_num,
-    -- WHY : Assumptions: the key is joined in rather than read by a scalar
-    --       subquery per row, so it is read exactly once for the whole scan. The
-    --       join is a CROSS JOIN over a one-row table, which the single-row
-    --       primary key above guarantees cannot multiply the transaction rows.
-    -- WHY : Assumptions: convert_to(..., 'UTF8') rather than a bare cast, because
-    --       sha256 takes bytea and the conversion has to be EXPLICIT about its
-    --       encoding: an implicit one would make the token depend on the server
-    --       encoding, so the same card would fingerprint differently on two
-    --       databases holding the same data. The key is concatenated as a prefix
-    --       so that the card digits terminate the input, which keeps the token a
-    --       function of the whole trimmed number rather than of a prefix of it.
-    encode(sha256(convert_to(k.key_value || rtrim(t.card_num), 'UTF8')), 'hex')
-                                                                  AS card_fingerprint,
+    -- WHY : Refactoring Rationale: the token is READ from reporting.card_identity where
+    --       it was computed here. The expression that used to stand in this position, and
+    --       the two properties recorded with it, are unchanged and now live at the
+    --       identity relation: convert_to(..., 'UTF8') rather than a bare cast, because
+    --       sha256 takes bytea and an implicit conversion would make the token depend on
+    --       the server encoding; and the secret concatenated as a PREFIX so the card
+    --       digits terminate the input and the token is a function of the whole trimmed
+    --       number rather than of a prefix of it. What changes is only WHERE the
+    --       expression is evaluated: once per card at maintenance time instead of once per
+    --       transaction row per query, which is what an index can be built over.
+    -- WHY : Assumptions: the masked rendering above is still computed from
+    --       ledger.transactions.card_num rather than read from the identity relation, and
+    --       the asymmetry is deliberate. This column is part of this projection's
+    --       identity, so it must be present on every row -- including a row whose card has
+    --       no identity yet -- and it is derivable from the ledger column alone. Measured
+    --       equal to card_identity.card_num_masked on every card of a 20 000-card
+    --       population, so the two walks that order on it agree.
+    ci.card_fingerprint                                           AS card_fingerprint,
     t.transaction_id,
     t.type_cd,
     t.category_cd,
@@ -408,7 +755,16 @@ SELECT
     t.orig_ts,
     t.proc_ts
 FROM ledger.transactions AS t
-CROSS JOIN reporting.card_grouping_key AS k;
+-- WHY : Assumptions: a LEFT JOIN for the reason recorded on v_report_transactions -- every
+--       ledger row stays in this relation, so a transaction whose card has no
+--       cross-reference row is visible to the count that detects it rather than absent
+--       from a report that looks complete. StatementTransactionView's identity is the
+--       masked rendering and the transaction identifier, neither of which comes from this
+--       join, so such a row is still fully identified; only its token is null, and a
+--       statement is only ever selected BY a token, so a null one can never be grouped
+--       into the wrong card's statement.
+LEFT JOIN reporting.card_identity AS ci
+       ON ci.card_num COLLATE "C" = t.card_num;
 
 COMMENT ON VIEW reporting.v_statement_transactions IS
     'Card-ordered projection of ledger.transactions for statement generation (app/cbl/CBSTM03A.CBL '
@@ -629,16 +985,43 @@ ALTER VIEW reporting.v_customers OWNER TO carddemo_reporting_owner;
 --       fingerprint, so only the fingerprint can be mapped as an entity identifier --
 --       which is what services/reporting-service/.../domain/CardXrefView.java now
 --       declares.
+-- WHY : Refactoring Rationale: both card-bearing columns are READ from
+--       reporting.card_identity where they were computed here, and the join to
+--       account.card_xref is now an equality on the whole card number. Two things follow
+--       that a computed projection could not give. A lookup by token is an index scan of
+--       pk_card_identity followed by an index scan of pk_card_xref, where it was a
+--       sequential scan of the cross-reference computing a digest per row; and a lookup by
+--       account is an index scan of idx_card_xref_account_id followed by
+--       uq_card_identity_card_num. Both were measured on a 20 000-card population.
+-- WHY : Assumptions: an INNER join, which is the one place in this file where a row of the
+--       source can be absent from the projection, and the reason it is accepted here is
+--       that card_fingerprint is this projection's IDENTITY. CardXrefView maps it as the
+--       entity identifier, so a row with a null token is not representable in the mapping
+--       at all -- an outer join would have to be paired with a coalesce back to the
+--       computed digest, and a coalesce is exactly what no index can serve, which would
+--       reinstate the defect this change exists to remove. The consequence is therefore
+--       accepted and controlled rather than hidden: a card present in account.card_xref
+--       but not yet in card_identity is absent from this relation until
+--       reporting.refresh_card_identity() runs, which is why that procedure exists and why
+--       it must be sequenced after the last load into account.card_xref and before any
+--       statement run. The caller is the LOAD PATH and can only be the load path:
+--       reporting-service opens its pool read-only, so PostgreSQL refuses the procedure's
+--       writes through it whatever privileges SECURITY DEFINER confers -- read-only is a
+--       property of the transaction and not of the privilege.
+-- WHY : Assumptions: the masked rendering comes from card_identity rather than being
+--       computed from x.card_num, although the two are equal by construction. Sourcing it
+--       from the same row as the token makes the ORDER this projection publishes identical
+--       to the order of the index the heading walk traverses, rather than equal to it by
+--       an argument about collations and asterisks.
 CREATE VIEW reporting.v_card_xref
     WITH (security_barrier = true) AS
 SELECT
-    ('************' || right(rtrim(x.card_num), 4))::character(16) AS card_num,
-    encode(sha256(convert_to(k.key_value || rtrim(x.card_num), 'UTF8')), 'hex')
-                                                                  AS card_fingerprint,
+    ci.card_num_masked::character(16) AS card_num,
+    ci.card_fingerprint               AS card_fingerprint,
     x.customer_id,
     x.account_id
-FROM account.card_xref AS x
-CROSS JOIN reporting.card_grouping_key AS k;
+FROM reporting.card_identity AS ci
+JOIN account.card_xref AS x ON x.card_num = ci.card_num;
 
 COMMENT ON VIEW reporting.v_card_xref IS
     'Read-only projection of account.card_xref resolving a card to its customer and account for '
@@ -750,20 +1133,41 @@ STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, reporting, account
 AS $$
+    -- WHY : Refactoring Rationale: this body reads reporting.card_identity where it
+    --       computed the digest from reporting.card_grouping_key, so the two columns it
+    --       returns are now the stored ones and the answer is reached by index. The
+    --       previous form's own comment claimed the predicate "stays index-eligible", and
+    --       that was true of the predicate and false of the query: rtrim() on the stored
+    --       column is not the indexed expression either, so a resolution was a sequential
+    --       scan of the cross-reference that computed one digest per row. Reading the
+    --       stored token means the whole-card equality below is the only comparison left.
     SELECT
-        ('************' || right(rtrim(x.card_num), 4))::character(16),
-        encode(sha256(convert_to(k.key_value || rtrim(x.card_num), 'UTF8')), 'hex'),
+        ci.card_num_masked::character(16),
+        ci.card_fingerprint,
         x.customer_id,
         x.account_id
-    FROM account.card_xref AS x
-    CROSS JOIN reporting.card_grouping_key AS k
-    -- WHY : Assumptions: the comparison trims both sides. The stored column is
-    --       CHAR(16) so it is blank-padded, and the argument arrives from a request
-    --       body where a caller may or may not have padded it; comparing untrimmed
-    --       would make the answer depend on the caller's padding. Trimming both sides
-    --       keeps the predicate an equality on the whole number rather than on a
-    --       prefix, so it stays index-eligible and cannot match two cards.
-    WHERE rtrim(x.card_num) = rtrim(p_card_num)
+    FROM reporting.card_identity AS ci
+    JOIN account.card_xref AS x ON x.card_num = ci.card_num
+    -- WHY : Assumptions: the comparison pads the ARGUMENT to the stored column's type
+    --       rather than trimming the column. The stored column is CHAR(16) and is
+    --       blank-padded, and the argument arrives from a request body where a caller may
+    --       or may not have padded it; casting the trimmed argument to character(16) makes
+    --       both sides the indexed type, so the equality is served by
+    --       uq_card_identity_card_num. Trimming the column instead -- which is what this
+    --       predicate used to do -- compares a computed value and can use no index at all.
+    -- WHY : Assumptions: the trim is applied to the argument BEFORE the cast, so a caller
+    --       that padded and a caller that did not resolve the same card. character(16)
+    --       pads on assignment, so the cast supplies exactly the padding the stored column
+    --       carries.
+    -- WHY : Assumptions: the width is asserted before the cast, and this arm is what keeps
+    --       the cast from changing behaviour. An explicit cast to character(16) TRUNCATES a
+    --       longer value silently, so without this test a seventeen-digit argument would
+    --       resolve the card formed by its first sixteen digits -- where the predicate this
+    --       replaced, comparing two trimmed values, matched nothing. Answering nothing for
+    --       an argument that is not a whole card number is the contract this function
+    --       publishes, so the guard restores it exactly rather than approximately.
+    WHERE length(rtrim(p_card_num)) = 16
+      AND ci.card_num = CAST(rtrim(p_card_num) AS character(16))
 $$;
 
 COMMENT ON FUNCTION reporting.resolve_card(character varying) IS
@@ -781,10 +1185,12 @@ GRANT EXECUTE ON FUNCTION reporting.resolve_card(character varying) TO carddemo_
 
 
 -- -----------------------------------------------------------------------------
--- Grants: SELECT on these eight relations, to the service login role. The one TABLE
--- this file creates is deliberately not among them; its own revoke is stated where
--- it is created, and the EXECUTE on reporting.resolve_card above is the only other
--- privilege this file grants that role.
+-- Grants: SELECT on these eight relations, to the service login role. Neither of the
+-- two TABLES this file creates is among them: card_grouping_key is revoked outright
+-- and card_identity is granted two named COLUMNS, each at the point it is created. The
+-- EXECUTE on reporting.resolve_card and the EXECUTE on
+-- reporting.refresh_card_identity above are the only other privileges this file grants
+-- that role.
 --
 -- WHY : Refactoring Rationale: this heading read "and nothing else anywhere", and that
 --       clause is withdrawn because it was false in two directions at once. It was
@@ -797,10 +1203,17 @@ GRANT EXECUTE ON FUNCTION reporting.resolve_card(character varying) TO carddemo_
 --       that overstates its own completeness is worse than one that states its bounds:
 --       a reader auditing the role would stop here.
 -- WHY : Assumptions: the count is EIGHT and is the number of GRANT SELECT statements
---       below, not the number of views this file creates -- it creates eleven views and
---       two tables, and the three views it does not grant are read only by the owner.
---       Counting the grants is what makes this heading checkable against the statements
---       beneath it rather than against the file's length.
+--       below, which for this file is also the number of views it creates. Counting the
+--       grants is what makes this heading checkable against the statements beneath it
+--       rather than against the file's length.
+-- WHY : Refactoring Rationale: this note read "not the number of views this file creates
+--       -- it creates eleven views and two tables", and both figures were wrong in a way
+--       worth correcting rather than carrying: this file creates EIGHT views, and it
+--       created ONE table until reporting.card_identity took it to two. Eleven is the
+--       count of views this file and V3__verification_surfaces.sql create between them
+--       across two schemas, which is a fact about the deployment and not about this file.
+--       The corrected inventory of what this file creates is eight views, two tables, one
+--       function and one procedure.
 --
 -- Refactoring Rationale: the count read seven and is restated as eight with
 -- v_transaction_category_balances. That view landed with the category-balance report
@@ -832,9 +1245,12 @@ GRANT SELECT ON reporting.v_transaction_category_balances TO carddemo_reporting;
 --       simple view over one table is AUTOMATICALLY UPDATABLE in PostgreSQL, so a
 --       projection that reads as read-only would accept a write the moment the
 --       privilege existed -- and five of the eight views here are simple enough to
---       qualify, every one except the three whose join to the grouping-key table
+--       qualify, every one except the three whose join to a second relation
 --       disqualifies them: v_statement_transactions, v_report_transactions and
---       v_card_xref. Refactoring Rationale: that count then read four-of-seven, and
+--       v_card_xref. Refactoring Rationale: that second relation was the grouping-key
+--       table and is now reporting.card_identity for all three; the count of
+--       five-of-eight is unchanged, because a view over a join is disqualified whichever
+--       relation it joins to. Refactoring Rationale: that count then read four-of-seven, and
 --       v_transaction_category_balances has since been added as a single-table
 --       projection over ledger.transaction_category_balances -- automatically
 --       updatable, so it joins the qualifying group and the count is five of eight.

@@ -492,10 +492,12 @@ import tools.jackson.databind.annotation.JsonDeserialize;
  *     borne as characters because the map declares this field {@code X(4)} and because a numeric
  *     form would drop a leading zero the four-digit key space allows
  * @param source the ten-character channel the transaction originated through, as text, from
- *     {@code TRAN-SOURCE PIC X(10)} at line 8; required and at most ten characters
+ *     {@code TRAN-SOURCE PIC X(10)} at line 8; required, at most ten characters, and restricted to
+ *     the printable domain {@link #PRINTABLE_TEXT} declares
  * @param description the free-text narrative of the transaction, as text, from
  *     {@code TRAN-DESC PIC X(100)} at line 9; required and at most the record's hundred characters,
- *     which is wider than the sixty the screen keys at {@code TDESCI} on line 90 of the map
+ *     which is wider than the sixty the screen keys at {@code TDESCI} on line 90 of the map, and
+ *     restricted to the printable domain {@link #PRINTABLE_TEXT} declares
  * @param amount the monetary value of the transaction, as the shared exact-decimal money type,
  *     from {@code TRAN-AMT PIC S9(09)V99} at line 10; required, exact at a scale of two, bounded to
  *     the record's nine integer digits rather than the screen's eight, and carried on the wire as a
@@ -505,13 +507,16 @@ import tools.jackson.databind.annotation.JsonDeserialize;
  *     digits-only, borne as characters for the same reason as the category code
  * @param merchantName the merchant's name, as text, from
  *     {@code TRAN-MERCHANT-NAME PIC X(50)} at line 12; required and at most the record's fifty
- *     characters, which is wider than the thirty the screen keys at {@code MNAMEI} on line 120
+ *     characters, which is wider than the thirty the screen keys at {@code MNAMEI} on line 120, and
+ *     restricted to the printable domain {@link #PRINTABLE_TEXT} declares
  * @param merchantCity the merchant's city, as text, from
  *     {@code TRAN-MERCHANT-CITY PIC X(50)} at line 13; required and at most the record's fifty
- *     characters, which is wider than the twenty-five the screen keys at {@code MCITYI} on line 126
+ *     characters, which is wider than the twenty-five the screen keys at {@code MCITYI} on line 126,
+ *     and restricted to the printable domain {@link #PRINTABLE_TEXT} declares
  * @param merchantZip the merchant's postal code, as text, from
- *     {@code TRAN-MERCHANT-ZIP PIC X(10)} at line 14; required and at most ten characters, the one
- *     field of these four the screen keys at full record width
+ *     {@code TRAN-MERCHANT-ZIP PIC X(10)} at line 14; required, at most ten characters and
+ *     restricted to the printable domain {@link #PRINTABLE_TEXT} declares, and the one field of
+ *     these four the screen keys at full record width
  * @param cardNumber the card the transaction is presented on, as digit characters, from
  *     {@code TRAN-CARD-NUM PIC X(16)} at line 15; the second of the two key alternatives, at most
  *     sixteen characters and digits-only when present, and derived from the cross-reference when the
@@ -561,29 +566,51 @@ public record TransactionAddRequest(
     @Size(max = CATEGORY_CODE_WIDTH)
     @Pattern(regexp = CATEGORY_CODE_DIGITS, message = CATEGORY_CODE_NOT_NUMERIC)
     String categoryCode,
+    // WHY : ⚠️ Refactoring Rationale: this member and the four free-text members below now declare a
+    //       CHARACTER DOMAIN, where every one of them previously declared only presence and width. The
+    //       five are the externally authored PIC X fields of this capture -- every other member is
+    //       already closed by a digit, date, amount or single-character expression -- so they were the
+    //       whole of the request's unbounded text surface, and two sinks made that surface load-bearing.
+    //       A carriage return or line feed stored in one of them is copied verbatim into the plain-text
+    //       statement's eighty-column bands and the transaction report's 133-column records, neither of
+    //       which has an escaping mechanism, so one stored value becomes two records and every reader
+    //       that counts records is wrong. A code point US-ASCII cannot represent is stored successfully
+    //       and then refused by FixedWidthCodec on a LATER run, where it is no longer attributable to a
+    //       request. PRINTABLE_TEXT above records why its span is exactly what both sinks can carry.
+    // WHY : Assumptions: the constraint is declared here rather than only in the service layer so that
+    //       its violation joins the same accumulated set as every other component constraint and reaches
+    //       the same per-field array that transformation rule T7 requires. The service layer applies the
+    //       same predicate as well, and that is not duplication: TransactionAddService assembles a
+    //       capture directly from stored values on the copy-last path, which no boundary constraint sees.
     @NotBlank(message = SOURCE_REQUIRED)
     @Size(max = SOURCE_WIDTH)
+    @Pattern(regexp = PRINTABLE_TEXT, message = SOURCE_NOT_PRINTABLE)
     String source,
     // WHY : Trade-offs: COTRN02.CPY line 90 keys sixty and CVTRA05Y.cpy line 9 holds a hundred.
     //       Constraining to sixty would discard capacity the record demonstrably holds; the cost is
     //       that a client rendering a fixed-width column may receive more than it can show.
-    // WHY : Assumptions: no character-set constraint is declared on this member, and its absence is
-    //       a decision rather than an omission. CVTRA05Y.cpy line 9 declares TRAN-DESC PIC X(100),
-    //       which admits every character in the code page, so a pattern here would refuse values the
-    //       reference accepts -- an ampersand in a merchant name being the ordinary case, not the
-    //       hostile one. AAP Rule T9 admits a behavioural change only as a documented divergence, and
-    //       narrowing an accepted domain to make an unrelated sink safe is the wrong place to spend
-    //       one.
-    // WHY : Trade-offs: this value is consequently UNTRUSTED free text that reaches a markup
-    //       artifact, and the control that makes that safe is output encoding at the sink rather than
-    //       input filtering here. reporting-service's StatementHtmlMapper routes every value it
-    //       embeds through the reporting statement mapper's own text-node escaping; the divergence from the
-    //       reference that creates is registered as D-STMT-HTML-ESCAPING in
-    //       docs/architecture/cobol-to-service-traceability.md. The trade accepted is that safety
-    //       depends on a control in another module: a value is safe or unsafe only relative to the
-    //       context it lands in, and this shape cannot know that context, whereas a sink always does.
+    // WHY : ⚠️ Refactoring Rationale: an earlier revision of this block argued that NO character-set
+    //       constraint should be declared here, on the reading that CVTRA05Y.cpy line 9 declares
+    //       TRAN-DESC PIC X(100) and so "admits every character in the code page". The premise was true
+    //       and the conclusion did not follow: the code page is a SINGLE-BYTE one, and the reference's
+    //       only writer of this field is the unprotected 3270 field TDESC at line 161 of
+    //       app/bms/COTRN02.bms, so a supplementary Unicode code point and a C0 control were never
+    //       accepted values here -- they are values the HTTP boundary introduced. Refusing them
+    //       restores the reference's own domain rather than narrowing it, which is why rule T9 does not
+    //       apply: there is no behavioural change to register as a divergence.
+    // WHY : Trade-offs: the earlier revision also concluded that safety belongs entirely to output
+    //       encoding at the sink, and that reasoning survives for the sink it was written about and for
+    //       no other. reporting-service's StatementHtmlMapper does escape every value it embeds, and
+    //       the divergence that creates is still registered as D-STMT-HTML-ESCAPING in
+    //       docs/architecture/cobol-to-service-traceability.md -- markup needs escaping and this shape
+    //       cannot know it is heading for markup. What the reasoning cannot cover is a fixed-width
+    //       sink: the plain-text statement's eighty-column bands and the report's 133-column records
+    //       have no escape sequence to encode a line feed INTO, so there is no sink-side control to
+    //       delegate to and the only place the value can be refused is here. Sink-side escaping and a
+    //       boundary domain are answers to two different problems, and this field needs both.
     @NotBlank(message = DESCRIPTION_REQUIRED)
     @Size(max = DESCRIPTION_WIDTH)
+    @Pattern(regexp = PRINTABLE_TEXT, message = DESCRIPTION_NOT_PRINTABLE)
     String description,
     // WHY : ⚠️ Refactoring Rationale: this component carries the SUBMITTED CHARACTERS and no longer
     //       the parsed money type, and the change is what makes a malformed amount reportable AS a
@@ -636,14 +663,22 @@ public record TransactionAddRequest(
     @Size(max = MERCHANT_ID_WIDTH)
     @Pattern(regexp = MERCHANT_ID_DIGITS, message = MERCHANT_ID_NOT_NUMERIC)
     String merchantId,
+    // WHY : Assumptions: the three merchant text members carry the same domain as the source and the
+    //       description above and for the same two sinks, so one expression governs all five rather than
+    //       three variants tuned per field. The ordinary punctuation of a merchant name -- ampersand,
+    //       apostrophe, hyphen, period, comma, solidus -- is inside that domain, so nothing a producer
+    //       legitimately sends is refused; PRINTABLE_TEXT records the measurement that establishes it.
     @NotBlank(message = MERCHANT_NAME_REQUIRED)
     @Size(max = MERCHANT_NAME_WIDTH)
+    @Pattern(regexp = PRINTABLE_TEXT, message = MERCHANT_NAME_NOT_PRINTABLE)
     String merchantName,
     @NotBlank(message = MERCHANT_CITY_REQUIRED)
     @Size(max = MERCHANT_CITY_WIDTH)
+    @Pattern(regexp = PRINTABLE_TEXT, message = MERCHANT_CITY_NOT_PRINTABLE)
     String merchantCity,
     @NotBlank(message = MERCHANT_ZIP_REQUIRED)
     @Size(max = MERCHANT_ZIP_WIDTH)
+    @Pattern(regexp = PRINTABLE_TEXT, message = MERCHANT_ZIP_NOT_PRINTABLE)
     String merchantZip,
     // WHY : Assumptions: COTRN02C.cbl line 223 fills the account identifier from the
     //       cross-reference when this field is the one supplied, which is the mirror of line 209.
@@ -931,6 +966,84 @@ public record TransactionAddRequest(
   public static final String CONFIRM_VALUES = "[YyNn]?";
 
   /**
+   * The character domain every free-text member of this capture is held to: printable US-ASCII.
+   *
+   * <p>Assumptions: the admitted set is the inclusive span from the space to the tilde, code points
+   * {@code 0x20} to {@code 0x7E}, and it is DERIVED from the encoder this migration actually writes
+   * these values through rather than chosen for tidiness. {@code FixedWidthCodec} encodes with
+   * {@link java.nio.charset.StandardCharsets#US_ASCII} and refuses any text its charset cannot
+   * round-trip, so a code point above {@code 0x7E} cannot be written to a fixed-width record at all;
+   * and everything below {@code 0x20}, together with {@code 0x7F}, round-trips through US-ASCII
+   * intact and is therefore copied verbatim into a record that has no escaping mechanism of any
+   * kind. The span between the two is exactly what can both survive the codec and carry no
+   * structural meaning in the artifacts it lands in. The shared kernel states the same span for the
+   * same two reasons on {@code GlobalExceptionHandler.isPrintableWithinDigitRun}.
+   *
+   * <p>Assumptions: the space is INSIDE the domain, unlike the neighbouring identifier domain
+   * {@code UserService.ADDRESSABLE_USER_ID} declares, which admits letters and digits only. A user
+   * identifier is delimited by white space and addressed as a URI path segment, so it can contain
+   * neither; a merchant name and a description are prose and routinely do --
+   * {@code app/data/ASCII/dailytran.txt} carries spaces in all five of the text spans this
+   * expression governs.
+   *
+   * <p>⚠️ Refactoring Rationale: this sentence named {@code UserService.CANONICAL_USER_ID} and said
+   * that domain "begins at {@code 0x21}", which described the identifier expression as it stood when
+   * this one was written. Both halves are now wrong: the constant was renamed and its domain narrowed
+   * from every printable byte above the space to {@code [A-Za-z0-9]+}, so it no longer begins at a
+   * byte value at all. The CONTRAST the sentence draws is unaffected and is restated on the narrower
+   * domain rather than deleted -- the space is still outside the identifier domain and still inside
+   * this one -- but the reason is now exclusion by enumeration rather than by lower bound, which is
+   * the stronger of the two and is why the cross-reference is worth keeping.
+   *
+   * <p>Assumptions: the ordinary punctuation of a merchant name is admitted rather than enumerated
+   * -- the ampersand, apostrophe, hyphen, period, comma and solidus are all inside the span -- so
+   * this expression narrows nothing a producer legitimately sends. Measured across all 300 records
+   * of the committed extract, the only bytes present in the source, description, merchant name,
+   * merchant city and merchant postal code spans are the space, the apostrophe, the comma, the
+   * hyphen, the digits and the letters, every one of them inside this domain.
+   *
+   * <p>⚠️ Refactoring Rationale: this expression REPLACES a decision, recorded on the description
+   * component and now corrected there, that no character-set constraint should be declared at all
+   * because {@code TRAN-DESC PIC X(100)} at line 9 of {@code app/cpy/CVTRA05Y.cpy} admits every
+   * character of its code page. The reading was wrong in one respect that matters: the code page is
+   * a SINGLE-BYTE one and the reference's only writer is a 3270 field -- {@code TDESC} at line 161
+   * of {@code app/bms/COTRN02.bms} and its four siblings -- so neither a supplementary Unicode code
+   * point nor a C0 control was ever an accepted value on this screen. Refusing them is a parity FIX,
+   * not the divergence rule T9 would require documenting: it restores a bound the terminal enforced
+   * physically and the HTTP boundary removed.
+   *
+   * <p>Trade-offs: a producer that would have sent an accented Latin letter now receives a field
+   * error instead of a capture. That is accepted because the alternative is worse in a way the
+   * producer cannot see: the value is stored, and the failure surfaces later inside a batch or
+   * reporting run that encodes it US-ASCII, where it is no longer attributable to a request and no
+   * longer refusable -- AAP section 0.7.3 and transformation rule T3 make those fixed-width codecs
+   * the boundary the data has to survive. Refusing at the boundary is the only place the refusal can
+   * still name a field.
+   *
+   * <p>Assumptions: length is NOT bounded here and stays with each member's own width constraint, so
+   * one over-long value reports once; and the empty string is admitted, so an omitted or empty value
+   * reports against its presence constraint alone. That is the same separation of presence from
+   * composition the digit expressions above record.
+   *
+   * <p>Assumptions: no anchor is written into the expression, for the reason
+   * {@link #AMOUNT_WIRE_FORM} records -- Bean Validation and {@link java.util.regex.Matcher#matches()}
+   * both match the whole string, and anchors here would make it unequal to the published pattern,
+   * which carries its own.
+   */
+  public static final String PRINTABLE_TEXT = "[\\x20-\\x7E]*";
+
+  /**
+   * The compiled form of {@link #PRINTABLE_TEXT}, held once for every request the service receives.
+   *
+   * <p>Assumptions: compiled from that constant rather than restated, for the reason
+   * {@link #AMOUNT_WIRE_FORM_PATTERN} records: the expression this record applies, the expression the
+   * service layer applies to an internally assembled capture, and the expression the contract test
+   * compares against the published schema are then the same characters.
+   */
+  private static final java.util.regex.Pattern PRINTABLE_TEXT_PATTERN =
+      java.util.regex.Pattern.compile(PRINTABLE_TEXT);
+
+  /**
    * The message reported when a submitted account identifier is not made up of digits, verbatim
    * from {@code app/cbl/COTRN02C.cbl} line 199.
    */
@@ -1025,6 +1138,68 @@ public record TransactionAddRequest(
   public static final String MERCHANT_ID_NOT_NUMERIC = "Merchant ID must be Numeric...";
 
   /**
+   * The message reported when the source carries a character outside {@link #PRINTABLE_TEXT}.
+   *
+   * <p>⚠️ Assumptions: the sentence is AUTHORED rather than transcribed, because the reference has none
+   * to transcribe: its writer is a 3270 field on a single-byte code page, so a value it could not
+   * represent never reached the program and no branch there reports one. It is worded in the voice of
+   * the neighbouring composition refusals -- {@code 'Type CD must be Numeric...'} at line 325 of
+   * {@code app/cbl/COTRN02C.cbl} names the field and then its domain -- so a screen renders it beside
+   * the same marker as every other field-level refusal.
+   *
+   * <p>Assumptions: it ends with the ellipsis those sentences end with, which is also what carries it
+   * through the shared advice's provenance gate: {@code GlobalExceptionHandler.referenceMessageOrNull}
+   * admits a sentence that terminates that way and is itself printable, and degrades anything else to
+   * the generic wording. A sentence that named the code points it refuses would carry a digit run and
+   * be degraded.
+   *
+   * <p>Trade-offs: it says {@code printable text} rather than naming US-ASCII or a code-point span.
+   * The operator's remedy is to re-key the value with ordinary characters, which this states; the exact
+   * admitted span belongs in the published contract and in {@link #PRINTABLE_TEXT}, where a client
+   * integrator reads it. The five sentences below are per-field rather than one shared sentence for the
+   * same reason every other refusal on this screen is per-field: the field name is how the operator
+   * finds the input.
+   */
+  public static final String SOURCE_NOT_PRINTABLE = "Source must be printable text...";
+
+  /**
+   * The message reported when the description carries a character outside {@link #PRINTABLE_TEXT}.
+   *
+   * <p>Assumptions: authored for the reason {@link #SOURCE_NOT_PRINTABLE} records, and worded to the
+   * same pattern so five refusals of one kind read as one kind.
+   */
+  public static final String DESCRIPTION_NOT_PRINTABLE = "Description must be printable text...";
+
+  /**
+   * The message reported when the merchant name carries a character outside {@link #PRINTABLE_TEXT}.
+   *
+   * <p>Assumptions: authored for the reason {@link #SOURCE_NOT_PRINTABLE} records, and worded to the
+   * same pattern so five refusals of one kind read as one kind.
+   */
+  public static final String MERCHANT_NAME_NOT_PRINTABLE =
+      "Merchant Name must be printable text...";
+
+  /**
+   * The message reported when the merchant city carries a character outside {@link #PRINTABLE_TEXT}.
+   *
+   * <p>Assumptions: authored for the reason {@link #SOURCE_NOT_PRINTABLE} records, and worded to the
+   * same pattern so five refusals of one kind read as one kind.
+   */
+  public static final String MERCHANT_CITY_NOT_PRINTABLE =
+      "Merchant City must be printable text...";
+
+  /**
+   * The message reported when the merchant postal code carries a character outside
+   * {@link #PRINTABLE_TEXT}.
+   *
+   * <p>Assumptions: authored for the reason {@link #SOURCE_NOT_PRINTABLE} records, and worded to the
+   * same pattern so five refusals of one kind read as one kind. The field is named {@code Merchant
+   * Zip} because that is what the reference's own presence sentence at line 316 of
+   * {@code app/cbl/COTRN02C.cbl} calls it.
+   */
+  public static final String MERCHANT_ZIP_NOT_PRINTABLE = "Merchant Zip must be printable text...";
+
+  /**
    * The message reported when the submitted amount is not a well-formed amount or is wider than the
    * record can hold, verbatim from line 345.
    *
@@ -1115,6 +1290,40 @@ public record TransactionAddRequest(
 
     Matcher shape = AMOUNT_WIRE_FORM_PATTERN.matcher(submitted);
     return shape.matches();
+  }
+
+  /**
+   * Reports whether text occupies the printable domain every free-text member of this capture shares.
+   *
+   * <p><b>Purpose.</b> This is the one statement of that domain, so the five boundary constraints and
+   * the service layer's guard over an internally assembled capture apply the same expression instead of
+   * each carrying a copy. The service needs its own application of it because
+   * {@code TransactionAddService} builds a capture directly from stored values on the copy-last path,
+   * which never passes through Bean Validation -- so a row written before this domain existed would
+   * otherwise be re-persisted unexamined.
+   *
+   * <p>Assumptions: {@code null} and the empty string both answer {@code true}, which is the opposite
+   * of {@link #isAmountWireForm(String)} and deliberately so. That predicate states that characters ARE
+   * a required form, so absence cannot satisfy it; this one states that characters are not OUTSIDE a
+   * domain, and absence is not outside it. Answering {@code true} for absence is what keeps presence
+   * the sole business of {@code @NotBlank} and of the service's own presence block, so one omitted
+   * value draws one sentence.
+   *
+   * @param submitted the characters a producer sent, or a stored value being re-submitted, which may be
+   *     {@code null}
+   * @return {@code true} when every character is in the inclusive span from the space to the tilde, and
+   *     for {@code null} and the empty string; {@code false} as soon as any other character is present
+   */
+  public static boolean isPrintableText(String submitted) {
+    // WHY : Assumptions: absence short-circuits rather than being matched, because a null cannot be
+    //       handed to a matcher and because the empty string is admitted by the expression anyway --
+    //       so the two absent spellings answer alike without depending on the expression to do it.
+    if (submitted == null) {
+      return true;
+    }
+
+    Matcher domain = PRINTABLE_TEXT_PATTERN.matcher(submitted);
+    return domain.matches();
   }
 
   /**
@@ -1544,11 +1753,12 @@ public record TransactionAddRequest(
    * own, distinct from the two above. Together with the masked card number and the two dates on the
    * same line, a merchant name, city and postal code reconstruct a real cardholder purchase -- what
    * was bought, roughly where and when -- which no single component discloses alone. The description
-   * is additionally free text that a submitter authors: it is the one component whose content nothing
-   * in this type constrains, so rendering it verbatim makes the log the sink for whatever arrives in
-   * it. The same field is why {@code com.carddemo.reporting.mapper.StatementHtmlMapper} encodes
-   * before emitting, and a log is no better a place to interpolate unconstrained text unencoded than
-   * a document is.</p>
+   * is additionally free text that a submitter authors: {@link #PRINTABLE_TEXT} now bounds which
+   * CHARACTERS it may carry, which is what keeps a control character out of a log record, but nothing
+   * in this type constrains what it SAYS -- so rendering it verbatim still makes the log the sink for
+   * a hundred characters of a submitter's choosing. The same field is why
+   * {@code com.carddemo.reporting.mapper.StatementHtmlMapper} encodes before emitting, and a log is no
+   * better a place to interpolate submitter-authored prose than a document is.</p>
    *
    * <p>Alternatives Considered: omitting the card number entirely rather than masking it, which is
    * what the sibling {@code com.carddemo.card.domain.Card} rendering does. Rejected HERE, and the

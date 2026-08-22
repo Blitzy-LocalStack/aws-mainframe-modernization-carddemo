@@ -120,8 +120,15 @@ import software.amazon.awssdk.services.sqs.model.SendMessageResponse;
  * already make observable.</p>
  *
  * <p>Assumptions: publication is at-least-once rather than exactly-once, and that is safe because
- * the reply queue is first-in-first-out and every message carries a purpose-scoped derivation of the
- * card-and-transaction identity as its deduplication identifier. A reply sent twice inside the
+ * the reply queue is first-in-first-out and every message carries the acquirer's TRANSACTION
+ * IDENTIFIER as its deduplication identifier. ⚠️ Refactoring Rationale: this sentence described that
+ * identifier as a purpose-scoped derivation of the card-and-transaction identity, which the code no
+ * longer does and must not: sections 0.4.1.8 and 0.7.6 of the technical specification freeze the reply
+ * queue's identities as {@code MessageGroupId = card_num} and
+ * {@code MessageDeduplicationId = transaction_id}, {@code V3__authorization_outbox_fifo_identities.sql}
+ * carried the columns to those values, and a derivation computes a different identity from the one any
+ * other party built to the frozen contract would -- which suppresses nothing and groups nothing in
+ * common with them. A reply sent twice inside the
  * deduplication window is accepted once; outside it the requester must tolerate a duplicate, which
  * is a genuine obligation this design introduces rather than inherits, since the reference queue
  * never redelivered anything -- its destructive get destroyed each message on read. The obligation
@@ -134,6 +141,31 @@ import software.amazon.awssdk.services.sqs.model.SendMessageResponse;
  * NOTHING after a crash between the commit and the trigger, which is the exact window this class
  * exists to close; one poll covers both cases with one mechanism. The delay is short and
  * configured, so the added latency is bounded by it.</p>
+ *
+ * <p>Assumptions: a committed reply is retried until it is published, and there is NO attempt count at
+ * which this class gives up on one. That IS the guarantee the outbox exists to provide -- §0.4.3 of the
+ * technical specification states it as "a reply is published for every committed authorization" -- and an
+ * attempt ceiling contradicted it twice over. Refactoring Rationale: an earlier revision abandoned a row
+ * once its attempts reached a configured ceiling. The reply was then lost outright, and the second
+ * consequence was worse and far less visible:
+ * {@link OutboxRepository#claimGroupHeads(int, java.time.LocalDateTime, java.time.LocalDateTime)} derives
+ * a group's head as its lowest unpublished, unabandoned identity, so abandoning a head let the SAME
+ * CARD'S later replies overtake it -- delivering that card's sequence with a hole where the abandoned
+ * reply belonged, which is the one outcome an ordering group exists to prevent. What replaces the ceiling
+ * is ESCALATION rather than termination: {@link #stallAlertAttempts} is the attempt count at which a
+ * still-failing row is reported under its own event name for an operator to act on, and the row stays
+ * pending and retryable at the capped backoff until it is delivered.</p>
+ *
+ * <p>Trade-offs: a destination that stays unreachable for ONE card therefore holds that card's later
+ * replies until it recovers or an operator intervenes, and that is chosen rather than merely tolerated.
+ * The alternative -- publishing the followers and leaving a gap -- hands a requester a reply sequence it
+ * cannot reconcile against the decisions behind it, and the reference has no such gap to reproduce.
+ * Liveness for every OTHER card is preserved by two properties working together: a failed row is
+ * ineligible until its capped delay elapses, and the claim takes the readiest rows first, so one blocked
+ * group costs a pass one row-turn rather than the pass. The single escape hatch is deliberately OUTSIDE
+ * this service's code -- an operator who has reconciled a missing reply quarantines its row by governed
+ * administrative statement, which {@code AuthReplyOutbox.getAbandonedAt()} describes -- because a code
+ * path that could enter that state is a code path that can enter it by accident.</p>
  */
 @Component
 public class OutboxPublisher {
@@ -204,7 +236,7 @@ public class OutboxPublisher {
      * {@code app/app-authorization-ims-db2-mq/cbl/COPAUA0C.cbl} L40 and enforced at L339, where the
      * loop ends once the processed count exceeds it. That makes it the largest number of replies
      * anything in this migration treats as ONE PASS, so a value above it is a misconfiguration
-     * rather than a tuning choice. {@link OutboxRepository#claimGroupHeads(int, java.time.LocalDateTime, java.time.LocalDateTime, int)} cites the same two
+     * rather than a tuning choice. {@link OutboxRepository#claimGroupHeads(int, java.time.LocalDateTime, java.time.LocalDateTime)} cites the same two
      * lines, so the ceiling here and the bound there cannot disagree.</p>
      *
      * <p>Refactoring Rationale: this ceiling was once justified as the largest figure treated as one
@@ -232,13 +264,20 @@ public class OutboxPublisher {
     private static final int MAX_ROWS_PER_DRAIN_CEILING = 5_000;
 
     /**
-     * The greatest attempt ceiling an operator may configure.
+     * The greatest stall-alert threshold an operator may configure.
      *
-     * <p>Assumptions: a value this large is already far past any transient outage -- with the doubling
-     * backoff below, a hundred attempts spans days -- so the bound refuses a figure that is a ceiling
-     * only nominally.</p>
+     * <p>Assumptions: the bound is on the ESCALATION point rather than on a terminal budget, because this
+     * class has no terminal budget -- the class comment records why. A hundred attempts already spans
+     * days at the capped backoff below, so a threshold beyond it announces a stalled reply long after the
+     * operator needed to know, which is an alert that exists without working.</p>
+     *
+     * <p>Refactoring Rationale: the name and the meaning both changed and the VALUE did not. This bounded
+     * {@code carddemo.messaging.outbox-max-attempts}, the ceiling at which a reply was abandoned; the
+     * property is now {@code carddemo.messaging.outbox-stall-alert-attempts} and crossing it raises an
+     * alarmable diagnostic instead. Keeping the figure means an operator who had tuned the old property
+     * gets the alert where they previously got the loss.</p>
      */
-    private static final int MAX_ATTEMPTS_CEILING = 100;
+    private static final int MAX_STALL_ALERT_ATTEMPTS_CEILING = 100;
 
     /**
      * How long a claimed row is owned by the pass that claimed it.
@@ -475,15 +514,22 @@ public class OutboxPublisher {
     private final Duration claimLease;
 
     /**
-     * How many attempts a reply is given before it is abandoned.
+     * At how many attempts a still-unpublished reply is escalated as stalled.
      *
-     * <p>Assumptions: this is the terminal policy, and it is a bound on ATTEMPTS BEGUN rather than on
-     * elapsed time, because the attempt counter is the one durable record of how many times the
-     * transport has refused the row. Refactoring Rationale: there was no such bound, so a reply whose
-     * queue was permanently unreachable was retried forever and held its group's head position
-     * forever.</p>
+     * <p>Assumptions: this is an OBSERVABILITY threshold and not a terminal policy -- reaching it changes
+     * which event name the failure is reported under and changes nothing about the row, which stays
+     * pending and retryable. It is counted in ATTEMPTS BEGUN rather than in elapsed time because the
+     * attempt counter is the one durable record of how many times the transport has refused this row, and
+     * because elapsed time cannot distinguish a row that was retried and refused from one whose backoff
+     * has simply not elapsed.</p>
+     *
+     * <p>Refactoring Rationale: this field was {@code maxAttempts} and it TERMINATED the row: at the
+     * ceiling the reply was abandoned, which lost it and -- because the head claim skips abandoned rows
+     * when it derives a group's head -- released the same card's later replies to overtake it. Both
+     * outcomes contradict the outbox guarantee, so the ceiling is gone and the threshold that remains
+     * raises an alarm instead of a decision.</p>
      */
-    private final int maxAttempts;
+    private final int stallAlertAttempts;
 
     /**
      * The base delay before a failed reply is attempted again.
@@ -548,8 +594,9 @@ public class OutboxPublisher {
      * @param maxRowsPerDrain the greatest number of rows one pass may reach a decision about across
      *     every group; must be at least {@code batchSize} and at most
      *     {@value #MAX_ROWS_PER_DRAIN_CEILING}
-     * @param maxAttempts how many attempts a reply is given before it is abandoned; must be positive
-     *     and at most {@value #MAX_ATTEMPTS_CEILING}
+     * @param stallAlertAttempts at how many attempts a still-unpublished reply is escalated as stalled,
+     *     which changes the diagnostic and never the row; must be positive and at most
+     *     {@value #MAX_STALL_ALERT_ATTEMPTS_CEILING}
      * @throws NullPointerException if {@code outbox}, {@code sqs}, {@code clock} or
      *     {@code transactionManager} is {@code null}
      * @throws IllegalArgumentException if any configured number falls outside its stated bounds
@@ -560,7 +607,7 @@ public class OutboxPublisher {
             @Value("${carddemo.messaging.outbox-poll-interval-ms:1000}") long pollIntervalMillis,
             @Value("${carddemo.messaging.outbox-retention-days:7}") int retentionDays,
             @Value("${carddemo.messaging.outbox-max-rows-per-drain:500}") int maxRowsPerDrain,
-            @Value("${carddemo.messaging.outbox-max-attempts:10}") int maxAttempts) {
+            @Value("${carddemo.messaging.outbox-stall-alert-attempts:10}") int stallAlertAttempts) {
         this.outbox = Objects.requireNonNull(outbox, "outbox must not be null");
         this.sqs = Objects.requireNonNull(sqs, "sqs must not be null");
         this.clock = Objects.requireNonNull(clock, "clock must not be null");
@@ -568,7 +615,7 @@ public class OutboxPublisher {
         requireBoundedPollInterval(pollIntervalMillis);
         this.retentionDays = validatedRetentionDays(retentionDays);
         this.maxRowsPerDrain = validatedMaxRowsPerDrain(maxRowsPerDrain, this.batchSize);
-        this.maxAttempts = validatedMaxAttempts(maxAttempts);
+        this.stallAlertAttempts = validatedStallAlertAttempts(stallAlertAttempts);
         // WHY : Assumptions: integer division rounds the share DOWN and the floor of one lifts it, so
         // the per-group budget never exceeds the pass budget and is never zero. Rounding up was
         // rejected because at a batch size that does not divide the pass budget the rounded-up shares
@@ -625,25 +672,33 @@ public class OutboxPublisher {
     }
 
     /**
-     * Returns the attempt ceiling after refusing a value that cannot terminate a failing row.
+     * Returns the stall-alert threshold after refusing a value that cannot raise a usable alarm.
      *
-     * @param configured the ceiling as the configuration bound it
+     * <p>Assumptions: a non-positive threshold is refused rather than read as "alert on every failure".
+     * It would report the first transient refusal of every reply as a stalled group, and an alert that
+     * fires on the ordinary case is an alert an operator learns to ignore -- which costs the alarm its
+     * only purpose, since nothing else in this class tells them a card has stopped moving.</p>
+     *
+     * @param configured the threshold as the configuration bound it
      * @return that same value once it is known to be inside its bounds
      * @throws IllegalArgumentException if the value is not positive or exceeds
-     *     {@value #MAX_ATTEMPTS_CEILING}
+     *     {@value #MAX_STALL_ALERT_ATTEMPTS_CEILING}
      */
-    private static int validatedMaxAttempts(int configured) {
+    private static int validatedStallAlertAttempts(int configured) {
         if (configured <= 0) {
             throw new IllegalArgumentException(
-                    "carddemo.messaging.outbox-max-attempts must be positive but was " + configured
-                            + "; a non-positive ceiling abandons every reply on its first attempt");
+                    "carddemo.messaging.outbox-stall-alert-attempts must be positive but was "
+                            + configured + "; a non-positive threshold escalates the first transient"
+                            + " refusal of every reply, so the stalled-group alarm would fire on the"
+                            + " ordinary case and stop being read");
         }
-        if (configured > MAX_ATTEMPTS_CEILING) {
+        if (configured > MAX_STALL_ALERT_ATTEMPTS_CEILING) {
             throw new IllegalArgumentException(
-                    "carddemo.messaging.outbox-max-attempts must be at most " + MAX_ATTEMPTS_CEILING
-                            + " but was " + configured
-                            + "; the ceiling is what stops a permanently unreachable queue holding a"
-                            + " group's head forever, and a value this large is not a ceiling");
+                    "carddemo.messaging.outbox-stall-alert-attempts must be at most "
+                            + MAX_STALL_ALERT_ATTEMPTS_CEILING + " but was " + configured
+                            + "; at the capped backoff this many attempts already spans days, so a"
+                            + " larger threshold reports a blocked card long after an operator needed"
+                            + " to know");
         }
         return configured;
     }
@@ -721,7 +776,7 @@ public class OutboxPublisher {
      * Claims and publishes one bounded batch of committed replies, one ordering group at a time.
      *
      * <p>Assumptions: the claim is an atomic STATUS TRANSITION and not a selection under a lock.
-     * {@link OutboxRepository#claimGroupHeads(int, java.time.LocalDateTime, java.time.LocalDateTime, int)} moves each row it takes from the attempt count it
+     * {@link OutboxRepository#claimGroupHeads(int, java.time.LocalDateTime, java.time.LocalDateTime)} moves each row it takes from the attempt count it
      * observed to the next one and returns only the rows whose transition it actually performed, so
      * single delivery is a property of the DATA rather than of anything held open while a reply is
      * sent. A concurrent pass that observed the same candidate finds the comparison no longer true
@@ -743,7 +798,7 @@ public class OutboxPublisher {
      *
      * <p>Refactoring Rationale: the pass is NOT one unit of work, and this paragraph said it was. Every
      * database touch here runs in its OWN short transaction -- the head claim, each follower claim and each
-     * publication, failure or abandonment record -- so no row lock and no connection is held across a send. The
+     * publication or failure record -- so no row lock and no connection is held across a send. The
      * withdrawn sentence went on to size a connection pool from a claim that was false, which is worse than
      * saying nothing: a reader would have provisioned for one connection per publisher for the whole of a
      * retry budget, and would have believed a second publisher blocks on the row.</p>
@@ -804,8 +859,15 @@ public class OutboxPublisher {
      */
     @Scheduled(fixedDelayString = "${carddemo.messaging.outbox-poll-interval-ms:1000}")
     public int drain() {
+        // WHY : Assumptions: the claim states no attempt bound, and its absence is the guarantee rather
+        //       than an omission. A bound here would make a reply's ELIGIBILITY expire -- the row would
+        //       stop being claimed while still unpublished, so the committed decision behind it would
+        //       never be answered, and the group's head would move to the next row and deliver that
+        //       card's sequence out of order. What keeps a permanently failing row from being re-claimed
+        //       every poll is the backoff written by its own failure, not a ceiling on how many times it
+        //       may be tried.
         List<AuthReplyOutbox> heads = this.shortTransaction.execute(status -> this.outbox
-                .claimGroupHeads(this.batchSize, now(), leaseUntil(), this.maxAttempts));
+                .claimGroupHeads(this.batchSize, now(), leaseUntil()));
         if (heads == null || heads.isEmpty()) {
             return 0;
         }
@@ -1015,7 +1077,7 @@ public class OutboxPublisher {
     private AuthReplyOutbox nextInGroup(AuthReplyOutbox handled) {
         List<AuthReplyOutbox> followers = this.shortTransaction.execute(status -> this.outbox
                 .claimGroupFollowers(handled.getOrderGroupId(), handled.getOutboxId(), 1, now(),
-                        leaseUntil(), this.maxAttempts));
+                        leaseUntil()));
         return followers == null || followers.isEmpty() ? null : followers.get(0);
     }
 
@@ -1204,10 +1266,12 @@ public class OutboxPublisher {
             Supplier<SendMessageResponse> send = () -> {
                 // WHY : Assumptions: the attempt counter is NOT advanced here. It is advanced once by
                 // the claiming statement, so one pass over one row is one attempt however many times
-                // the transport is retried inside it. Counting per transport call instead would burn a
-                // permanently unreachable queue's whole ceiling in a handful of passes and abandon
-                // replies that were never given the tries the configuration promises -- which is the
-                // property OutboxPublisherLifecycleRepositoryIT asserts against a real engine.
+                // the transport is retried inside it. Counting per transport call instead would inflate
+                // the count by the in-process retry budget, so a permanently unreachable queue would
+                // cross the stall-alert threshold in a fraction of the passes an operator reading the
+                // configured figure expects -- and the backoff, which is computed from the same
+                // counter, would reach its cap sooner than the configuration says. Both are properties
+                // OutboxPublisherLifecycleRepositoryIT asserts against a real engine.
                 return this.sqs.sendMessage(request);
             };
             SendMessageResponse accepted = SEND_RETRIES.invoke(send);
@@ -1253,11 +1317,12 @@ public class OutboxPublisher {
             String reason = ThrowableDigest.of(failure);
             // WHY : Assumptions: the MESSAGE is logged and not persisted, and the asymmetry is the point.
             // Alternatives Considered: persisting it too, which would put the "why" on the retained row.
-            // Rejected because an abandoned row deliberately survives the retention sweep, so persisting
-            // a message would give a transport-authored string an unbounded lifetime in the database
-            // while the log it also reaches is retained by policy. FailureSummary is what makes it
-            // sayable at all: it neutralises control characters, masks any embedded card number and
-            // bounds the length, in that order.
+            // Rejected because the retention sweep removes PUBLISHED rows only, so a row that keeps
+            // failing is retained for as long as its outage lasts -- persisting a transport-authored
+            // string would give it exactly that lifetime in the database, while the log it also reaches
+            // is retained by policy. FailureSummary is what makes it sayable at all: it neutralises
+            // control characters, masks any embedded card number and bounds the length, in that
+            // order.
             // WHY : ⚠️ Refactoring Rationale: the renderer is the WITHHOLDING one, and it used to be
             //       FailureSummary.of. This catch receives whatever a send raised, so it cannot reason
             //       about who composed the message it is holding, and the masking of `of` recognises
@@ -1279,52 +1344,48 @@ public class OutboxPublisher {
             // third site to choose a token for itself. Naming it once is what keeps one log query able
             // to match every site's absence.
             String sqlState = FailureSummary.sqlStateOrAbsent(failure);
-            if (row.getAttempts() >= this.maxAttempts) {
-                // WHY : Assumptions: a row that has used its whole attempt budget is ABANDONED rather
-                // than failed again, and this is the only place the terminal state is entered.
-                // Refactoring Rationale: an earlier revision had no terminal state at all, so a reply
-                // whose queue was permanently unreachable -- a deleted queue, a revoked permission --
-                // was retried forever, held its group's head position forever, and blocked every later
-                // reply for that card. Trade-offs: abandonment gives up on an answer the committed
-                // decision says was owed, which is why the row is retained with its diagnostic rather
-                // than deleted, is excluded from the retention sweep, and is logged at error.
-                transition(row, (stored, at) -> stored.abandon(at, reason));
-                // WHY : ⚠️ Refactoring Rationale: this line named the acquirer's TRANSACTION
-                // IDENTIFIER and no longer does. The argument for naming it was that the identifier "is
-                // message metadata rather than a protected value" because the specification freezes it
-                // as the deduplication identity, "so it already travels in queue telemetry on every
-                // send". Both halves are true and the conclusion does not follow: queue telemetry is a
-                // different sink with a different retention and a different audience from this
-                // service's application log, so a value being present in one is not a reason to write
-                // it into the other. The identifier is the key of a committed decision and of the
-                // ledger entry behind it, which is precisely what makes an unanswered-transaction
-                // report answerable -- and equally what makes a log line carrying it a link from log
-                // access to a financial record. This module's own request payload type already renders
-                // the same field as withheld in its diagnostic form, so naming it here was also the
-                // outlier.
-                // WHY : Assumptions: outboxId, which was already on this line, is what an operator
-                // pivots on. The path from a requester's report to this row runs through the governed
-                // table -- the identifier is the deduplication column, so one indexed query answers
-                // "was a reply owed for this transaction, and was it abandoned" -- and that query is
-                // access-controlled and audited where a log read is neither. Alternatives Considered: a
-                // keyed opaque token over the identifier, which this context can mint because it holds
-                // a tokeniser bean for its queue metadata. Rejected because it would put a second
-                // purpose on that key and would still need the same governed query to be useful, so it
-                // would add a coupling and remove nothing.
-                LOG.error(
-                        "event=auth.reply.abandoned outboxId={} attempts={} "
-                                + "maxAttempts={} fault={} reason={} sqlState={}",
-                        row.getOutboxId(), row.getAttempts(),
-                        this.maxAttempts, reason, detail, sqlState);
-                // WHY : Assumptions: the group does NOT advance past an abandoned row, so this returns
-                // false. Advancing would deliver that card's later replies with a gap where the
-                // abandoned one belongs, and the whole reason a group exists is that its replies are
-                // only meaningful in order; a stalled card that an operator must look at is the
-                // intended outcome, and the error line above is how they learn to.
-                return false;
-            }
+            // WHY : ⚠️ Refactoring Rationale: EVERY failure is recorded as retryable now, and one arm of
+            //       this handler used to be terminal: at a configured attempt ceiling the row was
+            //       abandoned. That lost a reply the committed decision says is owed, and it also broke
+            //       the ordering the group exists for, because the head claim derives a group's head as
+            //       its lowest unpublished, UNABANDONED identity -- so abandoning the head promoted the
+            //       same card's next reply and delivered its sequence with a hole in it. Both are
+            //       failures of the guarantee in §0.4.3 of the technical specification, which is why the
+            //       arm is gone rather than merely rate-limited.
+            // WHY : Assumptions: the attempt count is still recorded and still drives the backoff, so
+            //       "no ceiling" does not mean "no restraint" -- a row that has failed many times is
+            //       retried at the capped interval rather than every poll. The counter's own column is a
+            //       four-byte integer, which at the fifteen-minute cap spans longer than any deployment
+            //       of this service, so an unbounded retry cannot overflow it.
             LocalDateTime retryAt = backoffFrom(row.getAttempts());
             transition(row, (stored, at) -> stored.recordFailure(reason, retryAt));
+            if (row.getAttempts() >= this.stallAlertAttempts) {
+                // WHY : Assumptions: the escalation is a SECOND event name over the same recorded state,
+                //       not a second state. The row above has already been left pending and retryable;
+                //       what changes here is only that an operator is told a card has stopped moving,
+                //       because a reply this far into its attempts is no longer a blip and everything
+                //       behind it in the same group is waiting on it. Alternatives Considered: raising
+                //       the level and keeping one event name. Rejected because the alarm has to be
+                //       expressible as a query -- an alarm on the failure event alone fires on ordinary
+                //       transient refusals, and both lines are already at error.
+                // WHY : Assumptions: the line names the row and never the acquirer's transaction
+                //       identifier or the card. The path from a requester's report to this row runs
+                //       through the governed table, where the deduplication column answers "was a reply
+                //       owed for this transaction, and has it been published" under access control and
+                //       audit; a log line carrying the same identifier would be a link from log access
+                //       to a financial record, with neither.
+                LOG.error(
+                        "event=auth.reply.stalled outboxId={} attempts={} "
+                                + "stallAlertAttempts={} nextAttemptAt={} fault={} reason={} "
+                                + "sqlState={}",
+                        row.getOutboxId(), row.getAttempts(), this.stallAlertAttempts, retryAt, reason,
+                        detail, sqlState);
+                // WHY : Assumptions: this returns false for the same reason the ordinary failure below
+                //       does -- the group does not advance past a row that did not reach the wire. The
+                //       stalled line is how an operator learns the card is blocked; the block itself is
+                //       the correct outcome, since advancing would reorder that card's replies.
+                return false;
+            }
             LOG.error(
                     "event=auth.reply.publish-failed outboxId={} attempts={} nextAttemptAt={} fault={} "
                             + "reason={} sqlState={}",
@@ -1367,7 +1428,7 @@ public class OutboxPublisher {
      * <p>Assumptions: a {@code null} response is tolerated rather than dereferenced, and the reason is a
      * correctness one rather than defensive habit. This value is read AFTER the publication has already
      * been committed to the row, so a null dereference here would be caught by the failure handler below
-     * and would record a failure -- or an abandonment -- against a reply that was successfully sent. A
+     * and would record a failure against a reply that was successfully sent. A
      * live transport never returns null; a test double that stubs the client without stubbing this one
      * call does, which is exactly how that inversion would first reach a build.</p>
      *

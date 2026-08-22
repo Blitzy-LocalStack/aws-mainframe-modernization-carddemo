@@ -82,18 +82,66 @@
 > dependencies, because the error sink described in the last section is where
 > structured failure records land.
 >
-> **Measured implementation status.** `CsvAuthCodec` and its golden byte vectors,
-> the twelve-queue SQS module, the per-service queue-permission output and the
-> exact-ARN ECS task-role policy are authored. The environment roots do not yet
-> compose those modules, and authorization/account/reference listeners, an outbox
-> table, an outbox repository/writer/publisher and the external request producer
-> do not exist. Every baseline figure below is therefore derived from cited source,
-> while every unimplemented consumer or delivery flow is labelled as a target.
+> **Measured implementation status.** Three categories, kept apart rather than
+> merged into one list. Refactoring Rationale: the single list this paragraph
+> carried was wrong in three ways at once — it sized the queue module at twelve
+> queues where it declares ten, it said the environment roots did not yet compose
+> that module while **both** of them do, and it put the authored listeners, outbox
+> table, repository, writer and publisher in the same sentence as the one
+> component that genuinely does not exist. A reader was therefore told that code
+> already in the tree was aspirational, which is the reading that invites a
+> second, divergent implementation of a contract that already has one.
+>
+> *Delivered and composed.* The **ten-queue** SQS module — five primary queues,
+> each paired with a dead-letter queue of its own — is authored at
+> [`infra/modules/sqs`](../../infra/modules/sqs) and composed by both environment
+> roots: each of `infra/envs/dev/main.tf` and `infra/envs/prod/main.tf` declares
+> `module "sqs"` with `source = "../../modules/sqs"`, and each then writes the
+> queue URLs into Parameter Store per consuming service, derives the exact-ARN
+> send and receive boundaries from the module's own `service_queue_permissions`
+> output and hands them to `ecs-service` as `sqs_send_queue_arns` and
+> `sqs_receive_queue_arns`, and passes `queue_names` to the observability module.
+> Trade-offs: those two roots are cited by BLOCK IDENTITY rather than by line,
+> unlike everything else in this document. A root is edited far more often than
+> this document is, so a line citation into one goes stale in exactly the way
+> this paragraph already did once, whereas `module "sqs"` and the output names
+> stay greppable; the cost is that a reader must search rather than jump.
+> Both consumers and the error-sink producer are authored too:
+> `AuthorizationRequestListener` and `OutboxPublisher` over the `AuthReplyOutbox`
+> entity, `OutboxMessage`, `OutboxRepository` and the `auth_reply_outbox` table
+> created at `authorization-service`'s `V1__authorization.sql` **L948** and
+> refined by that module's `V2`, `V3` and `V4` migrations, all four in
+> `services/authorization-service/src/main/resources/db/migration/`;
+> `InquiryMessageListener` with `InquiryListenerHealth`
+> in `account-service`; `BatchErrorPublisher` in `batch-service`; and the wire
+> codecs `CsvAuthCodec`, `InquiryRequestCodec` and `DateInquiryReplyCodec` with
+> their golden byte vectors in `common-lib`. `reference-service` binds no listener
+> at all, and that is the design rather than a gap: one request queue admits
+> exactly one owning consumer, which
+> `services/reference-service/src/main/resources/db/migration/V4__drop_reference_inquiry_reply_ledger.sql`
+> records in those same terms.
+>
+> *Delivered but not exercised at runtime.* Nothing above has been applied to an
+> AWS account, so every queue, grant and parameter this document describes is a
+> declaration rather than an observation and **no application message has
+> traversed a provisioned queue**. The messaging code is covered by unit and
+> repository tests, plus one opt-in emulator compatibility test —
+> `account-service`'s `AwsStarterRuntimeIT`, against a queue it creates itself —
+> which is evidence that the code and its framework wiring behave, never that
+> this topology does.
+>
+> *Genuinely absent.* One component, and it is external: the point-of-sale
+> authorizer that **produces** authorization requests. The baseline supplies only
+> a test stub, `tests/mocks/mq_request_stub.py`, and AAP §0.2.2 puts building a
+> real producer out of scope — so the request side of the contract is specified
+> from the consumer's own parse. Every baseline figure below is derived from cited
+> source rather than from a run.
 >
 > **Caveats.** Five, stated up front rather than buried. First, the SQS module
-> validates in isolation, but no environment root wires it and **no message has
-> been sent through a provisioned queue**; no throughput, latency or ordering
-> figure anywhere in this document is a measurement. Second, the external
+> validates statically and is composed by both environment roots, but nothing has
+> been applied to an AWS account and **no message has been sent through a
+> provisioned queue**; no throughput, latency or ordering figure anywhere in this
+> document is a measurement. Second, the external
 > point-of-sale authorizer that *produces* authorization requests is **not supplied
 > by the baseline** — only a test stub exists — so the request side of the contract
 > is documented from the consumer's parse rather than exercised against a real
@@ -104,10 +152,16 @@
 > subjects of this document. Fourth, the mainframe MQ path is **preserved intact**
 > — the migration adds a path, it does not remove one, so the queue definitions,
 > the trigger definitions and the programs that use them all remain exactly as they
-> are. Fifth, this document specifies contracts, not capacity: the two bounds it
-> derives from the baseline are treated separately — the five-second wait is
-> preserved, while the declared 500-message ceiling is enforced exactly rather
-> than reproducing the observed 501-message off-by-one.
+> are. Fifth, this document specifies contracts, not capacity: both bounds it
+> derives from the baseline are **reproduced** rather than corrected — the
+> five-second wait is preserved, and so is the observed 501-message window, whose
+> declared 500 and its `+1` are carried as
+> `AuthorizationRequestListener.DEFAULT_REQUEST_PROCESS_LIMIT` and
+> `BASELINE_COMPARISON_OFFSET`. Refactoring Rationale: this caveat said the
+> declared 500 was enforced exactly rather than reproducing the off-by-one, which
+> is the divergence the section on batch discipline below withdrew — registration
+> `D-AUTH-REQUEST-WINDOW` went with it — so the front matter was still announcing
+> a divergence the body says does not exist.
 
 ---
 
@@ -820,18 +874,23 @@ separately in the following section.
 | message type, set to reply | inferred from the queue the message is on | `COPAUA0C.cbl` L744 |
 
 The `contentType` of `text/csv` is doing real work rather than decorating the
-message: it is the discriminator a consumer would use to distinguish a positional
-payload from the additive JSON envelope described above, which is why the format
-declaration at L397 and L751 is mapped rather than dropped as transport trivia.
+message: on the authorization request wire it is a **required admission check**, and
+it is the discriminator that distinguishes a positional payload from the additive JSON
+envelope described above, which is why the format declaration at L397 and L751 is
+mapped rather than dropped as transport trivia.
 
-- Refactoring Rationale: "would use" rather than "does use". `AuthReplyOutbox`
-  declares exactly one content type — `CONTENT_TYPE_CSV` — and `OutboxPublisher`
-  stamps that one value on every reply, while `AuthorizationRequestListener`
-  decodes every inbound payload with `CsvAuthCodec.decodeRequest` and branches on
-  no content type at all. Stamping the attribute now is what makes the envelope
-  addable later without a breaking change, because an existing consumer already
-  receives the discriminator it will need; claiming the dispatch exists would send
-  a reader looking for a branch that is not there.
+- Refactoring Rationale: "does use" rather than "would use", which reverses the note
+  that stood here. `AuthReplyOutbox` declares exactly one content type —
+  `CONTENT_TYPE_CSV` — and `OutboxPublisher` stamps that one value on every reply,
+  and `AuthorizationRequestListener.requireDeclaredWireFormat` refuses an inbound
+  request whose `contentType` is absent, blank or names any other format, comparing
+  case-insensitively over a trimmed value and declining a parameterised form. The
+  earlier note said the listener "branches on no content type at all", which was true
+  while the attribute was requested from the transport and never read — the gap that
+  method's own rationale records — and is not true now. Assumptions: the check precedes
+  the decode, because a positional record read under an undeclared format does not fail
+  to decode; it decodes into fields that may not be the fields the producer sent, which
+  is a wrong authorization decision rather than a detectable failure.
 
 ### The inquiry replies declare `text/plain`, not `text/csv`
 
@@ -861,12 +920,17 @@ describes, and the paragraph is kept because the drift it records is why the
 attribute is documented at all.
 
 - Assumptions: `text/csv` would be WRONG here even though it is correct on the
-  authorization flow, and the two must not be copied from one another. Nothing
-  consumes this attribute yet, so a wrong value would be inert and the defect
-  invisible — which is exactly why it is worth stating: the attribute exists to be
-  the discriminator a future consumer branches on, and a discriminator that names
-  the wrong format is worse than an absent one, because the consumer it misleads
-  will have had every reason to trust it.
+  authorization flow, and the two must not be copied from one another. Nothing in this
+  repository reads the attribute on the INQUIRY wire — `InquiryMessageListener` stamps
+  it on every payload it publishes and reads no inbound `contentType` — so a wrong
+  value would be inert here and the defect invisible, which is exactly why it is worth
+  stating: the attribute exists to be the discriminator a future consumer branches on,
+  and a discriminator that names the wrong format is worse than an absent one, because
+  the consumer it misleads will have had every reason to trust it. Refactoring
+  Rationale: this bullet said nothing consumed the attribute "yet" without naming a
+  wire, and that now holds on the inquiry side only: on the authorization request wire
+  `AuthorizationRequestListener` refuses a message that does not declare `text/csv`, so
+  a wrong value there is a named refusal rather than an inert label.
 - Refactoring Rationale: the paragraph naming the date consumer was added because
   that consumer still stamped `text/csv` while the account consumer's own
   documentation already asserted, in prose, that "the date-inquiry reply, which is
@@ -918,61 +982,91 @@ there is no ambiguity to resolve:
 > narrows the baseline's unrestricted `MQPUT1` destination to prevent the task
 > role becoming a confused deputy.
 >
-> The two inquiry programs remain the contrast: they pre-open fixed reply queues
-> by literal (`COACCT01.cbl` L198 and L261, `CODATE01.cbl` L147 and L210), and the
-> one target inquiry consumer sends only to the configured shared inquiry-reply
-> queue.
+> The two inquiry programs remain the contrast in one respect but not in the other:
+> they pre-open fixed reply queues by literal (`COACCT01.cbl` L198 and L261,
+> `CODATE01.cbl` L147 and L210), and the one target inquiry consumer publishes only
+> to its own configured shared inquiry-reply queue — but it reaches that
+> destination by applying the same exact-match rule to a requested route, not by
+> leaving the request's preference unread.
 >
 > Assumptions: the one inquiry listener is authored --
 > `services/account-service/src/main/java/com/carddemo/account/service/InquiryMessageListener.java`
-> -- and it publishes **only** to the queue named by its own configuration, so the
-> validation described here is enforced in code rather than required of a future
-> one. Refactoring Rationale: a second listener in `reference-service` was named here
-> and is withdrawn; the queue it bound is the one shared request queue, which admits a
-> single owning consumer. It does not read a destination from the message: it is
-> written against the
-> baseline's own behaviour, which saves the request's reply-to queue (`COACCT01.cbl` L341) and then
-> does not use it, putting instead to the handle opened from the statically assigned
-> reply-queue name. Honouring a message-supplied destination would have been both
-> unfaithful and a queue-injection vector, since a request could then direct an
-> account's balance to a queue of the sender's choosing;
-> `InquiryMessageListenerTest.theReplyIgnoresAMessageSuppliedDestination` asserts it
-> does not.
+> -- so the validation described here is enforced in code rather than required of a
+> future one. Refactoring Rationale: a second listener in `reference-service` was named
+> here and is withdrawn; the queue it bound is the one shared request queue, which
+> admits a single owning consumer.
+>
+> Refactoring Rationale: this paragraph also asserted that the listener "does not read
+> a destination from the message", and it does read one. `resolveReplyDestination`
+> honours `replyToQueueUrl` when it equals the configured destination **exactly**, and
+> otherwise substitutes that destination and logs
+> `event=account.inquiry.reply-destination-substituted reason=not-permitted` without
+> logging the rejected value; the two outcomes are asserted separately, by
+> `InquiryMessageListenerTest.aMatchingRequestedDestinationIsHonoured` and by
+> `InquiryMessageListenerTest.theReplyIgnoresAMessageSuppliedDestination`. That is the
+> same rule the authorization paragraph above states, so the two flows now read alike,
+> and that method's own documentation cites this document as where the rule is
+> recorded — so the earlier wording contradicted both. It also cited `COACCT01.cbl`
+> L341 for the baseline's saved reply-to queue, which is the input-queue handle move;
+> the reply-to field is captured at L366, its only occurrence in that file, and saved
+> at L371. Trade-offs: substituting rather than failing keeps a request the baseline
+> answered from being dead-lettered over a routing preference, while honouring an
+> arbitrary address is what would make the consumer a confused deputy, able to direct
+> an account's balance to a queue of the sender's choosing.
 
-### Divergence: an inquiry reply carries no copy of the request's message identifier
+### Divergence: an inquiry reply echoes the request's message identifier as an attribute
 
 Both inquiry programs restore the saved inbound **message** identifier onto the reply
 descriptor beside the correlation identifier — `CODATE01.cbl` L373 does
 `MOVE SAVE-MSGID TO MQMD-MSGID` immediately before its put at L383, having saved it at
-L321, and `COACCT01.cbl` does the same for its own reply. **Neither target listener
-re-publishes it.** `DateInquiryMessageListener.publishReply` and
-`InquiryMessageListener` each put a closed attribute set on a reply: `contentType`
-always, and `correlationId` only when the requester supplied one. There is no
-`messageId` attribute and no `replyToQueueUrl` attribute on an inquiry reply.
+L321, and `COACCT01.cbl` does the same at L469, having captured the descriptor field at
+L364 and saved it at L372. **The one target listener carries the same value across, but
+not in the same place.** `InquiryMessageListener` publishes a closed attribute set:
+`contentType` always, then `messageId` and `correlationId` each only when the request
+carried one. There is no `replyToQueueUrl` attribute on a reply, and the transport's own
+message-identifier field is not written by the sender at all.
 
-- Assumptions: this is a property of the target transport rather than an omission. SQS
-  assigns a `MessageId` to every message it accepts, so a reply carrying a copy of the
-  request's identifier under that name would carry **two** identifiers with one meaning
-  and leave a consumer to guess which one it held. The correlation identifier is the
-  value a requester actually matches an answer against, and it crosses verbatim — which
-  is what preserves the request/reply pairing the baseline descriptor provided.
-- Trade-offs: what is surrendered is a requester's ability to match a reply by the
-  request's own message identifier, which the baseline permitted and which nothing in
-  either reference program relies on. What is kept is one unambiguous identity per
-  message plus the requester's own opaque correlation value. A requester that keyed on
-  the message identifier rather than the correlation identifier would need to change;
-  no baseline consumer does, because the reference programs are the only producers of
-  these replies.
-- Assumptions: the asymmetry is asserted rather than left to be discovered.
-  `DateConversionMessageListenerTest` fixes the reply's attribute set as a **closed**
-  key set rather than as a presence check, so an attribute added beside `correlationId`
-  fails that case; `InquiryMessageListenerTest` does the same for the account flow.
+- Assumptions: the move is forced by the target transport rather than chosen. SQS assigns
+  a `MessageId` to every message it accepts and a producer cannot set it, so the
+  descriptor field the baseline writes has **no writable counterpart** on a send; the
+  captured value reaches the requester as the named attribute
+  `InquiryMessageListener.ATTRIBUTE_MESSAGE_ID` or not at all. The name is published as a
+  constant so a producer and a test assert one spelling rather than a repeated literal.
+- Trade-offs: a reply therefore carries **two** identifiers — the broker's own, assigned
+  on accept, and the echoed one under a different name — where the baseline had one field
+  holding the second. The cost is that a requester has to know which name it is matching
+  on; what is bought is that the value the baseline handed back is not silently dropped.
+  Dropping the echo was the alternative, and it fails the requester that pairs an answer
+  by the identifier it sent: the correlation identifier is the value a requester normally
+  matches on, but nothing obliges a producer to set one, and both reference programs
+  restore both fields.
+- Assumptions: the shape is asserted rather than left to be discovered.
+  `InquiryMessageListenerTest.theReplyDeclaresItsMediaType` fixes the attribute set as a
+  **closed** key set with `containsOnlyKeys` for a request that carried neither
+  identifier, so an attribute appearing beside `contentType` fails that case;
+  `theMessageIdentifierIsEchoed` and `theCorrelationIdentifierIsEchoedVerbatim` fix each
+  conditional echo, the second asserting the value crosses verbatim including punctuation.
+- Refactoring Rationale: this section previously recorded the opposite divergence — that
+  neither target listener re-published the identifier — and named two listeners, one of
+  them `reference-service`'s, and a date-flow test to assert it. There is one inquiry
+  listener, it does echo the identifier, and the withdrawn names resolve to nothing: the
+  reference context's queue half is gone with the per-consumer queue split, and its
+  replacement suite records the withdrawal by asserting that both withdrawn type names
+  are unresolvable from that module. A divergence register that inverts the divergence is
+  worse than a silent one, because a downstream producer author reads it as the contract
+  and builds against an attribute set the consumer does not send.
 
-This document is the register for that divergence. `SqsConfig` in `reference-service`
-records the same asymmetry at the point of use and cites this section rather than
-restating it, so the two cannot drift into disagreeing.
+This document is the register for that divergence. The point-of-use record is in
+`account-service`: the `ATTRIBUTE_MESSAGE_ID` constant's own documentation states why the
+value travels as an attribute, and that context's `SqsConfig` requests every message
+attribute so the five this flow reads always arrive, noting there that the authorization
+consumer echoes the correlation identifier but **mints** a fresh message identifier —
+which is why the two flows must not be generalised from one another. The authorization
+reply's attribute set is `contentType`, `correlationId` when the request carried one and
+`expiresAt` when a send deadline applies, and it carries no `messageId` attribute.
 
-The IAM boundary is already authored independently of that future validation.
+The IAM boundary is authored independently of the in-code validation above, so a send
+outside the permitted set is refused twice over rather than once.
 `infra/modules/sqs/outputs.tf` publishes `service_queue_permissions` as closed sets,
 one per workload that touches a queue:
 
@@ -980,15 +1074,24 @@ one per workload that touches a queue:
 |---|---|---|
 | `authorization-service` | `pauth_request` | `pauth_reply` |
 | `account-service` | `inquiry_request` | `inquiry_reply`, `error` |
+| `batch-service` | nothing | `error` |
+
+Refactoring Rationale: this table carried the first two rows only, while the paragraph
+below it said `batch` put no message on any of these queues and the paragraph beside it
+named `batch_service` as a member — three statements about one map, two of them wrong.
+`batch-service` receives **nothing**, because it declares no listener at all and takes
+its work from a job argument and its own tables, and it sends to the terminal error
+sink **alone**, because its authored `BatchErrorPublisher` reports a failed nightly run
+there and answers no requester. A receive grant it has no consumer for would let a
+batch task drain a queue another context is the sole consumer of, which is the failure
+mode a per-service boundary exists to make impossible.
 
 Refactoring Rationale: there is no `reference-service` row, and the module publishes
 no such member. That context consumes no queue, so a receive grant for it would let a
 second identity take messages only the owning consumer can answer, and a send grant
-would address a reply it never produces. `infra/modules/sqs` publishes
-`service_queue_permissions` with `authorization_service`, `account_service` and
-`batch_service` members; both roots fall a workload absent from that map through to an
-empty receive-and-send pair, so `infra/modules/ecs-service` creates no queue-boundary
-policy for it at all.
+would address a reply it never produces. Both roots fall a workload absent from that
+map through to an empty receive-and-send pair, so `infra/modules/ecs-service` creates
+no queue-boundary policy for it at all.
 
 `infra/modules/ecs-service` accepts those exact ARNs through
 `sqs_receive_queue_arns` and `sqs_send_queue_arns`. Its `AllowExactQueueSend`
@@ -1002,16 +1105,26 @@ There is no wildcard SQS resource and no ARN is assembled from
 
 Assumptions: both roots compose it through `local.sqs_permissions_by_workload`,
 which reads the three entries of that output directly rather than assembling ARNs.
-Composing it is NECESSARY rather than tidy, and the reason is the two inquiry
-consumers: both of them **send**, so without the grants each would poll its request
-queue successfully and then fail every reply with an access-denied error — a failure
-that presents as an unanswered requester rather than as a permissions problem, and
-which no plan-time check would surface.
+Composing it is NECESSARY rather than tidy, and the reason is that every consumer
+here **sends**: the one inquiry consumer answers on the shared reply queue and reports
+a failed publication to the error sink, and the authorization consumer's publisher
+sends on the reply queue. Without the grants a consumer would poll its request queue
+successfully and then fail every reply with an access-denied error — a failure that
+presents as an unanswered requester rather than as a permissions problem, and which no
+plan-time check would surface. Refactoring Rationale: this sentence said "the two
+inquiry consumers", of which there is one; the queue module's own
+`service_queue_permissions` has three members and none of them is a second inquiry
+context.
 
 A workload absent from that map receives the empty set and therefore no SQS
-statement at all. That is deliberate: `batch` and `data-migration` put no message
-on any of these queues, so the three workloads that do are named explicitly and
-adding a fourth is a visible edit rather than an inherited grant.
+statement at all. That is deliberate: `data-migration` puts no message on any of these
+queues, so the three workloads that do — `authorization-service`, `account-service` and
+`batch-service` — are named explicitly and adding a fourth is a visible edit rather
+than an inherited grant. Refactoring Rationale: this sentence grouped `batch` with
+`data-migration` as putting no message on any of these queues, contradicting the
+`batch_service` member two paragraphs above and the producer it grants: `batch-service`
+does send, to the terminal error sink and to nothing else, which is why its entry
+carries an empty receive list and a single send ARN.
 
 > Assumptions: **the FIFO deduplication identifier is a separate concern from
 > correlation, and the two must not be conflated.** The correlation identifier is
@@ -1155,74 +1268,88 @@ message becomes visible again if the handler fails, and is deleted only once the
 work and the reply have succeeded. Both paths keep a dead-letter queue at
 `maxReceiveCount` 5.
 
-Refactoring Rationale:  Delete-on-success is the whole of the inquiry
-discipline in one direction only, and this paragraph previously implied it was the
-whole of it. A baseline unit of work spanning get, read and put rolls the **put**
-back when it fails, so the baseline can neither lose a reply nor send one twice;
-delete-on-success reproduces only the first half. The send is committed at the queue
-the moment it returns and the acknowledgement is a separate call afterwards, so a
-task killed between them leaves the request visible again and the next delivery
-sends a **second** reply bearing the same correlation identifier as the first — two
-answers to one question, with nothing on the wire to tell them apart. The remedy is
-a durable **claim** keyed by the **queue service's own identifier for the
-delivery** — stable across every redelivery of one message, unique per accepted
-send, and not settable by a producer: the reply is recorded and committed, then
-sent, then marked sent, so a redelivery either suppresses its duplicate or re-sends
-the **recorded** bytes.
+Trade-offs: delete-on-success reproduces one half of the inquiry discipline and not
+the other. A baseline unit of work spanning get, read and put rolls the **put** back
+when it fails, so the baseline can neither lose a reply nor send one twice. In the
+target the send is committed at the queue the moment it returns and the
+acknowledgement is a separate call afterwards, so a task killed between them leaves
+the request visible again and the next delivery sends a **second** reply bearing the
+same correlation identifier as the first — two answers to one question, with nothing
+on the wire to tell them apart. The half delete-on-success does not reproduce is
+therefore carried by a durable **claim** keyed by the **queue service's own
+identifier for the delivery** — stable across every redelivery of one message,
+unique per accepted send, and not settable by a producer: the reply is recorded and
+committed, then sent, then marked sent, so a redelivery either suppresses its
+duplicate or re-sends the **recorded** bytes.
 
-**Both** inquiry consumers carry one, because the argument above is a property of the
-target acknowledgement boundary rather than of either exchange's payload:
+**Both** inquiry exchanges carry one — through the single consumer that answers them
+both — because the argument above is a property of the target acknowledgement boundary
+rather than of either exchange's payload:
 
-| Exchange | Table | Migration | Repository |
-|---|---|---|---|
-| Account inquiry (`COACCT01`) | `account.inquiry_reply_ledger` | [`V2__account_inquiry_reply_ledger.sql`](../../services/account-service/src/main/resources/db/migration/V2__account_inquiry_reply_ledger.sql) | `com.carddemo.account.repository.InquiryReplyLedger` |
-| Date inquiry (`CODATE01`) | `account.inquiry_reply_ledger` — the same table, because the same listener answers both | (as above) | `com.carddemo.account.repository.InquiryReplyLedger` |
+| Exchange | Consumer | Table | Migration | Repository |
+|---|---|---|---|---|
+| Account inquiry (`COACCT01`) | `account-service`'s `InquiryMessageListener` | `account.inquiry_reply_ledger` | [`V2__account_inquiry_reply_ledger.sql`](../../services/account-service/src/main/resources/db/migration/V2__account_inquiry_reply_ledger.sql) | `com.carddemo.account.repository.InquiryReplyLedger` |
+| Date inquiry (`CODATE01`) | `account-service`'s `InquiryMessageListener` | `account.inquiry_reply_ledger` | [`V2__account_inquiry_reply_ledger.sql`](../../services/account-service/src/main/resources/db/migration/V2__account_inquiry_reply_ledger.sql) | `com.carddemo.account.repository.InquiryReplyLedger` |
 
-⚠️ Refactoring Rationale: the date row named a `reference.inquiry_reply_ledger` with a
-repository of its own in `reference-service`. Both are withdrawn, and the guarantee is
-not. The shared inquiry request queue has exactly ONE consumer by design —
-`account-service`'s `InquiryMessageListener`, which dispatches on the four-character
-function code and answers `DATE` itself — so the reply for either exchange is composed
-in that service and recorded in that service's ledger before it is sent.
-`reference-service` declares no messaging starter and no `@SqsListener`, so the table it
-created could never be written to, and a table nothing inserts into supplies no
-idempotency. `V4__drop_reference_inquiry_reply_ledger.sql` withdraws it; `V3` is
-retained because a released migration can be reversed but not deleted.
+Assumptions: the shared inquiry request queue has exactly **one** consumer, so the
+reply for either exchange is composed in one place and recorded in one ledger before
+it is sent. That consumer is `account-service`'s `InquiryMessageListener`: it reads
+the queue, dispatches on the four-character function code, answers the `DATE`
+function itself, and records the composed reply in `account.inquiry_reply_ledger`
+before publishing it. `reference-service` carries no part of the transport — it
+declares no messaging starter and no `@SqsListener`, and its
+`ReferenceServiceStructureTest` asserts that the annotation does not resolve from
+that module's classpath at all — so no delivery reaches it and there is no second
+ledger a reply could be recorded in. `reference.inquiry_reply_ledger` is dropped by
+`V4__drop_reference_inquiry_reply_ledger.sql`, and
+`V3__reference_inquiry_reply_ledger.sql` is retained rather than deleted: Flyway
+validates applied history against the scripts it can resolve, so deleting the file
+would fail startup in an environment that had already applied it, and an object is
+therefore withdrawn by a later script instead.
 
-Refactoring Rationale: this section named the account ledger alone, and the date
-exchange was left with delete-on-success only on the ground that "the answer is the
-clock, so two answers to one request are the same answer". That has the implication
-backwards, and the date exchange is in fact the **worse** of the two. Its reply body
-is the system date and time read at the moment of composition
-([`CODATE01.cbl`](../../app/app-vsam-mq/cbl/CODATE01.cbl) L343–L353), so a redelivery
-does not repeat the answer, it composes a **later** one — two replies bearing one
-correlation identifier and disagreeing about the time. Being a function of the clock
-is precisely what makes the two differ. The account exchange's duplicate is at least
-byte-identical whenever the account has not moved; the date exchange's never is.
+Assumptions: the date exchange needs the claim at least as much as the account
+exchange does, because its reply body is the system date and time read at the moment
+of composition ([`CODATE01.cbl`](../../app/app-vsam-mq/cbl/CODATE01.cbl) L343–L353).
+An answer recomposed for a redelivered request is therefore a **later** answer rather
+than the same one — two replies bearing one correlation identifier and disagreeing
+about the time. Being a function of the clock is precisely what makes the two differ,
+and it is why the ledger stores the framed reply **verbatim** and a re-send sends the
+recorded bytes instead of composing a fresh answer: the stored payload is what makes
+a duplicate byte-identical for the date exchange, and what keeps an account reply
+identical when the balance has moved between deliveries.
 
 - Assumptions: a claim is **not** the outbox the authorization path uses, and the
   difference is the requirement rather than the mechanism. An outbox guarantees a
   reply **exists** for every committed decision, which this exchange does not need
   because its read commits nothing that a missing reply would contradict. A claim
-  guarantees a reply is **not sent twice**. Neither substitutes for the other, and
-  the section below still describes the outbox as the authorization path's alone.
-- Trade-offs: one crash window remains, between the send and the mark, and a task
-  dying there causes the redelivery to re-send — so the requester receives two
-  **byte-identical** copies rather than two possibly-disagreeing ones, because the
-  payload is stored verbatim instead of recomposed from an account that may have
+  **bounds how many times one reply is sent**: on the ordinary path a redelivery finds
+  the retired claim and its duplicate is suppressed rather than sent. Neither
+  substitutes for the other, and the section below describes the outbox as the
+  authorization path's alone.
+- Trade-offs: the claim bounds duplication rather than removing it, so the contract
+  is that bound and not exactly-once. One crash window remains, between the send and
+  the mark: a task dying there leaves the row `PENDING`, so the redelivery re-sends
+  and the requester receives two **byte-identical** copies — byte-identical because
+  the recorded payload is re-sent rather than recomposed from an account that may have
   moved or a clock that has advanced. Closing it entirely would need the queue send
   and the database mark to commit together across two resource managers, which is the
-  two-phase commit this migration records as eliminated. ⚠ Assumptions: `attempts` on
-  each ledger row counts **deliveries that reached the send step** — one recorded by the
-  claim itself, one by each redelivery that re-sends, and none by the retirement — so a
-  value above one is the operational signal that this window was actually entered, and a
-  value at the source queue's `maxReceiveCount` says the reply never got out at all. It
-  counted completed SENDS, which made it `0` for every outstanding claim and `1` for
-  every retired one — exactly what `status` already says — and left it silent for the one
-  condition worth reading it for. Both ledgers carry the corrected rule; each migration's
-  own column comment still states the narrower one, because both migrations are applied
-  and a frozen migration is corrected in prose beside it rather than edited. This is the
-  only residual divergence either exchange admits.
+  two-phase commit this migration records as eliminated. A request carrying a broker
+  identifier — which queue traffic always does — is therefore answered twice only when
+  a delivery observes the claim before it is marked, whether because the delivery that
+  took it died in that interval or because a second delivery arrived inside it.
+- Assumptions: `attempts` on a ledger row counts **deliveries that reached the send
+  step**, and nothing about how any of them turned out. One is recorded by the claim,
+  which is committed before the first send is attempted; one by each redelivery that
+  re-sends, which is committed before that re-send; none by the retirement, and none
+  by a redelivery whose duplicate is suppressed, because no send is attempted on that
+  path. It counts neither successes nor failures, so it cannot distinguish a send that
+  succeeded from one whose mark then failed, and a value equal to the source queue's
+  `maxReceiveCount` says five deliveries reached the send step rather than that no
+  reply got out. What it does say is that a value above one is the operational signal
+  that the window above was entered. The `attempts` column comment in
+  `V2__account_inquiry_reply_ledger.sql` states the narrower rule — sends rather than
+  deliveries — and is corrected here in prose beside it rather than edited, because
+  the migration is applied and its bytes are frozen.
 - Refactoring Rationale: the claim was keyed on the **producer-supplied** message
   attribute, falling back to the correlation identifier, and that inverted the
   guarantee for a whole class of requester. Neither value is authenticated or
@@ -1236,10 +1363,10 @@ byte-identical whenever the account has not moved; the date exchange's never is.
   constants rather than written as literals. The two producer-supplied values
   remain **below** it as explicitly legacy fallbacks, reachable only by a request
   that never passed the broker.
-- Assumptions: every identity that reaches either durable row, and every identity
-  echoed onto either reply, is **bounded at intake** by the shared queue-identity rule
-  in `com.carddemo.common.messaging.MessagingCorrelationId` — non-blank, at most 64
-  characters, printable US-ASCII. Assumptions: 64 rather than the baseline's own
+- Assumptions: every identity that reaches the durable row, and every identity
+  echoed onto either exchange's reply, is **bounded at intake** by the shared
+  queue-identity rule in `com.carddemo.common.messaging.MessagingCorrelationId` —
+  non-blank, at most 64 characters, printable US-ASCII. Assumptions: 64 rather than the baseline's own
   24-**byte** descriptor fields, because the natural text rendering of 24 arbitrary
   bytes is 48 hexadecimal characters, so a 24-character bound would refuse a faithful
   rendering of a value the baseline accepts; the bound is taken instead from the widest
@@ -1339,7 +1466,7 @@ part of it can be opened:
 
 | Part of the contract | Where it is authored |
 |---|---|
-| The `auth_reply_outbox` table, its primary key and its two partial unpublished-row indexes | `services/authorization-service/src/main/resources/db/migration/V1__authorization.sql` **L948**, **L1120**, **L1142** and **L1166** |
+| The `auth_reply_outbox` table, its primary key and its three partial indexes — two over unpublished rows and one over their published complement | `services/authorization-service/src/main/resources/db/migration/V1__authorization.sql`: `CREATE TABLE` at **L948**, `CONSTRAINT pk_auth_reply_outbox` at **L1195**, `idx_auth_reply_outbox_unpublished` at **L1217**, `idx_auth_reply_outbox_group` at **L1241** and `idx_auth_reply_outbox_published` at **L1265** |
 | The row's accepted-send record — `sent_at`, `send_expires_at`, `broker_message_id`, `broker_sequence_number`, their three check constraints and the partial index over unconfirmed accepted sends | `services/authorization-service/src/main/resources/db/migration/V4__authorization_outbox_send_acceptance.sql` |
 | The reply-intent row itself | `authorization/domain/AuthReplyOutbox.java` |
 | Its persistence, including the group-head and group-follower claim queries | `authorization/repository/OutboxRepository.java` |
@@ -1355,7 +1482,14 @@ second, divergent implementation of a contract that already has one. The line
 citations in the first row are measured against the file rather than carried forward
 from an earlier reading: a citation that lands in the middle of a different column's
 comment block is worse than none, because a reader who checks it concludes the
-artifact is absent. **What has still not happened is a run** — no application message has been sent through these queues,
+artifact is absent. Refactoring Rationale: that is precisely what three of those
+four citations had become — **L1120**, **L1142** and **L1166** landed inside
+why-comment blocks and a column declaration rather than on the primary key and the
+indexes, and the row counted two partial indexes where the migration declares three.
+Each object is now named beside its own line, so a reader who checks a citation
+lands on the statement it claims. The lines are safe to cite because a released
+Flyway migration is immutable in both directions, which the withdrawal script
+`V4__drop_reference_inquiry_reply_ledger.sql` states in those terms. **What has still not happened is a run** — no application message has been sent through these queues,
 so nothing here is a report of observed behaviour. The intentional divergence from the
 baseline's lossy sequence is registered in the contracted
 
@@ -1385,8 +1519,14 @@ no application message has been sent through these queues.
   inside the broker's five-minute deduplication window — which the configured retry
   delay is far inside — the second send is suppressed and the requester keeps the first
   message. The residual window and the reason a wider transaction was rejected are
-  recorded on `OutboxPublisher.recordSendAccepted` and asserted by
-  `OutboxPublisherTest.anUncommittedAcceptanceLeavesTheReplySendable`.
+  recorded at the acceptance write inside `OutboxPublisher.publishReply` — the method
+  that records it, `recordSendAccepted`, is declared on the `AuthReplyOutbox` entity
+  and called from there — and asserted by
+  `OutboxPublisherTest.anUncommittedAcceptanceLeavesTheReplySendable`. Refactoring
+  Rationale: this named `OutboxPublisher.recordSendAccepted`, a member that type does
+  not declare. A reader searching the publisher for it finds a call and not a
+  definition, which is the same wasted search a wholly absent type causes; naming the
+  caller and the declarer separately is longer and survives the search.
 
 ---
 
@@ -1423,13 +1563,13 @@ baseline needs a two-phase protocol to commit them atomically.
 > that both segments collapse into one schema without loss.
 
 Under the target persistence contract, the pending-authorization summary, detail
-and fraud rows become tables in the single `authorization` schema owned by
-`authorization-service`, so **the two-phase commit is to collapse to one local
-transaction**. There will then be one resource manager and one commit: a
-transaction manager coordinating two participants will have nothing left to
-coordinate. This is a designed simplification rather than an approximation — a
-single PostgreSQL transaction preserves the baseline's atomicity without a
-heuristically-resolved mixed outcome. The schema migration
+and fraud rows are tables in the single `authorization` schema owned by
+`authorization-service`, so **the two-phase commit collapses to one local
+transaction**: there is one resource manager and one commit, and a transaction
+manager coordinating two participants has nothing left to coordinate. This is a
+designed simplification rather than an approximation — a single PostgreSQL
+transaction preserves the baseline's atomicity without a heuristically-resolved
+mixed outcome. The schema migration
 (`db/migration/V1__authorization.sql`) and the per-message transaction boundary
 (`AuthorizationRequestListener.onRequest`, annotated `REQUIRES_NEW`) are both authored,
 and so is the fraud write's own boundary: `FraudMarkingService` carries `@Transactional`
@@ -1438,6 +1578,12 @@ over the mark, and `FraudController` publishes the operation that reaches it.
 - Assumptions: the paragraph above names the CLASSES that carry each boundary rather
   than counting boundaries, and that is what keeps it checkable — a reader can open
   each file and see the annotation, where a count would have to be trusted.
+- Refactoring Rationale: the paragraph read "is to collapse" and "there will then be",
+  which are the tenses of a design not yet written, immediately before naming the three
+  authored artifacts that write it. The collapse is a property of the authored schema
+  and boundaries and is stated in the present tense for that reason; what is still
+  future is the run, and that is said where it belongs, in
+  [the boundaries section](#caveats-boundaries-and-out-of-scope).
 
 **Exposing distributed transactions is explicitly out of scope**, and the target
 contract does not reintroduce a two-phase protocol. The one place a second
@@ -1451,7 +1597,7 @@ is recorded in [`service-catalog.md`](service-catalog.md).
 
 ---
 
-## Batch discipline diverges from the observed 501-message bound
+## Batch discipline reproduces the observed 501-message bound
 
 The authorization consumer declares a 500-message limit, but its control flow
 processes **501** messages when that many are continuously available. The counter
@@ -1502,32 +1648,53 @@ flag. The declaration and the observed behaviour must not be conflated.
   baseline comparison offset — so an unbounded consumer would fail this document
   rather than merely differ from it.
 
-- Assumptions: **closing the window means closing intake, not refusing a message.**
-  The bound is enforced by `ContainerCyclingWindowBoundary`, which stops the listener
-  container and starts it again, so the request that would have been the 501st of the
-  window is never received and remains on the queue until the next window opens — with
-  the allowance now at 501, that is the 502nd request of the window.
-  Refusing it inside the handler was rejected: throwing would send a legitimate
-  request toward the dead-letter queue over a bound that has nothing to do with the
-  request, and returning without handling would delete a request nobody answered.
+- Assumptions: **the boundary is between the 501st request and the 502nd, and the two
+  mechanisms that hold it are different.** Requests 1 to 501 are admitted and answered;
+  the 501st is also the one that closes intake. The ORDINARY mechanism for the 502nd is
+  that it is never received at all: `ContainerCyclingWindowBoundary` stops the listener
+  container and starts it again, so the request simply stays on the queue until the next
+  window opens. The SECOND mechanism covers the messages the container had already
+  dispatched before the stop took effect: each of those is refused in the handler with
+  `AuthorizationRequestListener.WindowClosedException`, logged as
+  `event=auth.request.deferred reason=window-closing`, and redelivered into the next
+  window. Refusing before anything has been done is what makes it free of consequence —
+  the refusal is the handler's first statement, so the transaction it rolls back holds
+  nothing.
+
+  Refactoring Rationale: this bullet said refusing inside the handler "was rejected",
+  on the grounds that throwing would push a legitimate request toward the dead-letter
+  queue. The consumer does throw, and the objection is answered rather than ignored: the
+  refused population is at most the container's configured concurrency and only for the
+  duration of one stop-and-start, so a message would have to be unlucky in five separate
+  windows to exhaust its redrive count. Returning without handling remains rejected for
+  the original reason — the acknowledgement mode would delete a request nobody answered.
+  What is NOT an option is blocking the thread until the cycle finishes: stopping a
+  container waits for its in-flight invocations, and those invocations would be waiting
+  for the stop.
 
 - Refactoring Rationale: **stopping intake is asynchronous, and the accounting now says
   so.** A container cannot be stopped from the thread it is delivering to, so between the
   window filling and the stop taking effect the container keeps handing messages over.
-  Those messages are handled — the paragraph above is why refusing them is not an option —
-  and the question is only which window's accounting they belong to. They used to be
-  charged to the NEXT window, because the generation advanced in the same atomic step that
-  fired the boundary. That had two consequences, and the second is the serious one: the next
-  window silently began part-spent, so its allowance was not the declared one; and if enough
-  arrived before the stop took effect, that window could FILL and fire a second closure while
-  the container was still stopping for the first. The consumer now holds an explicit
-  **closing** state instead. While it holds, the generation cannot advance, so a second
-  closure is impossible, and each extra admission is recorded as **overspill** of the window
-  that closed — reported as `event=auth.window.overspill` with that window's generation. The
-  generation advances only when the boundary reports intake reopened, through a callback it is
-  required to invoke on every path including its own failure paths. `ContainerCyclingWindowBoundary`
-  invokes it between the stop and the start, which is the one instant at which no message can
-  be in the act of being admitted.
+  Those messages used to be handled and charged to the NEXT window, because the generation
+  advanced in the same atomic step that fired the boundary. That had two consequences, and
+  the second is the serious one: the next window silently began part-spent, so its allowance
+  was not the declared one; and if enough arrived before the stop took effect, that window
+  could FILL and fire a second closure while the container was still stopping for the first.
+  The consumer now holds an explicit **closing** state instead. While it holds the generation
+  cannot advance, so a second closure is impossible, and no further admission is granted at
+  all: each message the container is still dispatching is deferred with that window's
+  generation named on the line — `event=auth.request.deferred reason=window-closing
+  generation=…` — and redelivered once intake reopens. The generation advances only when the
+  boundary reports intake reopened, through a callback it is required to invoke on every path
+  including its own failure paths. `ContainerCyclingWindowBoundary` invokes it between the
+  stop and the start, which is the one instant at which no message can be in the act of being
+  admitted. Alternatives Considered: counting each extra as **overspill** of the closed window
+  and reporting it, which is what this paragraph described before. Rejected because granting
+  nothing is the stronger property — it makes "one physical run admits at most the allowance"
+  follow from the state transition rather than from how quickly the container stops — and
+  because the event it named was never emitted. The three events this window arithmetic emits
+  are `auth.window.filled` at L816, `auth.request.deferred` at L807 and `auth.window.reopened`
+  at L845 of `AuthorizationRequestListener`.
 
 - Trade-offs: the counter is **per task**, so the platform-wide figure is the quota
   times the running task count. That matches the reference system, where the limit
@@ -1601,9 +1768,12 @@ sentence above can be read as a claim to the contrary:
 
 **Boundaries, stated honestly.**
 
-* The ten SQS resources are authored as infrastructure-as-code and the module has been
-  statically validated, and **both consumers are now authored**: the authorization
-  consumer as `AuthorizationRequestListener` with its bounded processing window,
+* The ten SQS resources are authored as infrastructure-as-code, the module has been
+  statically validated, and **both environment roots compose it** —
+  `infra/envs/dev/main.tf` L2681 and `infra/envs/prod/main.tf` L2437 — though no
+  deployment has been applied against a live account. **Both consumers are now
+  authored**: the authorization consumer as `AuthorizationRequestListener` with its
+  bounded processing window,
   `AuthReplyOutbox` and `OutboxPublisher`; and the inquiry consumer as
   `InquiryMessageListener`, which owns the one shared inquiry request queue and answers
   both function codes on it — each behind its own `SqsConfig` and each the **only**
@@ -1628,13 +1798,15 @@ sentence above can be read as a claim to the contrary:
     date **evaluation** of `CSUTLDTC` on its synchronous route.
   - Refactoring Rationale: an earlier correction to this bullet recorded a DIFFERENT
     withdrawal in the same module and is kept, because the two are separate facts. The
-    reference date flow once carried TWO consumers of its own —
-    `DateInquiryMessageListener` and a `DateConversionMessageListener` — declaring
+    reference date flow once carried TWO consumers of its own, each declaring
     `@SqsListener` on one queue with different reply widths, different reply routing,
     different content types and different requester-expiry handling, so which contract a
     message met depended on which container polled first. That was corrected to one
     consumer, and the same reasoning applied across modules is what has now taken the
-    count to zero there.
+    count to zero there. Neither withdrawn type is named here any more: both are
+    unresolvable from that module, which its
+    `DateConversionFlowContractTest` asserts as its first case, and a document that
+    spells a symbol nothing declares sends a reader looking for code that is not there.
   - Refactoring Rationale: the error-sink producer is named here because its absence was
     the sharper half of the same defect this bullet keeps correcting. `batch-service`
     carried an authored queue configuration -- a validated sink address, a media type, two
@@ -1646,9 +1818,11 @@ sentence above can be read as a claim to the contrary:
     have concluded the producer had a deployment. Both are true now, and the sentence that
     still bounds the claim is the unchanged one immediately after it -- nothing has been
     **run**.
-  - Refactoring Rationale: this bullet has now been corrected twice in the same
-    direction — first from "all three consumers are unauthored" to "one of three", and
-    now to all three — and the pattern is worth naming rather than just fixing. A
+  - Refactoring Rationale: this bullet has now been corrected three times in the same
+    direction — from "all three consumers are unauthored" to "one of three", then to all
+    three, and now to **both of two**, the denominator having fallen with the withdrawal
+    of the per-consumer queue split recorded above — and the pattern is worth naming
+    rather than just fixing. A
     boundaries section is written once and then read many times as though it were still
     current, so each correction it needs is a correction a reader has already been
     misled by. Overstating what is missing is as misleading as understating it: a reader
@@ -1667,8 +1841,10 @@ sentence above can be read as a claim to the contrary:
     queue listener, or if the queue-listener annotation resolves from its classpath at all,
     so re-creating the hazard requires restoring a dependency as well as a class.
 * The **external point-of-sale authorizer that produces authorization requests is
-  not supplied by the baseline.** Only a test stub exists, and building a real
-  producer is not in scope. The practical consequence is asymmetric confidence: the
+  not supplied by the baseline.** Only the test stub at
+  [`tests/mocks/mq_request_stub.py`](../../tests/mocks/mq_request_stub.py) exists, and
+  building a real producer is out of scope under AAP §0.2.2. The practical consequence
+  is asymmetric confidence: the
   reply side of the contract is derived from a `STRING` statement that actually
   emits it, so its exact bytes are known, whereas the request side is derived from
   the `UNSTRING` that consumes it plus the copybook that declares it. The request's
@@ -1686,12 +1862,13 @@ sentence above can be read as a claim to the contrary:
   intentional messaging divergence is specified here — replacing the authorization
   loss windows with delete-on-success plus an outbox — and it is **implemented**, by
   `AuthorizationRequestListener` with `AuthReplyOutbox` and `OutboxPublisher`.
-  Refactoring Rationale: this bullet reported a SECOND divergence, "enforcing exactly
-  500 messages rather than the observed 501", and no such divergence exists. The
-  section above withdrew it in favour of reproducing the observed 501, and its
-  registration `D-AUTH-REQUEST-WINDOW` was withdrawn with it, so this bullet was
-  describing the state of an earlier revision and contradicting the table it follows.
-  The window is 501 and is reproduced rather than diverged from.
+  Assumptions: there is no SECOND messaging divergence. Enforcing exactly 500 messages
+  rather than the observed 501 would be one, and it is not what the code does — the
+  window is **501** and is reproduced rather than diverged from. That is why the
+  register at `docs/architecture/cobol-to-service-traceability.md` carries no
+  `D-AUTH-REQUEST-WINDOW` entry, and why the sections above record the withdrawal of
+  the entry that would have asserted the difference: a registration standing beside a
+  reproduced bound would report a difference the code does not make.
 
 * Every citation above is a **read**. Nothing under [`app/`](../../app),
   [`tests/`](../../tests) or `scripts/` is modified by this document or by the work

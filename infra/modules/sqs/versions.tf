@@ -3,12 +3,24 @@
 # -----------------------------------------------------------------------------
 # Purpose:
 #   Declares the Terraform CLI version floor and the AWS provider constraint
-#   for the `sqs` module. That module provisions twelve queues -- six primary
-#   queues plus one dead-letter queue for each -- which together replace the
-#   CardDemo baseline's five IBM MQ queues: a FIFO pair carrying the
-#   pending-authorization request and reply, standard request queues for the
-#   account-inquiry and date-conversion flows sharing one standard reply queue,
-#   and a standard terminal error sink.
+#   for the `sqs` module. That module provisions ten queues -- five primary
+#   queues plus one dead-letter queue for each -- whose five primaries stand
+#   one-for-one against the CardDemo baseline's five IBM MQ queues: a FIFO pair
+#   carrying the pending-authorization request and reply, ONE shared standard
+#   request queue carrying both the account-inquiry and date-conversion flows
+#   with ONE shared standard reply queue answering them, and a standard terminal
+#   error sink. The five dead-letter queues have no baseline counterpart at all.
+#   Refactoring Rationale: this sentence read twelve queues over six primaries,
+#   and named a request queue per inquiry flow. Both figures belonged to a
+#   withdrawn topology: AAP section 0.4.1.8 maps five MQ queues onto five target
+#   queues, the baseline defines ONE shared request destination, and the
+#   two-consumer hazard the split answered is closed by consumer count instead --
+#   account-service is the only service binding a consumer and it dispatches on
+#   the request's function code. main.tf therefore declares ten aws_sqs_queue
+#   resources over five primaries, and README.md in this directory records that
+#   argument in full. The count is restated here rather than dropped because it is
+#   what tells a reader of this file that the constraints below govern a fixed
+#   inventory rather than a variable one.
 #
 #   This file deliberately declares NO provider configuration, because `sqs` is
 #   a reusable module rather than a root; the two environment roots that call

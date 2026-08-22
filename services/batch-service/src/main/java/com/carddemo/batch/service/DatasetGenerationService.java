@@ -23,13 +23,14 @@ import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CommonPrefix;
 import software.amazon.awssdk.services.s3.model.Delete;
 import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsResponse;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.ListObjectVersionsRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
-import software.amazon.awssdk.services.s3.model.S3Object;
 
 /**
  * Resolves a generation-dataset reference to the object-store location one batch step reads or writes.
@@ -98,16 +99,16 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  * make a second staging run for an already-staged earlier date derive its number from some later date's
  * generations, so re-running one day after a subsequent day had been staged would skip numbers and leave
  * the two dates' sequences uncomparable. The sibling stager states both halves of this and enforces
- * them the same way, family-wide at {@code loaders/s3_stage.py:1250-1256} and date-scoped at
- * {@code loaders/s3_stage.py:1317-1323}.</p>
+ * them the same way, family-wide in its {@code current_generation} and date-scoped in its
+ * {@code next_generation}.</p>
  *
  * <p>Refactoring Rationale: both forms were previously date-scoped, and so was retention. That made
  * {@code (0)} answer empty at every date boundary and made the five-generation window count five
  * generations PER DATE rather than five per family -- so a family staged on six days retained thirty
  * generations while reporting that it retained five. Ordering across a family is total because a
  * coordinate compares on its resolved partition date before its generation number, which is the same
- * ordering the sibling's coordinate type derives from its own field order at
- * {@code loaders/s3_stage.py:380-389}.</p>
+ * ordering the sibling's coordinate type derives from its own field order, in its
+ * {@code GenerationPrefix} dataclass.</p>
  *
  * <h2>The load-bearing ruling: an allocation happens once per run, not once per call</h2>
  *
@@ -146,7 +147,7 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  *
  * <p>Assumptions: the bucket is the one durable state every branch and every attempt already agrees on,
  * so it is where the reservation belongs. The sibling stager records the same conclusion for the same
- * reason at {@code data-migration/src/carddemo_migration/loaders/s3_stage.py:1306-1316}: a counter held
+ * reason in its {@code reserve_generation}: a counter held
  * by a process is wrong twice over, because two {@code Map} branches each start from the same base and
  * compute the same number, and because a retried branch recomputes the number its failed attempt already
  * used and overwrites a generation that had completed.</p>
@@ -161,7 +162,8 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  * <p>Trade-offs: the per-generation marker sits UNDER the generation prefix deliberately, which means a
  * claimed generation immediately becomes a listed common prefix for both implementations -- this one at
  * {@link #listGenerations(DatasetFamily, BusinessDate)} and the sibling at
- * {@code loaders/s3_stage.py:1150}. The accepted cost is one object of a few bytes per generation; the
+ * {@code loaders/s3_stage.py}'s {@code list_generation_prefixes}. The accepted cost is one object of a
+ * few bytes per generation; the
  * benefit is that a number claimed by a Java step is a number the Python stager also sees as taken,
  * which no reservation held outside the bucket could achieve. The run entry sits at a top-level prefix
  * outside every family root for the complementary reason: no family listing may return it, because a
@@ -176,7 +178,7 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  * -- a killed container runs no cleanup -- so it would replace a reliable small cost with an unreliable
  * one.</p>
  *
- * <h2>What this class does not own</h2>
+ * <h2>What this class touches in the bucket, and what it does not own</h2>
  *
  * <p>Trade-offs: the family roster, the two relative forms, the derivation of the partition-date and
  * generation segments and the rendering of a key prefix all belong to
@@ -187,9 +189,45 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  *
  * <p>Assumptions: the bucket, the ten prefix families, bucket versioning and the noncurrent-version
  * lifecycle configuration are provisioned by {@code infra/modules/s3-datasets}. This class provisions
- * none of them and deletes no object. The only objects it writes are the two reservation markers
- * described above, each a few bytes and each written at most once; it reports coordinates and leaves
- * staging the dataset bytes, and scratching an aged-out generation, to its callers.</p>
+ * none of them. What it does to the objects inside that bucket is the whole of the following, and
+ * nothing else:</p>
+ *
+ * <ul>
+ *   <li>It READS by listing. {@link #listGenerations(DatasetFamily, BusinessDate)} and the family-wide
+ *       walk list with a delimiter, so the store returns one common prefix per generation;
+ *       {@link #scratchGeneration} lists the SAME prefix undelimited, because there it wants every key
+ *       rather than the level below. It also gets one object, the run entry beneath
+ *       {@value #RUN_CLAIM_ROOT}, to learn which generation this run already took.</li>
+ *   <li>It WRITES two kinds of object. The two reservation markers described above, each a few bytes
+ *       and each written at most once under a conditional guard; and, through
+ *       {@link #stageDataset(DatasetGeneration, String, Path)}, one dataset object per call, streamed
+ *       from a local file and written UNCONDITIONALLY, because the generation was already claimed
+ *       exclusively before any bytes were staged into it.</li>
+ *   <li>It DELETES through {@link #scratchGeneration}, which removes every object beneath one
+ *       generation's prefix, batched at the store's own multiple-object limit, and reports how many it
+ *       removed.
+ *       That is the {@code SCRATCH} half of the retention rule the ten bases declare, and it is the only
+ *       delete this class issues: no other method removes anything, and neither marker is ever deleted,
+ *       for the reason the abandoned-allocation paragraph above gives. The four job callers decide WHICH
+ *       generation has aged out of the five-generation window; the mechanism is here.
+ *       ⚠️ This is also the paragraph an operator reads to decide what the batch task role needs, and
+ *       getting it wrong has a known cost: while this text said the class deleted nothing, the deployed
+ *       policy was granted read and write and no more, and the sixth run of a family could not retire its
+ *       oldest generation. The role requires the delete privilege because the delete originates
+ *       here.</li>
+ * </ul>
+ *
+ * <p>Alternatives Considered: leaving the staging write and the scratch delete to the callers, so that
+ * this class only ever resolved coordinates and reserved numbers. Rejected because a caller can hold a
+ * coordinate but not the bucket -- the bucket is configuration this class alone reads, from
+ * {@value #DATASET_BUCKET_PROPERTY} -- so every caller would have to be given it, and each would then
+ * be free to address a key it built itself. The scratch path is where that costs most: a delete
+ * addressed by a caller-supplied prefix string is one dropped segment away from removing a whole
+ * family, whereas a delete addressed by a constructed coordinate cannot name anything but one
+ * generation of one family on one date. Refactoring Rationale: this paragraph read that the class
+ * "deletes no object" and wrote "only the two reservation markers", which described the shape it had
+ * before those two operations existed; a reader auditing what may touch the dataset bucket would have
+ * concluded that neither a staged dataset nor a scratched generation could originate here.</p>
  *
  * <h2>Baseline lineage: provenance only</h2>
  *
@@ -200,6 +238,16 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  * {@code docs/architecture/cobol-to-service-traceability.md}. Line numbers refer to the source as
  * committed, and in a JCL line columns 73 to 80 carry a sequence field that is not part of the
  * statement.</p>
+ *
+ * <p>Refactoring Rationale: every citation of the sibling stager above names a SYMBOL -- a function or a
+ * dataclass in {@code data-migration/src/carddemo_migration/loaders/s3_stage.py} -- where each formerly
+ * named a line range. Six of those ranges had already stopped pointing at what they claimed, because the
+ * stager was rewritten to share this class's reservation contract and every line below the change moved.
+ * A citation of a file that is edited independently of this one cannot be maintained by line number: it
+ * decays silently, and it decays into the most misleading possible state, since a reader who follows it
+ * lands on real code that says something else. Symbols move with their definition. Citations of
+ * {@code app/**} stay line-numbered deliberately, because that tree is reference-only and byte-identical
+ * by policy, so a line number there is stable in a way one into a live sibling never is.</p>
  */
 @Service
 public class DatasetGenerationService {
@@ -774,7 +822,8 @@ public class DatasetGenerationService {
      * caller passed one date's generations at a time -- which is what a date-scoped listing gave it --
      * the count applied PER DATE, so a family staged on six days retained thirty generations while every
      * call reported that it retained five. The ordering is now the family ordering, resolved date before
-     * generation number, matching the sibling stager at {@code loaders/s3_stage.py:380-389}.</p>
+     * generation number, matching the ordering the sibling stager's {@code GenerationPrefix} dataclass
+     * derives from its own field order.</p>
      *
      * @param existing every generation currently present for one family, across every business date, in
      *     any order; must not be {@code null}
@@ -921,10 +970,42 @@ public class DatasetGenerationService {
      * every other listing in this class: the goal is every key beneath the prefix rather than the prefix
      * names one level down.</p>
      *
+     * <p>Refactoring Rationale: the listing is {@code ListObjectVersions} and each deletion names an
+     * explicit VERSION IDENTIFIER, where both were version-blind -- {@code ListObjectsV2} and a delete
+     * carrying a key alone. The bucket is versioned, which the {@code s3-datasets} module enables
+     * unconditionally as the analogue of the five-generation window, and on a versioned bucket a delete
+     * with no version identifier does not delete anything: it inserts a delete marker over the current
+     * version and leaves every prior version stored and billed. {@code SCRATCH} on the reference baseline
+     * releases the space, so the version-blind form was not a slower {@code SCRATCH} but a different
+     * operation -- it hid the generation from a listing while retaining its bytes indefinitely, and the
+     * five-generation window would have grown without bound behind the marker. Listing versions is also
+     * what makes the operation converge on a re-run: a scratched prefix that still holds delete markers
+     * is not empty, and only a version-addressed delete can remove the marker itself.</p>
+     *
+     * <p>Assumptions: DELETE MARKERS are collected alongside object versions and deleted by the same
+     * request. A marker left behind is a live "this key does not exist" record that keeps the prefix
+     * non-empty, so a prefix scratched by an earlier, version-blind run is cleaned up by this one rather
+     * than being permanently unreclaimable.</p>
+     *
+     * <p>Trade-offs: the same discipline is applied by {@code delete_generation_prefix} in
+     * {@code data-migration/src/carddemo_migration/loaders/s3_stage.py}, which prunes the same families
+     * from the ETL side. The two implementations must agree, because either may be the one that retires a
+     * generation the other created; the accepted cost is one grant of {@code s3:ListBucketVersions} and
+     * {@code s3:DeleteObjectVersion} to both task roles rather than to one.</p>
+     *
+     * <p>Assumptions: a per-object error in a batched response FAILS the operation, where the response was
+     * previously not examined at all. A batched delete answers 200 while reporting individual keys it
+     * refused, so an unexamined response let a partial deletion be reported as a completed scratch --
+     * retention would then appear to hold while the family grew past its window. The failure names the
+     * family, the generation, the prefix and the distinct error codes, which is what makes it
+     * diagnosable without a second run to find out what was refused.</p>
+     *
      * @param generation the generation to scratch; must not be {@code null}
-     * @return how many objects were deleted, which is zero when the generation held none
+     * @return how many object versions and delete markers were removed, which is zero when the generation
+     *     held none
      * @throws NullPointerException if {@code generation} is {@code null}
-     * @throws DatasetGenerationException if the listing or a deletion fails
+     * @throws DatasetGenerationException if the version listing fails, if a deletion request fails, or if
+     *     the store refuses one or more individual versions within an otherwise successful request
      */
     public int scratchGeneration(DatasetGeneration generation) {
         Objects.requireNonNull(generation, "generation must not be null");
@@ -932,25 +1013,33 @@ public class DatasetGenerationService {
         String prefix = generation.keyPrefix();
         List<ObjectIdentifier> doomed = new ArrayList<>();
         try {
-            try (Stream<S3Object> contents = this.objectStore
-                    .listObjectsV2Paginator(ListObjectsV2Request.builder()
+            // WHY : Assumptions: versions and delete markers are collected from ONE paginated listing
+            //       rather than two, because the store returns both in the same response and pairing a
+            //       key with its version identifier is all either kind needs to be deletable. Two
+            //       listings would double the request count and could observe the prefix in two
+            //       different states, leaving whichever kind was listed first partially removed.
+            this.objectStore
+                    .listObjectVersionsPaginator(ListObjectVersionsRequest.builder()
                             .bucket(this.datasetBucket)
                             .prefix(prefix)
                             .build())
-                    .contents().stream()) {
-
-                contents.map(S3Object::key)
-                        .filter(Objects::nonNull)
-                        .forEach(key -> doomed.add(ObjectIdentifier.builder().key(key).build()));
-            }
+                    .stream()
+                    .forEach(page -> {
+                        page.versions().forEach(version ->
+                                addDoomed(doomed, version.key(), version.versionId()));
+                        page.deleteMarkers().forEach(marker ->
+                                addDoomed(doomed, marker.key(), marker.versionId()));
+                    });
 
             for (int from = 0; from < doomed.size(); from += DELETE_BATCH_SIZE) {
                 List<ObjectIdentifier> slice =
                         doomed.subList(from, Math.min(from + DELETE_BATCH_SIZE, doomed.size()));
-                this.objectStore.deleteObjects(DeleteObjectsRequest.builder()
-                        .bucket(this.datasetBucket)
-                        .delete(Delete.builder().objects(slice).build())
-                        .build());
+                DeleteObjectsResponse response =
+                        this.objectStore.deleteObjects(DeleteObjectsRequest.builder()
+                                .bucket(this.datasetBucket)
+                                .delete(Delete.builder().objects(slice).build())
+                                .build());
+                requireEveryVersionDeleted(generation, prefix, response);
             }
         } catch (SdkException failure) {
             throw new DatasetGenerationException("could not scratch dataset family "
@@ -958,9 +1047,61 @@ public class DatasetGenerationService {
                     + generation.generationNumber() + " under prefix " + prefix, failure);
         }
 
-        LOG.info("event=batch.generation.scratched family={} generation={} objects={}",
+        LOG.info("event=batch.generation.scratched family={} generation={} versions={}",
                 generation.family().name(), generation.generationNumber(), doomed.size());
         return doomed.size();
+    }
+
+    /**
+     * Adds one version-addressed deletion target, ignoring an entry the store described incompletely.
+     *
+     * <p>Assumptions: an entry missing either half of its address is SKIPPED rather than deleted, because
+     * a deletion carrying a key and no version identifier is the version-blind delete this method exists
+     * to avoid -- it would insert a delete marker instead of removing anything. Skipping leaves the entry
+     * for the next retention pass, which is recoverable; deleting it version-blind is not.</p>
+     *
+     * @param doomed the accumulating deletion targets; must not be {@code null}
+     * @param key the object key the store reported, which may be {@code null} on a malformed entry
+     * @param versionId the version identifier the store reported, which may be {@code null} on a
+     *     malformed entry
+     */
+    private static void addDoomed(List<ObjectIdentifier> doomed, String key, String versionId) {
+        if (key == null || versionId == null) {
+            return;
+        }
+        doomed.add(ObjectIdentifier.builder().key(key).versionId(versionId).build());
+    }
+
+    /**
+     * Fails the scratch when a batched deletion reported any individual version it refused.
+     *
+     * <p>Assumptions: the DISTINCT error codes are reported rather than every refused key, because one
+     * refusal per object of a large generation would produce a message no log consumer keeps whole, while
+     * the codes are what distinguish the three cases an operator acts on differently -- a missing
+     * permission, an object-lock retention period, and a transient internal error worth retrying. The
+     * count of refusals is reported alongside them so the scale is not lost.</p>
+     *
+     * @param generation the generation being scratched, named in the failure; must not be {@code null}
+     * @param prefix the prefix being scratched, named in the failure; must not be {@code null}
+     * @param response the store's answer to one batched deletion; must not be {@code null}
+     * @throws DatasetGenerationException if the response reports one or more refused versions
+     */
+    private static void requireEveryVersionDeleted(
+            DatasetGeneration generation, String prefix, DeleteObjectsResponse response) {
+
+        if (!response.hasErrors() || response.errors().isEmpty()) {
+            return;
+        }
+
+        Set<String> codes = new LinkedHashSet<>();
+        response.errors().forEach(error ->
+                codes.add(error.code() == null ? "unknown" : error.code()));
+
+        throw new DatasetGenerationException("could not scratch dataset family "
+                + generation.family().mainframeBaseName() + " generation "
+                + generation.generationNumber() + " under prefix " + prefix + ": the object store"
+                + " refused " + response.errors().size() + " of the versions in one deletion request,"
+                + " reporting " + codes);
     }
 
     /**
@@ -999,7 +1140,7 @@ public class DatasetGenerationService {
      * family. An undelimited listing returns one entry per OBJECT, so a family holding five generations
      * of a three-hundred-and-fifty-byte extract returns every record key merely to learn five prefix
      * names. The accepted cost is one request per date rather than one per family. The sibling stager
-     * walks the same two levels for the same reason at {@code loaders/s3_stage.py:1182-1188}.</p>
+     * walks the same two levels for the same reason in its {@code latest_generation}.</p>
      *
      * <p>Assumptions: a date partition is accepted purely as an opaque prefix to descend into, and no
      * attempt is made to validate it as a date. Whether a child under it is a generation is settled the

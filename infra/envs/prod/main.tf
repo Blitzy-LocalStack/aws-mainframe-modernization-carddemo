@@ -70,12 +70,31 @@ locals {
   #       of mismatch a later reader corrects in the wrong direction.
   reference_context_origin = local.account_context_origin
 
-  # WHY : Refactoring Rationale: two locals stood here, telemetry_collector_image_tag
-  #       and telemetry_collector_repository, naming the version and the mirror
-  #       repository of an AWS Distro for OpenTelemetry collector sidecar. Both are
-  #       withdrawn with the sidecar itself; the argument is recorded at the
-  #       ecs-service module block below, which is where the inputs they fed used to
-  #       be passed.
+  # WHY : Refactoring Rationale: these two locals are RESTORED with the AWS Distro
+  #       for OpenTelemetry collector sidecar they address. They had been withdrawn
+  #       with it, and the withdrawal left this environment publishing meters nothing
+  #       collected and spans nothing exported; the full argument is recorded at the
+  #       ecs-service module block below, which is where they are read.
+  # WHY : Assumptions: the tag is the UPSTREAM collector version and not this
+  #       release's commit tag. The mirror holds a third-party artifact this
+  #       repository does not build, so tagging it with a CardDemo commit would assert
+  #       a provenance it does not have and would oblige a re-push on every release of
+  #       unrelated code.
+  #       Trade-offs: a collector upgrade is therefore two coordinated actions -- this
+  #       value and the mirror push documented in docs/runbooks/deploy.md -- which is
+  #       the friction that keeps the upgrade a reviewed change rather than a silent
+  #       one. Both roots hold the same value deliberately: a collector version is
+  #       topology rather than sizing, so it is not one of the differences
+  #       specification section 0.4.1.6 admits between the two environments.
+  telemetry_collector_image_tag = "v0.49.0"
+
+  # WHY : Assumptions: this names the ECR repository key infra/modules/ecr provisions
+  #       from third_party_mirror_repository_names, not a repository this root
+  #       creates. It is a local rather than repeated at the two call sites below
+  #       because the image reference and the pull grant must name the SAME
+  #       repository: an image from one repository with a grant on another is a task
+  #       that fails to start with an access denial naming neither.
+  telemetry_collector_repository = "aws-otel-collector"
 
   # WHY : Refactoring Rationale: this described a self-signed ALB certificate used
   #       "when an operator-issued one is not supplied". There is no such fallback and
@@ -1264,13 +1283,15 @@ resource "aws_secretsmanager_secret_version" "pagination_cursor" {
   #       it with the ephemeral generator above is one control rather than two: either
   #       half alone would still leave the key in a state file.
   # WHY : Assumptions: base64encode() wraps the generated characters because this key
-  #       is consumed through a STRICT base64 decoder. It is ONE OF TWO of the six that
+  #       is consumed through a STRICT base64 decoder. It is ONE OF TWO of the five that
   #       is base64-encoded at rest -- this cursor key and the reporting artifact HMAC
-  #       key below -- while the other four accept raw text, which is why each of those
-  #       four stores 48 fewer decisions than this one does.
+  #       key below -- while the other three accept raw text, which is why each of those
+  #       three stores 48 fewer decisions than this one does.
   #       Refactoring Rationale: this claimed to be "the ONLY one of the five", and it
-  #       was wrong twice over: the reporting artifact key is base64-encoded through the
-  #       identical expression, and there are six generated secrets rather than five. A
+  #       was wrong on the uniqueness rather than on the count: the reporting artifact key
+  #       is base64-encoded through the identical expression. The interim correction then
+  #       said six generated secrets, counting a messaging HMAC key that this root does not
+  #       declare, and there are five. A
   #       uniqueness claim is the most costly kind to get wrong here, because a reader
   #       adding a seventh key would have taken it as evidence that raw text is the norm
   #       and strict decoding the exception. Storing the characters unencoded would make the stored value
@@ -1315,7 +1336,7 @@ resource "aws_secretsmanager_secret_version" "pagination_cursor" {
 #
 # Why this is a purpose-scoped key of its own rather than a reuse of one above:
 #   Assumptions: purpose-scoping is the control, not key economy. This is the
-#   SIXTH and last generated key secret in this root, and the full inventory with
+#   FIFTH and last generated key secret in this root, and the full inventory with
 #   each holder set is enumerated once above the pagination-cursor key rather than
 #   restated here: this one is held by reporting-service alone, the cursor key by
 #   seven services, each of the TWO per-caller internal-identity keys by exactly
@@ -1336,14 +1357,14 @@ resource "aws_secretsmanager_secret_version" "pagination_cursor" {
 #   disappearing entry leaves nothing behind to notice. It points at the one
 #   enumerated inventory above rather than carrying a second count that can go stale
 #   independently, and the figure it now quotes is that list's length.
-#   Trade-offs: a sixth secret costs a sixth entry to provision and a sixth
+#   Trade-offs: a fifth secret costs a fifth entry to provision and a fifth
 #   attended rotation. That is accepted because the failure a shared key admits
 #   is a privilege escalation across contexts, while the cost is only
 #   operational.
 
 ephemeral "random_password" "reporting_artifact" {
   # WHY : Assumptions: EPHEMERAL rather than a managed random_password, for the same
-  #       reason as the five keys declared above it -- a managed resource retains its result in
+  #       reason as the four keys declared above it -- a managed resource retains its result in
   #       every state file and every plan artifact, which for key material would make
   #       the state file as sensitive as the secret store it exists to keep the
   #       material out of.
@@ -1357,8 +1378,9 @@ ephemeral "random_password" "reporting_artifact" {
   #       base64encode() of them makes the byte count a stated fact: 48 characters
   #       encode to exactly 64 base64 characters that decode back to 48 bytes, half
   #       again above the floor, with no padding ambiguity because 48 divides by three.
-  #       Alternatives Considered: storing 64 raw characters, as the messaging and
-  #       internal-identity keys do. Rejected here because the consequence of the
+  #       Alternatives Considered: storing 64 raw characters, as the card-selector and
+  #       the two per-caller internal-identity keys do. Rejected here because the
+  #       consequence of the
   #       branch flipping is worse for this key than for those: the derived bytes
   #       change, so every token changes, so every statement object already written
   #       stops being locatable by the lookup the application performs -- and nothing
@@ -2776,13 +2798,19 @@ locals {
     #       publish path the running system did not have. Publishing the address here is
     #       one of the two halves that make it real; the other is the send-only grant the
     #       batch entry of local.sqs_permissions_by_workload below carries.
-    # WHY : Assumptions: the value is the SAME terminal sink account-service and
-    #       reference-service publish to, and that is deliberate rather than an
-    #       oversight of a batch-specific queue. modules/sqs provisions ONE error queue
+    # WHY : Assumptions: the value is the SAME terminal sink account-service publishes
+    #       to, and that is deliberate rather than an oversight of a batch-specific
+    #       queue. Refactoring Rationale: this note named reference-service as the other
+    #       publisher, and that context publishes nothing at all -- its pom.xml records
+    #       at L251 that the awspring SQS starter is deliberately not declared, and
+    #       local.sqs_permissions_by_workload below grants queue actions to exactly three
+    #       workloads: authorization, account and batch. Naming a fourth publisher would
+    #       send a reader looking for a producer that cannot exist, and would misstate
+    #       which grants the sink depends on. modules/sqs provisions ONE error queue
     #       as the migration plan's section 0.4.1.8 maps CARD.DEMO.ERROR, and a consumer
     #       tells the producers apart by the contentType message attribute --
-    #       text/plain for the two fixed-width producers transcribing their reference
-    #       error paragraphs, application/json for this one, which has no reference
+    #       text/plain for the fixed-width producer transcribing its reference
+    #       error paragraph, application/json for this one, which has no reference
     #       paragraph to transcribe because the batch programs of app/cbl carry no
     #       message-queue verb at all.
     # WHY : Trade-offs: only the ADDRESS is published, and the media type and the two
@@ -2803,10 +2831,15 @@ locals {
     #       below, and the two must travel together because an address without the send
     #       action is an access-denied on the failure path and the action without the
     #       address is a grant nothing uses.
-    # WHY : Assumptions: the value is the SAME module.sqs.error_queue_url the account and
-    #       reference contexts already read for their own error-queue variables. There is
+    # WHY : Assumptions: the value is the SAME module.sqs.error_queue_url the account
+    #       context already reads for its own error-queue variable. There is
     #       one terminal sink for the whole deployment rather than one per bounded context,
-    #       so three publishers addressing one queue is the design and not a duplication.
+    #       so two publishers addressing one queue is the design and not a duplication.
+    #       Refactoring Rationale: this note read "the account and reference contexts" and
+    #       "three publishers". The reference context reads no error-queue variable and is
+    #       absent from local.sqs_permissions_by_workload below, so the real count is two --
+    #       account and batch. A count stated one too high reads as though a grant were
+    #       missing somewhere, which is the opposite of what an operator should check.
     # WHY : Assumptions: the variable is named for the shared messaging concern rather than
     #       for this context -- CARDDEMO_MESSAGING_ERROR_QUEUE_URL, not
     #       CARDDEMO_BATCH_ERROR_QUEUE -- because relaxed binding maps this exact spelling
@@ -2971,6 +3004,24 @@ locals {
     local.special_runtime_parameters,
   )
 
+  # WHY : Assumptions: FIVE platform parameters, and the inventory is stated because
+  #       "platform endpoints" -- the phrase aws_ssm_parameter.platform below uses in the
+  #       description it attaches to every one of them -- is too vague to check against
+  #       this map. Three name the Aurora cluster a workload connects to -- `aurora/host`,
+  #       `aurora/port` and `aurora/database`; one names the dataset bucket every
+  #       generation-writing state and the ETL address objects in -- `datasets/bucket`;
+  #       and one carries the seeded identity subjects the ETL cannot derive from the
+  #       records it loads -- `identity/seed-user-subjects`. There is no state-machine
+  #       entry and no queue entry: the reporting context receives its machine ARN as a
+  #       container environment variable from local.special_service_environment above, and
+  #       every queue address arrives the same way.
+  # WHY : Trade-offs: the count is written as prose here and asserted by the
+  #       "Verify hand-written Terraform prose counts against the declarations" gate in
+  #       .github/workflows/infra-ci.yml, which counts this map's entries in BOTH roots
+  #       and fails the build when a root's prose and its map disagree. A count nothing
+  #       measures is what drifted before -- the four withdrawn state-machine entries went
+  #       on being described as published after they were removed from this map, and
+  #       nothing in the package could report the disagreement.
   platform_parameters = {
     "aurora/host"     = module.aurora.writer_endpoint
     "aurora/port"     = tostring(module.aurora.port)
@@ -3163,12 +3214,19 @@ locals {
   #       the injection here would publish a secret to a container that never opens
   #       it -- a live credential with no reader, which is the shape a review is
   #       least likely to question and most likely to inherit.
-  # WHY : Assumptions: the SECRET itself is deliberately left provisioned. Its value
-  #       is generated at apply time and never leaves Secrets Manager, the
-  #       environment inventory and the secret census both count six purpose
-  #       secrets, and removing a secret is a destroy-and-recreate whose recovery
-  #       window is a separate operational decision from withdrawing an injection.
-  #       What is closed here is the exposure -- no task receives it.
+  # WHY : ⚠️ Refactoring Rationale: this said the SECRET itself was "deliberately left
+  #       provisioned" and that "the environment inventory and the secret census both
+  #       count six purpose secrets". Neither is true of this root. No messaging secret
+  #       resource exists here -- the withdrawal note above the card-selector resource
+  #       records that the ephemeral generator, the secret and its write-only version went
+  #       together with the injection -- so this file declares FIVE
+  #       aws_secretsmanager_secret resources and the census counts five. Describing a
+  #       withdrawn credential as still provisioned is the most expensive shape this drift
+  #       can take: a rotation review would have gone looking for a sixth key to rotate,
+  #       and a reader sizing the blast radius of a disclosure would have counted a holder
+  #       that does not exist. What remains withdrawn here is only the injection wiring,
+  #       and it is recorded at the site the wiring occupied because that is where a reader
+  #       looks for it.
 
 
   # WHY : Assumptions: the name is the one the card image reads -- application.yml
@@ -3334,10 +3392,18 @@ locals {
   #       docs/architecture/messaging-contracts.md recorded that the module boundary
   #       was authored but "not yet composed into a deployable stack", which was
   #       accurate while neither inquiry consumer existed. Both now exist and both
-  #       SEND -- account-service and reference-service each publish a reply and can
-  #       publish a diagnostic -- so without these grants each would poll
+  #       SEND -- account-service publishes every inquiry reply and can also publish a
+  #       diagnostic -- so without these grants it would poll
   #       successfully and then fail every reply with an access-denied error, which
   #       presents as an unanswered requester rather than as a permissions problem.
+  #       Refactoring Rationale: this note read "account-service and reference-service
+  #       each publish a reply", which describes a two-consumer split that was never
+  #       built. modules/sqs provisions ONE inquiry request queue carrying BOTH flows --
+  #       the COACCT01 account inquiry and the CODATE01 date-and-time inquiry -- and
+  #       exactly one service binds a consumer to it, dispatching on the four-character
+  #       function code in the request's first field. A second receiving principal is the
+  #       competing-consumer loss the single-owner rule exists to prevent, so naming one
+  #       here would invite exactly the grant that breaks it.
   #       (3) Assumptions: a workload absent from this map receives an empty set,
   #       which grants nothing. That is the correct default: data-migration puts no
   #       message on any of these queues, and the four workloads that do are named
@@ -3480,13 +3546,13 @@ locals {
         #       without it -- so every log record and metric series this estate produced
         #       was unattributable to a release. The service module now refuses a task
         #       whose value is absent, blank or that same placeholder.
-        #       Refactoring Rationale: this sentence also credited "the telemetry
-        #       collector's resource processor and OTEL_RESOURCE_ATTRIBUTES" with the same
-        #       fallback, and named spans among the affected signals. Neither consumer
-        #       exists now: the collector sidecar was withdrawn because the
-        #       specification's module inventory contains none, so nothing in this estate
-        #       emits a span and the only remaining consumer of the label is the
-        #       application's own configuration.
+        #       Assumptions: this one value reaches THREE consumers, which is why the
+        #       module refuses the placeholder rather than tolerating it. The
+        #       application's own configuration binds carddemo.version from it, the
+        #       collector sidecar's resource processor upserts it as service.version on
+        #       every exported metric and span, and OTEL_RESOURCE_ATTRIBUTES carries it
+        #       into the trace resource -- so a task started with the fallback publishes
+        #       logs, metrics and spans that all agree on a label naming no release.
         # WHY : Trade-offs: for a digest reference the label is the digest and not a
         #       human-readable version. That is preferred here: a digest is the only
         #       identity that cannot be moved after the fact, and the commit tag remains
@@ -3862,6 +3928,39 @@ data "aws_iam_policy_document" "reporting_runtime" {
     resources = [local.adhoc_report_state_machine_arn]
   }
 
+  # WHY : ⚠️ Refactoring Rationale: this statement was ABSENT, so the submission surface
+  #       shipped without the status surface behind it. ReportExecutionService.
+  #       describeExecution issues states:DescribeExecution on every status read, and the
+  #       request edge that serves it is delivered -- so the one operation a caller has
+  #       for finding out whether the run it submitted succeeded failed with an access
+  #       denial, and the artifact location a successful describe carries was
+  #       unreachable with it.
+  # WHY : Assumptions: the resource is an EXECUTION ARN and cannot be the machine ARN the
+  #       statement above names. A start names the state machine; a describe names one
+  #       run OF that machine, and the two resource forms differ in the segment between
+  #       the account identifier and the name, so the existing grant does not cover this
+  #       call however wide its action list is made. The ARN is composed from
+  #       local.adhoc_report_state_machine_arn by the same substitution the service
+  #       performs -- ReportExecutionService replaces its `:stateMachine:` segment with
+  #       `:execution:` and appends the run name -- so the two cannot describe different
+  #       machines, and a naming change moves both together through the one local that
+  #       the contract assertion at the foot of this file already compares against the
+  #       module's real output.
+  # WHY : Trade-offs: the trailing name segment is a wildcard rather than an enumeration,
+  #       and that is the narrowest form this grant can take. An execution name is minted
+  #       per submission and cannot exist when the policy is written, so no enumeration is
+  #       possible; what the wildcard admits is every run of THIS machine and nothing
+  #       else, because no caller-supplied text reaches an earlier segment -- the service
+  #       composes every segment but the last from its own configured machine ARN.
+  statement {
+    sid     = "DescribeAdhocReportExecution"
+    actions = ["states:DescribeExecution"]
+
+    resources = [
+      "${replace(local.adhoc_report_state_machine_arn, ":stateMachine:", ":execution:")}:*",
+    ]
+  }
+
   # Assumptions: the listing is bounded by the `s3:prefix` condition key, which
   #   is the ONLY way a list call can be bounded at all -- its resource is the
   #   bucket, so an object-ARN restriction has no effect on it. Without the
@@ -3896,16 +3995,55 @@ data "aws_iam_policy_document" "reporting_runtime" {
   #   ReportingTaskRunner exists to give that image a task mode. Reassigning the
   #   writes to a different role would leave those two states unable to write
   #   their output.
-  # Refactoring Rationale: `s3:GetObject` is REMOVED rather than narrowed.
-  #   Neither state reads an object: the report is assembled from the read-only
-  #   database views and the statement from the same, and the key layout is
-  #   deterministic precisely so a rerun replaces rather than appends. A read
-  #   grant that no code path exercises is a capability held for no purpose, and
-  #   a future download endpoint should acquire it together with the endpoint so
-  #   the two are reviewed as one change.
+  # WHY : ⚠️ Refactoring Rationale: this paragraph said `s3:GetObject` was "REMOVED
+  #   rather than narrowed" because "neither state reads an object" and a read grant
+  #   belonged with "a future download endpoint". That endpoint is not future and the
+  #   premise was false against delivered code, which is why the read is restored below
+  #   rather than argued for again: ArtifactStore.describe issues HeadObject,
+  #   ArtifactStore.open a whole GetObject and ArtifactStore.readRange a ranged
+  #   GetObject, and the statement lookup depends on all three -- it reads the manifest
+  #   through a bounded range, then binary-searches the run's index by range before it
+  #   describes either artifact. Every one of those was refused, so a published statement
+  #   was unlocatable by the service that wrote it. The write half of the paragraph stands
+  #   unchanged and is kept below.
   statement {
     sid     = "WriteReportOutputs"
     actions = ["s3:PutObject", "s3:AbortMultipartUpload"]
+    resources = [
+      for prefix in local.reporting_object_key_prefixes :
+      "${module.s3_datasets.bucket_arn}/${prefix}*"
+    ]
+  }
+
+  # WHY : Assumptions: the resource comprehension is the IDENTICAL expression the write
+  #   statement above uses, over local.reporting_object_key_prefixes, because every key
+  #   this role reads is one it wrote. Measured against the code rather than assumed:
+  #   StatementService composes its run prefix as `<statement-prefix>run=<runId>/` and its
+  #   manifest as `<statement-prefix>statements-manifest.txt`, so the run-versioned
+  #   objects and the manifest both sit INSIDE the statements prefix; and
+  #   ReportArtifactLocator.key composes `<report-prefix>dt=/type=/from=/to=/
+  #   transaction-detail.txt`, inside the transaction-detail prefix. Both prefixes are
+  #   members of that list already, so nothing this role reads falls outside it and the
+  #   grant needs no widening.
+  # WHY : Assumptions: HeadObject needs no action of its own. S3 authorises a HEAD on an
+  #   object under s3:GetObject, so granting the read covers ArtifactStore.describe as
+  #   well; naming a separate s3:HeadObject action would grant nothing, because no such
+  #   action exists.
+  # WHY : Alternatives Considered: one statement carrying the read and the write actions
+  #   together over the same resources, which is shorter. Rejected because the two are
+  #   reviewed as different questions -- "what may this role publish" and "what may it
+  #   read back" -- and a merged statement makes the second unanswerable without
+  #   re-deriving it from the action list. It also loses the ability to narrow one side
+  #   later without touching the other.
+  # WHY : Trade-offs: the read reaches the `tranrept` generation family as well, because
+  #   that prefix is in the same list and the nightly publication writes its second copy
+  #   there. Accepted: it is the one generation family this role already writes, and the
+  #   transaction backup and combined generations -- the ones carrying unmasked primary
+  #   account numbers at offset 262 of the 350-byte layout in app/cpy/CVTRA05Y.cpy -- stay
+  #   outside every statement in this document.
+  statement {
+    sid     = "ReadReportOutputs"
+    actions = ["s3:GetObject"]
     resources = [
       for prefix in local.reporting_object_key_prefixes :
       "${module.s3_datasets.bucket_arn}/${prefix}*"
@@ -4002,6 +4140,121 @@ data "aws_iam_policy_document" "batch_runtime" {
   statement {
     sid     = "ReadWriteDatasetGenerations"
     actions = ["s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"]
+    resources = [
+      for prefix in local.batch_generation_key_prefixes :
+      "${module.s3_datasets.bucket_arn}/${prefix}*"
+    ]
+  }
+
+  # WHY : ⚠️ Refactoring Rationale: this statement was ABSENT, and its absence failed the
+  #       FIRST allocation of a fresh deployment rather than an edge case reached later.
+  #       Every allocation reserves its generation number before it stages a byte:
+  #       DatasetGenerationService.recordedAllocation reads this run's record and
+  #       recordAllocation conditionally writes it, both at a key beneath
+  #       module.s3_datasets.generation_claim_prefix -- a TOP-LEVEL prefix outside every
+  #       family root, placed there precisely so no family listing can return it. The
+  #       object statement above covers the ten family prefixes and nothing else, so the
+  #       read was refused with an access denial and every generation-writing state failed
+  #       with it. loaders/s3_stage.py reserves through the same root, so the ETL staging
+  #       path failed identically.
+  # WHY : Assumptions: TWO actions, and no third. The Java side reaches this root with
+  #       exactly getObjectAsBytes and a conditional putObject; the Python side with
+  #       get_object and put_object. Neither ever LISTS it, because the key is composed
+  #       deterministically from the run identifier and the family, so an s3:ListBucket
+  #       scope here would authorise an enumeration of every run's bookkeeping that no
+  #       code path performs. No delete either: these records are retired by the
+  #       claim-generation-allocations lifecycle rule in infra/modules/s3-datasets, whose
+  #       retention means something different from the generation window, and a task that
+  #       could delete a claim could take a generation another attempt already holds.
+  # WHY : Assumptions: no KMS action is added. These objects sit in the same bucket as the
+  #       generations, so the UseDatasetKey statement below already reaches them through
+  #       its kms:ViaService condition. A second grant would be a duplicate whose only
+  #       effect is to make the key surface look wider than it is.
+  # WHY : Trade-offs: the prefix is read from module.s3_datasets.generation_claim_prefix
+  #       rather than written as the literal it resolves to. That same string is declared
+  #       three times -- in that module, as RUN_CLAIM_ROOT in the batch service and as
+  #       _RUN_CLAIM_ROOT in the ETL loader -- and tests on both application sides read
+  #       the module's declaration to assert all three agree. A literal here would be a
+  #       fourth copy that nothing compares against, and a drifted copy's failure mode is
+  #       exactly the access denial this statement exists to remove. The output is a
+  #       plan-time local composed from a literal, with no resource attribute in it, so
+  #       interpolating it into a policy document introduces no apply-time cycle.
+  statement {
+    sid     = "ReadWriteGenerationClaimRecords"
+    actions = ["s3:GetObject", "s3:PutObject"]
+
+    resources = [
+      "${module.s3_datasets.bucket_arn}/${module.s3_datasets.generation_claim_prefix}*",
+    ]
+  }
+
+  # WHY : ⚠️ Refactoring Rationale: these two statements were declared on
+  #       data_migration_runtime alone, which was right only while the ETL was the sole
+  #       implementation that pruned a generation. It is not:
+  #       DatasetGenerationService.scratchGeneration lists a generation prefix's object
+  #       VERSIONS and deletes each by version identifier, and the batch jobs call it to
+  #       retire a family's oldest generation. The batch task therefore held ListBucket,
+  #       GetObject, PutObject and AbortMultipartUpload and nothing else, so the
+  #       baseline's LIMIT(5) SCRATCH -- app/jcl/DEFGDGB.jcl:25-57, app/jcl/DEFGDGD.jcl:28-76
+  #       and app/jcl/DALYREJS.jcl:24-26 -- was refused on the sixth run of each family,
+  #       five runs after the deployment anyone would have exercised.
+  # WHY : Alternatives Considered: repeating the pair on data_migration_runtime and adding
+  #       a second, batch-named pair here. Rejected on this document's own rule, recorded
+  #       at local.task_role_policy_json: a grant belongs in the sourced document when the
+  #       two tasks GENUINELY share it, and either implementation may now retire a
+  #       generation the other created. Two lists free to disagree leaves one of them
+  #       denied, which is the defect being repaired. Declaring it once is also what the
+  #       provider's merge semantics reward -- a sid re-declared by the sourcing document
+  #       OVERRIDES the sourced one rather than adding to it, so the repeated form would
+  #       have discarded this statement for the ETL role while looking additive.
+  # WHY : Assumptions: the version listing is granted at BUCKET level with a prefix
+  #       condition and the deletions at OBJECT level over the same prefixes, because that
+  #       is how S3 authorises them. s3:ListBucketVersions is a bucket operation whose only
+  #       scoping mechanism is the s3:prefix condition key; s3:DeleteObject and
+  #       s3:DeleteObjectVersion are object operations scoped by resource ARN. Granting
+  #       either at the other's level would be refused as malformed or silently authorise
+  #       the whole bucket.
+  # WHY : Assumptions: the condition carries `<prefix>*` per family and not the bare
+  #       prefix as well, matching ListBatchGenerationPrefixes above. Every version
+  #       listing in either implementation is issued against a generation prefix strictly
+  #       BELOW a family root -- scratchGeneration passes generation.keyPrefix() and
+  #       s3_stage.py passes its generation_prefix -- so no call presents the bare family
+  #       prefix to this action, and a StringLike wildcard matches zero characters in any
+  #       case.
+  # WHY : Trade-offs: s3:DeleteObjectVersion is granted ALONGSIDE s3:DeleteObject rather
+  #       than instead of it. The bucket is versioned, so the version-addressed delete both
+  #       sweeps now issue requires the version-scoped action, while a delete carrying a
+  #       key alone merely inserts a marker and reclaims nothing -- which would leave
+  #       LIMIT(5) SCRATCH a claim rather than a fact. The unversioned action is kept
+  #       because the same batched call is authorised against both when any entry omits a
+  #       version, and a partial authorisation surfaces as per-key refusals inside a 200
+  #       response, which is far harder to read than a denial.
+  # WHY : Assumptions: the prefixes are local.batch_generation_key_prefixes, the same ten
+  #       families the read-and-write statement above scopes, so no delete can reach the
+  #       three reporting-artifact prefixes or the authorization extract prefix in the same
+  #       bucket. Those hold statements, reports and pending-authorization extracts that no
+  #       sweep is responsible for and that carry no gen= segment to prune, and the claim
+  #       records above are excluded for the reason given there.
+  statement {
+    sid       = "ListDatasetGenerationVersions"
+    actions   = ["s3:ListBucketVersions"]
+    resources = [module.s3_datasets.bucket_arn]
+
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = [for prefix in local.batch_generation_key_prefixes : "${prefix}*"]
+    }
+  }
+
+  statement {
+    sid = "ScratchOldestDatasetGeneration"
+
+    actions = [
+      "s3:DeleteObject",
+      "s3:DeleteObjectVersion",
+    ]
+
     resources = [
       for prefix in local.batch_generation_key_prefixes :
       "${module.s3_datasets.bucket_arn}/${prefix}*"
@@ -4159,69 +4412,25 @@ data "aws_iam_policy_document" "data_migration_runtime" {
   #   merely small, and infra/modules/kms asserts the same encryption-context
   #   condition on that key's own policy, so removing it from either side still
   #   leaves the other enforcing it.
-  # WHY : Refactoring Rationale: these two statements were ABSENT, and their absence
-  #   made a DELIVERED retention contract fail on the sixth run rather than leaving a
-  #   feature undone. The baseline defines every one of its ten generation data groups
-  #   with LIMIT(5) SCRATCH -- app/jcl/DEFGDGB.jcl:25-57, app/jcl/DEFGDGD.jcl:28-76 and
-  #   app/jcl/DALYREJS.jcl:24-26 -- so a sixth generation SCRATCHES the oldest, and
-  #   loaders/s3_stage.py reproduces that by listing a family's object versions and
-  #   deleting the oldest generation prefix. It inherited only ListBucket, GetObject,
-  #   PutObject and AbortMultipartUpload, so the first five stagings of each family
-  #   succeeded and the sixth failed with an access denial on the version listing --
-  #   a failed batch step, five runs after the deployment anyone would have tested.
-  # WHY : Assumptions: the version-list action is granted at BUCKET level with a prefix
-  #   condition, and the delete actions at OBJECT level over the same prefixes, because
-  #   that is how S3 authorises them. s3:ListBucketVersions is a bucket operation whose
-  #   only scoping mechanism is the s3:prefix condition key; s3:DeleteObject and
-  #   s3:DeleteObjectVersion are object operations scoped by resource ARN. Granting
-  #   either at the other's level would either be rejected as a malformed policy or
-  #   silently authorise the whole bucket.
-  # WHY : Assumptions: the prefixes come from module.s3_datasets.dataset_prefixes rather
-  #   than being written out, so this grant covers exactly the ten generation families
-  #   that module declares and moves with them. Writing them here would create a second
-  #   inventory free to disagree, and the disagreement's failure mode is a family whose
-  #   retention sweep is denied -- which is the defect being fixed.
-  # WHY : Assumptions: the two STATEMENT prefixes and the inbox prefix are deliberately
-  #   EXCLUDED. Neither is a generation family: the statement artifacts are rewritten in
-  #   place by the reporting task and carry no gen= segment for a sweep to prune, and the
-  #   inbox holds the operator's delivered export, whose retention is the operator's
-  #   decision. A delete grant over either would let the migration task destroy data no
-  #   part of it is responsible for.
-  # WHY : Trade-offs: s3:DeleteObjectVersion is granted alongside s3:DeleteObject rather
-  #   than instead of it. The bucket is versioned, so a delete naming a VersionId --
-  #   which is what the sweep issues, because a plain delete on a versioned bucket adds a
-  #   marker and reclaims nothing -- requires the version-scoped action; the unversioned
-  #   action is granted because the same batched call is authorised against both when any
-  #   entry omits a version, and a partial authorisation reports as a partial failure
-  #   that is far harder to read than a denial.
-  statement {
-    sid       = "ListDatasetGenerationVersions"
-    actions   = ["s3:ListBucketVersions"]
-    resources = [module.s3_datasets.bucket_arn]
-
-    condition {
-      test     = "StringLike"
-      variable = "s3:prefix"
-      values = flatten([
-        for prefix in values(module.s3_datasets.dataset_prefixes) : [prefix, "${prefix}*"]
-      ])
-    }
-  }
-
-  statement {
-    sid = "ScratchOldestDatasetGeneration"
-
-    actions = [
-      "s3:DeleteObject",
-      "s3:DeleteObjectVersion",
-    ]
-
-    resources = [
-      for prefix in values(module.s3_datasets.dataset_prefixes) :
-      "${module.s3_datasets.bucket_arn}/${prefix}*"
-    ]
-  }
-
+  # WHY : ⚠️ Refactoring Rationale: the generation-retention pair -- sids
+  #   ListDatasetGenerationVersions and ScratchOldestDatasetGeneration -- was declared
+  #   HERE and is now declared once in batch_runtime, which this document sources. The
+  #   pair was correct when written and stopped being sufficient the moment the batch
+  #   tier gained its own sweep: DatasetGenerationService.scratchGeneration performs the
+  #   same version listing and version-addressed deletion loaders/s3_stage.py does, so
+  #   either implementation may retire a generation the other created and a grant held by
+  #   only one of them denies the other. The move is what makes the two privileges equal
+  #   by construction rather than by two lists agreeing; the migration task holds exactly
+  #   what it held before, because a sourced statement is inherited whole.
+  # WHY : Assumptions: nothing narrowed in the move. The delete resources are the same
+  #   expression over the same ten families, and the version-listing condition dropped
+  #   only the bare-prefix entries beside each `<prefix>*` -- neither implementation ever
+  #   presents a bare family prefix to s3:ListBucketVersions, since both pass a
+  #   generation prefix, and a StringLike wildcard matches zero characters regardless.
+  #   Re-declaring the pair here as well would not have been additive: the provider
+  #   OVERRIDES a sourced statement whose sid the sourcing document repeats, so the copy
+  #   in batch_runtime would have been discarded for this role while appearing to
+  #   reinforce it.
   statement {
     sid = "EnvelopeEncryptMigratedProtectedColumns"
 
@@ -4464,33 +4673,53 @@ module "ecs_service" {
   )
   ecr_repository_arn = module.ecr.repository_arns[each.value.repository]
 
-  # WHY : Refactoring Rationale: two inputs stood here, telemetry_collector_image and
-  #       telemetry_collector_repository_arn, resolving the mirrored AWS Distro for
-  #       OpenTelemetry collector image and authorizing the execution role to pull it.
-  #       Both are WITHDRAWN because infra/modules/ecs-service no longer composes a
-  #       collector sidecar, and it no longer does so because the sidecar was outside
-  #       the frozen specification and was forcing two topology changes that are also
-  #       outside it -- an eleventh ECR repository to mirror a public image into,
-  #       against the ten that section 0.4.1.6 states, and a ninth interface endpoint
-  #       for xray, against the eight that section 0.4.1.9 states. The module records
-  #       the full argument and the alternatives weighed against it.
-  #       Trade-offs: what this root loses is span export to a managed tracing
-  #       backend. What it keeps is every observability artifact the specification
-  #       actually names: container logs in each workload's own group, the Actuator
-  #       Prometheus surface each service already exposes, the common metric tags
-  #       common-lib's MetricsConfig applies, and end-to-end request correlation
-  #       through common-lib's CorrelationIdFilter.
-  container_name       = each.value.container_name
-  container_port       = module.network.app_container_port
-  task_cpu             = var.ecs_task_cpu
-  task_memory          = var.ecs_task_memory
-  attach_load_balancer = each.value.online
-  create_service       = each.value.online
-  desired_count        = each.value.online ? var.ecs_desired_count : 1
-  enable_autoscaling   = each.value.online
-  min_capacity         = var.ecs_desired_count
-  max_capacity         = max(var.ecs_desired_count, var.ecs_desired_count * 2)
-  health_check_path    = local.health_check_path
+  # WHY : Refactoring Rationale: these three inputs are RESTORED. They had been
+  #       withdrawn with the collector sidecar, and the withdrawal is what left this
+  #       environment with a telemetry producer and no destination -- nothing scraped
+  #       the Actuator Prometheus endpoint, the spans common-lib's OpenTelemetry
+  #       starter creates were exported nowhere, the operations dashboard read a
+  #       `CardDemo` namespace no component published to, and the batch state machine
+  #       went on pushing reporting-run meters to a loopback receiver that had ceased
+  #       to exist. Specification sections 0.2.1.4 and 0.9.3 require metrics and
+  #       tracing to be delivered, not documented as absent.
+  # WHY : Assumptions: the image and the repository ARN authorizing its pull are
+  #       passed TOGETHER, because either alone is a broken deployment: the image
+  #       without the grant is a pull the execution role is refused, and the grant
+  #       without the image authorizes a repository nothing fetches. Both read
+  #       local.telemetry_collector_repository, so they cannot name different
+  #       repositories.
+  # WHY : Assumptions: the reference prefers the mirrored image's DIGEST and falls
+  #       back to its immutable tag, which in this environment is the same posture
+  #       image_uri already takes for the nine task images. The fallback is what lets
+  #       a plan run before any digest has been recorded; repository immutability
+  #       makes it safe, and recording the digest is what makes the registered task
+  #       definition state WHICH collector bytes ran.
+  telemetry_collector_image = (
+    lookup(var.image_digests, local.telemetry_collector_repository, null) != null
+    ? "${module.ecr.repository_urls[local.telemetry_collector_repository]}@${var.image_digests[local.telemetry_collector_repository]}"
+    : "${module.ecr.repository_urls[local.telemetry_collector_repository]}:${local.telemetry_collector_image_tag}"
+  )
+  telemetry_collector_repository_arn = module.ecr.repository_arns[local.telemetry_collector_repository]
+
+  # WHY : Trade-offs: production keeps the module's own default proportion of
+  #       successful traces, five percent, and states it here rather than relying on
+  #       the default so that the two environments' sampling is visible side by side.
+  #       Production traffic is the volume this control exists for -- retaining every
+  #       successful trace would multiply X-Ray ingest by request rate -- and the
+  #       collector's separate always-keep policy retains error traces in full, so the
+  #       sample bounds cost without bounding failure diagnosis.
+  telemetry_success_sample_percentage = 5
+  container_name                      = each.value.container_name
+  container_port                      = module.network.app_container_port
+  task_cpu                            = var.ecs_task_cpu
+  task_memory                         = var.ecs_task_memory
+  attach_load_balancer                = each.value.online
+  create_service                      = each.value.online
+  desired_count                       = each.value.online ? var.ecs_desired_count : 1
+  enable_autoscaling                  = each.value.online
+  min_capacity                        = var.ecs_desired_count
+  max_capacity                        = max(var.ecs_desired_count, var.ecs_desired_count * 2)
+  health_check_path                   = local.health_check_path
   # WHY : Assumptions: looked up with a null default rather than indexed, because
   #       data-migration is intentionally absent from the map and the module reads null
   #       as "this workload has no in-container probe".

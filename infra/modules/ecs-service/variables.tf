@@ -35,7 +35,7 @@
 #     requirement: omitting one fails in the CALLING ROOT at `terraform
 #     validate` with a missing-required-argument error, before any resource
 #     in this module is evaluated.
-#   - Forty-nine variables carry sixty-one `validation` blocks between them, so a
+#   - Fifty-three variables carry sixty-five `validation` blocks between them, so a
 #     bad value is rejected before the AWS API sees it. The checks cover
 #     identifiers and ARN shapes, Fargate CPU/memory and network contracts,
 #     HTTPS health checks, deployment/autoscaling bounds, CloudWatch retention,
@@ -46,7 +46,7 @@
 #     own variable is evaluated by `terraform validate`; one reading ANOTHER
 #     variable is deferred to `terraform plan`, because the context that lets
 #     one variable see another does not exist at validate time. Fifteen of the
-#     sixty-one rules fall in the second group -- among them
+#     sixty-five rules fall in the second group -- among them
 #     writable_mount_paths reading readonly_root_filesystem, task_memory
 #     reading task_cpu, the four autoscaling and desired_count rules reading
 #     create_service, task_role_policy_json reading create_task_role_policy and
@@ -54,12 +54,12 @@
 #     so `validate` alone reports none of those pairings and `plan` reports all
 #     of them. Both precede any resource, so no task definition is created from
 #     a broken pairing either way.
-#   - Five variables select the module's SHAPE rather than one of its values:
+#   - Six variables select the module's SHAPE rather than one of its values:
 #     create_service, attach_load_balancer, enable_autoscaling,
-#     create_task_role_policy and
-#     create_online_write_gate_policy. Disabling one is not an error; it removes
-#     the corresponding service/target/scaler or task-role policy
-#     resources. Each states its own coupling because none is inferable from the
+#     create_task_role_policy, create_online_write_gate_policy and
+#     enable_telemetry_collector. Disabling one is not an error; it removes
+#     the corresponding service/target/scaler, task-role policy or telemetry
+#     sidecar resources. Each states its own coupling because none is inferable from the
 #     boolean type. container_health_check_command belongs to the same group
 #     without being a boolean: left null it removes the container healthCheck
 #     block rather than changing a value inside it.
@@ -116,10 +116,10 @@
 # -----------------------------------------------------------------------------
 # TIER 1 -- REQUIRED INPUTS. Every variable in this tier omits `default`.
 #
-# WHY : Alternatives Considered: ordering all sixty-one variables strictly
+# WHY : Alternatives Considered: ordering all sixty-two variables strictly
 #       alphabetically, which is the obvious scheme and does help a reader
 #       hunting for one name already known. Rejected because it interleaves
-#       the ten inputs a caller MUST supply with the fifty-one it may
+#       the ten inputs a caller MUST supply with the fifty-two it may
 #       ignore, so a new `module` block could only be written correctly by
 #       reading every block in the file to discover which ones lack a
 #       default. Required-first answers the question a caller actually
@@ -1843,29 +1843,174 @@ variable "allow_service_managed_log_encryption" {
   nullable    = false
 }
 
-# WHY : Refactoring Rationale: four telemetry inputs stood here --
-#       enable_telemetry_collector, telemetry_collector_image,
-#       telemetry_collector_repository_arn and telemetry_success_sample_percentage --
-#       and all four are WITHDRAWN together with the AWS Distro for OpenTelemetry
-#       collector sidecar they configured. The reason is scope: the frozen technical
-#       specification contains no collector, and the sidecar could not be delivered
-#       inside the numbers the specification does state. Section 0.4.1.6 fixes the
-#       ecr module at TEN repositories, one per deployable, and pulling a public
-#       image from a private application subnet needed an ELEVENTH to mirror it into,
-#       because Amazon ECR Public is a separate service that the ecr.api and ecr.dkr
-#       interface endpoints do not serve. Section 0.4.1.9 fixes the interface-endpoint
-#       set at exactly eight services, and exporting spans needed a NINTH for xray.
-#       One out-of-specification component was therefore forcing two
-#       out-of-specification topology changes. main.tf records the full argument, the
-#       alternatives weighed against it and what is kept for this concern -- container
-#       logs, the Actuator Prometheus surface, the common metric tags and end-to-end
-#       request correlation -- at the locals block that replaced the collector
-#       configuration.
-#       Trade-offs: a caller that previously set any of these four now fails the plan
-#       with an "argument is not expected here" error naming the input, which is the
-#       outcome intended. The alternative was to keep them as accepted-but-ignored
-#       inputs, which would have let a root believe a sidecar was configured while
-#       nothing rendered one.
+# -----------------------------------------------------------------------------
+# Telemetry collection and export.
+#
+# WHY : Refactoring Rationale: these four inputs are RESTORED after having been
+#       withdrawn with the AWS Distro for OpenTelemetry collector sidecar they
+#       configure. The withdrawal removed the only destination this deployment had
+#       for two of its three signals: no component scraped the Actuator Prometheus
+#       endpoint every service publishes, and the spans the shared kernel's
+#       OpenTelemetry starter creates were exported nowhere -- while
+#       infra/modules/observability still read a metric namespace with no publisher
+#       and infra/modules/step-functions-batch still pushed reporting-run meters at a
+#       loopback receiver that no longer existed. Specification sections 0.2.1.4 and
+#       0.9.3 require centralized logging, metrics AND tracing as delivered
+#       cross-cutting concerns, so the gap was not a defensible end state. main.tf
+#       carries the full argument, the alternatives weighed against it and the
+#       pipeline these inputs render.
+#       Assumptions: restoring them needs no topology change from the two modules
+#       that would have to carry one. infra/modules/ecr already declares the mirror
+#       outside its ten-deployable inventory, in
+#       third_party_mirror_repository_names, and infra/modules/network already
+#       carries `xray` in its exact interface-endpoint set -- so both were shipping
+#       an unused input and an unused endpoint, and these inputs are what make them
+#       used.
+# -----------------------------------------------------------------------------
+
+# WHY : Trade-offs: the default is ON for every workload rather than opt-in per
+#       instantiation. A caller that forgets an opt-in produces a task whose meters
+#       and spans go nowhere and whose absence from a dashboard is the only symptom,
+#       which is precisely the failure this module is recovering from; a caller that
+#       wants no collector states so, and the statement is visible in that root.
+variable "enable_telemetry_collector" {
+  description = <<-EOT
+    Whether to add the AWS Distro for OpenTelemetry collector sidecar that receives
+    this workload's telemetry and exports it: traces over OTLP to AWS X-Ray, and
+    metrics to CloudWatch through the embedded-metric-format exporter in the
+    `CardDemo` namespace. Metrics reach it one of two ways, selected by
+    create_service so that no meter is exported twice -- a serving workload's
+    Actuator Prometheus endpoint is scraped over loopback, while a task-only
+    workload pushes through Micrometer's OTLP registry. Setting it false removes the
+    container, its ephemeral volume, its OTEL_* environment variables and the task
+    role's telemetry policy together, which leaves that workload's container logs as
+    its only signal.
+  EOT
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
+# WHY : Assumptions: the default names the upstream v0.49.0 OCI index by DIGEST
+#       rather than by tag, and the distinction is the whole point of the default. A
+#       tag is a label the publisher can move, so "pinned by tag" means "pinned to
+#       whatever that label resolves to on the day of the pull" -- which for the one
+#       container attached to every workload in the estate is the weakest link in the
+#       supply chain. The digest form drops the human-readable version from the value,
+#       which is why the version is stated here and in the description instead; the
+#       same trade is made by every base-image pin in every Dockerfile in this
+#       repository.
+# WHY : Assumptions: the pure `@sha256:` form is used rather than `:tag@sha256:`.
+#       Both are accepted by container tooling, but the ECS container-definition
+#       `image` field is documented for the tag form OR the digest form, so the
+#       combined spelling would rest on an undocumented acceptance for the sake of
+#       carrying a version string that a comment carries instead.
+# WHY : Assumptions: a PRIVATE registry reference is admissible and is what both
+#       environment roots pass, from the mirror repository infra/modules/ecr
+#       provisions. infra/modules/network enumerates the application tier's egress
+#       instead of allowing 0.0.0.0/0, and Amazon ECR Public has neither an interface
+#       endpoint nor a managed prefix list, so a task in a private application subnet
+#       cannot reach the upstream registry at all -- and because the sidecar is
+#       created for every workload by default, an unmirrored reference is not a
+#       degraded deployment but one in which no task starts.
+#       Alternatives Considered: hard-requiring the private form, which would have
+#       made this module unusable outside this deployment's network shape. Rejected
+#       because a module input should not encode one root's egress policy; the roots
+#       express that by what they pass. What is NOT admitted, in either form, is an
+#       unpinned reference.
+variable "telemetry_collector_image" {
+  description = <<-EOT
+    Pinned AWS Distro for OpenTelemetry collector image used by the telemetry
+    sidecar. Either a private Amazon ECR reference -- which is what both environment
+    roots pass, from the mirror repository the ecr module provisions, because the
+    application tier's egress is enumerated and admits no public registry -- or the
+    upstream public reference for a caller whose egress reaches it. A private
+    reference must carry an explicit non-latest tag or a digest; the public reference
+    must carry a digest, because only the private registry is configured for
+    immutable tags. The default is the upstream v0.49.0 index digest, so a collector
+    upgrade stays a reviewed task-definition change rather than something a moved
+    label delivers.
+  EOT
+  type        = string
+  default     = "public.ecr.aws/aws-observability/aws-otel-collector@sha256:d2bdfff2c377c3d71d78bd5d9ce9862fd535b12134a5739d87a07801297cf9fd"
+
+  # WHY : Assumptions: the public form must be DIGEST-pinned where the private form
+  #       may carry a tag, because the two registries do not offer the same
+  #       guarantee. infra/modules/ecr sets image_tag_mutability to IMMUTABLE, so a
+  #       tag in the private form cannot be moved onto different bytes and is a pin
+  #       in practice, while nothing constrains a tag in a public registry this
+  #       repository does not control.
+  #       Trade-offs: a caller keeping the upstream reference has to look up a
+  #       digest, which is one registry query. Accepted: that caller is bypassing the
+  #       mirror and so has no immutability from the registry either, which is the
+  #       case that needs the digest most.
+  validation {
+    condition = (
+      (
+        can(regex("^public\\.ecr\\.aws/aws-observability/aws-otel-collector@sha256:[a-f0-9]{64}$", var.telemetry_collector_image)) ||
+        can(regex("^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com/[a-z0-9._/-]+(:[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64})$", var.telemetry_collector_image))
+      ) &&
+      !endswith(lower(var.telemetry_collector_image), ":latest")
+    )
+    error_message = "telemetry_collector_image must be either the upstream public AWS observability collector image pinned by @sha256 digest, or a private Amazon ECR reference carrying an explicit non-latest tag or a digest. A public TAG is refused because only the private registry is configured for immutable tags, so only there is a tag a pin."
+  }
+}
+
+# WHY : Assumptions: this is a SECOND repository ARN rather than a widening of
+#       ecr_repository_arn, and the separation is the least-privilege point. The task
+#       execution role must pull two images when the sidecar is enabled -- the
+#       service's own and the mirrored collector -- and the alternative was to accept
+#       a list and let a caller pass any number of repositories. A named second input
+#       says exactly which second image the role may fetch, and the statement in
+#       main.tf compacts a null away, so a caller that supplies no mirror grants no
+#       second repository.
+# WHY : Assumptions: nullable with a null default, because the collector may be
+#       disabled and because a caller keeping the public reference has no repository
+#       to name. Requiring it would force every caller into the mirrored shape this
+#       deployment happens to use.
+variable "telemetry_collector_repository_arn" {
+  description = <<-EOT
+    ARN of the Amazon ECR repository holding the mirrored telemetry collector image,
+    added to the task execution role's image-pull statement so the sidecar can be
+    fetched. Null when the collector is disabled or when telemetry_collector_image
+    names a registry this role needs no grant for, in which case no second repository
+    is authorized.
+  EOT
+  type        = string
+  default     = null
+
+  validation {
+    condition = (
+      var.telemetry_collector_repository_arn == null ||
+      can(regex("^arn:[a-z0-9-]+:ecr:[a-z0-9-]+:[0-9]{12}:repository/[a-z0-9._/-]+$", var.telemetry_collector_repository_arn))
+    )
+    error_message = "telemetry_collector_repository_arn must be null or an ECR repository ARN of the form arn:<partition>:ecr:<region>:<account>:repository/<name>; a repository name or an image URI produces an IAM statement matching no repository, so the sidecar fails to pull."
+  }
+}
+
+# WHY : Trade-offs: successful traffic is sampled to bound X-Ray ingest volume and
+#       its charge, while status-code ERROR traces are retained by a separate
+#       always-keep tail-sampling policy in main.tf and are not affected by this
+#       value. It is therefore a cost control rather than a service-level objective,
+#       which is why the environment root may differ on it -- the same latitude
+#       specification section 0.4.1.6 gives the roots over sizing and retention --
+#       and why lowering it never discards a failed request.
+variable "telemetry_success_sample_percentage" {
+  description = <<-EOT
+    Percentage of SUCCESSFUL traces retained by the collector's tail-sampling
+    processor, after its always-keep policy for traces carrying an ERROR status.
+    Accepts 0 through 100 and may differ by environment without changing task
+    topology; 0 keeps error traces only.
+  EOT
+  type        = number
+  default     = 5
+  nullable    = false
+
+  validation {
+    condition     = var.telemetry_success_sample_percentage >= 0 && var.telemetry_success_sample_percentage <= 100
+    error_message = "telemetry_success_sample_percentage must be between 0 and 100 inclusive; the collector reads it as a percentage and rejects a value outside that range at start-up, which fails the container rather than the plan."
+  }
+}
 
 # -----------------------------------------------------------------------------
 # Configuration injection.
@@ -2122,13 +2267,11 @@ variable "secret_arns" {
 #       task role starts with no BUSINESS permission and receives only what one
 #       caller passes for one service, and the module attaches no fixed policy of
 #       its own to this role at all.
-#       Refactoring Rationale: this sentence previously ended "The module's fixed
-#       telemetry policy is separate and grants only writes to this service's own log
-#       group and X-Ray ingestion, so it cannot widen a bounded context's data
-#       access." That policy went with the withdrawn collector sidecar, so the
-#       sentence would describe an attachment that no longer exists -- and the
-#       property it was reassuring a reader about is now unconditional rather than
-#       argued.
+#       Assumptions: the module's fixed telemetry policy is separate from this input
+#       and grants only writes to this service's OWN log group plus the two X-Ray
+#       ingestion actions, so no statement the module composes can widen a bounded
+#       context's data access -- the caller's document remains the only channel
+#       through which business permissions reach this role.
 #       Refactoring Rationale: the migrated system delegated this to an
 #       external security manager that has no cloud equivalent and is not
 #       pretended to have one. Its role is filled by these per-service task

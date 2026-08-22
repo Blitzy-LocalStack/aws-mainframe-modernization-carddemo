@@ -3,15 +3,18 @@
 # -----------------------------------------------------------------------------
 # Purpose:
 #   Carries one CardDemo bounded context onto ECS Fargate with its log group,
-#   roles, task definition, optional target group and service, and optional
-#   autoscaling policy. Environment roots are required to instantiate this
-#   reusable module once per bounded context, with batch using the task-only
-#   shape defined by its conditional resources.
+#   roles, task definition, optional target group and service, optional
+#   autoscaling policy, and the AWS Distro for OpenTelemetry collector sidecar
+#   that gives the workload's metrics and traces a destination -- CloudWatch
+#   metrics through embedded-metric-format records, and AWS X-Ray for spans.
+#   Environment roots are required to instantiate this reusable module once per
+#   bounded context, with batch using the task-only shape defined by its
+#   conditional resources.
 #
 # Parameters:
 #   None are declared here. Every input this file reads is declared in the
 #   sibling variables.tf, which is the one place a caller's arguments are
-#   accepted, typed and validated. Fifty-eight variables are declared there
+#   accepted, typed and validated. Sixty-two variables are declared there
 #   and every one of them is consumed inside this module, which has no other
 #   consumer of them. That reconciliation is a standing constraint
 #   rather than tidiness: this directory is never applied directly, so
@@ -47,6 +50,13 @@
 #   - A service created before its execution role's inline policy exists fails
 #     ECS's own permission validation with an error naming the role, because
 #     the service references the role and not the policy.
+#   - A telemetry_collector_image drawn from a private repository whose ARN is
+#     not passed as telemetry_collector_repository_arn is refused at PLAN time by
+#     a precondition on the task definition. Without it the execution role is
+#     simply not granted that repository -- compact() drops the null from the pull
+#     statement -- the sidecar's pull is denied at task start, and because the
+#     sidecar is essential the task never reaches RUNNING, reported as a
+#     CannotPullContainerError naming the image rather than the omitted input.
 #
 # WHY (non-obvious design decisions):
 #   - Refactoring Rationale: the blocks below are ordered by dependency --
@@ -132,45 +142,337 @@ locals {
     Service     = var.service_name
   }, var.tags)
 
-  # WHY : Refactoring Rationale: this module composed an AWS Distro for
-  #       OpenTelemetry collector sidecar into every task -- a receiver, processor,
-  #       exporter and pipeline configuration rendered as YAML, a set of OTEL_*
-  #       environment variables pointing the application at loopback, a writable
-  #       scratch volume, an X-Ray export policy on the task role and a container
-  #       dependency ordering the two. All of it is WITHDRAWN, and the reason is
-  #       scope rather than taste: the frozen technical specification contains no
-  #       collector. Section 0.4.1.6 defines the ecr module as TEN repositories --
-  #       one per deployable -- and section 0.4.1.9 fixes the interface-endpoint set
-  #       at exactly eight services, none of which is xray. The sidecar could not be
-  #       delivered inside either number: pulling its image from a private subnet
-  #       required an ELEVENTH repository to mirror it into, because Amazon ECR
-  #       Public is a separate service that the ecr.api and ecr.dkr endpoints do not
-  #       serve, and exporting its spans required a NINTH endpoint for xray. So one
-  #       out-of-specification component was forcing two out-of-specification
-  #       topology changes, each of which then had to be defended on its own.
-  #       Alternatives Considered: (a) keeping the sidecar and pulling the image
-  #       straight from public.ecr.aws -- rejected, that needs general outbound
-  #       internet access from the application subnets, which is the allow-all
-  #       egress this module's own network peer deliberately does not ship;
-  #       (b) keeping the sidecar and adding the xray endpoint -- rejected, it is a
-  #       ninth endpoint against a set the specification states exactly;
-  #       (c) keeping the collector configuration behind a default-off flag --
-  #       rejected, a disabled pipeline is still four variables, an IAM document and
-  #       a container definition that a reader has to evaluate, and it would leave
-  #       the eleventh repository defensible again the moment someone enabled it.
-  #       Trade-offs: what is lost is span EXPORT to a managed tracing backend. What
-  #       is kept is everything the specification actually names for this concern:
-  #       container logs delivered to the group below, application metrics exposed
-  #       on /actuator/prometheus by micrometer-registry-prometheus, the common
-  #       metric tags of common-lib's MetricsConfig, and end-to-end request
-  #       correlation through common-lib's CorrelationIdFilter, which puts one
-  #       identifier into the diagnostic context and onto the response so a request
-  #       is followable across services in the logs. Re-introducing export is a
-  #       deliberate act that has to argue for its own endpoint or its own egress,
-  #       which is the argument that was previously skipped.
+  # WHY : Refactoring Rationale: the AWS Distro for OpenTelemetry collector sidecar
+  #       is RESTORED here after having been withdrawn, and the withdrawal is what
+  #       makes the restoration necessary rather than optional. Removing it left the
+  #       estate with a producer and no destination -- every service exposed
+  #       /actuator/prometheus with nothing scraping it, the shared kernel's
+  #       OpenTelemetry starter created spans with no exporter, the operations
+  #       dashboard in infra/modules/observability read a `CardDemo` namespace no
+  #       component published to, and infra/modules/step-functions-batch went on
+  #       pushing reporting-run meters to http://127.0.0.1:4318/v1/metrics, a receiver
+  #       that had stopped existing inside the task. Specification sections 0.2.1.4
+  #       and 0.9.3 make centralized logging, metrics AND tracing a delivered
+  #       cross-cutting concern, so a documented gap does not satisfy them: two of the
+  #       three signals had no destination at all.
+  #       Assumptions: the withdrawal's stated cost was two topology changes outside
+  #       the specification's stated counts, and BOTH are already carried by the
+  #       modules that own them rather than being reopened here -- infra/modules/ecr
+  #       declares the mirror separately from the ten deployables in
+  #       third_party_mirror_repository_names, so the deployable count is still the
+  #       ten of section 0.4.1.6, and infra/modules/network's exact endpoint set
+  #       already contains `xray` with the reason recorded at its own validation. The
+  #       sidecar therefore needs no new module, no new provider and no new Maven
+  #       dependency; it makes three inputs that were shipping unused into inputs that
+  #       are used.
+  #       Alternatives Considered: (a) exporting straight from each application to the
+  #       X-Ray OTLP endpoint with no sidecar -- rejected, X-Ray's OTLP ingestion
+  #       authenticates each request with SigV4, which the vanilla OTLP exporter on the
+  #       services' classpath cannot sign, so it would need a new signing dependency in
+  #       common-lib and would still leave the Prometheus endpoint unscraped;
+  #       (b) a CloudWatch agent sidecar instead of the collector -- rejected, it
+  #       receives no OTLP spans, so tracing would still have no destination and the
+  #       image would need mirroring exactly as this one does; (c) leaving the pipeline
+  #       out and recording the gap -- rejected, that is the state this replaces.
+  #       Trade-offs: one more container per task, sized at 128 CPU units and 128 MiB
+  #       reservation, and one more image to keep pinned. Accepted because the same
+  #       container serves all three destinations at once -- scraped meters and pushed
+  #       meters to CloudWatch metrics, spans to X-Ray -- so the alternative to it is
+  #       not a cheaper collector but no metrics and no traces.
+  # WHY : Refactoring Rationale: every online service already exposes
+  #       `/actuator/prometheus`, but without a scraper those meters stay inside
+  #       the task. A sidecar shares the task network namespace, so it can scrape
+  #       loopback and receive OTLP traces without exposing either endpoint
+  #       through a security group or a load-balancer route.
+  telemetry_receivers = merge(
+    {
+      # WHY : Assumptions: both OTLP listeners bind LOOPBACK rather than every
+      #       interface. Under awsvpc the whole task shares one network namespace and
+      #       one elastic network interface, so a producer in the same task reaches
+      #       127.0.0.1 while nothing outside the task can, and the collector's
+      #       upstream example config binding 0.0.0.0 would instead publish two
+      #       unauthenticated ingest ports on that interface. Nothing legitimate needs
+      #       them there: every producer -- the application container and the tasks
+      #       the batch state machine starts -- is a container in this same task.
+      # WHY : Trade-offs: this makes the security group the SECOND control on those
+      #       ports rather than the only one. The application group admits just
+      #       app_container_port from the load-balancer group, so an interface-wide
+      #       bind is unreachable today; it would become reachable the moment some
+      #       later rule widened that group, and an OTLP receiver accepts spans and
+      #       metrics from any caller that can open the socket. The cost of binding
+      #       loopback is that a future sidecar in a DIFFERENT task could not push
+      #       here -- correctly, since it would have to cross the network to do it.
+      otlp = {
+        protocols = {
+          grpc = {
+            endpoint = "127.0.0.1:4317"
+          }
+          http = {
+            endpoint = "127.0.0.1:4318"
+          }
+        }
+      }
+    },
+    var.create_service ? {
+      prometheus = {
+        config = {
+          scrape_configs = [{
+            job_name        = local.resource_name
+            scrape_interval = "60s"
+            metrics_path    = "/actuator/prometheus"
+            scheme          = "https"
+            static_configs = [{
+              targets = ["127.0.0.1:${var.container_port}"]
+            }]
+            tls_config = {
+              # WHY : Assumptions: the scrape deliberately uses loopback so the
+              #       metrics endpoint is never exposed through a security-group
+              #       rule, and the TLS channel still protects the bytes inside
+              #       the task namespace.
+              # WHY : Assumptions: verification is skipped because the listener
+              #       certificate is UNANCHORED, not because of its names.
+              #       config/docker/generate-listener-material.sh mints the leaf with
+              #       `SAN=dns:<cn>,dns:localhost,ip:127.0.0.1`, so loopback IS a
+              #       subject-alternative name; what no container in the task has is
+              #       the issuer, because the leaf is self-signed and minted per task.
+              #       The only alternative would be exporting that per-task leaf into
+              #       the collector's own trust store on every start.
+              insecure_skip_verify = true
+            }
+          }]
+        }
+      }
+    } : {},
+  )
 
+  # WHY : Assumptions: memory_limiter is first in every pipeline below because it is
+  #       the only processor that can refuse work: a collector sharing a Fargate task's
+  #       fixed memory with the application must shed telemetry rather than grow into
+  #       the application's headroom and have the task killed for the whole workload.
+  telemetry_processors = {
+    memory_limiter = {
+      check_interval  = "5s"
+      limit_mib       = 128
+      spike_limit_mib = 32
+    }
+    resource = {
+      attributes = [
+        {
+          key    = "service.name"
+          action = "upsert"
+          value  = var.service_name
+        },
+        {
+          key    = "deployment.environment.name"
+          action = "upsert"
+          value  = var.environment
+        },
+        {
+          key    = "service.version"
+          action = "upsert"
+          value  = lookup(var.environment_variables, "CARDDEMO_VERSION", "unspecified")
+        },
+      ]
+    }
+    # WHY : Trade-offs: tail sampling rather than head sampling, so the decision is
+    #       taken after the spans of a request are in hand. Head sampling would discard
+    #       a request before it was known to have failed, which is the one request an
+    #       operator needs; the cost is the ten-second decision wait and the memory to
+    #       hold a trace for it.
+    tail_sampling = {
+      decision_wait = "10s"
+      policies = [
+        {
+          name = "errors"
+          type = "status_code"
+          status_code = {
+            status_codes = ["ERROR"]
+          }
+        },
+        {
+          name = "successful-sample"
+          type = "probabilistic"
+          probabilistic = {
+            sampling_percentage = var.telemetry_success_sample_percentage
+          }
+        },
+      ]
+    }
+    batch = {}
+  }
+
+  # WHY : Assumptions: the sidecar's container name is fixed by this module rather
+  #       than accepted as an input, because nothing outside the task addresses it --
+  #       unlike local.container_name, which infra/modules/step-functions-batch names
+  #       in its run-task container overrides. It is named once here because two
+  #       places read it, the container definition and the application container's
+  #       dependsOn, and a dependency naming a container that does not exist is
+  #       rejected only at RegisterTaskDefinition.
+  telemetry_container_name = "aws-otel-collector"
+
+  # WHY : Assumptions: the namespace is named once here and read by the exporter
+  #       below, rather than spelled inline, because it is the join between what this
+  #       module publishes and what infra/modules/observability reads: that module
+  #       declares the identical literal in its own
+  #       local.application_metric_namespace and its dashboard search selects series
+  #       from it. Two spellings would produce two namespaces, one of them with no
+  #       reader and no panel reporting the difference.
+  application_metric_namespace = "CardDemo"
+
+  # WHY : Assumptions: the awsemf exporter publishes into the `CardDemo` namespace and
+  #       that name is a cross-module contract, not a local choice --
+  #       infra/modules/observability names the same literal in
+  #       local.application_metric_namespace and its dashboard search reads it, so a
+  #       different spelling here would create a second near-identical namespace whose
+  #       series no panel or alarm addresses.
+  # WHY : Assumptions: the exporter writes its EMF records into this workload's OWN log
+  #       group under a dedicated stream prefix, which is why the task role's telemetry
+  #       policy below needs no group beyond the one this module creates. Trade-offs:
+  #       EMF records are billed as ingested log data as well as producing metrics, so
+  #       the stream is separated from the application's own so retention and volume
+  #       are attributable.
+  # WHY : Assumptions: NoDimensionRollup with resource-to-telemetry conversion on
+  #       means each series carries the full dimension set rather than additional
+  #       rolled-up copies of itself. Rolling up would multiply the published series
+  #       and its cost by the number of dimension subsets, and the dashboard selects
+  #       series by SEARCH expression rather than by an exact dimension list, so the
+  #       roll-ups would be paid for and never read.
+  telemetry_exporters = {
+    awsxray = {}
+    awsemf = {
+      namespace               = local.application_metric_namespace
+      log_group_name          = local.log_group_name
+      log_stream_name         = "${var.service_name}-telemetry"
+      dimension_rollup_option = "NoDimensionRollup"
+      resource_to_telemetry_conversion = {
+        enabled = true
+      }
+    }
+  }
+
+  # WHY : Assumptions: the metrics pipeline is created for EVERY workload and its
+  #       receiver list holds otlp in all cases, because the two task-only workloads --
+  #       batch and data-migration -- have no listener to scrape: batch starts with no
+  #       web server, so a scrape receiver pointed at it would collect nothing and the
+  #       counters, timers and gauges a nightly step records would go unexported.
+  # WHY : Assumptions: the two receivers serve two DIFFERENT modes and cannot
+  #       double-count, because a workload only ever feeds one of them. A serving task
+  #       is scraped -- telemetry_environment_variables below leaves Micrometer's OTLP
+  #       registry disabled for it -- and a one-shot task pushes, with the registry
+  #       enabled and no scrape target present. Enabling both on one workload is what
+  #       would export a meter twice, and that stays impossible through the environment
+  #       split rather than by omitting a pipeline.
+  # WHY : Trade-offs: reporting-service is create_service = true and its task
+  #       definition is ALSO started directly by the batch state machine, in
+  #       WebApplicationType.NONE. That one shape therefore carries a Prometheus scrape
+  #       configuration with no listener behind it while it runs as a task; the
+  #       collector reports the scrape failure at warn level and exports nothing extra,
+  #       and infra/modules/step-functions-batch supplies the push variables as
+  #       container overrides for those runs so the meters still arrive. Splitting
+  #       reporting into two task definitions would remove the harmless warning at the
+  #       cost of two revisions to keep in step for one image.
+  telemetry_pipelines = {
+    traces = {
+      receivers  = ["otlp"]
+      processors = ["memory_limiter", "resource", "tail_sampling", "batch"]
+      exporters  = ["awsxray"]
+    }
+    metrics = {
+      receivers  = var.create_service ? ["otlp", "prometheus"] : ["otlp"]
+      processors = ["memory_limiter", "resource", "batch"]
+      exporters  = ["awsemf"]
+    }
+  }
+
+  # WHY : Assumptions: the collector's own logs are held at warn level. At info it
+  #       narrates every export batch into the same log group the application writes
+  #       to, which is the group an operator reads during an incident.
+  telemetry_collector_configuration = yamlencode({
+    receivers  = local.telemetry_receivers
+    processors = local.telemetry_processors
+    exporters  = local.telemetry_exporters
+    service = {
+      telemetry = {
+        logs = {
+          level = "warn"
+        }
+      }
+      pipelines = local.telemetry_pipelines
+    }
+  })
+
+  # WHY : Assumptions: the OpenTelemetry starter is on every service classpath
+  #       through common-lib, but carddemo-common-defaults.yml leaves export disabled
+  #       so a local run or a test does not attempt to reach a collector that is not
+  #       listening. These task-only variables are the deployed override that activates
+  #       OTLP explicitly and points it at loopback; no collector endpoint is exposed
+  #       outside the task.
+  # WHY : Assumptions: the whole set is spelled in OTEL_* form and NOT in Spring's own
+  #       MANAGEMENT_* form, and that is a correctness requirement rather than a style
+  #       choice. spring-boot-starter-opentelemetry 4.1.0 registers
+  #       OpenTelemetryEnvironmentVariableEnvironmentPostProcessor, which translates the
+  #       OTEL_* variables into Spring properties and installs the result with
+  #       MutablePropertySources.addFirst -- the HIGHEST precedence in the environment,
+  #       above the system environment itself. So OTEL_METRICS_EXPORTER resolves
+  #       management.otlp.metrics.export.enabled and cannot be overridden by a
+  #       MANAGEMENT_OTLP_METRICS_EXPORT_ENABLED variable; mixing the two channels
+  #       produces a task whose push looks configured and is off.
+  #       Refactoring Rationale: this block previously set OTEL_METRICS_EXPORTER=none
+  #       for every workload and enabled the push with the MANAGEMENT_* trio, and by
+  #       that precedence rule the trio was inert -- the batch and data-migration
+  #       meters, which have no scrape target, were exported nowhere.
+  # WHY : Assumptions: OTEL_METRICS_EXPORTER carries the mode split, because the
+  #       framework's transform reads "otlp" as enabled and "none" as disabled for the
+  #       one property. A serving task publishes /actuator/prometheus and the collector
+  #       scrapes it, so its value is "none"; a one-shot task publishes nothing to
+  #       scrape, so its value is "otlp" and it pushes. That split is what stops a
+  #       meter being exported twice, and it is expressed once here rather than left to
+  #       each caller.
+  # WHY : Trade-offs: the push interval is shortened to fifteen seconds for a pushing
+  #       workload, supplied in MILLISECONDS because the framework reads this variable
+  #       through Duration.ofMillis as the OpenTelemetry specification requires. The
+  #       registry's own default publishes once a minute, and a batch step that
+  #       finishes inside that window would exit having exported nothing, because the
+  #       shutdown flush is best effort. Fifteen seconds bounds that loss to a quarter
+  #       of a step at four times the request volume, which is negligible for a nightly
+  #       chain. infra/modules/step-functions-batch sets the same value for the
+  #       reporting runs it starts, and for the same reason.
+  telemetry_environment_variables = var.enable_telemetry_collector ? merge({
+    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://127.0.0.1:4318/v1/traces"
+    OTEL_EXPORTER_OTLP_TRACES_PROTOCOL = "http/protobuf"
+    OTEL_LOGS_EXPORTER                 = "none"
+    OTEL_RESOURCE_ATTRIBUTES           = "deployment.environment.name=${var.environment},service.version=${lookup(var.environment_variables, "CARDDEMO_VERSION", "unspecified")}"
+    OTEL_SERVICE_NAME                  = var.service_name
+    OTEL_TRACES_EXPORTER               = "otlp"
+
+    # WHY : Assumptions: the value is always_on with an UNDERSCORE, which is the
+    #       OpenTelemetry specification spelling the framework's mapSamplerType
+    #       accepts. Its hyphenated form is rejected with a warn-level "Invalid value
+    #       for environment variable" line and no mapping, which silently leaves the
+    #       framework default of management.tracing.sampling.probability = 0.1 -- nine
+    #       traces in ten discarded in the application, before the collector's
+    #       tail-sampling policies could retain the failing ones. That misspelling was
+    #       present here and is the reason this value carries its own note.
+    OTEL_TRACES_SAMPLER = "always_on"
+
+    OTEL_METRICS_EXPORTER = var.create_service ? "none" : "otlp"
+    }, var.create_service ? {} : {
+    OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = "http://127.0.0.1:4318/v1/metrics"
+    OTEL_METRIC_EXPORT_INTERVAL         = "15000"
+  }) : {}
+
+  # WHY : Assumptions: the sampler is left always-on in the application and the
+  #       sampling decision is taken in the collector's tail_sampling processor above.
+  #       A head sampler in the application decides before the outcome of the request
+  #       is known, so an error trace it dropped cannot be recovered downstream.
+  # WHY : Assumptions: the telemetry names are merged AFTER the caller's map, so they
+  #       are the module's own contribution and are deliberately not subject to the
+  #       admissible-name preconditions at the foot of this file -- those check
+  #       var.environment_variables, which is what a root supplies. A root cannot set
+  #       an OTEL_* name at all, because the allow-list does not contain one.
   effective_environment_variables = merge(
     var.environment_variables,
+    local.telemetry_environment_variables,
   )
 
   # WHY : Assumptions: ECS stores the environment array in the order supplied,
@@ -1277,14 +1579,18 @@ data "aws_iam_policy_document" "execution" {
   #       through the root rather than being reconstructed from the image URI,
   #       because parsing an ARN out of a registry reference would encode the
   #       registry hostname format in this module.
-  # WHY : Refactoring Rationale: the Resource list held a SECOND repository, the
-  #       one a mirrored telemetry collector image was pulled from, and it is
-  #       withdrawn with the sidecar itself for the reason recorded in the locals
-  #       block above. One task now pulls one image, so one repository ARN is the
-  #       whole grant, and compact() is no longer needed to drop a null second
-  #       element. Keeping the two-element shape "in case" would have re-created
-  #       the grant for an image nothing pulls, which is exactly the kind of
-  #       leftover privilege a least-privilege execution role exists to avoid.
+  # WHY : Refactoring Rationale: the Resource list carries the SECOND repository
+  #       again, because the telemetry sidecar restored in the locals block above
+  #       makes this a two-image task. The mirrored collector lives in its own
+  #       repository so that ordinary service releases cannot expire it out of a
+  #       shared one, so a role granted only the service's repository can pull the
+  #       application container and not its sidecar -- and a task whose sidecar
+  #       cannot be pulled does not start degraded, it fails to start.
+  #       Assumptions: compact() removes the null rather than a conditional
+  #       expression choosing between two lists, so a caller that names no mirror
+  #       grants exactly one repository and the statement never carries an empty or
+  #       null element -- a policy with a null Resource is rejected at apply time
+  #       with a message naming neither the input nor the statement.
   statement {
     sid    = "AllowEcrImagePull"
     effect = "Allow"
@@ -1295,7 +1601,10 @@ data "aws_iam_policy_document" "execution" {
       "ecr:GetDownloadUrlForLayer",
     ]
 
-    resources = [var.ecr_repository_arn]
+    resources = compact([
+      var.ecr_repository_arn,
+      var.telemetry_collector_repository_arn,
+    ])
   }
 
   # WHY : Assumptions: logs:CreateLogGroup is deliberately absent, and its
@@ -1565,16 +1874,18 @@ resource "aws_iam_role_policy" "execution" {
 #       is the exact opposite of the per-service least privilege that stands in
 #       for RACF here. The caller passes what its own service needs -- its own
 #       queues, secrets and key usage -- and nothing else is attached here.
-# WHY : Refactoring Rationale: this paragraph continued "while the telemetry
-#       statement below is invariant across all services and contains no business
-#       resource. No wildcard action reaches this role; the sole wildcard Resource
-#       is on the two X-Ray ingestion actions, which do not support resource
-#       scoping." It is withdrawn with the collector sidecar: it would otherwise
-#       describe a policy document this file no longer contains, and it would
-#       concede a wildcard Resource that this role now does not hold. Neither a
-#       wildcard action nor a wildcard resource reaches this role any more, which
-#       is a stronger property than the sentence was explaining and is worth
-#       stating rather than leaving as a stale concession.
+# WHY : Assumptions: the telemetry statement restored below is the ONE exception to
+#       the per-caller shape above, and it is deliberately invariant across all nine
+#       instantiations: it names no business resource, so granting every task the same
+#       two X-Ray ingestion actions and its own log group gives no task any reach into
+#       another's data.
+#       Trade-offs: those two X-Ray actions carry a wildcard Resource, which is the
+#       only wildcard resource this role holds. X-Ray does not support resource-level
+#       permissions for segment ingestion -- a segment has no ARN until the call that
+#       submits it -- so naming a resource produces a policy that denies every write.
+#       The narrowing that IS available is applied: exactly two write-only actions, and
+#       no X-Ray read permission at all, so a compromised task can contribute trace
+#       data and cannot read anyone's. No wildcard ACTION reaches this role.
 resource "aws_iam_role" "task" {
   name                 = "${local.resource_name}-task"
   description          = "Application task role for ${local.resource_name}."
@@ -1668,18 +1979,71 @@ resource "aws_iam_role_policy_attachment" "task" {
   policy_arn = each.value
 }
 
-# WHY : Refactoring Rationale: a task_telemetry policy document and inline policy
-#       stood here. It carried two statements -- CloudWatch Logs stream creation and
-#       PutLogEvents on this workload's own group, and the two X-Ray ingestion
-#       actions on the wildcard resource those APIs require -- and both existed for
-#       the withdrawn collector sidecar rather than for the application. The
-#       application's own container logs travel through the awslogs driver, which
-#       runs under the EXECUTION role and is granted by the AllowLogWrite statement
-#       above, so removing this document takes nothing away from the workload; what
-#       it removes is a wildcard trace-export grant held by every task role in the
-#       deployment for an exporter that no longer runs. Leaving it in place would
-#       have been a standing privilege with no consumer, which is the shape a
-#       least-privilege review is meant to catch.
+# WHY : Refactoring Rationale: this document is RESTORED with the sidecar, and it is
+#       the grant half of the export path -- without it the collector runs, receives
+#       spans and meters, and is refused by both destinations. The two statements are
+#       the exporters' two destinations and nothing else: the awsemf exporter writes
+#       its embedded-metric records as log events, and the awsxray exporter submits
+#       trace segments. It is held on the TASK role rather than the execution role
+#       because the collector process makes these calls itself while it runs, where
+#       the awslogs driver's own log writes are made by the ECS agent before and
+#       around it under the execution role.
+data "aws_iam_policy_document" "task_telemetry" {
+  # WHY : Assumptions: the log statement names THIS workload's own group and its
+  #       streams, which is the whole of what the metric exporter writes -- it is
+  #       configured with local.log_group_name above. logs:DescribeLogStreams is
+  #       included because the exporter checks for its stream before creating it;
+  #       omitting it makes the first export fail rather than the stream be created
+  #       silently.
+  statement {
+    sid    = "AllowTelemetryLogExport"
+    effect = "Allow"
+
+    actions = [
+      "logs:CreateLogStream",
+      "logs:DescribeLogStreams",
+      "logs:PutLogEvents",
+    ]
+
+    resources = [
+      local.log_group_arn,
+      "${local.log_group_arn}:*",
+    ]
+  }
+
+  statement {
+    sid    = "AllowXrayTraceExport"
+    effect = "Allow"
+
+    # WHY : Assumptions: X-Ray ingestion actions do not support resource-level
+    #       permissions, so the Resource wildcard is imposed by the API rather than
+    #       chosen -- a segment has no ARN to name because it does not exist until
+    #       the call that submits it. The narrowing that IS available is applied: two
+    #       write-only actions, and no sampling-rule read, because the sampling
+    #       decision is taken by the collector's own tail_sampling processor rather
+    #       than fetched from the service. The AWSXRayDaemonWriteAccess managed policy
+    #       was rejected for granting exactly those three unused reads.
+    actions = [
+      "xray:PutTelemetryRecords",
+      "xray:PutTraceSegments",
+    ]
+
+    resources = ["*"]
+  }
+}
+
+# WHY : Alternatives Considered: requiring every one of the nine callers to repeat
+#       these statements was rejected because the permissions are a property of the
+#       sidecar this module creates, not of any bounded context. Keeping them here
+#       means disabling the sidecar removes the policy with it, while each service's
+#       queue, database and secret grants stay root-owned.
+resource "aws_iam_role_policy" "task_telemetry" {
+  count = var.enable_telemetry_collector ? 1 : 0
+
+  name   = "${local.resource_name}-telemetry"
+  role   = aws_iam_role.task.id
+  policy = data.aws_iam_policy_document.task_telemetry.json
+}
 
 
 # -----------------------------------------------------------------------------
@@ -1714,16 +2078,22 @@ resource "aws_ecs_task_definition" "this" {
   #       with no readiness barrier unprotected. The service keeps its own edge
   #       below, which now names the task-role policies as well, so a rolling
   #       deployment cannot begin before the grants it will run under are in place.
-  # WHY : Trade-offs: the list names the three conditional policy resources with
-  #       splat expressions rather than being derived, so adding a fifth policy to
-  #       this role means adding a line here. That friction is preferred to a
-  #       depends_on on the role itself, which would NOT work: an inline policy is a
-  #       separate resource that depends on the role, so depending on the role
-  #       orders this before the policies rather than after them.
+  # WHY : Trade-offs: the list names the four conditional policy resources
+  #       explicitly rather than being derived, so adding a further policy to this
+  #       role means adding a line here. That friction is preferred to a depends_on
+  #       on the role itself, which would NOT work: an inline policy is a separate
+  #       resource that depends on the role, so depending on the role orders this
+  #       before the policies rather than after them.
+  # WHY : Assumptions: the telemetry policy belongs in this list for the same reason
+  #       the other three do, and its failure mode is the quietest of them. A
+  #       collector started before its grant exists retries its exports and logs the
+  #       denial at warn level in the same group the application writes to, so the
+  #       symptom is a gap in the dashboards rather than a failed task.
   depends_on = [
     aws_iam_role_policy.task,
     aws_iam_role_policy.task_sqs,
     aws_iam_role_policy.task_online_write_gate,
+    aws_iam_role_policy.task_telemetry,
     aws_iam_role_policy_attachment.task,
     aws_iam_role_policy.execution,
   ]
@@ -1780,29 +2150,44 @@ resource "aws_ecs_task_definition" "this" {
     }
   }
 
-  # WHY : Refactoring Rationale: this was a concat() of the application container
-  #       with a conditional single-element list holding the collector sidecar. The
-  #       sidecar is withdrawn for the reason recorded in the locals block above, so
-  #       the concat had one operand and is replaced by the list itself. Keeping the
-  #       concat would have implied a second container definition somewhere for a
-  #       reader to find.
-  container_definitions = jsonencode([
+  dynamic "volume" {
+    for_each = var.enable_telemetry_collector ? [true] : []
+
+    content {
+      # WHY : Assumptions: the collector runs with a read-only root filesystem and
+      #       receives its own ephemeral /tmp rather than sharing an application
+      #       scratch volume that may hold business data. A third-party container is
+      #       the wrong place to give write access to a path the application also
+      #       writes.
+      name = "telemetry-tmp"
+    }
+  }
+
+  # WHY : Refactoring Rationale: this is a concat() of the application container with
+  #       a conditional single-element list holding the collector sidecar, restored
+  #       with the sidecar. It had been reduced to a bare list when the sidecar was
+  #       withdrawn, and the withdrawal is what left this deployment's meters and
+  #       spans with no destination.
+  container_definitions = jsonencode(concat([
     {
       name  = local.container_name
       image = var.image_uri
 
-      # WHY : Assumptions: the application container is essential, so the task
-      #       stops when it stops. With the telemetry sidecar withdrawn this is now
-      #       the only container in the task, which makes the flag a statement of
-      #       intent rather than a live discriminator -- it is kept explicit because
-      #       ECS defaults it per-container and a task whose sole container is
-      #       non-essential can sit in RUNNING with nothing serving traffic.
-      # WHY : Refactoring Rationale: a dependsOn ordering the application after the
-      #       collector's START is withdrawn with the sidecar. There is no second
-      #       container to order against, and an empty dependency array left behind
-      #       would read as an ordering constraint that had been satisfied rather
-      #       than one that no longer applies.
+      # WHY : Assumptions: the application container is essential, so the task stops
+      #       when it stops. That remains true with the sidecar present, which is the
+      #       case the flag exists for: otherwise a task could sit in RUNNING with the
+      #       collector alive and nothing serving business traffic.
       essential = true
+
+      # WHY : Assumptions: START waits only for the collector process to begin, not
+      #       for an external health endpoint. OTLP exporters buffer and retry during
+      #       the short interval before its receivers are ready, whereas omitting the
+      #       dependency loses the spans emitted before the sidecar process exists at
+      #       all -- which are the start-up spans most worth having.
+      dependsOn = var.enable_telemetry_collector ? [{
+        containerName = local.telemetry_container_name
+        condition     = "START"
+      }] : []
 
       # WHY : Assumptions: container_user carries a numeric uid, which must
       #       match the non-root user the service's own Dockerfile creates -- a
@@ -1924,11 +2309,124 @@ resource "aws_ecs_task_definition" "this" {
         startPeriod = var.health_check_grace_period_seconds
       }
     }
-  ])
+    ],
+    var.enable_telemetry_collector ? [
+      {
+        name  = local.telemetry_container_name
+        image = var.telemetry_collector_image
+
+        # WHY : Assumptions: the collector is essential too, so a task whose
+        #       telemetry pipeline cannot start is replaced rather than running
+        #       unobserved. Trade-offs: that couples the workload's availability to a
+        #       third-party image, which is exactly why the image is pulled from the
+        #       private mirror and pinned rather than resolved from a public tag.
+        essential = true
+
+        # WHY : Assumptions: the image supports an environment-backed config URI.
+        #       Supplying the complete typed configuration through the task definition
+        #       avoids an S3 config object, its read policy and a second deployment
+        #       artifact that could drift from this revision.
+        command = ["--config=env:AOT_CONFIG_CONTENT"]
+
+        # WHY : Trade-offs: 128 CPU units and a 128 MiB reservation, matching the
+        #       collector's own memory_limiter limit above so the process sheds
+        #       telemetry before the container is killed. The reservation is soft
+        #       rather than a hard `memory` limit, so a burst borrows from the task's
+        #       unreserved headroom instead of terminating the container mid-export.
+        cpu               = 128
+        memoryReservation = 128
+
+        # WHY : Assumptions: tail sampling waits up to ten seconds before a decision.
+        #       A thirty-second stop window lets the collector make that decision and
+        #       flush its final batch after the application exits, which is
+        #       load-bearing for the short-lived batch tasks whose whole run may be
+        #       shorter than one export interval.
+        stopTimeout = 30
+
+        readonlyRootFilesystem = true
+        mountPoints = [{
+          containerPath = "/tmp"
+          readOnly      = false
+          sourceVolume  = "telemetry-tmp"
+        }]
+
+        # WHY : Assumptions: the configuration travels as an environment value and
+        #       carries no credential of any kind -- it names endpoints, a namespace,
+        #       a log group and a sampling percentage, all of which are already
+        #       readable to anyone who can describe this task definition. The
+        #       credential path is the task role, which the container assumes rather
+        #       than being handed.
+        environment = [
+          {
+            name  = "AOT_CONFIG_CONTENT"
+            value = local.telemetry_collector_configuration
+          },
+          {
+            name  = "AWS_REGION"
+            value = data.aws_region.current.region
+          },
+        ]
+
+        # WHY : Assumptions: this container declares NO portMappings, and the omission
+        #       is the point rather than an oversight. Under awsvpc a mapping does not
+        #       describe a listener, it publishes one on the task's elastic network
+        #       interface, so mapping 4317 and 4318 would put two unauthenticated
+        #       telemetry ingest ports on that interface; the application and the tasks
+        #       the batch state machine starts are containers in this same task and
+        #       reach the collector over the shared loopback interface, which needs no
+        #       mapping at all. The only container port this task publishes is the
+        #       application's, which is the one the load balancer's target group
+        #       registers.
+        # WHY : Refactoring Rationale: both ports were mapped here on the stated
+        #       grounds that a mapping "documents the listeners without exposing them
+        #       outside the task". It does not -- under this network mode a mapping IS
+        #       the exposure -- and the listener addresses in local.telemetry_receivers
+        #       document themselves. The listeners now bind loopback and the mappings
+        #       are gone, so the two statements agree.
+
+        # WHY : Assumptions: the sidecar logs into the SAME group as the application
+        #       under its own stream prefix, so an operator diagnosing a missing
+        #       series reads the collector's refusal beside the request that produced
+        #       the meter rather than in a second group they have to know exists.
+        logConfiguration = {
+          logDriver = "awslogs"
+          options = {
+            "awslogs-group"         = aws_cloudwatch_log_group.this.name
+            "awslogs-region"        = data.aws_region.current.region
+            "awslogs-stream-prefix" = "telemetry"
+          }
+        }
+      },
+    ] : [],
+  ))
 
   tags = local.tags
 
   lifecycle {
+    # WHY : Assumptions: a private collector image with no repository ARN is refused
+    #       HERE, at plan time, because nothing else refuses it. The execution role's
+    #       pull statement is built with compact(), so a null ARN silently drops out
+    #       of it and the plan succeeds; the pull is then denied at task start, and
+    #       because the sidecar is essential the task never reaches RUNNING -- surfaced
+    #       as a CannotPullContainerError on a stopped task, which names the image and
+    #       not the input that was omitted. This module's own header recorded that
+    #       failure mode as a caveat, and a caveat is a worse control than a
+    #       precondition when the check is this cheap.
+    # WHY : Assumptions: the test is on the image string containing ".dkr.ecr." rather
+    #       than on any registry reference, because the upstream public reference is
+    #       equally admissible and needs NO grant -- Amazon ECR Public is unauthenticated
+    #       for pulls. Requiring the ARN unconditionally would refuse the one caller this
+    #       module is meant to stay usable for: a deployment whose egress reaches the
+    #       public registry.
+    precondition {
+      condition = (
+        !var.enable_telemetry_collector ||
+        !can(regex("\\.dkr\\.ecr\\.", var.telemetry_collector_image)) ||
+        var.telemetry_collector_repository_arn != null
+      )
+      error_message = "telemetry_collector_image names a private Amazon ECR repository, so telemetry_collector_repository_arn must be supplied for the execution role to be granted that pull."
+    }
+
     precondition {
       condition = (
         length(setsubtract(toset(keys(var.environment_variables)), local.plain_environment_names)) == 0 &&
@@ -1992,15 +2490,13 @@ resource "aws_ecs_task_definition" "this" {
       #       literal "unspecified" when the variable is absent, so a task that supplied
       #       that placeholder explicitly would be indistinguishable from one that
       #       supplied nothing -- while looking wired.
-      #       Refactoring Rationale: this also named "this module's own
-      #       resource-attribute and OTEL_RESOURCE_ATTRIBUTES expressions" as sharing the
-      #       fallback word. The module no longer has either: both belonged to the
-      #       telemetry sidecar it used to add, and that sidecar was withdrawn because the
-      #       specification's module inventory contains no collector -- the same removal
-      #       that retired the eleventh ECR repository mirroring its image. The
-      #       precondition is unaffected, because the reason it exists is the
-      #       application-side fallback above, which is still present; only the withdrawn
-      #       consumers are dropped from the sentence.
+      #       Assumptions: the same fallback word is spelled in TWO further places in
+      #       this module -- the collector's resource processor, which upserts
+      #       service.version, and OTEL_RESOURCE_ATTRIBUTES, which carries it into the
+      #       trace resource -- so the placeholder would reach the metric and span
+      #       dimensions as well as the application's own configuration. This one
+      #       precondition covers all three, which is why neither of those expressions
+      #       repeats the check.
       # WHY : Assumptions: the release identity is not checked for SHAPE, only for
       #       being a real value. Both roots derive it from the same expression that
       #       chooses this workload's image -- the immutable digest where one is

@@ -128,7 +128,12 @@ public class BatchRun {
     private BatchRunStatus status;
 
     /**
-     * Operational timestamp supplied when execution of the step begins.
+     * Operational timestamp at which the attempt this row currently describes began.
+     *
+     * <p>A first attempt carries the instant supplied to the constructor. Each re-open through
+     * {@link #reopen(LocalDateTime)} replaces it with the instant the new attempt begins, so the
+     * stored value always describes the attempt named by {@link #getAttempt()} rather than the
+     * moment the row was first created.</p>
      */
     // WHY : Assumptions: Callers obtain operational timestamps from an injected Clock and
     //       normalize them to the migration's microsecond precision. Business date remains a job
@@ -137,7 +142,20 @@ public class BatchRun {
     //       record, whose PIC X(05) offset component is never copied into the emitted timestamp.
     //       Instant or OffsetDateTime would therefore manufacture zone information not preserved
     //       by the source contract.
-    @Column(name = "started_at", nullable = false, updatable = false)
+    // WHY : Refactoring Rationale: this column is deliberately updatable, unlike run_id and
+    //       step_name beside it. It was mapped updatable = false while the only writer was the
+    //       constructor, and reopen() was added afterwards; the provider silently omitted the
+    //       column from the UPDATE, so a redriven row durably kept the FIRST attempt's start and
+    //       every later attempt was invisible in the ledger. Excluding started_at from the SET
+    //       list is what let that regression exist, so the exclusion is removed rather than
+    //       worked around at the caller.
+    // WHY : Trade-offs: keeping the creation instant as well was rejected. An operator reading a
+    //       recovered night asks when the attempt that is running now started, and answering that
+    //       from a column also claiming to be the row's birth instant serves neither question.
+    //       The attempt counter already carries the retry history, and a per-attempt audit trail
+    //       belongs in the orchestrator's own execution history, not in a one-row-per-step ledger
+    //       whose purpose is the idempotency decision.
+    @Column(name = "started_at", nullable = false)
     private LocalDateTime startedAt;
 
     /**
@@ -187,9 +205,12 @@ public class BatchRun {
     @Column(name = "attempt", nullable = false)
     private int attempt;
 
-    // WHY : Assumptions: The ledger records immutable identity and start facts, so id, runId,
-    //       stepName and startedAt expose no setters; rewriting any of them would destroy the
-    //       audit meaning of the row.
+    // WHY : Assumptions: The ledger records immutable identity, so id, runId and stepName are
+    //       written once by the constructor and are mapped updatable = false; rewriting any of
+    //       them would repoint the row at a different step of a different run and destroy its
+    //       audit meaning. No field on this entity exposes a setter: startedAt is mutable state,
+    //       but only the named reopen transition may rewrite it, and only to the start of the
+    //       attempt it is opening.
 
     /**
      * Creates an uninitialized persistence shell for provider hydration.
@@ -247,6 +268,10 @@ public class BatchRun {
 
     /**
      * Re-opens a terminal or abandoned row for another attempt, counting it.
+     *
+     * <p>The supplied instant becomes the row's durable start time, replacing the previous
+     * attempt's, so a caller reading the row back sees when the attempt it now describes began.
+     * Both nullable outcome columns are cleared and the attempt counter is incremented.</p>
      *
      * @param startedAt the non-null LocalDateTime at which the new attempt begins
      * @throws NullPointerException if startedAt is null
@@ -389,9 +414,9 @@ public class BatchRun {
     }
 
     /**
-     * Returns the immutable operational start time.
+     * Returns the operational start time of the attempt this row currently describes.
      *
-     * @return the non-null LocalDateTime start time
+     * @return the non-null LocalDateTime start time of the current attempt
      */
     public LocalDateTime getStartedAt() {
         return startedAt;

@@ -7,7 +7,6 @@ import com.carddemo.common.time.TimestampFormatter;
 import com.carddemo.common.validation.DateEditValidator;
 import com.carddemo.common.validation.DateEditValidator.LanguageEnvironmentResult;
 import com.carddemo.common.validation.FieldValidationFlag;
-import com.carddemo.common.web.CorrelationIdFilter;
 import com.carddemo.reporting.dto.ReportRequest;
 import com.carddemo.reporting.dto.ReportSubmissionResponse;
 import com.carddemo.reporting.mapper.ReportBandLayouts;
@@ -28,7 +27,6 @@ import java.util.UUID;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import software.amazon.awssdk.core.exception.SdkException;
@@ -1069,10 +1067,13 @@ public class ReportExecutionService {
      *
      * <p>Assumptions: a submission that the orchestrator has already accepted under the same name is
      * answered with the handle of that run rather than as a failure, so a caller retrying one request
-     * observes one execution. Which second request counts as the same submission is decided by
-     * {@link #currentSubmissionKey()} and joined into the name by
-     * {@link #executionName(String, String, String, String)}; the two documents together are the whole
-     * of this method's deduplication behaviour.</p>
+     * observes one execution. Which second request counts as the same submission is decided by the
+     * caller alone -- it is the same submission exactly when the caller repeats the
+     * {@code Idempotency-Key} header -- and the key is joined into the name by
+     * {@link #executionName(String, String, String, String)}. A submission that carries no such header
+     * takes a fresh discriminator from {@link #freshSubmissionKey()} and therefore collides with
+     * nothing; those three documents together are the whole of this method's deduplication
+     * behaviour.</p>
      *
      * @param request the confirmed report request; must not be {@code null}
      * @param reportName the resolved report name, as {@link #resolveReportName(ReportRequest)}
@@ -1147,19 +1148,34 @@ public class ReportExecutionService {
         // WHY : Assumptions: the key is resolved ONCE, before the call, and the same value is used
         //       for the name and for the log line that reports a duplicate, so that an operator
         //       reading the record can tell which submission was folded onto which run.
-        // WHY : Refactoring Rationale: the key has TWO sources and the caller's wins. A caller that
-        //       sends the Idempotency-Key header is stating whether a second submission of the same
-        //       range is a retry of one attempt or a genuinely new run, and it is the only party that
-        //       knows -- an execution name is reserved for the 90 days the orchestrator remembers a
-        //       completed run, so a name derived from the range alone refuses every legitimate rerun.
-        //       When the header is absent the key is derived from the request's own correlation
-        //       identifier instead, which folds the retries of ONE abandoned call onto one run (the
-        //       client's per-call ceiling can abandon a call the orchestrator went on to accept)
-        //       without making a later, separately-correlated submission collide with it.
-        // WHY : Alternatives Considered: a random distinguisher when the header is absent. Rejected
-        //       because it makes every retry of an abandoned call start another run, which is the
-        //       duplicate-submission defect this deduplication exists to prevent.
-        String submissionKey = suppliedKey == null ? currentSubmissionKey() : suppliedKey;
+        // WHY : Assumptions: the Idempotency-Key header is the ONLY idempotency contract. A caller
+        //       that sends it is stating that a second submission of the same range is a retry of one
+        //       attempt rather than a genuinely new run, and it is the only party that knows -- an
+        //       execution name is reserved for the 90 days the orchestrator remembers a completed run,
+        //       so a name derived from the range alone would refuse every legitimate rerun. A caller
+        //       that sends no header gets a fresh discriminator per call, which is exactly what
+        //       reporting-api.yaml publishes for the absent header and what the @param clause above
+        //       states.
+        // WHY : ⚠️ Refactoring Rationale: the absent-header key was DERIVED FROM THE CORRELATION
+        //       IDENTIFIER, and a review found that it made this method deduplicate submissions the
+        //       contract promises to keep distinct. A correlation identifier is a tracing handle: it
+        //       is accepted from the caller, it is reused across a whole client operation, and two
+        //       genuinely independent submissions of one range under one identifier are ordinary --
+        //       yet they collapsed onto one run, and the second caller was answered 201 with the FIRST
+        //       run's handle, so a report it believed it had ordered was never started. Deriving
+        //       idempotency from a field whose purpose is correlation makes a tracing decision change
+        //       an execution outcome, which is why the two are now separate: the correlation
+        //       identifier still travels on every record through CorrelationIdFilter and no longer
+        //       decides what counts as a duplicate.
+        // WHY : Trade-offs: what is given up is the folding of retries of ONE abandoned call -- the
+        //       client's per-call ceiling can abandon a call the orchestrator went on to accept -- onto
+        //       one run when the caller sent no header. That is the correct direction: such a caller
+        //       has told this service nothing about whether its second call is a retry, and starting a
+        //       second run is recoverable (a duplicate report is written and both handles are
+        //       observable) while suppressing a wanted run is not (the caller holds a handle to a run
+        //       it did not ask for and no record says so). A caller that wants the folding asks for it
+        //       by sending the header, which is the one instrument that says so unambiguously.
+        String submissionKey = suppliedKey == null ? freshSubmissionKey() : suppliedKey;
         String executionName = executionName(reportName, startDate, endDate, submissionKey);
 
         try {
@@ -1212,9 +1228,15 @@ public class ReportExecutionService {
             //       deployment-configuration fault on whichever request happened to be a retry.
             // WHY : Assumptions: this is an INFO record and not a warning, because nothing failed --
             //       a retry was recognised and folded onto the run it was retrying. The submission
-            //       key is recorded because it is the only field that ties the two requests together,
-            //       and it is a digest of the correlation identity rather than the identity itself,
-            //       so the record carries no caller-supplied text.
+            //       key is recorded because it is the only field that ties the two requests together.
+            // WHY : Assumptions: reaching this arm now means the caller SENT an Idempotency-Key and
+            //       sent it before, because that is the only key a second submission can repeat -- an
+            //       absent header takes 96 fresh random bits per call, so a collision on that path is
+            //       not a state an operator will ever read. The value is therefore caller-supplied
+            //       text, which is admissible in this record precisely because validatedIdempotencyKey
+            //       below has already confined it to letters, digits, the hyphen and the underscore
+            //       within a bounded length: nothing a caller can put in it can break a log line or
+            //       carry a cardholder value of the kind docs/architecture/observability.md withholds.
             LOG.info("event=report.submission.deduplicated reportName={} startDate={} endDate={}"
                     + " submission={} execution={}",
                     reportName, startDate, endDate, submissionKey, executionName);
@@ -1349,9 +1371,9 @@ public class ReportExecutionService {
             String reportName, String startDate, String endDate, String idempotencyKey) {
 
         // WHY : Refactoring Rationale: the key is REQUIRED here rather than defaulted, because the
-        //       caller resolves it -- the Idempotency-Key header when one arrives, the request's
-        //       correlation digest otherwise -- and a second default in this method would make the
-        //       name depend on which of two places had filled it in.
+        //       caller resolves it -- the Idempotency-Key header when one arrives, a fresh
+        //       discriminator from freshSubmissionKey otherwise -- and a second default in this method
+        //       would make the name depend on which of two places had filled it in.
         Objects.requireNonNull(idempotencyKey, "idempotencyKey must not be null");
         return reportName.toLowerCase(Locale.ROOT) + "-" + startDate + "-" + endDate
                 + "-" + idempotencyKey;
@@ -1460,6 +1482,16 @@ public class ReportExecutionService {
 
         DescribeExecutionResponse described;
         try {
+            // WHY : ⚠️ Assumptions: this call needs states:DescribeExecution on the EXECUTION ARN
+            //       composed above, which is not the resource the submission's states:StartExecution
+            //       names -- that one names the state machine. A review found the deployed task role
+            //       holding the start action alone with a rationale asserting that a read grant
+            //       belonged with "a future download endpoint"; this call is that endpoint's
+            //       predecessor and it ships, so the grant is required now. Because the ARN is
+            //       composed here from the configured machine and only its final segment comes from
+            //       the caller, the grant is safely written as that machine's execution ARN with a
+            //       wildcard name -- no widening of the resource lets a caller reach another
+            //       machine's runs, since no caller-supplied text reaches any earlier segment.
             described = sfnClient.describeExecution(DescribeExecutionRequest.builder()
                     .executionArn(executionArn)
                     .build());
@@ -1687,39 +1719,46 @@ public class ReportExecutionService {
     }
 
     /**
-     * Derives the key identifying THIS submission, so that a retry of it is recognisable.
+     * Mints a discriminator that makes THIS submission distinct from every other.
      *
-     * <p>Assumptions: the correlation identifier is the per-submission key, and it is read from the
-     * mapped diagnostic context that {@link CorrelationIdFilter} populates for every request. That
-     * filter accepts a caller-supplied identifier and generates one only when none arrives, so a
-     * client retrying with the identifier it used the first time is recognised as retrying, and a
-     * client submitting afresh gets a new identifier and a new run. Idempotency is therefore something
-     * a caller asks for by resending the header it already owns, rather than something inferred from
-     * the request's content -- which is the only reading that can tell a retry from a reprint, since a
-     * reprint and a retry carry byte-identical bodies.</p>
+     * <p>Assumptions: this is the absent-header path and it is deliberately unpredictable and
+     * stateless. When a caller supplies no {@code Idempotency-Key} the published contract says the
+     * submission is its own run, so the only correct key is one that has never been used and cannot be
+     * reproduced: any key derived from something OBSERVABLE about the request -- its correlation
+     * identifier, its body, its principal, the clock to a coarse resolution -- makes two submissions
+     * that happen to agree on that thing collide, and a collision on this path is answered as a
+     * duplicate rather than as a new run.</p>
      *
-     * <p>Assumptions: a random key is used when the context carries none, which happens for a caller
-     * that is not an HTTP request -- a scheduled invocation or a test. Such a caller has no stable key
-     * to retry under, so the alternative to a random one is a constant one, and a constant would make
-     * every non-HTTP submission a duplicate of the first for 90 days.</p>
+     * <p>⚠️ Refactoring Rationale: this method read the correlation identifier from the mapped
+     * diagnostic context and digested that. The full reasoning for withdrawing it is recorded at the
+     * point of use in {@link #start(ReportRequest, String, LocalDate, LocalDate, String)}; the short
+     * form is that a correlation identifier is reused across a client operation by design, so
+     * deduplicating on it silently discarded submissions the contract promises to start.</p>
      *
-     * <p>Assumptions: the identifier is DIGESTED rather than used verbatim, for two reasons that are
-     * both about not depending on another class's rules. Its width is bounded by a constant that class
-     * owns, and the punctuation it admits includes the full stop, which is admissible in an execution
-     * name today; a digest is a fixed sixteen characters drawn from the base64url alphabet, so the
-     * assembled name is provably within the orchestrator's ceiling and provably within its character
-     * set whatever the identifier holds. It also keeps caller-supplied text out of a name that appears
-     * in operational records.</p>
+     * <p>Assumptions: the source is {@link UUID#randomUUID()}, which draws 122 bits from a
+     * cryptographically strong generator, and it is DIGESTED rather than used verbatim so the key
+     * keeps the fixed sixteen-character base64url width the execution-name arithmetic on
+     * {@link #SUBMISSION_DIGEST_BYTES} depends on -- a rendered UUID is 36 characters and carries the
+     * hyphen, so using it directly would both widen every name and re-open the question of whether
+     * its punctuation is admissible. Alternatives Considered: taking twelve bytes straight from a
+     * {@link java.security.SecureRandom} and encoding those, which is the same width with one fewer
+     * step; it is not adopted because it would leave this class holding a second source of randomness
+     * beside the one the platform already gives it, for no property this path needs.</p>
      *
-     * @return the per-submission key, sixteen base64url characters; never {@code null}
+     * <p>Trade-offs: an accidental collision is possible in principle rather than impossible, and its
+     * probability is what makes that acceptable: {@value #SUBMISSION_DIGEST_BYTES} bytes reach the
+     * name, so two submissions of one report type and one range collide only on a 96-bit coincidence.
+     * The alternative -- a monotonic counter, which cannot collide -- would need durable state in a
+     * service whose database role is {@code SELECT}-only, and the coincidence would still have to be
+     * handled because a caller-supplied key can collide deliberately.</p>
+     *
+     * @return the per-submission discriminator, sixteen base64url characters, different on every
+     *     call; never {@code null}
      * @throws IllegalStateException if the platform does not provide
      *     {@value #SUBMISSION_DIGEST_ALGORITHM}, which the platform specification forbids
      */
-    private static String currentSubmissionKey() {
-        String correlationId = MDC.get(CorrelationIdFilter.CORRELATION_ID_MDC_KEY);
-        String source = correlationId == null || correlationId.isBlank()
-                ? UUID.randomUUID().toString()
-                : correlationId;
+    private static String freshSubmissionKey() {
+        String source = UUID.randomUUID().toString();
 
         byte[] digest;
         try {

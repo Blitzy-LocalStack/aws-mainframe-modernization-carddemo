@@ -61,6 +61,7 @@ import ast
 import base64
 import hashlib
 import logging
+import re
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -3516,6 +3517,22 @@ def test_a_new_generation_is_discovered_from_the_highest_existing_prefix(
         "synthetic-execution-token",
     )
     assert reserved == 3
+    # Assumptions: discovery reports 4 AFTER the reservation, because the reservation marker lives
+    #   inside the ``gen=0003/`` prefix it reserves and that prefix is therefore returned by the
+    #   same listing discovery reads. This is the property the reservation exists for and it is
+    #   asserted here rather than only in the staging module's own suite: a second writer asking
+    #   "what is next?" must be told 4 while 3 is spoken for but not yet written. Refactoring
+    #   Rationale: this assertion read 3, which was true only while a reservation was recorded in a
+    #   ``_claims/`` prefix that discovery could not see -- and a number invisible to discovery is a
+    #   number a second writer is free to take.
+    following_reservation = s3_stage.next_generation(
+        fake_object_store,
+        staging_settings,
+        registered.domain,
+        registered.dataset,
+        _BUSINESS_DATE,
+    )
+    assert following_reservation == 4
     # Assumptions: the discovery is scoped to the TARGET business date, so a generation staged
     #   under a later date does not advance an earlier date's sequence. Without that scoping,
     #   re-running one day after a subsequent day had been staged would skip generation numbers and
@@ -3531,7 +3548,7 @@ def test_a_new_generation_is_discovered_from_the_highest_existing_prefix(
             registered.dataset,
             _BUSINESS_DATE,
         )
-        == 3
+        == 4
     )
 
 
@@ -4230,14 +4247,13 @@ _RETENTION_IAM_ACTIONS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
 _ENVIRONMENT_ROOTS: Final[tuple[str, ...]] = ("dev", "prod")
 
 
-def _data_migration_runtime_policy(environment: str) -> str:
-    """Read one environment root's data-migration task policy document.
+def _environment_root_source(environment: str) -> str:
+    """Read one environment root's Terraform source.
 
     Purpose
     -------
-    Give the IAM assertions a text scoped to the one policy document under test, so a grant found
-    anywhere else in a three-thousand-line root -- the batch runtime's, the reporting role's --
-    cannot be mistaken for this role's.
+    Serve every assertion in this file that reads infrastructure from a single accessor, so a root
+    that is renamed or moved fails once with a readable path rather than in each caller.
 
     Parameters
     ----------
@@ -4247,25 +4263,139 @@ def _data_migration_runtime_policy(environment: str) -> str:
     Returns
     -------
     str
-        The `data "aws_iam_policy_document" "data_migration_runtime"` block, its opening line
-        through its closing brace.
-
-    Raises
-    ------
-    AssertionError
-        If the root holds no such block, which itself means the task role lost its policy.
+        The whole of that root's ``main.tf``.
     """
-    root = (
+    return (
         Path(__file__).resolve().parents[2] / "infra" / "envs" / environment / "main.tf"
     ).read_text(encoding="utf-8")
-    opening = 'data "aws_iam_policy_document" "data_migration_runtime" {'
-    assert opening in root, f"infra/envs/{environment} declares no data_migration_runtime policy"
+
+
+def _policy_document_block(root_source: str, document_name: str) -> str | None:
+    """Extract one named ``aws_iam_policy_document`` data block from a root's source.
+
+    Parameters
+    ----------
+    root_source : str
+        The environment root's Terraform source.
+    document_name : str
+        The data block's second label, for example ``data_migration_runtime``.
+
+    Returns
+    -------
+    str | None
+        The block from its opening line through its closing brace, or ``None`` when the root
+        declares no such block.
+    """
+    opening = f'data "aws_iam_policy_document" "{document_name}" {{'
+    if opening not in root_source:
+        return None
     # Trade-offs: the block is delimited by the next closing brace in the FIRST column rather
     #   than by counting braces. Terraform formats top-level blocks that way and `terraform fmt
     #   -check` is a CI gate, so the delimiter is enforced elsewhere; a brace counter here would be
     #   a second HCL parser to maintain for no additional certainty.
-    body = root.split(opening, 1)[1]
-    return opening + body.split("\n}\n", 1)[0]
+    return opening + root_source.split(opening, 1)[1].split("\n}\n", 1)[0]
+
+
+def _data_migration_runtime_policy(environment: str) -> str:
+    """Compose the text of the data-migration task role's EFFECTIVE policy document.
+
+    Purpose
+    -------
+    Give the IAM assertions a text scoped to the documents this role actually composes, so a grant
+    found anywhere else in a five-thousand-line root -- the reporting role's, an unrelated
+    Lambda's -- cannot be mistaken for this role's, while a grant the role genuinely holds is not
+    missed because of where it is declared.
+
+    Notes
+    -----
+    Refactoring Rationale: this used to return the ``data_migration_runtime`` block alone. That was
+    correct while the block declared every statement itself, and it silently stopped being correct
+    when the version-listing and delete statements moved into ``batch_runtime`` -- the document this
+    role has always named in ``source_policy_documents``. The privilege did not change, because the
+    provider merges a sourced document into the composed one; only the file position did. Following
+    the declared composition, rather than pattern-matching one block, is what keeps this test
+    measuring the role's authority instead of the layout of the file that expresses it. The
+    alternative considered was re-declaring the statements in both documents so the old text search
+    kept working; it was rejected because two declarations of one grant are free to drift, and the
+    provider treats a repeated ``sid`` as an override rather than an addition, so the duplicate
+    would be load-bearing in a way no reader would expect.
+
+    Parameters
+    ----------
+    environment : str
+        Environment directory name beneath ``infra/envs``, one of :data:`_ENVIRONMENT_ROOTS`.
+
+    Returns
+    -------
+    str
+        The role's own block followed by the block of each document it names in
+        ``source_policy_documents``, concatenated.
+
+    Raises
+    ------
+    AssertionError
+        If the root holds no such block, which itself means the task role lost its policy, or if it
+        sources a document the root does not declare.
+    """
+    root = _environment_root_source(environment)
+    own = _policy_document_block(root, "data_migration_runtime")
+    assert own is not None, f"infra/envs/{environment} declares no data_migration_runtime policy"
+
+    composed = [own]
+    # Assumptions: only the FIRST source list is followed, and only one level deep. Both are true
+    #   of this root by construction -- the block carries a single `source_policy_documents`
+    #   argument and the document it names carries none -- and asserting each sourced document
+    #   exists turns a deeper chain into a readable failure here rather than a silently partial
+    #   text that would make the grant assertions below pass for the wrong reason.
+    sourced = own.split("source_policy_documents = [", 1)
+    if len(sourced) == 2:
+        for reference in re.findall(
+            r"data\.aws_iam_policy_document\.(\w+)\.json",
+            sourced[1].split("]", 1)[0],
+        ):
+            block = _policy_document_block(root, reference)
+            assert block is not None, (
+                f"infra/envs/{environment} sources data.aws_iam_policy_document.{reference}, which"
+                " the root does not declare"
+            )
+            composed.append(block)
+    return "\n".join(composed)
+
+
+def _prefix_list_is_module_derived(root_source: str, statement: str) -> bool:
+    """Report whether a statement's prefix list originates in the s3-datasets module's output.
+
+    Purpose
+    -------
+    Hold the property that matters -- one inventory of dataset prefixes, owned by the module that
+    declares them -- without also fixing HOW the root spells the reference. A root may use the
+    module output directly or bind it to a named local first; a hand-written list is what must fail.
+
+    Parameters
+    ----------
+    root_source : str
+        The environment root's Terraform source, needed to resolve a local's definition.
+    statement : str
+        The text of the one statement under assertion.
+
+    Returns
+    -------
+    bool
+        ``True`` when the statement names the module output, or names a root local whose own
+        definition names it; ``False`` otherwise.
+    """
+    module_output = "module.s3_datasets.dataset_prefixes"
+    if module_output in statement:
+        return True
+    # Assumptions: the local's definition is matched on the SAME line as its name. Every locals
+    #   assignment in these roots is single-line and `terraform fmt -check` keeps it that way, so a
+    #   line-scoped search resolves the indirection without parsing HCL.
+    for local_name in re.findall(r"local\.(\w+)", statement):
+        for line in root_source.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(f"{local_name} =") and module_output in stripped:
+                return True
+    return False
 
 
 def test_both_environment_roots_grant_the_retention_path_the_actions_it_calls() -> None:
@@ -4308,6 +4438,7 @@ def test_both_environment_roots_grant_the_retention_path_the_actions_it_calls() 
         )
 
     for environment in _ENVIRONMENT_ROOTS:
+        root = _environment_root_source(environment)
         policy = _data_migration_runtime_policy(environment)
         for operation, actions in _RETENTION_IAM_ACTIONS.items():
             for action in actions:
@@ -4325,7 +4456,7 @@ def test_both_environment_roots_grant_the_retention_path_the_actions_it_calls() 
         assert 'variable = "s3:prefix"' in listing, (
             f"infra/envs/{environment} grants s3:ListBucketVersions with no prefix condition"
         )
-        assert "module.s3_datasets.dataset_prefixes" in listing, (
+        assert _prefix_list_is_module_derived(root, listing), (
             f"infra/envs/{environment} conditions the listing on a written prefix list rather than"
             " the s3-datasets module's own output, so the two can drift apart silently"
         )
@@ -4336,7 +4467,7 @@ def test_both_environment_roots_grant_the_retention_path_the_actions_it_calls() 
         #   -- and it would pass every other assertion in this test.
         scratch = policy.split('"ScratchOldestDatasetGeneration"', 1)[1]
         scratch = scratch.split("statement {", 1)[0]
-        assert "module.s3_datasets.dataset_prefixes" in scratch, (
+        assert _prefix_list_is_module_derived(root, scratch), (
             f"infra/envs/{environment} scopes the delete grant by something other than the dataset"
             " prefixes"
         )

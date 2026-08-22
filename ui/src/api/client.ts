@@ -53,7 +53,7 @@ import type {
 } from 'axios';
 
 import { MASKED_PATH_SEGMENT } from './masking';
-import { runtimeApiBaseUrl } from './runtimeConfig';
+import { resolvedApiBaseUrl } from './runtimeConfig';
 import { recordServerDate } from './serverClock';
 import type {
   AbendDetail,
@@ -290,93 +290,24 @@ let client: AxiosInstance | undefined;
 /**
  * Resolves and validates the API base URL for this environment.
  *
- * Refactoring Rationale: the runtime document is consulted **before** the build-time variable, and
- * the order is the point. `VITE_API_BASE_URL` is inlined when the bundle is produced, which is
- * before the deployment applies the environment that creates the API endpoint, so it is necessarily
- * empty for a deployed build and this function used to throw on first render. The published
- * `config.json` is written after the endpoint is known, so it is the authority wherever it exists;
- * the compiled variable remains the fallback so a local development server configured by `.env`
- * keeps working unchanged. See `runtimeConfig.ts` for the full reasoning.
+ * Refactoring Rationale: the shape rules used to be written out here, and they are now a single call
+ * to `ui/src/api/runtimeConfig.ts`. Keeping them here meant this application had TWO validators for
+ * one value — this one and the document loader's — and they disagreed: the loader admitted any
+ * non-blank string, so a malformed document was adopted at start-up and refused here on the first
+ * request. Neither of them checked the `/api/v1` prefix, so a base URL one segment short produced a
+ * 404 on every call while looking correct in the client and in the gateway when each was read alone.
+ * The rules are stated once, in the module that owns the value, and applied at every point that
+ * reads it: at adoption, at start-up in `ui/src/main.tsx`, and here.
  *
- * Assumptions: the resolved value INCLUDES the `/api/v1` prefix. Every operation this client calls
- * is addressed relatively — `/cards`, `/auth/signon` — while the gateway publishes its route keys
- * under `/api/v1`, so a base URL without that prefix produces a 404 on every request while looking
- * correct in both the client and the gateway when each is read alone.
- * @returns {string} The normalized absolute API base URL, without a trailing slash.
- * @throws {Error} If no source supplied a URL, or the value supplied is unsafe.
+ * Assumptions: this indirection is kept as a named function rather than being inlined at the one
+ * call site below, because the name is what makes the base URL's provenance readable where the Axios
+ * instance is built — and because a future second reader must not be tempted to re-derive it.
+ * @returns {string} The normalized API base URL, without a trailing slash.
+ * @throws {Error} If no source supplied a URL, or the value supplied is not one of the two accepted
+ *   shapes; see `normalizeApiBaseUrl` for what those are and why each is admitted.
  */
 function apiBaseUrl(): string {
-  const configured = (runtimeApiBaseUrl() ?? import.meta.env.VITE_API_BASE_URL)?.trim() ?? '';
-  if (configured.length === 0) {
-    throw new Error(
-      'CardDemo API configuration is unavailable; neither the published runtime configuration nor VITE_API_BASE_URL supplied an API base URL.',
-    );
-  }
-
-  let parsed: URL;
-  try {
-    parsed = new URL(configured);
-  } catch {
-    throw new Error(
-      'CardDemo API configuration is invalid; VITE_API_BASE_URL must be an absolute URL.',
-    );
-  }
-
-  // Refactoring Rationale: the loopback exemption is decided from the RESOLVED HOST at run time,
-  //       and it used to be decided from `import.meta.env.DEV` at build time. That was a defect
-  //       rather than a preference, and it was measured rather than reasoned about: a production
-  //       bundle inlines that flag as `false`, so the compiler constant-folded the whole exemption
-  //       away and the shipped asset carried an UNCONDITIONAL `if (protocol !== 'https:') throw`.
-  //       Serving the built bundle against the documented local edge — which publishes
-  //       `http://localhost:8000/api/v1` in `config.json` — therefore threw inside this factory
-  //       before any request was dispatched, and every screen rendered its catalogued
-  //       last-resort message instead: sign-on answered 'Unable to verify the User ...' with no
-  //       credential ever leaving the browser. An exemption whose condition cannot be true in the
-  //       artifact it ships in is dead code, and the comment describing it was a false claim about
-  //       the delivered behaviour.
-  // Assumptions: loopback is the only plain-HTTP host admitted, and admitting it costs nothing the
-  //       HTTPS requirement was protecting. Traffic to a loopback address never reaches a network
-  //       interface, so there is no wire to intercept, and a browser cannot be induced to resolve
-  //       these names to anything else — `localhost` is reserved for loopback and the two literal
-  //       addresses are the loopback addresses themselves. Every other host, including a private
-  //       address inside a deployment's own network, still requires HTTPS, which is what carries
-  //       AAP 0.9.1's encryption-in-transit constraint for a body bearing a primary account number.
-  // Assumptions: the bracketed IPv6 form is tested as well as the bare one. `URL` normalises
-  //       `http://[::1]:8000` to a hostname of `[::1]` with the brackets retained, so a check for
-  //       `::1` alone silently fails to admit the address a dual-stack host resolves `localhost` to.
-  // Alternatives Considered: leaving the guard alone and serving the local edge over TLS, or
-  //       building in development mode for local use. Both were rejected as the fix rather than as
-  //       practices: each leaves the exemption this file documents unreachable in a production
-  //       bundle, so the next reader is misled again, and neither makes the delivered artifact
-  //       behave as its own comment describes.
-  const loopbackApi =
-    parsed.protocol === 'http:' &&
-    (parsed.hostname === 'localhost' ||
-      parsed.hostname === '127.0.0.1' ||
-      parsed.hostname === '::1' ||
-      parsed.hostname === '[::1]');
-  if (parsed.protocol !== 'https:' && !loopbackApi) {
-    throw new Error(
-      'CardDemo API configuration is invalid; only HTTPS is accepted for any host other than loopback.',
-    );
-  }
-  // WHY : Assumptions: a PATH is permitted here and the other four components are not. The base
-  //       URL is required to carry `/api/v1`, so rejecting a path would reject every correct
-  //       value; user information, a query and a fragment have no meaning on a base URL and each
-  //       would be silently dropped or appended by the client, so refusing them is refusing a
-  //       configuration that cannot work as written.
-  if (
-    parsed.username.length > 0 ||
-    parsed.password.length > 0 ||
-    parsed.search.length > 0 ||
-    parsed.hash.length > 0
-  ) {
-    throw new Error(
-      'CardDemo API configuration is invalid; user information, queries and fragments are not permitted.',
-    );
-  }
-
-  return configured.replace(/\/+$/u, '');
+  return resolvedApiBaseUrl();
 }
 
 /**
@@ -565,7 +496,91 @@ export function newCorrelationId(): string {
 }
 
 /**
- * Adds the short-lived access token and a fresh request correlation identifier.
+ * The character set the shared service filter admits in a correlation identifier.
+ *
+ * Assumptions: letters, digits and the three separators `-`, `_` and `.`, which is `isTokenSafe` together
+ * with `ACCEPTED_PUNCTUATION` in
+ * `services/common-lib/src/main/java/com/carddemo/common/web/CorrelationIdFilter.java`. The exclusions are
+ * not stylistic: a carriage return or line feed in a header value that is echoed on the response would
+ * introduce a second response header, and a quote, bracket or delimiter would corrupt the field
+ * boundaries of the log record the value is written into. The rule is RESTATED here rather than imported
+ * because it lives in Java and no build step spans the two languages, which is the same reason
+ * `client.test.ts` restates the protected-identifier half of the same contract.
+ */
+const CORRELATION_ID_ACCEPTED_CHARACTERS = /^[A-Za-z0-9._-]+$/u;
+
+/** The three separators the filter strips before it counts a value's digits. */
+const CORRELATION_ID_SEPARATORS = /[-_.]/gu;
+
+/**
+ * Fewest digits that make a value protected-identifier-shaped, so the services refuse to echo it.
+ *
+ * Assumptions: nine, mirroring `PROTECTED_IDENTIFIER_MIN_DIGITS` in the same filter, which derives it
+ * from the shortest protected identifier this system holds -- a customer or national identifier is
+ * `PIC 9(09)`, an account identifier eleven digits, a card number sixteen. A conforming identifier is
+ * published to the mapped diagnostic context and echoed on the response, so an all-digit value of that
+ * width would place cardholder-shaped data in log storage; the filter answers HTTP 400 instead, before
+ * any handler runs.
+ */
+const PROTECTED_IDENTIFIER_MIN_DIGITS = 9;
+
+/**
+ * Builds the header bag that pins one request's correlation identifier to a value the caller holds.
+ *
+ * Purpose: the only supported way for a caller to correlate several dispatches as ONE unit of work.
+ * {@link applyRequestHeaders} mints an identifier for a request that carries none and leaves one that
+ * arrives already set, so a caller retrying an ambiguous request can reproduce the identity the first
+ * attempt was sent under -- which some services read as the identity of the work rather than of the
+ * call. `ui/src/api/reporting.ts` is the caller this exists for: the reporting service derives a report
+ * submission's deduplication key from the correlation identifier when no explicit submission key arrives.
+ *
+ * Assumptions: the value is validated HERE against all three conditions the shared filter applies -- at
+ * most {@link CORRELATION_ID_MAX_LENGTH} characters, every character in
+ * {@link CORRELATION_ID_ACCEPTED_CHARACTERS}, and not a run of at least
+ * {@link PROTECTED_IDENTIFIER_MIN_DIGITS} digits once separators are removed. A value failing any of them
+ * is refused with HTTP 400 before it reaches a handler, and that refusal is indistinguishable at a screen
+ * from a rejected payload; failing at the call site instead names the real cause.
+ *
+ * Alternatives Considered: a per-request configuration member declared through the module augmentation
+ * above, as {@link WITHOUT_STORED_SESSION} does for the bearer. Rejected because the flag there suppresses
+ * a header this module owns, whereas this supplies a VALUE that has to survive the interceptor -- and a
+ * configuration member would be a second channel for a value the header bag already carries, with the
+ * interceptor then having to decide which of the two wins.
+ * @param {string} correlationId - The identifier to pin, normally minted by {@link newCorrelationId}.
+ * @returns {Readonly<Record<string, string>>} A single-entry header bag under the configured correlation
+ *   header name, ready to spread into a request configuration's `headers`.
+ * @throws {RangeError} If the identifier is one the shared service filter would refuse, so the defect
+ *   surfaces at the call site rather than as a 400 on an otherwise correct request.
+ * @throws {Error} If the configured correlation-header name is not an HTTP token, from
+ *   {@link correlationHeaderName}.
+ */
+export function correlationHeaders(correlationId: string): Readonly<Record<string, string>> {
+  const digits = correlationId.replace(CORRELATION_ID_SEPARATORS, '');
+  const protectedShape =
+    /^[0-9]+$/u.test(digits) && digits.length >= PROTECTED_IDENTIFIER_MIN_DIGITS;
+  if (
+    correlationId.length === 0 ||
+    correlationId.length > CORRELATION_ID_MAX_LENGTH ||
+    !CORRELATION_ID_ACCEPTED_CHARACTERS.test(correlationId) ||
+    protectedShape
+  ) {
+    /*
+     * WHY : Assumptions: both bounds are interpolated rather than spelled in the sentence, so the text
+     *       cannot outlive the constants it describes. A sentence naming a width the code no longer
+     *       enforces is worse than one naming none, because it sends the reader to the wrong side.
+     */
+    throw new RangeError(
+      `A pinned correlation identifier must be 1 to ${String(CORRELATION_ID_MAX_LENGTH)} letters, digits,` +
+        ' hyphens, underscores or periods, and must not be a run of' +
+        ` ${String(PROTECTED_IDENTIFIER_MIN_DIGITS)} or more digits; the services refuse anything else` +
+        ' with HTTP 400 before a handler runs.',
+    );
+  }
+  return { [correlationHeaderName()]: correlationId };
+}
+
+/**
+ * Adds the short-lived access token and, unless the request already carries one, a correlation identifier.
  *
  * Refactoring Rationale: the token is the whole of what this client asserts about its operator, and
  * it asserts it as a SIGNED claim it cannot author. The baseline carried the operator's authority in
@@ -597,10 +612,29 @@ export function newCorrelationId(): string {
  * unauthenticated operations however their configuration was composed: the reasoning for the flag, and the two
  * alternatives rejected in its favour, are recorded on its declaration above.
  *
- * Assumptions: the correlation identifier is attached to EVERY request including the suppressed ones.
- * It carries no credential and confers no authority — it is a name for a unit of work — so an
+ * Assumptions: every request leaves here carrying a correlation identifier, including the suppressed
+ * ones. It carries no credential and confers no authority — it is a name for a unit of work — so an
  * unauthenticated exchange is exactly as much in need of being traceable as any other, and a sign-on
  * that could not be found in the logs would be the one failure an operator reports most often.
+ *
+ * ⚠️ Refactoring Rationale: an identifier the caller already SET is now kept, where it used to be
+ * overwritten. Attaching a fresh one unconditionally made the identifier a name for the dispatch rather
+ * than for the work, and one service reads it as the latter: `ReportExecutionService` derives a report
+ * submission's deduplication key from the request's correlation identifier whenever no explicit
+ * submission key arrives, so a browser retry of a submission that may already have been accepted could
+ * not reproduce the identity the first attempt was sent under and started a second run of the same
+ * report. Preserving a pinned value lets {@link correlationHeaders} express "these dispatches are one
+ * unit of work" — the only way a caller has to say so.
+ *
+ * Assumptions: preserving is safe for every existing caller because, at the time this changed, NO caller
+ * set the header: it was minted here and nowhere else, so a request that arrives without one still leaves
+ * with one and the guarantee above is unchanged. What the condition adds is a way to opt in, not a way to
+ * opt out — there is no path through this function that leaves the header absent.
+ *
+ * Assumptions: a header present but not a non-empty string is treated as ABSENT rather than honoured.
+ * Axios admits `null`, a number, a boolean and an array in a header bag, and none of those is an
+ * identifier the services would accept; minting over them keeps a malformed pin from silently becoming
+ * the value on the wire, which would be refused with HTTP 400 by the shared filter.
  * @param {InternalAxiosRequestConfig} config - Axios request configuration being dispatched.
  * @returns {InternalAxiosRequestConfig} The same configuration with bounded security headers
  *   applied.
@@ -611,7 +645,11 @@ function applyRequestHeaders(config: InternalAxiosRequestConfig): InternalAxiosR
   } else if (bearerToken !== null && bearerToken.length > 0) {
     config.headers.set(AUTHORIZATION_HEADER, `Bearer ${bearerToken}`);
   }
-  config.headers.set(correlationHeaderName(), newCorrelationId());
+  const correlationName = correlationHeaderName();
+  const pinned = config.headers.get(correlationName);
+  if (typeof pinned !== 'string' || pinned.length === 0) {
+    config.headers.set(correlationName, newCorrelationId());
+  }
   return config;
 }
 
@@ -1947,12 +1985,22 @@ const DEFAULT_PAGE_DIRECTION: PageDirection = 'next';
  *
  * Assumptions: ⚠️ every contract declares the pair asymmetrically -- a cursor without a direction is read
  * forward -- but they do NOT agree on the reverse combination, and that disagreement is the reason the
- * rule belongs here rather than being left to the service. Measured across the seven documents: auth,
- * card, reference and authorization publish that a direction with no cursor is refused with 400 keyed on
- * the direction; account publishes the opposite for `listAccountCardCrossReferences`, returning the
- * opening page whichever direction is named; and reporting and transaction publish no answer for it at
- * all. Deferring to the service would therefore give a screen three different behaviours for one caller
- * mistake, two of them silent.
+ * rule belongs here rather than being left to the service. Re-measured across the seven documents:
+ * `reference` and `authorization` publish that a direction with no cursor is refused with 400 keyed on
+ * the direction; `auth`, `account` and `card` publish the opposite, returning the opening page whichever
+ * direction is named; and `reporting` and `transaction` publish no answer for it at all. Deferring to the
+ * service would therefore give a screen three different behaviours for one caller mistake, two of them
+ * silent.
+ *
+ * Refactoring Rationale: ⚠️ this census read "auth, card, reference and authorization" as the refusing
+ * group, and two of those four were wrong in the same direction -- their services answer the opening
+ * page and their contracts have been corrected to say so. It is stated as RE-MEASURED because the earlier
+ * list was assembled once and then carried forward while two contracts moved underneath it, which is the
+ * failure this guard's own existence is meant to prevent: a client that believes a service refuses
+ * something it silently accepts renders a page the operator did not ask for. The guard itself is
+ * unchanged by the correction -- it refuses the pair for every service, so no screen depends on which of
+ * the three answers its own service would have given, and that independence is exactly why the census
+ * moving does not move any behaviour.
  *
  * Alternatives Considered: modelling each query as a discriminated union that admits the pair only
  * together, which would move the refusal to compile time and is the stronger form. Rejected for now

@@ -4,20 +4,27 @@
  * <h2>Purpose</h2>
  *
  * <p>This package holds one class, {@code ReportingFixtureContractTest}, and it exists because the
- * fixture files it consumes previously had no consumer at all. It now binds SEVEN by exact name --
- * {@code acctfile.txt}, {@code carddata.txt}, {@code cardxref.txt}, {@code custfile.txt},
- * {@code tcatbal.txt}, {@code trancatg.txt} and {@code trantype.txt} -- of which the four that
- * predate it were the unconsumed ones. A fixture nobody loads proves nothing: its record length, its
- * field offsets, its key domain and the synthetic origin of its values are all claims, and a claim no
- * test reads cannot fail. The class here turns each of those claims into an assertion, and it also
- * drives the two mappers of the sibling {@code com.carddemo.reporting.mapper} package with fixture
- * rows, so the fixtures are consumed as data and not merely as bytes.</p>
+ * fixture files it consumes previously had no consumer at all. It binds every fixture named by its
+ * own {@code EXPECTED_RESOURCES} list and registers each one in its {@code everyFixture} argument
+ * source against the descriptor, record length and row count that fixture claims; those two members
+ * are the roster, and this charter deliberately does not restate it. A fixture nobody loads proves
+ * nothing: its record length, its field offsets, its key domain and the synthetic origin of its
+ * values are all claims, and a claim no test reads cannot fail. The class here turns each of those
+ * claims into an assertion, and it also drives the two mappers of the sibling
+ * {@code com.carddemo.reporting.mapper} package with fixture rows, so the fixtures are consumed as
+ * data and not merely as bytes.</p>
  *
- * <p>Refactoring Rationale: the count is spelled out because the sentence previously read "the four
- * fixture files it consumes", which a reader could take as the current roster rather than as the
- * historical subset that lacked a consumer. The distinction matters here more than it would
- * elsewhere: the inventory assertion in this package is CLOSED-SET, so a reader who believed the
- * roster was four would read two of the bound files as arrivals nobody had accounted for.</p>
+ * <p>Refactoring Rationale: this paragraph named a roster of SEVEN files and listed them. That was
+ * accurate when it was written and is not now -- {@code tranfile.txt}, {@code trnxfile.txt} and
+ * {@code xreffile.txt} landed afterwards -- so the charter under-reported the bound set by three
+ * while the inventory assertion in this package remained CLOSED-SET, which is the reading that does
+ * real harm: someone reconciling the directory against this text would have taken three bound
+ * fixtures for arrivals nobody had accounted for. The roster is now referenced rather than copied,
+ * because a list restated in a second place has to be re-tallied by hand every time one lands, and
+ * this is the second time that re-tally was missed. Alternatives Considered: restating the roster at
+ * ten. Rejected for the reason the drift itself demonstrates -- the count and the names are already
+ * asserted in one place, and a duplicate that a build cannot check is a duplicate that goes
+ * stale.</p>
  *
  * <p>Assumptions: the tests live in their own package rather than beside the mapper tests, because
  * their subject is the <em>resource directory</em> rather than any one production type. Placing them

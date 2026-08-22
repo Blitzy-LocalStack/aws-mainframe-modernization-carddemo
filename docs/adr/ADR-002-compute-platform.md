@@ -228,9 +228,26 @@ count of chain states is not a count of functions:
 | Function | Declared in | Duty |
 |---|---|---|
 | `quiesce` | each environment root | Chain state 1 — sets the read-only flag |
-| `resume` | each environment root | Chain state 11 — clears the flag; **also** the target of the bracket-finalizer rule (`aws_cloudwatch_event_rule.daily_finalizer`), which releases the flag when an execution ends FAILED, TIMED\_OUT or ABORTED without reaching state 12 |
+| `resume` | each environment root | Chain state 11 — clears the flag; **also** the target of the bracket-finalizer rule (`aws_cloudwatch_event_rule.daily_finalizer`, declared in the module rather than the root), which releases the flag when an execution ends FAILED, TIMED\_OUT or ABORTED **without the in-graph release having run** |
 | `database_admin` | each environment root | Chain state 10 — runs `VACUUM ANALYZE`; **also** invoked once at apply time to run the schema-and-role bootstrap transactionally |
 | `dataset_retention` | each environment root | Not a chain state — triggered by object creation in the dataset bucket to enforce generation retention |
+
+⚠️ Refactoring Rationale: the `resume` row said the finalizer releases the flag when an
+execution ends "without reaching **state 12**". **There is no state 12.** The chain
+declares eleven states and `ResumeOnlineWrites` is the eleventh and last, which the same
+paragraph three lines above this table already said — so the row invented a twelfth state
+as the thing an execution had failed to reach, and a reader reconciling the two figures
+had to guess which was the chain's length. What the finalizer actually covers is named
+instead of numbered: the in-graph compensating release, the separate
+`ResumeOnlineWritesOnFailure` state. Assumptions: naming it rather than numbering it is
+the durable form, because the release the rule substitutes for is **not** state 11 on
+the paths that matter. A top-level timeout or an operator stop TERMINATES the execution,
+so Step Functions enters no further state at all and neither release runs; and the rule
+matches FAILED as well, because `ResumeOnlineWritesOnFailure` is itself a state and can
+error, leaving the bracket engaged. Trade-offs: the ordinary failure path therefore
+releases twice. That is accepted because the release writes one SSM value and is
+idempotent, so the duplicate costs a log line, against an outage if the case were left
+uncovered.
 
 Two clarifications the inventory earns. The maintenance statement is
 `VACUUM ANALYZE`, which is what AAP §0.4.1.7 specifies for this state, and the
@@ -903,17 +920,72 @@ the tag, so a rebuild resolves the same bytes even if a tag is republished.
 | SPA runtime | `nginx:1.30.4-alpine` | The runtime stage of the user-interface image |
 | ETL | `python:3.13.14-slim-trixie` | The data-migration image |
 
-Four properties of that table are decisions rather than defaults.
+**Six** properties of that table are decisions rather than defaults, and each is
+recorded below in the order it weighed.
 
-**There is no Alpine variant of the Corretto image, and assuming one costs a
-build.** Alternatives Considered: `21-alpine` is the tag a reader would reach for
-to shrink the runtime layer, and it is the tag the migration plan names.
-**That tag does not exist and fails every image build.** The repository publishes only `-al2` and `-al2023` tags, carried with
-`headful`, `headless`, `generic` and `jdk` suffixes; there is no Alpine or musl
-variant at all, and the highest 21.x available at the time of verification is
-`21.0.12`. The `-headless` suffix is the size reduction that *is* available here,
-and it is the one taken. This is recorded so that the tag is not "simplified"
-later into one that cannot resolve.
+⚠️ Refactoring Rationale: this line said **four**, above six bolded properties, one of
+which — the nginx branch choice — appeared **twice**, once carrying `Trade-offs:` and
+once carrying `Alternatives Considered:` for the same decision. The two are merged into
+the single paragraph below, keeping both labels and losing no reasoning, and the count is
+corrected. Assumptions: a miscount over a list that repeats itself is the same defect
+class this record is being corrected for elsewhere — a reader cannot tell whether a
+property is missing, duplicated, or simply uncounted, so the header has to agree with the
+list it introduces.
+
+**The Corretto runtime is the AL2023 tag, and the Alpine alternative is real — it was
+weighed and declined, not found missing.** Two facts have to be separated here, because
+collapsing them produces a claim that is false:
+
+* **The registry this project pins from carries no Alpine tag.** The pinned reference is
+  `public.ecr.aws/amazoncorretto/amazoncorretto:21.0.12-al2023-headless`, and that ECR
+  Public repository publishes only the `-al2` and `-al2023` tag families, each carried
+  with `headful`, `headless`, `generic` and `jdk` suffixes. So `21-alpine` — the tag the
+  migration plan's shorthand names, and the one a reader would reach for to shrink the
+  runtime layer — **does not resolve against this registry** and would fail the build as
+  written. `-headless` is the size reduction that *is* available on this path, and it is
+  the one taken.
+* **An official Alpine Corretto 21 image does exist, on a different registry.** Docker
+  Hub's `amazoncorretto` publishes `21-alpine`, `21-alpine3.24` and `21.0.12-alpine`
+  from the same `corretto/corretto-docker` source. Switching registry as well as tag is
+  therefore a genuine option, and it is the option this decision declines.
+
+Alternatives Considered: the Docker Hub `amazoncorretto:21.0.12-alpine` runtime, which
+would cut the runtime layer materially. Declined on three grounds, in the order they
+weighed:
+
+1. **musl versus glibc under a JVM carrying money.** An Alpine Corretto runs against
+   musl; the AL2023 tag runs against glibc. The two differ in allocator behaviour, in
+   DNS resolution and in default thread stack sizing, and none of those differences
+   surfaces as a build failure — they surface as latency, as native-memory growth, or as
+   a resolver edge case under load. The workload here posts a nightly ledger and serves
+   fixed-point money arithmetic, so a class of divergence that presents only under load
+   and only in production is worth more to avoid than a layer is worth to shrink.
+2. **One advisory stream for the runtime's OS packages.** AL2023's package versions track
+   Amazon Linux Security Advisories, which is the same stream the rest of an AWS-hosted
+   estate is patched against, so a CVE in an OS package is triaged once rather than once
+   per base-image lineage. Alpine's package set is tracked separately and would add a
+   second stream for one image.
+3. **libc parity with the build stage.** The build stage is
+   `maven:3.9.16-amazoncorretto-21-al2023`, which is glibc. An Alpine runtime would put a
+   libc boundary inside a single image, between the stage that resolves and produces
+   artifacts and the stage that runs them — which is exactly the guarantee the
+   build-matched-to-runtime property below exists to hold.
+
+Trade-offs: the accepted cost is image size, and it is a real cost paid on every pull
+across eight services. It is accepted because the pull is amortised by the registry's
+layer cache while the three risks above are not amortised at all, and because
+`-headless` already removes the largest avoidable component on this path.
+
+⚠️ Refactoring Rationale: this paragraph asserted that "there is no Alpine or musl
+variant **at all**" of the Corretto image and that `21-alpine` "does not exist". **The
+second half of that is false**: `amazoncorretto:21-alpine` is published on Docker Hub
+and is an official image from the same source repository. Only the *ECR Public*
+repository lacks the family. An ADR that dismisses a real alternative as nonexistent is
+worse than one that never mentions it, because it forecloses the comparison instead of
+recording it — and the next reader who checks Docker Hub finds the record wrong on a
+checkable fact and has no way to tell what else in it was asserted rather than verified.
+The registry-scoped fact is retained because it is the one that governs the pinned
+reference; the comparison is added because that is what the decision actually rests on.
 
 **The build stage is matched to the runtime deliberately.** Assumptions: the
 build image names the same JDK vendor and the same major version as the runtime
@@ -923,11 +995,13 @@ supported in general but removes a guarantee for nothing in return, since the
 matched tag is published and equally available.
 
 **The SPA runtime takes the stable nginx branch rather than mainline.**
+Alternatives Considered: mainline 1.31.x, which carries newer features.
 Trade-offs: mainline carries newer features and stable receives a longer patch
 window. A server whose entire job is returning pre-built static assets and one
 SPA fallback route has no use for mainline's feature additions, so the currency
-is given up and the longer patch window taken. The trade would go the other way
-for a server doing request processing that mainline had improved.
+is given up and the longer patch window taken — the branch that changes least is
+the one serving a bundle that changes on every deployment. The trade would go the
+other way for a server doing request processing that mainline had improved.
 
 **The ETL image matches the interpreter the existing test suite already runs
 on.** Assumptions: the fixed-width and zoned-decimal decoding the ETL performs is
@@ -953,12 +1027,6 @@ tag — the ETL image
 tag in both stages, and the browser SPA image
 ([`ui/Dockerfile`](../../ui/Dockerfile)), which pins the Node build tag and the
 nginx runtime tag.
-
-**The SPA runtime is the stable nginx branch rather than mainline.**
-Alternatives Considered: mainline 1.31.x, which carries newer features. Declined
-because a static asset server needs none of them and stable receives the longer
-patch window, so the branch that changes least is the one serving a bundle that
-changes on every deployment.
 
 **Private registry references are placeholders, and that is deliberate.** The
 public base images above are named verbatim because they are public registry
@@ -1027,8 +1095,11 @@ references `org/springframework/retry` from six of its own classes, among them
 
 ```bash
 # WHAT: list every path by which Spring Retry reaches this reactor.
-# Assumptions: this is a claim about the dependency graph, so it is stated with the
-#   command that checks it rather than left to be trusted.
+# WHY : Assumptions: this is a claim about the dependency graph, so it is stated
+#       with the command that checks it rather than left to be trusted. A reader
+#       who doubts the transitive path can run this and read the answer from Maven
+#       instead of taking this record's word for it, which is the whole reason the
+#       command is published rather than its conclusion.
 mvn -f services/pom.xml dependency:tree \
     -Dincludes=org.springframework.retry:spring-retry
 ```
@@ -1211,9 +1282,13 @@ described in [`infra/README.md`](../../infra/README.md).
   reintroduce the need for sticky sessions and invalidate fact 2 of the
   [Rationale](#rationale), so it requires a superseding ADR rather than a code
   change.
-- **The base-image tags are pinned, and the Corretto tag in particular is not to
-  be shortened.** The no-Alpine fact under
-  [Additional decision 1](#1-container-base-image-pin) is the reason.
+- **The base-image tags are pinned, and the Corretto tag in particular is neither to
+  be shortened nor to be moved to another registry.** Shortening it to `21-alpine`
+  breaks the build, because the ECR Public repository it is pinned from carries no such
+  tag; re-pointing it at the Docker Hub tag that *does* carry one is a libc change
+  argued against on three grounds under
+  [Additional decision 1](#1-container-base-image-pin). Either edit is a decision
+  reversal rather than a tidy-up.
 - **A framework minor upgrade is a source-level event for retry.** Because the
   retry capability comes from the framework core rather than a library, an
   annotation or attribute rename there is a change in every service that uses it.

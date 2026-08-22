@@ -9,23 +9,38 @@
 #   no credential.
 #
 # Parameters:
-#   This image takes no command arguments and reads no environment variable at
-#   run time. Every value the SPA needs is compiled INTO the bundle by Vite at
-#   build time from the VITE_-prefixed variables named in ui/.env.example
-#   (VITE_API_BASE_URL, VITE_CORRELATION_ID_HEADER, VITE_API_TIMEOUT_MS), so the
-#   build stage is where a deployment supplies them.
+#   This image takes no command arguments. It reads two environment variables at
+#   RUN time, both consumed by docker-entrypoint.sh before nginx starts:
+#     CARDDEMO_API_BASE_URL (required) -- the API base URL this container is to
+#       call, either an absolute https URL ending in /api/v1 or the same-origin
+#       path /api/v1. The entrypoint publishes it as /config.json in the document
+#       root and derives the policy's connect-src origin from it.
+#     CARDDEMO_API_CONNECT_SRC_ORIGINS (optional) -- additional https origins to
+#       admit in connect-src, space separated, for a deployment that calls an
+#       origin besides the API.
+#   Refactoring Rationale: this section previously said the image "reads no
+#   environment variable at run time" and that every value is compiled into the
+#   bundle. The first half was true of the image as it stood and the second half
+#   was not: the bundle is built BEFORE the environment that creates the API
+#   endpoint exists, so VITE_API_BASE_URL is necessarily empty in it, and the
+#   container therefore served an application whose every request was
+#   unconfigured. The VITE_-prefixed variables in ui/.env.example remain build
+#   inputs for `npm run dev` and for a locally built bundle; the deployed and
+#   containerised paths are configured at run time by the document above.
 #
 # Return values:
 #   0 (integer): nginx exited after a requested shutdown.
-#   non-zero (integer): the configuration failed to load or the process
-#     terminated abnormally. ECS reads that status to decide whether to replace
-#     the task.
+#   non-zero (integer): the runtime configuration was absent or malformed, the
+#     configuration failed to load, or the process terminated abnormally. ECS
+#     reads that status to decide whether to replace the task.
 #
 # Exceptions or errors:
 #   A type error, a lint violation or a Vite resolution failure aborts the build
 #   stage, so a broken bundle is never copied into the runtime stage. At run time
-#   an invalid ui/nginx.conf aborts before the listener binds and the task never
-#   reports healthy.
+#   an unset or malformed CARDDEMO_API_BASE_URL, an unsafe connect-src origin, or
+#   a document root that cannot be written aborts the entrypoint with a stated
+#   reason on stderr and before the listener binds; an invalid ui/nginx.conf
+#   aborts for the same reason, and in every case the task never reports healthy.
 #
 # Governing convention:
 #   docs/CODE_DOCUMENTATION_STANDARD.md
@@ -175,6 +190,10 @@ COPY --chown=10001:10001 nginx.conf /etc/nginx/templates/default.conf.template
 # Assumptions: the renderer is copied executable rather than invoked through a
 #   shell, so the ENTRYPOINT below stays in exec form and nginx still inherits
 #   PID 1 through `exec`.
+# Assumptions: it renders the policy AND publishes /config.json into the document
+#   root copied below, which is why it must run as the same uid that owns that
+#   directory. Both are start-time work for the same reason -- neither the API
+#   origin nor the API base URL is knowable when this image is built.
 COPY --chown=10001:10001 --chmod=0555 docker-entrypoint.sh /usr/local/bin/carddemo-entrypoint.sh
 
 # Assumptions: the bundle is copied from the build stage's outDir, which

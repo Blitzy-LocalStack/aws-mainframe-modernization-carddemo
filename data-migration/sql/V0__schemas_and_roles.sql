@@ -81,7 +81,7 @@
 --     seven migrators and the one verifier. The eight owners get none, by
 --     construction.
 --   - CREATE on schema public is revoked from PUBLIC.
---   - carddemo_batch holds USAGE on ledger, account and reference, and
+--   - carddemo_batch holds USAGE on ledger, account, card and reference, and
 --     default privileges that grant it SELECT/INSERT/UPDATE on ledger tables,
 --     USAGE/SELECT on ledger sequences, SELECT on account tables with UPDATE on
 --     account.accounts by name, SELECT on reference tables, and SELECT and
@@ -1681,9 +1681,13 @@ GRANT SELECT ON ALL TABLES IN SCHEMA reporting TO carddemo_reporting;
 -- WHY : Assumptions: the two statements above convey SELECT on every relation in
 -- the reporting schema, and in PostgreSQL "ON TABLES" covers TABLES AND VIEWS
 -- alike. That is exactly what makes the masking views readable without naming
--- each one -- and it is also why the ONE relation in that schema which must NOT
--- be readable by the service role has to be excluded right here, immediately
--- after the grant that would otherwise convey it.
+-- each one -- and it is also why the TWO relations in that schema which must NOT
+-- be readable in full by the service role have to be excluded right here,
+-- immediately after the grant that would otherwise convey them. Refactoring
+-- Rationale: this read "the ONE relation" while reporting.card_grouping_key was
+-- the only table in the schema; reporting.card_identity is now the second, and its
+-- exclusion is a column-level one rather than a whole-relation one, so the two
+-- repairs below are deliberately not the same statement.
 --
 -- reporting.card_grouping_key holds the secret the statement projection mixes
 -- into its per-card grouping token. That token exists so a statement can be
@@ -1728,6 +1732,59 @@ BEGIN
             'needed. It is created by data-migration/sql/V1__reporting_views.sql; '
             're-run this script afterwards so the grouping key is withheld from '
             'carddemo_reporting.';
+    END IF;
+END
+$$;
+
+-- WHY : Assumptions: reporting.card_identity is the SECOND relation in that schema
+-- the blanket grant above must not convey whole, and it needs a different repair
+-- from the key table rather than the same one. It holds one row per card carrying
+-- the WHOLE card number beside the keyed token derived from it, so the service
+-- login may read two of its three columns and must never read card_num -- which is
+-- a column-level privilege, and a column-level privilege cannot survive the
+-- table-level grant above. GRANT SELECT ON ALL TABLES conveys the whole relation
+-- and PostgreSQL then discards the narrower column entries as redundant, so the
+-- prescribed re-run of this script would hand every card number in the portfolio to
+-- the reporting login and report nothing. The revoke-then-re-grant pair below
+-- rebuilds the privilege from nothing on every run, which is what makes the outcome
+-- independent of whether this script ran before or after
+-- data-migration/sql/V1__reporting_views.sql.
+--
+-- WHY : Trade-offs: the pair is stated here AND at the table's creation, exactly as
+-- the key table's revoke is, and for the same non-redundant reasons: the statement
+-- in V1 closes the window opened by the default privilege that fires as the table is
+-- created, and this one closes the window opened by the blanket grant on re-run.
+-- Omitting either leaves a documented sequence that ends with the wrong privilege.
+--
+-- Alternatives Considered: revoking here and leaving the re-grant to V1 alone.
+-- Rejected because the documented sequence ends with THIS script, so a database
+-- whose last action was this re-run would leave the reporting login unable to read
+-- the token it walks -- the statement heading query would fail with SQLSTATE 42501
+-- and every statement run would stop. The privilege has to be left in the state the
+-- service needs by whichever script ran last, so both scripts state it in full.
+--
+-- Alternatives Considered: storing no whole card number in the reporting schema at
+-- all, so that no column-level privilege would be needed. Rejected because the token
+-- is a function of the whole number and the join to the ledger and the cross-reference
+-- is on the whole number: without it the token cannot be indexed, which is the
+-- performance defect the identity relation exists to remove. The column-level grant
+-- is what keeps that storage from widening what the reporting login can read.
+DO $$
+BEGIN
+    IF to_regclass('reporting.card_identity') IS NOT NULL THEN
+        REVOKE ALL ON reporting.card_identity FROM carddemo_reporting;
+        GRANT SELECT (card_fingerprint, card_num_masked) ON reporting.card_identity
+            TO carddemo_reporting;
+    ELSE
+        -- WHY : Trade-offs: a NOTICE rather than an EXCEPTION, matching the key
+        -- table's guard immediately above. On a first bootstrap the identity
+        -- relation is legitimately absent, and raising here would make the
+        -- documented sequence fail at its first step.
+        RAISE NOTICE
+            'reporting.card_identity does not exist yet, so no privilege repair was '
+            'needed. It is created by data-migration/sql/V1__reporting_views.sql; '
+            're-run this script afterwards so carddemo_reporting holds SELECT on '
+            'card_fingerprint and card_num_masked only.';
     END IF;
 END
 $$;

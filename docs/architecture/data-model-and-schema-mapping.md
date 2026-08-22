@@ -979,7 +979,7 @@ statement grouping token and is granted to the schema owner alone.
 | `card` | `card-service` | `cards` | `V1__card.sql` authored |
 | `ledger` | `transaction-service` | `transactions`, `daily_transactions`, `transaction_rejects`, `transaction_category_balances` | `V1__ledger.sql` authored |
 | `reference` | `reference-service` | `transaction_types`, `transaction_categories`, `disclosure_groups`, `us_phone_area_codes`, `us_states`, `us_state_zip_prefixes` — six tables, all copybook-derived | `V1__reference.sql`, `V2__seed_reference.sql`, `V3__reference_inquiry_reply_ledger.sql` and `V4__drop_reference_inquiry_reply_ledger.sql` authored |
-| `batch` | `batch-service` | `batch_run`, `daily_feed_watermark`, plus the batch framework's own job-repository tables | `V1__batch.sql` and `V2__batch_feed_watermark.sql` authored |
+| `batch` | `batch-service` | `batch_run`, `daily_feed_watermark`, plus the batch framework's own job-repository tables | `V1__batch.sql`, `V2__batch_feed_watermark.sql` and `V3__batch_run_contract_restatement.sql` authored |
 | `authorization` | `authorization-service` | `pending_auth_summary`, `pending_auth_detail`, `auth_fraud`, `auth_reply_outbox` | `V1__authorization.sql` authored, extended by `V2`, `V3` and `V4` |
 | `reporting` | `reporting-service`, schema owned in the database by `carddemo_reporting_owner` | **no table the service can read** — eight read-only cross-schema views, plus one owner-only key table | `data-migration/sql/V1__reporting_views.sql` authored |
 
@@ -1805,15 +1805,24 @@ Two target indexes on unpublished rows only, plus the accepted-send index above:
 defines `reporting` as the eighth of the eight schemas in
 [`V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql)
 and [`V1__reporting_views.sql`](../../data-migration/sql/V1__reporting_views.sql)
-authors the eight read-only cross-schema views, plus one table the service role
-cannot select from: `reporting.card_grouping_key`. That table holds the secret mixed
-into `v_statement_transactions.card_fingerprint`, the per-card grouping token that
-lets a statement break by card while the card number itself stays masked. It is
-granted to `carddemo_reporting_owner` alone, and both `V1__reporting_views.sql` and
-`V0__schemas_and_roles.sql` revoke it from `carddemo_reporting` — the first because
-the schema's default privilege would otherwise convey it at creation, the second
-because the bootstrap's blanket `GRANT SELECT ON ALL TABLES` would convey it again on
-the re-run the sequence prescribes. Applying those scripts makes the
+authors the eight read-only cross-schema views, plus **two** tables, neither of which
+the service role may read whole.
+
+The first is `reporting.card_grouping_key`, which the service role cannot select from
+at all. It holds the secret mixed into `v_statement_transactions.card_fingerprint`,
+the per-card grouping token that lets a statement break by card while the card number
+itself stays masked. It is granted to `carddemo_reporting_owner` alone, and both
+`V1__reporting_views.sql` and `V0__schemas_and_roles.sql` revoke it from
+`carddemo_reporting` — the first because the schema's default privilege would
+otherwise convey it at creation, the second because the bootstrap's blanket
+`GRANT SELECT ON ALL TABLES` would convey it again on the re-run the sequence
+prescribes.
+
+The second is `reporting.card_identity`, described in full
+[below](#reportingcard_identity--one-indexed-row-per-card): one row per card, holding
+that token, the whole card number the views join on, and the masked rendering they
+publish. The service role holds **column-level** `SELECT` on two of its three columns
+and no privilege on the third. Applying those scripts makes the
 context read `ledger`, `account`, `card` and `reference` through a login holding
 `SELECT` on the views alone. The artifacts have been executed successfully against a
 disposable PostgreSQL validation database; no provisioned application environment is
@@ -1823,7 +1832,7 @@ Two properties of this schema differ from the other seven, and both are delibera
 
 | Property | The other seven | `reporting` |
 |---|---|---|
-| Contents | tables, indexes and constraints | eight views the service role may read, plus `card_grouping_key`, the one table it may not |
+| Contents | tables, indexes and constraints | eight views the service role may read, plus two tables it may not read whole: `card_grouping_key`, which it may not read at all, and `card_identity`, of which it may read two columns of three |
 | Target creation authority | the owning service's own Flyway migration, applied under `SET ROLE carddemo_<context>_owner` | `data-migration/sql/V1__reporting_views.sql`, applied after the source-table migrations under `SET ROLE carddemo_reporting_owner` |
 
 > Refactoring Rationale: **database ownership used to be the third difference and is
@@ -1852,13 +1861,17 @@ Two properties of this schema differ from the other seven, and both are delibera
 >    data-definition script, no Flyway artifact and no `db/migration` directory, and the
 >    login role it authenticates as, `carddemo_reporting`, holds `USAGE` on the schema and
 >    `SELECT` on the eight views and nothing else whatsoever.
-> 2. **The `reporting` schema is not empty of tables.** It holds exactly one,
->    `card_grouping_key`, created by `V1__reporting_views.sql` and owned by
->    `carddemo_reporting_owner`.
-> 3. **The service cannot read that one table.** Both scripts revoke it from
+> 2. **The `reporting` schema is not empty of tables.** It holds exactly two,
+>    `card_grouping_key` and `card_identity`, both created by
+>    `V1__reporting_views.sql` and both owned by `carddemo_reporting_owner`.
+> 3. **The service cannot read either table whole.** Both scripts revoke both from
 >    `carddemo_reporting`, which is what keeps the per-card grouping token
 >    non-invertible; a role that could read the key could recover a card number from a
->    fingerprint by hashing sixteen digits.
+>    fingerprint by hashing sixteen digits, and a role that could read
+>    `card_identity.card_num` would not need to. `card_identity` then re-grants
+>    `SELECT` on `(card_fingerprint, card_num_masked)` only — the two columns the
+>    statement heading cursor orders by — so the role's visible column set across the
+>    whole schema is exactly what the eight views already publish.
 >
 > Statement 1 is the AAP's "owned tables: (none)" for this context, and statements 2 and 3
 > are the mechanism that delivers it rather than an exception to it. An artifact that
@@ -1916,7 +1929,111 @@ Two properties of this schema differ from the other seven, and both are delibera
 > instead, so the ordering is an index property rather than a stored duplicate. The
 > accepted cost is that statement generation reads through the index rather than
 > from a pre-sorted extract.
+>
+> Assumptions: **`reporting.card_identity` is not that projection and does not
+> reopen this decision.** It carries one row per CARD — three columns, no amount, no
+> timestamp and no transaction — so it duplicates no monetary state and there is
+> nothing in it that a posting or reject comparison could disagree with. What it
+> stores is an identity mapping that was previously recomputed per row, and the
+> transactions themselves are still read from `ledger.transactions` through
+> `idx_transactions_card_num`.
 
+
+### `reporting.card_identity` — one indexed row per card
+
+`V1__reporting_views.sql` creates a second table in this schema, and it is the one
+physical access structure the reporting context owns:
+
+| Column | Type | Role | Readable by `carddemo_reporting` |
+|---|---|---|---|
+| `card_fingerprint` | `text COLLATE "C"`, primary key `pk_card_identity` | the keyed per-card grouping token every card-bearing projection publishes | yes |
+| `card_num` | `character(16)`, unique `uq_card_identity_card_num` | the whole card number the views join on and `resolve_card` compares | **no** |
+| `card_num_masked` | `text COLLATE "C"`, sixteen characters | the masked rendering the views publish as `card_num` | yes |
+
+plus `idx_card_identity_masked_fingerprint` on `(card_num_masked, card_fingerprint)`,
+which is the statement heading cursor's ordering tuple exactly.
+
+The rows are **derived** from `account.card_xref`, one per card, and are produced by
+the same keyed digest the views previously computed inline:
+`encode(sha256(convert_to(key_value || rtrim(card_num), 'UTF8')), 'hex')` over the
+single row of `reporting.card_grouping_key`. **The token value is deliberately
+unchanged** — the operand order and the encoding are byte-identical to the computed
+form — because the token appears in every reporting DTO and in the statement selector
+a client holds, so re-keying it would read to a caller as every selector having become
+invalid at once.
+
+> WHY — Refactoring Rationale: **an unindexable expression was replaced by an indexed
+> column.** The three card-bearing views used to compute the token per row, with a
+> cross join to the key table. An expression that reads a table is not `IMMUTABLE`, and
+> PostgreSQL will not build an index over one — so `where card_fingerprint = :token`
+> could never be anything but a sequential scan of `ledger.transactions`, once per
+> card, and the heading cursor's `order by (masked card, fingerprint)` had nothing
+> behind either component and sorted the whole cardholder population per chunk. Storing
+> the token makes the first a primary-key seek and the second an ordered index scan.
+> The cost is a derived relation that has to be maintained, which is the next entry.
+
+> WHY — Assumptions: **freshness is a correctness property, not an optimisation.** A
+> card the cross-reference carries but this relation does not is absent from
+> `reporting.v_card_xref` and unresolvable by `reporting.resolve_card`, so a statement
+> run over a stale relation emits one document fewer and reports nothing. The relation
+> is therefore backfilled when it is created and reconciled by
+> `reporting.refresh_card_identity()` — a `SECURITY DEFINER` procedure with a pinned
+> `search_path`, revoked from `PUBLIC` and granted to `carddemo_reporting`, which
+> inserts the cards it lacks and deletes the cards the cross-reference no longer
+> publishes. It is idempotent and writes only the difference, so calling it
+> unconditionally before a run costs nothing on an unchanged population.
+> `data-migration/src/carddemo_migration/loaders/aurora.py` publishes it as
+> `refresh_card_identity(connection)`, taking a writable `_migrator` connection and
+> returning the published, missing and departed counts. **The load path is the only
+> caller it can have.** `reporting-service` opens its pool `read-only: true`, so
+> PostgreSQL refuses the procedure's writes through that pool whatever privileges
+> `SECURITY DEFINER` confers — read-only is a property of the transaction, not of the
+> privilege — and the repository method the service exposes is therefore a diagnostic
+> and a contract rather than a usable maintenance path. Sequencing the call after the
+> last load into `account.card_xref` and before any statement run is the ETL
+> orchestration entry point's responsibility.
+
+> WHY — Alternatives Considered: **a trigger on `account.card_xref`, which would have
+> removed the maintenance step entirely.** Rejected on two independent grounds.
+> `V1__reporting_views.sql` runs under `SET LOCAL ROLE carddemo_reporting_owner`, and
+> that role holds no `TRIGGER` privilege on a relation the **account** context owns —
+> granting it would widen a cross-context boundary in the direction this architecture
+> forbids. And a trigger would make an account-context write fail whenever reporting
+> maintenance failed, coupling a transaction that must succeed to a derived relation
+> that may be repaired later. A definer procedure with a pinned search path is the
+> narrower capability: the reporting role can reconcile and can still not write the
+> relation or read the cross-reference.
+
+> WHY — Assumptions: **the column-level grant is what keeps the masking control
+> exactly as strong as it was.** The views are not `security_invoker`, so they resolve
+> their reads as `carddemo_reporting_owner` and can join on `card_num` while the
+> service role holds no privilege on that column. The role's visible column set is
+> therefore unchanged by this table's arrival: `card_fingerprint` and
+> `card_num_masked` are values the views already published. Both
+> `V1__reporting_views.sql` and `V0__schemas_and_roles.sql` carry the
+> revoke-then-column-grant pair, because a whole-table `GRANT SELECT` makes a column
+> grant redundant and PostgreSQL discards the narrower entries — so the bootstrap's
+> blanket grant on a prescribed re-run would otherwise hand the role every card number
+> in the portfolio.
+
+> WHY — Assumptions: **row inclusion is preserved by outer joins, and that is a
+> deliberate asymmetry.** `v_statement_transactions` and `v_report_transactions` drive
+> from `ledger.transactions` and reach this relation with a `LEFT JOIN`, so a
+> transaction whose card the cross-reference does not carry — or does not carry yet,
+> between a load and the next reconciliation — keeps its row with a null fingerprint
+> rather than disappearing from a report total. `v_card_xref` is the opposite case by
+> construction: it publishes one row per card, so a card with no identity row has no
+> row to keep, which is precisely why the reconciliation is mandatory before a run.
+
+> WHY — Trade-offs: **the two card-number columns do not share a collation, and the
+> difference is load-bearing.** `card_identity.card_num` is `character(16)` in the
+> database default collation, matching `account.card_xref.card_num` so the join and the
+> unique key are directly comparable. `ledger.transactions.card_num` is bytewise
+> (`COLLATE "C"`), so the join to it carries an explicit `COLLATE "C"` rather than
+> relying on the default — an implicit mismatch there would be a runtime collation
+> error at best and a silently unindexed comparison at worst. The two ordered columns
+> are `COLLATE "C"` for the same reason the heading order is: the cursor's order must
+> not depend on the container's locale.
 
 ## Alternate indexes become real secondary indexes
 

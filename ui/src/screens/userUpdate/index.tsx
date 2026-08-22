@@ -2,6 +2,18 @@
  * @file The user update screen, migrated from `app/cbl/COUSR02C.cbl` (415 lines) and its mapset
  * `app/bms/COUSR02.bms` (29 `DFHMDF` fields, 12 of them named), mounted at `/users/:id/edit`.
  *
+ * Assumptions: the route's selector segment is OPTIONAL, so one pattern serves both arrivals this
+ * screen has to answer -- `/users/edit`, which administrative option 3 enters with no identifier and
+ * which matches `app/cbl/COUSR02C.cbl`'s empty first turn, and `/users/<id>/edit`, which the browse
+ * enters with one already chosen. The mount effect below reads nothing when the route carries no
+ * identifier, which is what lets one module serve both without a second component.
+ *
+ * Assumptions: the identifier segment is OPTIONAL in that one declaration, so both arrivals the
+ * reference has reach this screen -- `/users/:id/edit` from a caller that selected a row, and
+ * `/users/edit` from the administrative menu, which selects nobody. The mount effect below reads
+ * nothing in the second case, mirroring `app/cbl/COUSR02C.cbl` L99-L104, which tests its selection
+ * carrier against `SPACES AND LOW-VALUES` before using it.
+ *
  * Purpose
  * -------
  * Render the reference screen's two-turn fetch-then-save workflow over one administered user: read
@@ -45,7 +57,7 @@
  * Alternatives Considered: implementing a truthful credential reset, so the control could keep its
  * meaning. Rejected on scope rather than on difficulty -- the AAP publishes no administrative
  * credential-reset operation, and `services/auth-service/src/main/resources/openapi/auth-api.yaml`
- * declares eight operations, none of them one. Onboarding's own credential is published as
+ * declares nine operations, none of them one. Onboarding's own credential is published as
  * `CreatedUserResponse.credentialSecretName`, the NAME of a managed-secret entry, precisely so that no
  * credential travels in a response body; a reset operation faithful to that design needs a service
  * endpoint, a user-pool administrative grant and its own contract, which is a capability to plan rather
@@ -62,7 +74,7 @@ import { Divider, Flex, Form, Input, Typography, theme } from 'antd';
 import type { InputRef } from 'antd';
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { ChangeEvent, CSSProperties, ReactElement } from 'react';
-import { useNavigate, useParams } from 'react-router';
+import { useLocation, useNavigate, useParams } from 'react-router';
 
 import { USER_ID_MAX_LENGTH, getUser, updateUser } from '../../api/auth';
 import { isApiRequestError } from '../../api/client';
@@ -88,7 +100,12 @@ import {
   formatMessageTemplate,
 } from '../../messages/messages';
 import type { MapsetName } from '../../messages/messages';
-import { ADMIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
+import {
+  ADMIN_MENU_ROUTE,
+  inApplicationRoute,
+  navigateSafely,
+  screenTransitionState,
+} from '../../routes/navigation';
 import { ScreenTitle } from '../../layout/ScreenTitle';
 import {
   BMS_COLOR_TOKENS,
@@ -166,7 +183,7 @@ export const USER_UPDATE_FIELD_LABELS = {
  *
  * Assumptions: the mapset paints a second hint, `INITIAL='(8 Char)'` at L135-L139, beside the
  * credential control. It goes with that control rather than being retained without it, and the width it
- * names is separately registered as `D-SIGNON-PASSWORD-HINT` for the one screen that still has a
+ * names is separately registered as `D-SIGNON-RETIRED-WIDTH-HINT` for the one screen that still has a
  * credential control to hint at.
  */
 export const USER_UPDATE_FIELD_HINTS = {
@@ -524,13 +541,31 @@ export function normaliseUserType(typed: string): '' | UserType {
  * this route. The name is per-route rather than global -- the only other parameterised routes in the
  * table are the two card routes, and both spell theirs `cardKey` (`ui/src/routes/cards.ts` L88, L91) --
  * so the two spellings are not interchangeable and a mismatch resolves to `undefined` silently. It is
- * optional in this component's own terms: an operator may reach the screen with no identifier and type
- * one, which is exactly what the reference permits when `CDEMO-CU02-USR-SELECTED` arrives as `SPACES`
- * (L99-L104).
+ * optional in this component's own terms, and that is a property of the COMPONENT rather than of any
+ * route: `useParams` types every parameter as possibly absent, and a mount outside a match of this
+ * screen's one pattern -- which is how its covering test reaches the no-identifier state -- supplies
+ * none. The screen answers that arrival the way the reference answers a carrier arriving as `SPACES`
+ * (L99-L104): it reads nothing and waits for a typed identifier.
+ *
+ * ⚠️ Refactoring Rationale: no ROUTE produces that arrival any more, and the previous wording -- "an
+ * operator may reach the screen with no identifier and type one" -- claimed one did. A selector-free
+ * `/users/edit` was mounted on this component so the administrative menu's update option had somewhere
+ * to go, and it was withdrawn because AAP section 0.4.1.4 enumerates twenty-one screen routes and names
+ * `/users/:id/edit` as the only user-update route. `ui/src/screens/admin/index.tsx` sends that option to
+ * the user browse instead, where the identifier is selected, so every routed arrival here now carries
+ * one.
  * @returns {ReactElement} The header band, caption, message band, the four controls and the key legend.
  */
 export function UserUpdateScreen(): ReactElement {
   const navigate = useNavigate();
+  /*
+   * WHY : Assumptions: the location is read for its `state` alone, which is where the caller origin
+   *       arrives. `app/cpy/COCOM01Y.cpy` L23-L26 carried `CDEMO-FROM-PROGRAM` in the shared structure
+   *       and this screen's PF3 arm prefers it over its own menu destination, so a stateless target needs
+   *       some carrier for it; router state is that carrier because it travels in the history entry and
+   *       therefore appears in no request line, unlike a query member.
+   */
+  const location = useLocation();
   /*
    * WHY : Assumptions: the instant is server-derived rather than read from the browser clock, because
    *       the reference reads ONE region clock for every terminal -- `POPULATE-HEADER-INFO` runs
@@ -866,10 +901,13 @@ export function UserUpdateScreen(): ReactElement {
      * presses anything. AAP section 0.7.1 relocates that selection carrier to the request path, so the
      * route parameter is what stands in for it.
      *
-     * Assumptions: the effect is skipped entirely when the route carries no identifier, which the
-     * reference's own guard does -- it tests the carrier against `SPACES AND LOW-VALUES` before using
-     * it -- and leaves the screen waiting for a typed identifier rather than refusing a blank one the
-     * operator never entered.
+     * Assumptions: the effect is skipped entirely when NO identifier reaches it, which the reference's
+     * own guard does -- it tests the carrier against `SPACES AND LOW-VALUES` before using it -- and
+     * leaves the screen waiting for a typed identifier rather than refusing a blank one the operator
+     * never entered. Since `/users/edit` was withdrawn, the router cannot produce that arrival: this
+     * component is mounted at `/users/:id/edit` alone, so the guard covers the optional shape
+     * `useParams` gives the parameter and a mount outside a matched route, both of which its covering
+     * tests exercise. Removing it would trade a defined waiting state for a read of `undefined`.
      * @returns {void} Completion is represented by the screen's own state.
      */
     function loadRouteUser(): void {
@@ -1120,15 +1158,46 @@ export function UserUpdateScreen(): ReactElement {
   }
 
   /**
-   * Leaves the screen for the administrative menu, which is where both exit arms transfer to.
+   * Leaves the screen for the route it was entered from, which is the reference's PF3 destination.
    *
-   * Assumptions: the destination is the administrative menu unconditionally. `app/cbl/COUSR02C.cbl`
-   * L113-L118 prefers `CDEMO-FROM-PROGRAM` and falls back to `'COADM01C'`, and L125 uses that same
-   * fallback for PF12 with no preference at all. The preferred arm reads a value a CALLING program
-   * deliberately placed in the shared structure, and the router publishes no equivalent named caller --
-   * a history entry is not a named program and need not even be inside this application -- so the
-   * fallback is the only arm with a target analogue, and it is the reference's own default. The sibling
-   * screens resolve the identical construct the same way.
+   * ⚠️ Refactoring Rationale: this arm reads a VALIDATED caller origin where it previously transferred to
+   * the administrative menu unconditionally, and the old rationale -- that the router publishes no
+   * equivalent of a named calling program -- was wrong: `ui/src/routes/navigation.ts` publishes exactly
+   * that as `ScreenTransitionState.from`, validated against a closed set of this application's own
+   * routes, and the user browse hands its own route over on the row action it opens this screen with
+   * (`ui/src/screens/userList/index.tsx`). Taking the fallback unconditionally lost real behaviour: an
+   * administrator who opened a row from the list was returned to the administrative menu and had to
+   * re-enter the browse and re-page to reach the next row, which is the behaviour loss
+   * `app/cbl/COUSR00C.cbl` L192-L197 avoids by naming itself in `CDEMO-FROM-PROGRAM` before it transfers.
+   *
+   * Assumptions: both arms of the reference's decision are reproduced intact -- `app/cbl/COUSR02C.cbl`
+   * L113-L118 prefers `CDEMO-FROM-PROGRAM` and falls back to `'COADM01C'` when it is blank -- so an
+   * origin the closed set does not admit, and an arrival with none at all, both reach the administrative
+   * menu, which is the reference's own default.
+   *
+   * Assumptions: the claim is validated rather than trusted, because router state is attacker-writable
+   * through a hand-edited history entry: an unvalidated path-shaped value would either reach the
+   * not-found surface or, if protocol-relative, leave the application on a key press the operator
+   * believes goes back one screen. The origin selects a destination and nothing else -- the row this
+   * screen reads and writes comes from the path parameter under the signed token -- so a forged origin
+   * changes where PF3 goes and reaches no other operator's record.
+   * @returns {void} Completion is the requested route transition.
+   */
+  function exitToOrigin(): void {
+    navigateSafely(
+      navigate,
+      inApplicationRoute(screenTransitionState(location.state).from) ?? ADMIN_MENU_ROUTE,
+    );
+  }
+
+  /**
+   * Leaves the screen for the administrative menu, which is the reference's PF12 arm (L124-L125).
+   *
+   * Assumptions: this arm is UNCONDITIONAL where PF3's is not, and the two are kept as separate
+   * functions for that reason rather than sharing one destination. `app/cbl/COUSR02C.cbl` L124-L125 moves
+   * `'COADM01C'` into `CDEMO-TO-PROGRAM` with no preference for the calling program at all, so PF12
+   * always returns to the administrative menu even on a turn where PF3 would have gone back to the
+   * browse. The sibling deletion screen draws the same distinction from its own L121-L122.
    * @returns {void} Completion is the requested route transition.
    */
   function exitToAdminMenu(): void {
@@ -1232,8 +1301,12 @@ export function UserUpdateScreen(): ReactElement {
      *       the request continue in the background. Rejected because it races the request against an
      *       unmount, which can leave the write unsent, and because it would make the write's completion
      *       unordered with respect to the destination screen's own reads.
+     * WHY : Assumptions: BOTH settlements transfer to the same place, and that place is the validated
+     *       caller origin rather than the menu. The reference's L112-L119 has no `ERR-FLG` test between
+     *       `UPDATE-USER-INFO` and `RETURN-TO-PREV-SCREEN`, so the destination does not depend on the
+     *       save's outcome; `exitToOrigin` is what encodes which destination that is.
      */
-    attemptSave().then(exitToAdminMenu, exitToAdminMenu);
+    attemptSave().then(exitToOrigin, exitToOrigin);
   }
 
   /**

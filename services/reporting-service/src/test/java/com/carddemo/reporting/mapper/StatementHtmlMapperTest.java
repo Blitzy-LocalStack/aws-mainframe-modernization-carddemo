@@ -107,25 +107,37 @@ import org.junit.jupiter.params.provider.MethodSource;
  * the whole-item regime is provably NOT trimming. Every one is supplied as a transcribed literal at
  * the point of use, and each carries a note stating the boundary it reaches.</p>
  *
- * <p>Alternatives Considered: driving them from this module's fixture files. Rejected on measurement.
- * The register at {@code src/test/resources/fixtures/README.md} declares the {@code ACCOUNT},
- * {@code CARD}, {@code XREF}, {@code CUSTOMER}, {@code TCATBAL}, {@code TRANTYPE} and
- * {@code TRANCAT} record types -- the same seven {@code ReportingFixtureContractTest} binds -- and
- * none of them is a
- * {@code TRNX} record, so no fixture description exists to carry trailing blanks in the first place;
- * and {@code ReportingFixtureContractTest} asserts that the fixture directory contains EXACTLY the
- * closed set of entries it names, so adding one would fail that sibling rather than help this one.
- * Trade-offs: this paragraph now names the record types instead of counting them, because a count
- * goes stale the next time a planned fixture lands while the argument it supports does not.
- * Assumptions: naming them is only better than counting them if the NAMES are complete, and this
- * list omitted {@code XREF} while {@code cardxref.txt} was bound -- so the enumeration went stale in
- * exactly the way the count would have. It is a weaker failure than a wrong count, because the
- * argument this paragraph supports is that NO bound record type is a {@code TRNX} record, and an
- * omitted name cannot falsify that; it is corrected anyway, since a reader checking the list against
- * the contract test would have found a seventh type and no reason for its absence. The
-
- * sibling {@code StatementTextMapperTest} reaches its own four boundaries the same way and for the
- * same recorded reason, so the two emitters are proven against values built by one convention.</p>
+ * <p>Alternatives Considered: driving them from this module's fixture files. Rejected on measurement
+ * of the committed VALUES, which is the only form of this argument that stays true as fixtures are
+ * added. Refactoring Rationale: this paragraph twice argued from a roster of bound record types
+ * instead -- first with {@code XREF} missing from the list, then with the list predating
+ * {@code trnxfile.txt} altogether -- and both times the roster went stale while the boundaries it
+ * was standing in for did not move. The first and third properties are out of reach of the committed
+ * data, and each shortfall is a number a reader can measure against a file:</p>
+ *
+ * <p>First property, the over-wide name: the widest three-part name in
+ * {@code fixtures/custfile.txt} assembles to 24 characters of text plus the two separators between
+ * its parts, 26 against the {@value StatementTextMapper#MARKUP_NAME_WIDTH} the markup cell keeps, so
+ * a fixture-driven name would be narrowed to itself and the truncation case would prove nothing about
+ * which of two mappers produced it. Third property, the untrimmed description: every description in
+ * {@code fixtures/trnxfile.txt}, across all 700 rows that sibling test binds, occupies between 61 and
+ * 77 characters of its declared {@code PIC X(100)}, so each one narrowed into the
+ * {@value StatementTextMapper#DESCRIPTION_ITEM_WIDTH}-character band item fills it completely and
+ * arrives here with no trailing blank at all -- and a whole-item cell with nothing to trim cannot be
+ * told apart from the right-trim cell beside it.</p>
+ *
+ * <p>Trade-offs: the second property, an item ending in its own declared padding, IS reachable from
+ * the committed data -- the address lines in {@code fixtures/custfile.txt} occupy between 8 and 26
+ * characters of their declared {@code PIC X(50)} and {@code FixedWidthCodec} returns text at its
+ * declared width without trimming -- and is nonetheless supplied as a literal here. The four
+ * right-trim sites are swept with ONE text at three different declared widths, 50, 75 and 80, and
+ * two of those three are ASSEMBLED items that no committed record declares at all; a fixture value
+ * per site would leave the four cases asserting four different strings, so the cut could no longer
+ * be compared across them. {@code ReportingFixtureContractTest} additionally asserts that the
+ * fixture directory holds EXACTLY the closed set of entries it names, so a value tailored to any of
+ * these three boundaries cannot be added as a fixture without turning that sibling red. The sibling
+ * {@code StatementTextMapperTest} reaches its own four boundaries the same way and for the same
+ * recorded reason, so the two emitters are proven against values built by one convention.</p>
  *
  * <p>Assumptions: {@code TRNX} and {@code TRAN} are distinct record types and neither is an alias of
  * the other. {@code TRNX-RECORD} is declared at line 20 of {@code app/cpy/COSTM01.CPY} with

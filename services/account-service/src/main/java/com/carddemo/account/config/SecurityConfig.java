@@ -253,11 +253,16 @@ public class SecurityConfig {
     /**
      * The loopback addresses the task-local collector can reach this service from.
      *
-     * <p>Assumptions: the only configured consumer of the endpoints above is TASK-LOCAL. The
-     * collector sidecar scrapes {@code https://127.0.0.1:<container-port>} at
-     * {@code metrics_path: /actuator/prometheus} every sixty seconds --
-     * {@code infra/modules/ecs-service/main.tf} -- and that scrape configuration carries no
-     * authorization header at all, so it can present no token.</p>
+     * <p>Assumptions: any consumer of the endpoints above is TASK-LOCAL, and none is configured
+     * today. A scraper would reach {@code https://127.0.0.1:<container-port>} at
+     * {@code /actuator/prometheus} from inside the task's own network namespace and would carry no
+     * authorization header, so it could present no token -- which is why these paths are granted by
+     * NETWORK POSITION rather than by authority. Refactoring Rationale: this named a collector
+     * sidecar in {@code infra/modules/ecs-service/main.tf} as that consumer, scraping every sixty
+     * seconds. The sidecar is WITHDRAWN -- it sat outside the frozen specification -- so the surface
+     * is published with nothing collecting from it. The rule is unchanged by that withdrawal,
+     * because a token-free consumer inside the namespace and no consumer at all both require
+     * exactly the loopback restriction.</p>
      *
      * <p>Refactoring Rationale: an earlier revision covered the whole {@link #MANAGEMENT_PATH}
      * namespace with one rule requiring the administrator authority, on the ground that a metrics

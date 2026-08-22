@@ -1509,9 +1509,25 @@ public class AuthorizationRequestListener {
      * account reaches once in ten thousand authorizations, and the one arm that holds no summary cannot be
      * near the bound, for the reason recorded at that call site.</p>
      *
-     * <p>Assumptions: only the account identifier, the member and the two values are named. The account
-     * identifier is not a protected value -- every line this class writes carries it -- while the card
-     * number and the amounts are, so neither appears here.</p>
+     * <p>⚠️ Assumptions: only the member and the two counter values are named, and NO account identifier
+     * is. Refactoring Rationale: this paragraph asserted that the account identifier "is not a protected
+     * value -- every line this class writes carries it", and both halves were wrong. No other line in this
+     * class names it, the neighbouring {@link #rowCountFailureSentence()} states the opposite rule for the
+     * same reason, and the identifier is the key of a customer's account: writing it into a retained log
+     * makes log access a path to a financial record, which is the disclosure the migration's logging
+     * contract exists to prevent. The card number and the amounts were already withheld here, so naming
+     * the account beside them was the outlier rather than the convention.</p>
+     *
+     * <p>Assumptions: the diagnosis does not depend on the identifier. This is a WARNING that one stored
+     * counter has stopped tracking the authorizations behind it, and what an operator does with it is
+     * query the governed table for summaries resting on the bound -- which is one indexed predicate, under
+     * access control and audit, where a log read is neither. The line still says which member narrowed,
+     * what the contribution asked for and what was stored, and the correlation identifier the enclosing
+     * handler places in the logging context joins it to the request that caused it. Alternatives
+     * Considered: an opaque purpose-scoped token over the identifier. Rejected because this class
+     * deliberately takes no tokeniser -- its constructor's own record says so, and the replay line above
+     * withholds the acquirer's transaction identifier on exactly that reasoning -- so minting one here
+     * would reintroduce a key, a secret and a grant for a value the query above does not need.</p>
      *
      * @param summary the summary read in this transaction, empty when none was read; must not be
      *     {@code null}
@@ -1524,10 +1540,13 @@ public class AuthorizationRequestListener {
         summary.ifPresent(stored -> {
             int next = counter.apply(stored) + addend;
             if (PendingAuthSummary.exceedsCounterDomain(next)) {
-                LOG.warn("event=auth.summary.counter-narrowed accountId={} field={} requested={} "
-                                + "stored={}",
-                        stored.getAccountId(), field, next,
-                        PendingAuthSummary.narrowedCounterToStoredDomain(next));
+                // WHY : ⚠️ Assumptions: the summary is read for its COUNTER only and its identifier is
+                //       never rendered. This line previously carried `accountId=` taken from the same
+                //       row, which put an account key into a retained log on the one path where an
+                //       operator is most likely to be reading -- and the fields that remain are what the
+                //       diagnosis actually uses, the account being reachable through the governed table.
+                LOG.warn("event=auth.summary.counter-narrowed field={} requested={} stored={}",
+                        field, next, PendingAuthSummary.narrowedCounterToStoredDomain(next));
             }
         });
     }

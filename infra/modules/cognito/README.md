@@ -318,19 +318,73 @@ root; the input is required with no default so a fall-back to the AWS-managed ke
 cannot happen unnoticed.
 
 ```bash
-# WHAT: retrieve one seed identity's initial credential from Secrets Manager, using
-#       a secret name taken from this module's seed_user_secret_names output.
-# WHY : Trade-offs: retrieval is deliberately out of band rather than a Terraform
-#       output. An output is printed to the console, written into the state of every
-#       consuming root and readable with one command, which would turn a managed,
-#       audited secret into an unmanaged copy of itself. The cost is one extra
-#       operator step; the gain is that every read is attributable in CloudTrail.
-#       Do not echo the result into a shell history, a log or a ticket.
-aws secretsmanager get-secret-value \
-  --region "<region>" \
-  --secret-id "<secret-name>" \
-  --query SecretString \
-  --output text
+# WHAT: hand one seed identity's initial credential to a subshell without displaying
+#       it, report only the non-secret metadata of that read -- the entry's ARN and
+#       the version the value came from -- and pipe the value straight into the
+#       channel that delivers it to the person.
+# WHY : Refactoring Rationale: this block used to end in
+#       `--query SecretString --output text`, which writes the credential to stdout
+#       -- the terminal, the shell's scrollback, and any transcript or job log
+#       capturing the step. It therefore performed the exposure its own rationale
+#       told the operator to avoid, and the instruction not to echo the result was
+#       being given by the command that echoed it. A command substitution keeps the
+#       value in memory instead, and `set +o xtrace` is asserted first because a
+#       shell left in trace mode echoes the expansion wherever it is assigned.
+# WHY : Refactoring Rationale: the whole sequence runs in a SUBSHELL rather than in
+#       the operator's own shell followed by an `unset`. Two reasons, and the second
+#       is the one that matters: the variable then cannot outlive the block at all,
+#       and a delivery command that FAILS cannot leave the plaintext behind -- a
+#       trailing `unset` is skipped by any shell running with `set -e`, which is
+#       exactly the shell a careful operator uses. `set +o xtrace` inside the
+#       subshell also leaves the caller's own trace setting untouched.
+# WHY : Assumptions: every hop passes the value on STDIN and never as an argument.
+#       An argument is visible in `ps` output and in the process table to any other
+#       user on the host for as long as the command runs, so `--secret-string` and
+#       its equivalents are avoided even where they would be shorter.
+# WHY : Trade-offs: retrieval stays out of band rather than becoming a Terraform
+#       output. An output is printed at the end of an apply, written into the state
+#       of every consuming root and readable with one command, which would turn a
+#       managed, audited secret into an unmanaged copy of itself. The cost is one
+#       extra operator step; the gain is that every read is a GetSecretValue event
+#       attributable in CloudTrail. The further cost of this shape is that the
+#       operator cannot read the value off the screen and must pipe it into a
+#       delivery channel -- a password manager's stdin, or an encryption command
+#       addressed to the recipient -- which is the intent: a credential this package
+#       keeps out of state, out of every output and out of the repository should not
+#       become legible in a scrollback at the one moment it changes hands.
+(
+  set +o xtrace
+
+  CARDDEMO_SEED_SECRET_NAME="<one name from the seed_user_secret_names output>"
+
+  CARDDEMO_SEED_SECRET_JSON="$(aws secretsmanager get-secret-value \
+    --region "<region>" \
+    --secret-id "$CARDDEMO_SEED_SECRET_NAME" \
+    --output json)"
+
+  # Assumptions: ARN and VersionId are metadata of the read, not the payload of it,
+  # so neither is nor reveals the credential. The version identifier is what makes a
+  # handover attributable to one rotation when the revision input is bumped later.
+  printf '%s' "$CARDDEMO_SEED_SECRET_JSON" | python3 -c \
+    'import json, sys; read = json.load(sys.stdin); print("secret-arn:", read["ARN"]); print("version-id:", read["VersionId"])'
+
+  # Assumptions: SecretString is the JSON object seed_user_bootstrap.py wrote --
+  # {"username": ..., "password": ...} -- so the username travels with the
+  # credential and the recipient learns which identity it belongs to without a
+  # second lookup.
+  # Trade-offs: the delivery step below is armoured public-key encryption addressed
+  # to the recipient, because that is the one channel present on a bare operator
+  # host, and its output is ciphertext rather than the credential. Substitute the
+  # channel your organisation actually uses -- a password manager's create-from-
+  # stdin command is the common one -- subject to one requirement: it must READ
+  # STDIN and must not print what it reads. A command that takes the value as an
+  # argument, or echoes it on success, reintroduces exactly the exposure this block
+  # exists to close.
+  printf '%s' "$CARDDEMO_SEED_SECRET_JSON" | python3 -c \
+    'import json, sys; sys.stdout.write(json.load(sys.stdin)["SecretString"])' \
+    | gpg --encrypt --armor --recipient "<recipient-key-id>" \
+    > "carddemo-seed-handoff.asc"
+)
 ```
 
 

@@ -15,9 +15,12 @@ import com.carddemo.batch.dto.DatasetGeneration.DatasetFamily;
 import com.carddemo.batch.dto.DatasetGeneration.GenerationReference;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -27,6 +30,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -38,14 +43,23 @@ import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CommonPrefix;
+import software.amazon.awssdk.services.s3.model.DeleteMarkerEntry;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsResponse;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
+import software.amazon.awssdk.services.s3.model.ListObjectVersionsRequest;
+import software.amazon.awssdk.services.s3.model.ListObjectVersionsResponse;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
+import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
+import software.amazon.awssdk.services.s3.model.ObjectVersion;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectResponse;
+import software.amazon.awssdk.services.s3.model.S3Error;
 import software.amazon.awssdk.services.s3.model.S3Exception;
+import software.amazon.awssdk.services.s3.paginators.ListObjectVersionsIterable;
 import software.amazon.awssdk.services.s3.paginators.ListObjectsV2Iterable;
 
 /**
@@ -197,6 +211,17 @@ class DatasetGenerationServiceTest {
     private static final int NOT_FOUND_STATUS = 404;
 
     /**
+     * How many entries one page of the stubbed version listing carries.
+     *
+     * <p>Assumptions: the value is the object store's own per-page ceiling, and it is deliberately the
+     * same number as the service's deletion batch size without being read from it. Reading the service's
+     * constant would make the stub agree with the subject by construction, so a subject that batched at
+     * the wrong size would still see pages that matched it exactly. Spelling the store's contract here
+     * keeps the two independent.</p>
+     */
+    private static final int VERSION_PAGE_SIZE = 1000;
+
+    /**
      * The keys the most recently built stub holds, in the order they were created.
      *
      * <p>Assumptions: the backing store is exposed to the cases as a live view rather than copied out,
@@ -204,6 +229,61 @@ class DatasetGenerationServiceTest {
      * whose writes vanished would let a reservation defect pass as an absence of writes.</p>
      */
     private final Map<String, String> storedObjects = new LinkedHashMap<>();
+
+    /**
+     * The version identifiers each key holds, oldest first, as a versioned bucket would hold them.
+     *
+     * <p>Assumptions: this is a SEPARATE registry from {@link #storedObjects} rather than a richer value
+     * in it, because the two answer different questions and one case needs them to disagree. A listing
+     * without a delimiter reports every version of every key, including versions no current read can
+     * reach, and only a registry that outlives an overwrite can hold those. Folding the versions into the
+     * body map would make a key's history exactly one entry long, and a retention pass that removed the
+     * current version while leaving its predecessors would look complete.</p>
+     */
+    private final Map<String, List<String>> storedVersions = new LinkedHashMap<>();
+
+    /**
+     * The delete-marker version identifiers each key carries, oldest first.
+     *
+     * <p>Assumptions: markers are held apart from real versions because the store reports them apart, in
+     * a different member of the same response, and because a scratch that removes versions while leaving
+     * markers leaves the prefix non-empty. A test can seed a marker directly, which is what a prefix
+     * scratched by an earlier version-blind delete actually looks like.</p>
+     */
+    private final Map<String, List<String>> storedDeleteMarkers = new LinkedHashMap<>();
+
+    /**
+     * Every batched deletion the service issued, in order, as the exact identifiers it named.
+     *
+     * <p>Assumptions: the requests are recorded as their own lists rather than flattened, because one
+     * case settles the BATCH SIZE. A flattened record would show every identifier that was deleted and
+     * nothing about how many requests carried them, and the batch ceiling is a hard service limit rather
+     * than a preference.</p>
+     */
+    private final List<List<ObjectIdentifier>> deleteRequests = new ArrayList<>();
+
+    /**
+     * Per-object refusals every batched deletion is to report, or empty when none are staged.
+     *
+     * <p>Assumptions: the refusals are reported INSIDE an otherwise successful response rather than as a
+     * thrown exception, because that is how the store reports them and it is the case the previous
+     * implementation could not see. A stub that threw instead would exercise the transport-failure branch
+     * and leave the partial-failure branch unexecuted.</p>
+     */
+    private final List<S3Error> stagedDeleteErrors = new ArrayList<>();
+
+    /** The exception every batched deletion raises, or {@code null} when none is staged. */
+    private SdkException stagedDeleteFailure;
+
+    /**
+     * Supplies the next synthetic version identifier, so each write lands on its own version.
+     *
+     * <p>Assumptions: the identifiers are monotonic and distinct across the whole fixture rather than per
+     * key, which is what the real store does. Restarting the sequence per key would let two keys share an
+     * identifier, and a deletion that named the wrong key with the right identifier would then appear to
+     * succeed.</p>
+     */
+    private final AtomicInteger nextVersionOrdinal = new AtomicInteger();
 
     /**
      * How many further listings the most recently built stub is to fail before it starts answering.
@@ -256,6 +336,16 @@ class DatasetGenerationServiceTest {
      */
     private S3Client objectStoreHolding(List<DatasetGeneration> staged) {
         this.storedObjects.clear();
+        // WHY : Assumptions: the version registries and the deletion staging are cleared here alongside
+        //       the body map, for the same reason it is: a case that seeds versions or stages a refusal
+        //       must not leak either into the next case, or an outcome becomes a function of the order
+        //       the cases happened to run in.
+        this.storedVersions.clear();
+        this.storedDeleteMarkers.clear();
+        this.deleteRequests.clear();
+        this.stagedDeleteErrors.clear();
+        this.stagedDeleteFailure = null;
+        this.nextVersionOrdinal.set(0);
 
         // WHY : Assumptions: the failure staging is cleared here rather than only set by the failing
         //       builder, so that "a plain store never fails" holds by construction. Leaving a previous
@@ -265,8 +355,7 @@ class DatasetGenerationServiceTest {
         this.stagedListingFailure = null;
 
         for (DatasetGeneration generation : staged) {
-            this.storedObjects.put(
-                    generation.keyPrefix() + DatasetGenerationService.CLAIM_OBJECT_NAME, RUN_ID);
+            storeObject(generation.keyPrefix() + DatasetGenerationService.CLAIM_OBJECT_NAME, RUN_ID);
         }
 
         S3Client objectStore = mock(S3Client.class);
@@ -341,9 +430,11 @@ class DatasetGenerationServiceTest {
                                 .build();
                     }
 
-                    this.storedObjects.put(request.key(), bodyOf(call.getArgument(1)));
+                    storeObject(request.key(), bodyOf(call.getArgument(1)));
                     return PutObjectResponse.builder().build();
                 });
+
+        installVersionAwareRetention(objectStore);
 
         when(objectStore.getObjectAsBytes(any(GetObjectRequest.class))).thenAnswer(call -> {
             String key = call.<GetObjectRequest>getArgument(0).key();
@@ -357,6 +448,175 @@ class DatasetGenerationServiceTest {
             return ResponseBytes.fromByteArray(
                     GetObjectResponse.builder().build(), body.getBytes(StandardCharsets.UTF_8));
         });
+    }
+
+    /**
+     * Records one write into both the body map and the version history, as a versioned bucket does.
+     *
+     * <p>Assumptions: a write that overwrites a key ADDS a version rather than replacing one, because
+     * that is what a versioned bucket does and it is the only arrangement under which a retention pass
+     * can be wrong. On an unversioned store every key holds one thing and a key-addressed delete removes
+     * it, so a version-blind retention pass would pass every test; the history is what makes the
+     * difference between removing the bytes and hiding them observable at all.</p>
+     *
+     * @param key the object key written; must not be {@code null}
+     * @param body the body written; must not be {@code null}
+     */
+    private void storeObject(String key, String body) {
+        this.storedObjects.put(key, body);
+        this.storedVersions
+                .computeIfAbsent(key, absent -> new ArrayList<>())
+                .add("version-" + this.nextVersionOrdinal.incrementAndGet());
+    }
+
+    /**
+     * Seeds one delete marker over a key, as a version-blind delete would have left behind.
+     *
+     * @param key the object key the marker covers; must not be {@code null}
+     */
+    private void storeDeleteMarker(String key) {
+        this.storedDeleteMarkers
+                .computeIfAbsent(key, absent -> new ArrayList<>())
+                .add("marker-" + this.nextVersionOrdinal.incrementAndGet());
+    }
+
+    /**
+     * Wires the version listing and the version-addressed batched deletion onto a stubbed store.
+     *
+     * <p>Assumptions: the listing PAGINATES at the store's own thousand-entry ceiling and drives the
+     * continuation through the key and version markers the response carries, rather than answering every
+     * entry in one page. Answering in one page was the simpler stub and was rejected: the retention pass
+     * both consumes a paginator and batches its deletions at the same ceiling, so a single-page stub
+     * would leave the continuation unexercised and would make a generation larger than one page look
+     * like one the pass handles correctly.</p>
+     *
+     * <p>Assumptions: a deletion REMOVES the named identifiers from the registries rather than merely
+     * being recorded, so a second retention pass over the same prefix finds it empty. A stub that only
+     * recorded would make the pass look idempotent whether or not it had deleted anything.</p>
+     *
+     * @param objectStore the stubbed store to wire; must not be {@code null}
+     */
+    private void installVersionAwareRetention(S3Client objectStore) {
+        when(objectStore.listObjectVersionsPaginator(any(ListObjectVersionsRequest.class)))
+                .thenAnswer(call -> new ListObjectVersionsIterable(objectStore, call.getArgument(0)));
+
+        when(objectStore.listObjectVersions(any(ListObjectVersionsRequest.class))).thenAnswer(call -> {
+            raiseAnyStagedListingFailure();
+
+            ListObjectVersionsRequest request = call.getArgument(0);
+            List<Object[]> entries = versionEntriesUnder(request.prefix());
+
+            int from = 0;
+            if (request.keyMarker() != null) {
+                for (int index = 0; index < entries.size(); index++) {
+                    if (request.keyMarker().equals(entries.get(index)[0])
+                            && request.versionIdMarker().equals(entries.get(index)[1])) {
+                        from = index + 1;
+                        break;
+                    }
+                }
+            }
+
+            List<Object[]> page = entries.subList(from, Math.min(from + VERSION_PAGE_SIZE, entries.size()));
+            boolean truncated = from + page.size() < entries.size();
+
+            ListObjectVersionsResponse.Builder response = ListObjectVersionsResponse.builder()
+                    .isTruncated(truncated)
+                    .versions(page.stream()
+                            .filter(entry -> !(boolean) entry[2])
+                            .map(entry -> ObjectVersion.builder()
+                                    .key((String) entry[0])
+                                    .versionId((String) entry[1])
+                                    .build())
+                            .toList())
+                    .deleteMarkers(page.stream()
+                            .filter(entry -> (boolean) entry[2])
+                            .map(entry -> DeleteMarkerEntry.builder()
+                                    .key((String) entry[0])
+                                    .versionId((String) entry[1])
+                                    .build())
+                            .toList());
+
+            if (truncated && !page.isEmpty()) {
+                Object[] last = page.get(page.size() - 1);
+                response.nextKeyMarker((String) last[0]).nextVersionIdMarker((String) last[1]);
+            }
+            return response.build();
+        });
+
+        when(objectStore.deleteObjects(any(DeleteObjectsRequest.class))).thenAnswer(call -> {
+            if (this.stagedDeleteFailure != null) {
+                throw this.stagedDeleteFailure;
+            }
+
+            DeleteObjectsRequest request = call.getArgument(0);
+            List<ObjectIdentifier> named = List.copyOf(request.delete().objects());
+            this.deleteRequests.add(named);
+
+            for (ObjectIdentifier identifier : named) {
+                removeVersion(this.storedVersions, identifier);
+                removeVersion(this.storedDeleteMarkers, identifier);
+                if (!this.storedVersions.containsKey(identifier.key())) {
+                    this.storedObjects.remove(identifier.key());
+                }
+            }
+
+            return DeleteObjectsResponse.builder().errors(List.copyOf(this.stagedDeleteErrors)).build();
+        });
+    }
+
+    /**
+     * Removes one named version from a version registry, dropping the key when its last one goes.
+     *
+     * <p>Assumptions: the key is dropped once it holds no versions, because a key with an empty history
+     * is not a state the store can be in and leaving one would make a scratched prefix still list.</p>
+     *
+     * @param registry the registry to remove from; must not be {@code null}
+     * @param identifier the key and version the deletion named; must not be {@code null}
+     */
+    private static void removeVersion(
+            Map<String, List<String>> registry, ObjectIdentifier identifier) {
+
+        List<String> held = registry.get(identifier.key());
+        if (held == null) {
+            return;
+        }
+        held.remove(identifier.versionId());
+        if (held.isEmpty()) {
+            registry.remove(identifier.key());
+        }
+    }
+
+    /**
+     * Renders every version and delete marker under one prefix, in the order the store reports them.
+     *
+     * <p>Assumptions: the entries are ordered by KEY and then by version, which is the order the store
+     * lists them in and the order the marker-driven continuation depends on. An unordered answer would
+     * make the continuation pick an arbitrary resume point and the pagination case would be flaky rather
+     * than wrong, which is worse.</p>
+     *
+     * @param prefix the prefix to list beneath; must not be {@code null}
+     * @return one entry per version or marker, each holding the key, the version identifier and whether
+     *     it is a delete marker, never {@code null}
+     */
+    private List<Object[]> versionEntriesUnder(String prefix) {
+        List<Object[]> entries = new ArrayList<>();
+        Set<String> keys = new java.util.TreeSet<>();
+        keys.addAll(this.storedVersions.keySet());
+        keys.addAll(this.storedDeleteMarkers.keySet());
+
+        for (String key : keys) {
+            if (!key.startsWith(prefix)) {
+                continue;
+            }
+            for (String versionId : this.storedVersions.getOrDefault(key, List.of())) {
+                entries.add(new Object[] {key, versionId, false});
+            }
+            for (String versionId : this.storedDeleteMarkers.getOrDefault(key, List.of())) {
+                entries.add(new Object[] {key, versionId, true});
+            }
+        }
+        return entries;
     }
 
     /**
@@ -1642,6 +1902,480 @@ class DatasetGenerationServiceTest {
                     assertThat(DatasetFamily.resolveByMainframeBaseName(family.mainframeBaseName()))
                             .isEqualTo(family));
         }
+    }
+
+    /**
+     * Settles what {@code SCRATCH} removes on a versioned bucket, and what it does when a delete is refused.
+     *
+     * <p>Purpose: the retention window is only a window if the generations that fall out of it release
+     * their space. The bucket the {@code s3-datasets} module provisions is versioned, so a key-addressed
+     * delete inserts a delete marker and retains every version behind it; a pass built on one would report
+     * a scratched generation while the bytes stayed stored and billed indefinitely. These cases drive the
+     * pass against a store that models versions and assert what it actually removed.</p>
+     *
+     * <p>Assumptions: the stubbed store REMOVES what a deletion names, so the assertions can be made
+     * against the store's residual state rather than only against the requests issued. Asserting requests
+     * alone would pass for a pass that named the right identifiers in the wrong operation.</p>
+     */
+    @Nested
+    @DisplayName("version-aware SCRATCH")
+    class VersionAwareScratch {
+
+        /**
+         * Every version of every key under the prefix goes, not just the current one.
+         *
+         * <p>Pins the {@code SCRATCH} operand each of the ten bases carries -- {@code app/jcl/DEFGDGB.jcl}
+         * lines 27, 33, 39, 45, 51 and 57, {@code app/jcl/DEFGDGD.jcl} lines 30, 53 and 76, and
+         * {@code app/jcl/DALYREJS.jcl} line 27 -- which releases the space rather than uncataloguing it.</p>
+         *
+         * <p>Refactoring Rationale: the pass listed current objects and deleted them by key alone. Against
+         * this store that removes nothing at all: the assertion below on the residual versions is the one
+         * that fails for the previous implementation, and it fails while the request count and the returned
+         * total both look right, which is why it is asserted on the store rather than on the calls.</p>
+         */
+        @Test
+        @DisplayName("delete every version beneath the generation prefix")
+        void scratchDeletesEveryVersion() {
+            DatasetGeneration doomed = generation(DatasetFamily.TRANSACT_BKUP, 1);
+            DatasetGenerationService service = serviceOver(objectStoreHolding(List.of(doomed)));
+            String records = doomed.keyPrefix() + "records.dat";
+            storeObject(records, "first");
+            storeObject(records, "second");
+            storeObject(doomed.keyPrefix() + "manifest.json", "{}");
+
+            int removed = service.scratchGeneration(doomed);
+
+            // WHY : Assumptions: four is the claim marker, the two versions of the record file and the
+            //       manifest. Naming the arithmetic rather than the number is what keeps this case
+            //       readable when the seeding above changes, and it is the count of VERSIONS rather than
+            //       of keys -- which is the distinction the previous implementation collapsed.
+            assertThat(removed).isEqualTo(4);
+            assertThat(storedVersions.keySet()).noneMatch(key -> key.startsWith(doomed.keyPrefix()));
+            assertThat(deleteRequests).isNotEmpty();
+            assertThat(deleteRequests.stream().flatMap(List::stream).toList())
+                    .allSatisfy(identifier -> assertThat(identifier.versionId()).isNotNull());
+        }
+
+        /**
+         * A delete marker left by an earlier, version-blind pass is itself removed.
+         *
+         * <p>Assumptions: this is the recovery case rather than a hypothetical. Any generation scratched
+         * before this pass became version-aware still carries a marker over every key, and a marker is a
+         * live version: a pass that removed only real versions would leave the prefix listing forever and
+         * the space unreclaimed. Seeding the marker directly is the only way to reach that state, because
+         * this store's own deletions no longer create one.</p>
+         */
+        @Test
+        @DisplayName("delete a marker an earlier version-blind pass left behind")
+        void scratchDeletesDeleteMarkers() {
+            DatasetGeneration doomed = generation(DatasetFamily.TRANSACT_DALY, 2);
+            DatasetGenerationService service = serviceOver(objectStoreHolding(List.of(doomed)));
+            String records = doomed.keyPrefix() + "records.dat";
+            storeObject(records, "bytes");
+            storeDeleteMarker(records);
+
+            int removed = service.scratchGeneration(doomed);
+
+            assertThat(removed).isEqualTo(3);
+            assertThat(storedDeleteMarkers).isEmpty();
+            assertThat(storedVersions.keySet()).noneMatch(key -> key.startsWith(doomed.keyPrefix()));
+        }
+
+        /**
+         * More versions than one request may carry are deleted in several requests, none over the ceiling.
+         *
+         * <p>Assumptions: the ceiling is the object store's own limit on a batched deletion, so exceeding
+         * it is a refused request rather than a slow one. A generation of the transaction master holds one
+         * object per staging step and accumulates a version per re-stage, so passing the ceiling is an
+         * ordinary outcome rather than an edge case -- and a pass that sent one oversized request would
+         * fail on exactly the generations that most needed scratching.</p>
+         */
+        @Test
+        @DisplayName("batch the deletions beneath the request ceiling")
+        void scratchBatchesLargeGenerations() {
+            DatasetGeneration doomed = generation(DatasetFamily.TRANREPT, 3);
+            DatasetGenerationService service = serviceOver(objectStoreHolding(List.of(doomed)));
+            int extraObjects = VERSION_PAGE_SIZE + 5;
+            for (int index = 0; index < extraObjects; index++) {
+                storeObject(doomed.keyPrefix() + String.format("part-%05d.dat", index), "bytes");
+            }
+
+            int removed = service.scratchGeneration(doomed);
+
+            assertThat(removed).isEqualTo(extraObjects + 1);
+            assertThat(deleteRequests).hasSizeGreaterThan(1);
+            assertThat(deleteRequests).allSatisfy(
+                    request -> assertThat(request).hasSizeLessThanOrEqualTo(VERSION_PAGE_SIZE));
+        }
+
+        /**
+         * A version the store refuses inside an otherwise successful request fails the whole scratch.
+         *
+         * <p>Refactoring Rationale: the response was not examined. A batched deletion answers 200 while
+         * naming individual keys it refused, so an unexamined response reported a partial deletion as a
+         * completed scratch -- the family then grew past its five-generation window with every pass
+         * logging success, which is the shape of defect that is only found when the bill arrives.</p>
+         *
+         * <p>Assumptions: the failure is asserted to NAME the family, the generation, the prefix and the
+         * store's own error code, because those four are what an operator needs to act without a second
+         * run. A refusal reported as a bare count would establish that the pass failed closed and leave
+         * the reader no way to tell a missing permission from a retention lock.</p>
+         */
+        @Test
+        @DisplayName("fail closed, and diagnosably, when the store refuses a version")
+        void scratchFailsOnPartialDeletion() {
+            DatasetGeneration doomed = generation(DatasetFamily.TCATBALF_BKUP, 4);
+            DatasetGenerationService service = serviceOver(objectStoreHolding(List.of(doomed)));
+            storeObject(doomed.keyPrefix() + "records.dat", "bytes");
+            stagedDeleteErrors.add(S3Error.builder()
+                    .key(doomed.keyPrefix() + "records.dat")
+                    .versionId("version-1")
+                    .code("AccessDenied")
+                    .message("stubbed object store: the caller may not delete this version")
+                    .build());
+
+            assertThatThrownBy(() -> service.scratchGeneration(doomed))
+                    .isInstanceOf(DatasetGenerationService.DatasetGenerationException.class)
+                    .hasMessageContaining(DatasetFamily.TCATBALF_BKUP.mainframeBaseName())
+                    .hasMessageContaining("4")
+                    .hasMessageContaining(doomed.keyPrefix())
+                    .hasMessageContaining("AccessDenied");
+        }
+
+        /**
+         * A refused deletion REQUEST fails the scratch, naming the family, the generation and the prefix.
+         *
+         * <p>Purpose: this is the shape the deployed defect took rather than a variation on the case above.
+         * The batch task role's policy granted object actions on the ten family prefixes and no deletion
+         * action at all, so the store refused the whole request with a 403 and the sixth run of a family
+         * could not retire its oldest generation. A refusal of the request and a refusal of individual
+         * versions arrive through two different channels -- a thrown exception and an error list inside a
+         * successful response -- so a suite that exercised only the second would leave the branch that
+         * actually fired unexecuted.</p>
+         *
+         * <p>Assumptions: the failure is required to name the family, the generation and the prefix, and to
+         * retain the store's own exception as its cause. The status code alone does not distinguish a
+         * missing grant from a bucket policy denial, and without the prefix an operator cannot tell which
+         * of the ten families' resource patterns the policy is short of.</p>
+         */
+        @Test
+        @DisplayName("fail closed, and diagnosably, when the store refuses the deletion request")
+        void scratchFailsWhenTheDeletionRequestIsRefused() {
+            DatasetGeneration doomed = generation(DatasetFamily.TRANCATG_BKUP, 2);
+            DatasetGenerationService service = serviceOver(objectStoreHolding(List.of(doomed)));
+            storeObject(doomed.keyPrefix() + "records.dat", "bytes");
+            SdkException refused = S3Exception.builder()
+                    .statusCode(403)
+                    .message("stubbed object store: the caller holds no s3:DeleteObject on this prefix")
+                    .build();
+            DatasetGenerationServiceTest.this.stagedDeleteFailure = refused;
+
+            assertThatThrownBy(() -> service.scratchGeneration(doomed))
+                    .isInstanceOf(DatasetGenerationService.DatasetGenerationException.class)
+                    .hasMessageContaining(DatasetFamily.TRANCATG_BKUP.mainframeBaseName())
+                    .hasMessageContaining("2")
+                    .hasMessageContaining(doomed.keyPrefix())
+                    .hasCause(refused);
+            // WHY : Assumptions: the store's residual state is asserted too. A pass that reported the
+            //       refusal and had already removed part of the generation would leave a half-scratched
+            //       prefix, and the count it returned is unavailable to the caller once it throws -- so
+            //       the residue is the only evidence that the failure was clean.
+            assertThat(DatasetGenerationServiceTest.this.storedVersions)
+                    .containsKey(doomed.keyPrefix() + "records.dat");
+        }
+
+        /**
+         * A version listing that fails is reported as a scratch failure that retains the store's exception.
+         *
+         * <p>Assumptions: the cause is asserted to be THE instance the store raised rather than an
+         * equivalent, because the reason for wrapping at all is to add the family and the prefix without
+         * discarding the transport detail underneath. A translation that built a fresh cause would leave an
+         * operator with a message naming the generation and nothing naming the network.</p>
+         */
+        @Test
+        @DisplayName("retain the store's own failure when the version listing fails")
+        void scratchRetainsTheListingFailure() {
+            SdkException unreachable = SdkClientException.create("stubbed object store: unreachable");
+            DatasetGeneration doomed = generation(DatasetFamily.SYSTRAN, 1);
+            DatasetGenerationService service =
+                    serviceOver(objectStoreFailingThenHolding(1, unreachable, List.of(doomed)));
+
+            assertThatThrownBy(() -> service.scratchGeneration(doomed))
+                    .isInstanceOf(DatasetGenerationService.DatasetGenerationException.class)
+                    .hasMessageContaining(DatasetFamily.SYSTRAN.mainframeBaseName())
+                    .hasCause(unreachable);
+        }
+
+        /**
+         * A generation holding nothing is scratched without issuing a deletion at all.
+         *
+         * <p>Assumptions: a request carrying no identifiers is refused by the store, so the empty case has
+         * to be a no-op rather than an empty request. It is reachable in production: retention runs after
+         * every staging pass, and a generation whose staging failed before its first write holds a claim
+         * marker only -- or, once that marker has been scratched, nothing.</p>
+         */
+        @Test
+        @DisplayName("issue no deletion for a generation holding nothing")
+        void scratchOfAnEmptyGenerationIssuesNothing() {
+            DatasetGenerationService service = serviceOver(objectStoreHolding(List.of()));
+
+            assertThat(service.scratchGeneration(generation(DatasetFamily.DALYREJS, 1))).isZero();
+            assertThat(deleteRequests).isEmpty();
+        }
+    }
+
+    /**
+     * Holds the reservation this service writes equal to the reservation the Python stager reads.
+     *
+     * <p>Purpose: two components allocate generations of the same ten families into the same bucket --
+     * this service, and {@code data-migration/src/carddemo_migration/loaders/s3_stage.py}, which the
+     * {@code StageSeedDatasets} state runs one containerised branch of per family. They coordinate
+     * through objects in the bucket and through nothing else: there is no shared library, no lock and no
+     * call between them. A claim one of them writes is therefore only honoured by the other if both spell
+     * the key the same way, and the failure when they do not is silent and destructive -- each concludes
+     * the same number is free, each claims it under its own spelling, and both write a generation over one
+     * prefix. These cases are the only place that agreement is checked.</p>
+     *
+     * <p>Assumptions: the cases read the STAGER'S OWN SOURCE and the Terraform module's own declaration
+     * rather than restating either here, and they compose their keys from what they read. A test that
+     * spelled the shared literals itself would agree with whichever side it copied them from and would
+     * keep passing after the other side moved -- which is exactly the state this class exists to make
+     * impossible. The sibling suite
+     * {@code data-migration/tests/test_s3_stage.py} runs the mirror image of every case below, reading
+     * this service's declarations, so neither language holds the contract alone.</p>
+     *
+     * <p>Alternatives Considered: exercising the two implementations together against a real object store
+     * through LocalStack. Rejected as the wrong instrument rather than as unnecessary: a live store would
+     * prove that two agreeing implementations interoperate, which is not in doubt, while costing a
+     * container per case; what has to be caught is a DIVERGENCE, and a divergence is visible in the
+     * declarations themselves. The seeded-marker and seeded-record cases below reproduce the interop
+     * outcome without needing either runtime.</p>
+     */
+    @Nested
+    @DisplayName("the reservation contract shared with the Python stager")
+    class CrossLanguageClaimContract {
+
+        /** The stager's source, read as text so its declared literals can be compared with these. */
+        private static final String STAGER_SOURCE =
+                "data-migration/src/carddemo_migration/loaders/s3_stage.py";
+
+        /** The Terraform module whose lifecycle rule and published output scope the replay records. */
+        private static final String DATASETS_MODULE = "infra/modules/s3-datasets/main.tf";
+
+        /**
+         * The family this class allocates for, chosen for having no hyphen in its dataset segment.
+         *
+         * <p>Assumptions: a hyphen-free segment is used deliberately. The stager derives its family token
+         * by upper-casing the segment and replacing each hyphen with an underscore, and the ten pairs
+         * that transformation produces are asserted family-by-family on the Python side where the
+         * registry lives. Choosing a segment the transformation leaves alone keeps these cases about the
+         * KEY SHAPE rather than re-testing the token rule from the side that does not own it.</p>
+         */
+        private static final DatasetFamily FAMILY = DatasetFamily.SYSTRAN;
+
+        /**
+         * Both tiers name the claim marker and the replay-record root identically.
+         *
+         * <p>Assumptions: the marker name and the root are read from the stager's declarations, and the
+         * root is additionally read from the Terraform module. Three artifacts have to agree on the root
+         * because the module's published {@code generation_claim_prefix} output is what an environment
+         * root scopes the batch task role's read and write to: a root that agreed with neither
+         * implementation would produce an {@code AccessDenied} on the first allocation of a deployed run,
+         * with every test in both languages still green.</p>
+         */
+        @Test
+        @DisplayName("declare one marker name and one replay root across both tiers and the module")
+        void theSharedLiteralsAreDeclaredIdenticallyEverywhere() {
+            assertThat(declaredInStager("_CLAIM_OBJECT_NAME"))
+                    .isEqualTo(DatasetGenerationService.CLAIM_OBJECT_NAME);
+            assertThat(declaredInStager("_RUN_CLAIM_ROOT"))
+                    .isEqualTo(DatasetGenerationService.RUN_CLAIM_ROOT);
+            assertThat(declaredInModule("generation_claim_prefix"))
+                    .isEqualTo(DatasetGenerationService.RUN_CLAIM_ROOT);
+        }
+
+        /**
+         * An allocation writes exactly the two objects, at the two keys, the stager reads.
+         *
+         * <p>Assumptions: both keys are composed from the stager's own literals -- including the run
+         * marker and the family separator, which are private to this service and so cannot be read from
+         * it -- so this case pins the whole key shape rather than the two literals a public constant
+         * exposes. The bodies are asserted too: the marker carries the run identifier and the record
+         * carries the UNPADDED decimal generation, which is the form the stager parses. A record written
+         * as the zero-padded {@code gen=} segment would parse to the same number and would hide a
+         * divergence the moment either side stopped trimming.</p>
+         */
+        @Test
+        @DisplayName("write the two objects the stager reads, at the keys and with the bodies it expects")
+        void anAllocationWritesTheKeysAndBodiesTheStagerReads() {
+            DatasetGeneration allocated = serviceOver(objectStoreHolding(List.of()))
+                    .allocateNewGeneration(FAMILY, BUSINESS_DATE, RUN_ID);
+
+            String markerKey = allocated.keyPrefix() + declaredInStager("_CLAIM_OBJECT_NAME");
+            String recordKey = declaredInStager("_RUN_CLAIM_ROOT")
+                    + declaredInStager("_RUN_CLAIM_RUN_MARKER") + RUN_ID
+                    + declaredInStager("_RUN_CLAIM_FAMILY_SEPARATOR") + FAMILY.name();
+
+            assertThat(DatasetGenerationServiceTest.this.storedObjects)
+                    .containsEntry(markerKey, RUN_ID)
+                    .containsEntry(recordKey, Integer.toString(allocated.generationNumber()));
+            assertThat(allocated.generationNumber()).isEqualTo(1);
+        }
+
+        /**
+         * A generation the stager claimed is not taken a second time here.
+         *
+         * <p>Assumptions: the marker is seeded at a key composed from the stager's literal rather than
+         * through this service's own allocation, which is what makes the case cross-language. The
+         * property it settles is not the conditional write but the LISTING: a marker beneath
+         * {@code gen=0001/} makes that prefix a common prefix, so this service's discovery counts the
+         * number as present without knowing anything about claims. That is the whole reason the marker
+         * sits inside the generation prefix rather than in a sibling of it.</p>
+         */
+        @Test
+        @DisplayName("skip a generation the stager claimed")
+        void aGenerationClaimedByTheStagerIsSkipped() {
+            S3Client objectStore = objectStoreHolding(List.of());
+            String claimedByStager = new DatasetGeneration(FAMILY, BUSINESS_DATE, 1).keyPrefix()
+                    + declaredInStager("_CLAIM_OBJECT_NAME");
+            DatasetGenerationServiceTest.this.storeObject(claimedByStager, "stager-execution-token");
+
+            DatasetGeneration allocated = serviceOver(objectStore)
+                    .allocateNewGeneration(FAMILY, BUSINESS_DATE, RUN_ID);
+
+            assertThat(allocated.generationNumber()).isEqualTo(2);
+            // WHY : Assumptions: the stager's marker is asserted UNCHANGED as well. An allocator that
+            //       had overwritten it would also answer two on the next listing, so the number alone
+            //       cannot distinguish honouring another writer's claim from destroying it.
+            assertThat(DatasetGenerationServiceTest.this.storedObjects)
+                    .containsEntry(claimedByStager, "stager-execution-token");
+        }
+
+        /**
+         * A run the stager already allocated for replays the stager's number rather than taking a new one.
+         *
+         * <p>Assumptions: the record is seeded at a key composed entirely from the stager's literals and
+         * carries the unpadded decimal body the stager writes. This is the case that makes a redriven
+         * branch safe across the language boundary: the orchestrator may retry a branch as a Python task
+         * and the retry as a Java task, or the reverse, and a retry that allocated afresh would consume a
+         * second generation of the five the family retains and stage a duplicate copy of identical
+         * bytes.</p>
+         */
+        @Test
+        @DisplayName("replay the generation the stager recorded for this run")
+        void aGenerationRecordedByTheStagerIsReplayed() {
+            S3Client objectStore = objectStoreHolding(List.of());
+            String recordKey = declaredInStager("_RUN_CLAIM_ROOT")
+                    + declaredInStager("_RUN_CLAIM_RUN_MARKER") + RUN_ID
+                    + declaredInStager("_RUN_CLAIM_FAMILY_SEPARATOR") + FAMILY.name();
+            DatasetGenerationServiceTest.this.storeObject(recordKey, "7");
+
+            DatasetGeneration allocated = serviceOver(objectStore)
+                    .allocateNewGeneration(FAMILY, BUSINESS_DATE, RUN_ID);
+
+            assertThat(allocated.generationNumber()).isEqualTo(7);
+            // WHY : Assumptions: no marker is expected for the replayed number. The attempt that first
+            //       recorded it wrote that marker, so writing another would be a second claim over a
+            //       prefix this run already owns -- and asserting its absence is what distinguishes a
+            //       replay from an allocation that happened to land on the same number.
+            assertThat(DatasetGenerationServiceTest.this.storedObjects)
+                    .doesNotContainKey(new DatasetGeneration(FAMILY, BUSINESS_DATE, 7).keyPrefix()
+                            + DatasetGenerationService.CLAIM_OBJECT_NAME);
+        }
+
+        /**
+         * Reads one module-level string constant out of the stager's source.
+         *
+         * @param name the constant's identifier, for example {@code _RUN_CLAIM_ROOT}; must not be
+         *     {@code null}
+         * @return the declared literal with its quotes removed; never {@code null}
+         * @throws AssertionError if the stager declares no such constant, so a renamed literal fails
+         *     here rather than leaving the comparison unmade
+         */
+        private String declaredInStager(String name) {
+            Matcher declaration = Pattern
+                    .compile(name + ":\\s*Final\\[str\\]\\s*=\\s*\"([^\"]*)\"")
+                    .matcher(readRepositoryFile(STAGER_SOURCE));
+
+            assertThat(declaration.find())
+                    .withFailMessage("%s declares no Final[str] constant named %s, so the reservation"
+                            + " contract has only one side", STAGER_SOURCE, name)
+                    .isTrue();
+            return declaration.group(1);
+        }
+
+        /**
+         * Reads one local's string value out of the dataset module's Terraform.
+         *
+         * @param name the local's name, for example {@code generation_claim_prefix}; must not be
+         *     {@code null}
+         * @return the declared literal with its quotes removed; never {@code null}
+         * @throws AssertionError if the module declares no such local
+         */
+        private String declaredInModule(String name) {
+            Matcher declaration = Pattern
+                    .compile(name + "\\s*=\\s*\"([^\"]*)\"")
+                    .matcher(readRepositoryFile(DATASETS_MODULE));
+
+            assertThat(declaration.find())
+                    .withFailMessage("%s declares no local named %s, so the grant and the lifecycle rule"
+                            + " that scope this prefix cannot be held against it", DATASETS_MODULE, name)
+                    .isTrue();
+            return declaration.group(1);
+        }
+    }
+
+    /**
+     * Reads one repository file as text.
+     *
+     * <p>Assumptions: the file is located by walking up from the working directory to the repository
+     * root rather than by a relative literal, because Maven runs a module's tests with the working
+     * directory set to that module and a literal would encode the depth from here to the root. The same
+     * pattern is used by {@code DisclosureGroupSeedParityTest} and by the shared kernel's
+     * cross-artifact contract tests, for the same reason: the artifacts that have to agree are a Java
+     * source, a Python source and a Terraform file, and no two of those are ever on one class path.</p>
+     *
+     * @param relative the path relative to the repository root; must not be {@code null}
+     * @return the file's full text; never {@code null}
+     * @throws UncheckedIOException if the file cannot be read
+     */
+    private static String readRepositoryFile(String relative) {
+        Path file = repositoryRoot().resolve(relative);
+        try {
+            return Files.readString(file, StandardCharsets.UTF_8);
+        } catch (IOException unreadable) {
+            throw new UncheckedIOException("cannot read " + file, unreadable);
+        }
+    }
+
+    /**
+     * Locates the repository root from the directory the test runs in.
+     *
+     * @return the nearest ancestor of the working directory that holds both artifacts the
+     *     cross-language cases read; never {@code null}
+     * @throws AssertionError if no ancestor holds them
+     */
+    private static Path repositoryRoot() {
+        // WHY : Assumptions: the search requires BOTH the stager and the Terraform module to be
+        //       present, not either one. A single marker could match an ancestor that happens to
+        //       contain one of them -- a nested checkout, or a partial export -- and the cases would
+        //       then read one artifact from that tree and fail to find the other, reporting the
+        //       contract broken when only the lookup was.
+        Path candidate = Path.of("").toAbsolutePath().normalize();
+        while (candidate != null) {
+            boolean holdsStager = Files.isRegularFile(candidate.resolve(
+                    CrossLanguageClaimContract.STAGER_SOURCE));
+            boolean holdsModule = Files.isRegularFile(candidate.resolve(
+                    CrossLanguageClaimContract.DATASETS_MODULE));
+            if (holdsStager && holdsModule) {
+                return candidate;
+            }
+            candidate = candidate.getParent();
+        }
+        throw new AssertionError("no ancestor of " + Path.of("").toAbsolutePath()
+                + " holds both " + CrossLanguageClaimContract.STAGER_SOURCE + " and "
+                + CrossLanguageClaimContract.DATASETS_MODULE + ", so the shared reservation contract"
+                + " cannot be read from either side");
     }
 
     /**

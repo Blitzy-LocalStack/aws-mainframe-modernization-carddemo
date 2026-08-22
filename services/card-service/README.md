@@ -164,8 +164,9 @@ services/card-service/
 |   |                                    card_num character-domain check
 |   |-- openapi/card-api.yaml            OpenAPI 3.1 contract of record
 |-- src/test/
-    |-- java/com/carddemo/card/**        24 test classes, package-info per package
-                                         (23 *Test + 1 *IT)
+    |-- java/com/carddemo/card/**        25 test classes, package-info per package
+                                         (24 *Test + 1 *IT — the census the Tests
+                                          section's marker publishes)
     |-- resources/application-test.yml
     |-- resources/fixtures/              12 fixture files, 40 CVACT02Y records, 150 bytes each
 ```
@@ -715,9 +716,9 @@ mvn -B -f services/pom.xml -pl card-service -am verify
 mvn -B -f services/pom.xml -pl card-service -am test
 ```
 
-Starting locally takes two steps, and the first is not optional: the ten variables
-under [Configuration](#configuration) that have no fallback must already be in the
-environment, and they are prepared **out of band** so that no credential or key
+Starting locally takes two steps, and the first is not optional: the **eleven**
+variables under [Configuration](#configuration) that have no fallback must already be
+in the environment, and they are prepared **out of band** so that no credential or key
 identifier is ever typed on a command line.
 
 ```bash
@@ -738,19 +739,22 @@ touch .env.card-service.local
 chmod 600 .env.card-service.local
 git check-ignore -v .env.card-service.local
 
-# Fill in one KEY=value per line, with no `export` and no quoting:
+# Fill in one KEY=value per line, with no `export` and no quoting. All ELEVEN that
+# Configuration marks `none`, because a partial file fails at startup rather than
+# degrading:
 #   SPRING_DATASOURCE_URL, SPRING_DATASOURCE_USERNAME, SPRING_DATASOURCE_PASSWORD,
 #   SPRING_FLYWAY_USER, SPRING_FLYWAY_PASSWORD,
 #   SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI,
 #   CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID, CARDDEMO_SECURITY_CVV_KEY_ID,
-#   CARDDEMO_SECURITY_CARD_SELECTOR_SIGNING_KEY
+#   CARDDEMO_SECURITY_CARD_SELECTOR_SIGNING_KEY,
+#   CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD, CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY
 ```
 
 ```bash
 # WHAT: the COMPLETE local launch contract, in the order it has to be performed.
 # WHY : (1) Refactoring Rationale: this block used to be the package step and the
 #       `java -jar` alone. Following it could not start the service, and the two
-#       reasons are independent. Ten variables listed under Configuration have NO
+#       reasons are independent. Eleven variables listed under Configuration have NO
 #       fallback in application.yml, so the process stopped at startup naming the
 #       first key it could not resolve; and `application.yml` enables TLS and opens
 #       a PKCS#12 keystore that exists only inside the deployed image, so even a
@@ -779,9 +783,23 @@ git check-ignore -v .env.card-service.local
 #       (4) Trade-offs: those values are supplied from an environment file that is
 #       deliberately not committed, rather than typed on the command line, because
 #       a shell history is a poor place for a credential and `.gitignore` already
-#       excludes `.env`. THREE of the eleven are key material -- the card selector
-#       key, the card-verification key identifier and the paging cursor key -- so
-#       this is not a hypothetical concern for this service.
+#       excludes `.env` and `.env.*`. THREE of the eleven are key material -- the card
+#       selector key, the card-verification key identifier and the paging cursor key --
+#       so this is not a hypothetical concern for this service.
+#       Refactoring Rationale: the file sourced below is `.env.card-service.local`, the
+#       SAME name the block above creates, and one name in both places IS the fix. This
+#       line read `. ./card-service.env` while the block above created
+#       `.env.card-service.local` and explained at length why that name is the ignored
+#       one -- so an operator following these instructions literally wrote the card
+#       selector signing key, the card-verification key identifier and two database
+#       passwords into a file matching no ignore rule, which `git status` would then
+#       offer to commit. `git check-ignore -v .env.card-service.local` prints the rule
+#       and its line number; run against `card-service.env` it prints nothing and exits
+#       non-zero, which is the whole difference.
+#       (4a) Assumptions: `set -a` exports each assignment the file makes and `set +a`
+#       stops that, so three pieces of key material reach this one JVM rather than every
+#       later command in the shell. The leading `./` is deliberate: `. file` searches
+#       PATH first, so a PATH entry of that name would be sourced instead.
 #       (5) Assumptions: `SERVER_SSL_ENABLED` is not a `${...}` placeholder in any
 #       profile; it reaches `server.ssl.enabled` through the framework's relaxed
 #       binding of an environment name onto a property. Its fallback is therefore
@@ -796,7 +814,7 @@ git check-ignore -v .env.card-service.local
 mvn -B -f services/pom.xml -pl card-service -am package
 
 export SERVER_SSL_ENABLED=false
-set -a && . ./card-service.env && set +a
+set -a && . ./.env.card-service.local && set +a
 java -jar services/card-service/target/card-service.jar --spring.profiles.active=dev
 ```
 
@@ -827,10 +845,32 @@ and no cloud credential at any scope, so nothing it does can push an image.
 [`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml) does push:
 it assumes a role by **GitHub OIDC** rather than holding a long-lived access key,
 logs in to **Amazon ECR**, and builds and pushes the project's **ten** immutable
-service images, this module's among them; it additionally mirrors the AWS
-OpenTelemetry collector image, which is why
-[`infra/modules/ecr`](../../infra/modules/ecr) provisions **eleven** repositories
-rather than ten.
+images — the eight services, this module's among them, plus the SPA and the ETL.
+It mirrors nothing, and
+[`infra/modules/ecr`](../../infra/modules/ecr) provisions exactly **ten**
+repositories to receive them, one per deployable, which is the inventory
+specification section 0.4.1.6 fixes.
+
+Refactoring Rationale: this paragraph said the workflow *additionally mirrors the AWS
+OpenTelemetry collector image*, and that an eleventh repository existed to hold it.
+Both statements are deleted rather than corrected downward, because the thing they
+described no longer exists in any form: `infra/modules/ecs-service` withdrew the
+collector sidecar as outside the frozen specification, and the mirror step in
+`deploy.yml` and the eleventh repository were withdrawn with it — the mirror existed
+only so a sidecar in a subnet with enumerated egress could pull its image, and with
+no sidecar there is nothing to pull. Leaving a softened version would have been worse
+than the wrong count: a reader auditing image provenance would have gone looking for a
+mirror step, found none, and had to establish from scratch whether it had been removed
+or was simply broken. Ten images and ten repositories is now one statement rather than
+two that have to be reconciled.
+
+Trade-offs: what went with the sidecar is span **export**. Nothing in this module
+claims otherwise — spans are still created by the shared kernel's OpenTelemetry
+starter and their identifiers reach the log lines through `CorrelationIdFilter`, so a
+card read is followable across services in the logs, but no exporter target is
+configured anywhere and no span leaves a task. Request correlation is delivered; span
+export is an open gap, recorded as one in
+[`docs/architecture/observability.md`](../../docs/architecture/observability.md).
 
 Refactoring Rationale: this paragraph stated that nothing in this repository
 pushes the image to a registry. That was false of `deploy.yml`, and the error was
@@ -992,7 +1032,7 @@ authority assertions would have assumed the framework was auto-configuring a
 sliced context when in fact the full security chain is exercised — an assumption
 that understates what the class proves.
 
-The wider test tree holds more than those five. It contains contract-census tests
+The wider test tree holds more than those six. It contains contract-census tests
 that assert the published members of each DTO and each route against
 `openapi/card-api.yaml`, a fixture-contract test that measures every fixture against
 the copybook, a security-configuration test that enumerates the authority rules as
@@ -1001,12 +1041,23 @@ and the shared `LayeringRulesTest` from `common-lib`, which is what applies the
 architecture rules to `com.carddemo.card` rather than leaving them authored but
 unenforced here.
 
-The module's own test tree holds **22 classes**. Adding the inherited
-`LayeringRulesTest`, a `mvn -B -f services/pom.xml -pl card-service -am clean verify`
-run reports **335 tests across 23 report files, with no failures, no errors and
-nothing skipped** -- 301 from the Surefire execution, 9 from the architecture-rules
-execution and 25 from Failsafe. Those figures were measured from the reports that run
-produced rather than carried over from a previous one.
+The module's own test tree holds **25 classes** — the 24 `*Test` and the one `*IT` the
+marker above publishes. Adding the inherited `LayeringRulesTest`, a
+`mvn -B -f services/pom.xml -pl card-service -am clean verify` run reports **388 tests
+across 26 report files, with no failures, no errors and nothing skipped** — 351 from the
+Surefire execution, 10 from the architecture-rules execution and 27 from Failsafe. Those
+figures were measured from the reports that run produced rather than carried over from a
+previous one.
+
+Refactoring Rationale: the class figure here read **22** while the marker above published
+24 plus 1, and the sentence introducing the table said "those five" over a table of six
+rows — three statements of one census, no two of them agreeing. The class figure is now
+stated as a restatement of the marker rather than as an independent count, because the
+marker is the copy a test re-measures and an independent count is what drifts. The
+execution totals cannot be marker-checked in the same way — they come from the reports a
+run writes, not from the tree — so they are re-measured with the class figure whenever
+either changes; the previous set (335 across 23 files) was consistent with the stale 22
+and became wrong with it, which is the signal that the two must move together.
 
 Assumptions: the architecture rules arrive as a separate Surefire execution
 because a rule can only analyse the classpath of the module whose tests run it, and

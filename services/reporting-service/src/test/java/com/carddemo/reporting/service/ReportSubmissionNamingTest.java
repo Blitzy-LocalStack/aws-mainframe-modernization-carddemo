@@ -10,6 +10,7 @@ import static org.mockito.Mockito.when;
 
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
+import com.carddemo.common.web.CorrelationIdFilter;
 import com.carddemo.reporting.dto.ReportRequest;
 import com.carddemo.reporting.dto.ReportSubmissionResponse;
 import java.time.Clock;
@@ -18,10 +19,12 @@ import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.stream.IntStream;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.slf4j.MDC;
 import software.amazon.awssdk.services.sfn.SfnClient;
 import software.amazon.awssdk.services.sfn.model.ExecutionAlreadyExistsException;
 import software.amazon.awssdk.services.sfn.model.StartExecutionRequest;
@@ -84,6 +87,19 @@ class ReportSubmissionNamingTest {
                         .build());
         service = new ReportExecutionService(
                 sfnClient, MACHINE_ARN, Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC));
+    }
+
+    /**
+     * Clears the diagnostic context so one case's correlation identifier cannot reach another.
+     *
+     * <p>Assumptions: the context is thread-local and the runner reuses a thread across cases, so a
+     * value one case installs outlives it. That is cleared here rather than at the end of the one case
+     * that sets it, because a case failing part-way would then leave the value behind and the next case
+     * would run under a context it never chose.</p>
+     */
+    @AfterEach
+    void clearDiagnosticContext() {
+        MDC.clear();
     }
 
     // WHY : Assumptions: this is the case the whole change exists for, so it asserts the two names are
@@ -238,6 +254,40 @@ class ReportSubmissionNamingTest {
         assertThat(startedNames(submissions))
                 .as("every unkeyed submission must have its own identity")
                 .doesNotHaveDuplicates();
+    }
+
+    // WHY : ⚠️ Assumptions: the correlation identifier is installed EXPLICITLY here, and that is what
+    //       makes this case the regression guard the other unkeyed cases cannot be. The absent-header
+    //       key used to be a digest of this very value, so two independent submissions sharing one
+    //       correlation identifier -- ordinary, since a client reuses it across an operation and may
+    //       send its own -- collapsed onto one run and the second caller was answered with the first
+    //       run's handle. Every other unkeyed case above runs with an EMPTY diagnostic context, which
+    //       took the random fallback and therefore passed while the defect was live.
+    // WHY : Trade-offs: the context is populated directly rather than by driving the shared filter,
+    //       because what is under test is the service's key derivation and not the filter's. Using the
+    //       filter would need a servlet request and would make this case fail for a second reason.
+    /**
+     * Asserts two unkeyed submissions sharing one correlation identifier are still two runs.
+     */
+    @Test
+    @DisplayName("unkeyed submissions sharing one correlation identifier stay distinct")
+    void unkeyedSubmissionsUnderOneCorrelationIdentifierStayDistinct() {
+        // WHY : Assumptions: the value is a structurally valid but visibly fabricated RFC-4122
+        //       identifier -- a zero body with a single low-order digit -- rather than a realistic random
+        //       one. What this case needs from it is only that BOTH submissions see the SAME value, so
+        //       its entropy is irrelevant to what is proved; and a random-looking hexadecimal literal is
+        //       a credential shape to the repository's secret scan, which cannot tell a fabricated
+        //       correlation identifier from a leaked token. Trade-offs: it reads less like production
+        //       traffic, which is the cost of being unmistakable to both a reader and a scanner.
+        MDC.put(CorrelationIdFilter.CORRELATION_ID_MDC_KEY, "00000000-0000-4000-8000-000000000001");
+
+        submit(null);
+        submit(null);
+
+        List<String> names = startedNames(2);
+        assertThat(names.get(0))
+                .as("a tracing identifier must not decide which submissions are duplicates")
+                .isNotEqualTo(names.get(1));
     }
 
     // WHY : ⚠️ Assumptions: the handle is asserted on BOTH accepted paths, and this is the second of

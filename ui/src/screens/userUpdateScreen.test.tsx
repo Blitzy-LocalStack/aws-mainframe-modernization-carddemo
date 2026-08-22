@@ -1,6 +1,7 @@
 /**
  * @file Proves the user update screen accepts no credential and submits exactly the three members the
- * published contract declares, which is registered divergence D-10.
+ * published contract declares -- registered divergence D-10 -- and that the three user administration
+ * screens preserve the reference's caller-origin transfer.
  *
  * Purpose
  * -------
@@ -24,6 +25,21 @@
  * assert what the screen sent. The verbatim sentences are read from the catalog rather than retyped, for
  * the reason the sibling screen tests record.
  *
+ * The second concern, and why it is in this file
+ * ----------------------------------------------
+ * ⚠️ Purpose: `app/cbl/COUSR00C.cbl` L192-L207 moves its own program name into `CDEMO-FROM-PROGRAM`
+ * immediately before it transfers to `COUSR02C` or `COUSR03C`, and both of those programs prefer that
+ * field over their hard-coded menu destination on their back key -- L113-L118 and L111-L118 respectively.
+ * The migrated transfer carried the identifier alone, so the preferred arm could never be taken and an
+ * administrator who opened a row from the browse was returned to the administrative menu, losing their
+ * position in the list on every row they touched. The second block below covers the whole round trip:
+ * what the browse hands over, what each receiving screen does with it, and the one key on each screen
+ * whose destination is unconditional.
+ *
+ * Assumptions: the caller-origin cases live beside the credential cases rather than in a file of their
+ * own because they render the SAME screen under the same transport mock, so a second file would duplicate
+ * the mock factory and the legend lookup and would then be free to drift from this one.
+ *
  * Refactoring Rationale: every callback is a named declaration rather than an inline arrow, for the two
  * reasons the sibling screen tests record -- the lint rule requires a documentation block on a function
  * expression in any position, and Prettier detaches a block comment that follows an argument comma.
@@ -32,15 +48,21 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactElement } from 'react';
-import { MemoryRouter, Route, Routes, useNavigate } from 'react-router';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router';
 
 import { AppShell } from '../layout/AppShell';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { getUser, updateUser } from '../api/auth';
+import { deleteUser, getUser, listUsers, updateUser } from '../api/auth';
 import type { UserResponse } from '../api/auth';
+import type { PageResponse, UserSummary } from '../api/types';
 import { PF_KEY_BAR_REGION_LABEL } from '../layout/PfKeyBar';
-import { navigateSafely } from '../routes/navigation';
+import {
+  ADMIN_MENU_ROUTE,
+  USER_LIST_ROUTE,
+  navigateSafely,
+  screenTransitionState,
+} from '../routes/navigation';
 import { SHARED_MESSAGES } from '../messages/messages';
 import { fieldErrorId, fieldHintId } from '../layout/fieldHelp';
 import {
@@ -49,6 +71,16 @@ import {
   USER_UPDATE_KEY_LABELS,
   UserUpdateScreen,
 } from './userUpdate';
+import { USER_DELETE_KEY_LABELS } from '../messages/messages';
+import { UserDeleteScreen } from './userDelete';
+import {
+  USER_LIST_KEY_LABELS,
+  USER_LIST_LABELS,
+  USER_LIST_ROW_ACTION_CODES,
+  userDeletePath,
+  userEditPath,
+} from './userList';
+import UserListScreen from './userList';
 
 /**
  * Builds the mocked surface of the auth transport module.
@@ -56,14 +88,24 @@ import {
  * Assumptions: a hoisted function DECLARATION, not an inline factory held in a `const`. Vitest lifts
  * every `vi.mock` call above the imports, so a `const` factory would be in its temporal dead zone at
  * registration time.
- * @returns {Record<string, unknown>} The two transport functions this screen calls plus the width
- *   constant it imports from the same module, which a bare spy pair would leave undefined.
+ * @returns {Record<string, unknown>} Every transport function the three administration screens in this
+ *   file call, plus the width constant all three import from the same module, which a bare spy set would
+ *   leave undefined.
  */
 function mockAuthTransportModule(): Record<string, unknown> {
   return {
     USER_ID_MAX_LENGTH: 8,
     getUser: vi.fn(),
     updateUser: vi.fn(),
+    /*
+     * WHY : Assumptions: the browse and the deletion operations are declared here even though the
+     *       credential cases never call them, because the caller-origin cases below render the user browse
+     *       and the deletion screen -- the two ends of the transfer under test -- and a factory replaces
+     *       the module WHOLESALE. A member the factory omits is `undefined` at the call site, which
+     *       surfaces as a screen failing to render rather than as the transfer being wrong.
+     */
+    listUsers: vi.fn(),
+    deleteUser: vi.fn(),
   };
 }
 
@@ -81,8 +123,24 @@ const STORED: UserResponse = {
   cognitoSub: '00000000-0000-4000-8000-000000000001',
 };
 
-/** The route this screen is mounted at, whose parameter supplies the administered identifier. */
+/**
+ * The route this screen is mounted at, whose parameter supplies the administered identifier.
+ *
+ * Assumptions: this is spelled exactly as `USER_UPDATE_PATH` in `ui/src/router.tsx` -- the ONE route
+ * `COUSR02C` holds. A selector-free `'/users/edit'` was declared beside it and is withdrawn, because
+ * one program with two routes made the route table publish twenty-two paths for twenty-one programs
+ * and stop being a bijection with the reference option tables.
+ *
+ * Assumptions: the screen's selector-free FIRST TURN survives that withdrawal and is still covered
+ * here, because it is a property of the screen rather than of the table -- `app/cbl/COUSR02C.cbl`
+ * L99-L104 reads the selection carrier only when it is present. {@link renderScreen} reaches it
+ * through a second HARNESS-local mount at {@link UNSELECTED_PATH}; that mount is deliberately not a
+ * product route, and `ui/src/routes/routeCensus.test.ts` holds the table itself to twenty-one.
+ */
 const ROUTE = '/users/:id/edit';
+
+/** The selector-free arrival, which is the path the administrative menu's option 3 navigates to. */
+const UNSELECTED_PATH = '/users/edit';
 
 /** An administered path whose identifier is blank once decoded, standing for a malformed link. */
 const BLANK_ID_PATH = '/users/%20/edit';
@@ -121,11 +179,18 @@ function NavigateToABlankIdentifier(): ReactElement {
 
 /**
  * Renders the screen at a concrete administration path.
+ *
+ * Assumptions: the entry is a parameter with the selected arrival as its default, so every existing
+ * case keeps arriving with an identifier while the selector-free arrival can be exercised without a
+ * second harness. TWO patterns are mounted, not one: {@link ROUTE} is the product route and
+ * {@link UNSELECTED_PATH} is a harness-local mount for the screen's selector-free first turn, which
+ * the product table deliberately no longer offers a route to.
+ * @param {string} [entry] - Concrete path to open; the selected arrival by default.
  * @returns {ReactElement} The composed tree under test.
  */
-function renderScreen(): ReactElement {
+function renderScreen(entry: string = `/users/${USER_ID}/edit`): ReactElement {
   return (
-    <MemoryRouter initialEntries={[`/users/${USER_ID}/edit`]}>
+    <MemoryRouter initialEntries={[entry]}>
       <NavigateToABlankIdentifier />
       {/*
         WHY : ⚠️ Refactoring Rationale: the screen is rendered INSIDE `AppShell`, where it was rendered
@@ -139,6 +204,14 @@ function renderScreen(): ReactElement {
       <AppShell>
         <Routes>
           <Route path={ROUTE} element={<UserUpdateScreen />} />
+          {/*
+            WHY : Assumptions: the selector-free arrival is mounted HERE and nowhere in
+                  `ui/src/router.tsx`. The screen keeps the empty first turn the reference gives it, so
+                  the behaviour must be covered, but giving it a product route is what previously made
+                  `COUSR02C` hold two of the table's rows. A harness mount exercises the screen without
+                  re-adding the row the route census counts.
+          */}
+          <Route path={UNSELECTED_PATH} element={<UserUpdateScreen />} />
         </Routes>
       </AppShell>
     </MemoryRouter>
@@ -149,6 +222,8 @@ function renderScreen(): ReactElement {
 function resetSpies(): void {
   vi.mocked(getUser).mockReset();
   vi.mocked(updateUser).mockReset();
+  vi.mocked(listUsers).mockReset();
+  vi.mocked(deleteUser).mockReset();
 }
 
 /**
@@ -462,11 +537,40 @@ async function describesARefusedControlAndItsHint(): Promise<void> {
   ).not.toHaveAttribute('aria-invalid');
 }
 
+/**
+ * The selector-free arrival prompts for an identifier and reads nothing.
+ *
+ * Purpose: this is the arrival administrative option 3 performs, and it is the turn a parameterised
+ * entry cannot reach. `ui/src/router.tsx` declares exactly ONE route for this program and no
+ * selector-free path, so the arrival is staged by {@link renderScreen}'s harness mount; what is under
+ * test is what the SCREEN does when the route names nobody, which the withdrawal did not change.
+ *
+ * Assumptions: the verdict is that no read was dispatched AND that the form is operable. Either alone
+ * would pass against the wrong screen -- a screen that read a blank identifier would also leave the
+ * controls enabled once the refusal returned, and a screen stuck in flight would also have dispatched
+ * nothing if the identifier never reached it. `app/cbl/COUSR02C.cbl` L99-L104 is the behaviour being
+ * matched: the carrier is tested against `SPACES AND LOW-VALUES` and the screen otherwise waits.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function promptsWithNoIdentifierInTheRoute(): Promise<void> {
+  render(renderScreen(UNSELECTED_PATH));
+
+  const identifier = await screen.findByLabelText(USER_UPDATE_FIELD_LABELS.userId);
+  expect(identifier).toHaveValue('');
+  expect(identifier).toBeEnabled();
+  expect(getUser, 'a route naming no operator must not read one').not.toHaveBeenCalled();
+  expect(
+    screen.getByLabelText(USER_UPDATE_FIELD_LABELS.firstName),
+    'the form must be operable, because nothing is in flight',
+  ).toBeEnabled();
+}
+
 /** Registers the credential-removal cases. */
 function credentialRemovalCases(): void {
   beforeEach(resetSpies);
   afterEach(resetSpies);
 
+  it('prompts for an identifier when the route names none', promptsWithNoIdentifierInTheRoute);
   it('renders no credential control in any form', rendersNoCredentialControl);
   it('submits exactly the three published members', submitsExactlyThePublishedThreeMembers);
   it(
@@ -481,3 +585,358 @@ function credentialRemovalCases(): void {
 }
 
 describe('the user update screen accepts no credential (D-10)', credentialRemovalCases);
+
+/** Marker a probe route paints so an arrival can be observed by text. */
+const ARRIVED = 'ARRIVED';
+
+/** Marker a probe route paints when it received no caller origin at all. */
+const NO_ORIGIN = 'NO-ORIGIN';
+
+/**
+ * A probe route that reports both where it was reached and the caller origin it was handed.
+ *
+ * Purpose: the origin is the property under test and it travels in router STATE, which leaves no trace
+ * in the path -- so a probe that reported only its arrival would pass for a transfer that dropped the
+ * origin entirely. Reading `useLocation().state` inside the destination is the only place the handover
+ * can be observed as the receiving screen would observe it.
+ *
+ * Assumptions: the state is read through the application's OWN reader rather than destructured here,
+ * because `useLocation().state` is untyped -- a hand-edited history entry can carry anything -- and
+ * `screenTransitionState` is the structural check every receiving screen applies to it. Reading it the
+ * same way means this probe observes exactly what a real destination observes, and it is deliberately the
+ * UNVALIDATED member: whether the origin is admissible is the receiving screen's decision, which the
+ * later cases assert by where each key lands.
+ * @returns {ReactElement} A line naming the arrival path and the origin it carried.
+ */
+function ArrivalProbe(): ReactElement {
+  const location = useLocation();
+  const origin = screenTransitionState(location.state).from ?? NO_ORIGIN;
+
+  return <div>{`${ARRIVED} ${location.pathname} ${origin}`}</div>;
+}
+
+/** Route the deletion screen is mounted at, whose parameter supplies the administered identifier. */
+const DELETE_ROUTE = '/users/:id/delete';
+
+/** The single page the browse answers with, so one marked row is unambiguous. */
+const ONE_ROW_PAGE: PageResponse<UserSummary> = {
+  items: [
+    { userId: USER_ID, firstName: STORED.firstName, lastName: STORED.lastName, userType: 'U' },
+  ],
+  firstKey: USER_ID,
+  lastKey: USER_ID,
+  hasNext: false,
+};
+
+/**
+ * Renders the user browse with probe routes at both of the per-record destinations it transfers to.
+ *
+ * Assumptions: the two destinations are PROBES rather than the real screens, because what is under test
+ * is what the browse hands over -- the receiving screens' own use of it is asserted separately below. A
+ * real screen would additionally issue its own read, so a failure there would present as a failure here.
+ * @returns {ReactElement} The composed tree under test.
+ */
+function renderBrowse(): ReactElement {
+  return (
+    <MemoryRouter initialEntries={[USER_LIST_ROUTE]}>
+      <AppShell>
+        <Routes>
+          <Route path={USER_LIST_ROUTE} element={<UserListScreen />} />
+          <Route path={ROUTE} element={<ArrivalProbe />} />
+          <Route path={DELETE_ROUTE} element={<ArrivalProbe />} />
+        </Routes>
+      </AppShell>
+    </MemoryRouter>
+  );
+}
+
+/**
+ * Renders one administration screen at its per-record path, optionally carrying a caller origin.
+ *
+ * Assumptions: the origin is supplied through the router's own `state` member of an initial entry, which
+ * is exactly the channel `navigateSafely` writes it to -- so a case that arranges it this way arranges
+ * the same thing the browse produces, rather than a shape only the test can create.
+ * @param {ReactElement} screenUnderTest - The screen to mount at the per-record path.
+ * @param {string} path - Route pattern the screen is mounted at.
+ * @param {string | undefined} from - Caller origin to hand over, or nothing to model a direct arrival.
+ * @returns {ReactElement} The composed tree under test.
+ */
+function renderAtPerRecordPath(
+  screenUnderTest: ReactElement,
+  path: string,
+  from: string | undefined,
+): ReactElement {
+  const concrete = path === ROUTE ? userEditPath(USER_ID) : userDeletePath(USER_ID);
+
+  return (
+    <MemoryRouter
+      initialEntries={[from === undefined ? concrete : { pathname: concrete, state: { from } }]}
+    >
+      <AppShell>
+        <Routes>
+          <Route path={path} element={screenUnderTest} />
+          <Route path={USER_LIST_ROUTE} element={<ArrivalProbe />} />
+          <Route path={ADMIN_MENU_ROUTE} element={<ArrivalProbe />} />
+        </Routes>
+      </AppShell>
+    </MemoryRouter>
+  );
+}
+
+/**
+ * Marks one browse row with an action code and takes the turn, which is how the reference transfers.
+ *
+ * Assumptions: the code is typed into the row's own action cell and the turn taken with the ENTER
+ * control, because that is the whole of the reference's transfer condition:
+ * `app/cbl/COUSR00C.cbl` L149-L184 reduces the ten action cells on the ENTER key alone. Navigating
+ * directly to the destination would prove nothing about the browse.
+ * @param {string} code - The action code, from the screen's own published pair.
+ * @returns {Promise<void>} Resolves once the turn has been taken.
+ */
+async function markTheRowAndTakeTheTurn(code: string): Promise<void> {
+  const operator = userEvent.setup();
+  vi.mocked(listUsers).mockResolvedValue(ONE_ROW_PAGE);
+  render(renderBrowse());
+
+  const cell = await screen.findByLabelText(`${USER_LIST_LABELS.selColumn.trim()} ${USER_ID}`);
+  await operator.type(cell, code);
+  await operator.click(legendControl(USER_LIST_KEY_LABELS.ENTER));
+}
+
+/**
+ * The browse hands the update screen its own route as the caller origin.
+ *
+ * ⚠️ Purpose: the transfer previously carried the identifier alone, so the receiving screen's PF3 arm
+ * could only ever take its fallback -- an administrator who opened a row from the list was returned to
+ * the administrative menu and had to re-enter the browse and re-page to reach the next row. The reference
+ * does not lose that: `app/cbl/COUSR00C.cbl` L192-L197 moves its own program name into
+ * `CDEMO-FROM-PROGRAM` in the same paragraph as the transfer to `COUSR02C`.
+ *
+ * Assumptions: both the destination path and the origin are asserted in one expectation, because the two
+ * are one handover -- a case that checked the path alone would pass for the defect being prevented, and a
+ * case that checked the origin alone would pass for a transfer to the wrong screen.
+ * @returns {Promise<void>} Resolves once the arrival has been observed.
+ */
+async function theBrowseHandsTheUpdateScreenItsOrigin(): Promise<void> {
+  await markTheRowAndTakeTheTurn(USER_LIST_ROW_ACTION_CODES.update);
+
+  expect(
+    await screen.findByText(`${ARRIVED} ${userEditPath(USER_ID)} ${USER_LIST_ROUTE}`),
+  ).toBeInTheDocument();
+}
+
+/**
+ * The browse hands the deletion screen its own route as the caller origin.
+ *
+ * Assumptions: this is asserted separately from the update transfer even though one line in the screen
+ * produces both, because the two arms are chosen by different action codes and the reference states them
+ * as two paragraphs -- `app/cbl/COUSR00C.cbl` L192-L197 and L202-L207 -- so a reduction that dropped one
+ * code would leave the other's case green.
+ * @returns {Promise<void>} Resolves once the arrival has been observed.
+ */
+async function theBrowseHandsTheDeleteScreenItsOrigin(): Promise<void> {
+  await markTheRowAndTakeTheTurn(USER_LIST_ROW_ACTION_CODES.delete);
+
+  expect(
+    await screen.findByText(`${ARRIVED} ${userDeletePath(USER_ID)} ${USER_LIST_ROUTE}`),
+  ).toBeInTheDocument();
+}
+
+/**
+ * Waits for the mount read to have been dispatched and answered.
+ *
+ * Assumptions: both screens disable every control while their mount read is in flight, so a key pressed
+ * before the row lands is withheld and the case would observe no transfer at all -- a false negative that
+ * looks exactly like the origin having been dropped. This is the half of that wait the two screens share.
+ * @returns {Promise<void>} Resolves once the read has been issued for the administered identifier.
+ */
+async function waitForTheReadToBeIssued(): Promise<void> {
+  await waitFor(
+    /**
+     * Waits for the read to have been dispatched.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(getUser).toHaveBeenCalledWith(USER_ID);
+    },
+  );
+}
+
+/**
+ * Waits for the administered row to reach the update screen's editable controls.
+ * @returns {Promise<void>} Resolves once the fetched surname holds a control's value.
+ */
+async function waitForTheFetchedRowInControls(): Promise<void> {
+  await waitForTheReadToBeIssued();
+  expect(await screen.findByDisplayValue(STORED.lastName)).toBeInTheDocument();
+}
+
+/**
+ * Waits for the administered row to reach the deletion screen's protected values.
+ *
+ * ⚠️ Assumptions: the surname is sought as TEXT here and as a control's value on the update screen,
+ * because the two mapsets differ in kind and not merely in wording. `app/bms/COUSR03.bms` paints the
+ * three name and type fields with `ASKIP`, so the deletion screen renders them as protected text and
+ * offers one enterable control -- its fetch key -- whereas the update screen renders four editable
+ * controls. A shared display-value wait failed on the deletion screen for that reason, which reads as the
+ * row never arriving rather than as the query being wrong for the screen.
+ * @returns {Promise<void>} Resolves once the fetched surname is painted.
+ */
+async function waitForTheFetchedRowOnTheGlass(): Promise<void> {
+  await waitForTheReadToBeIssued();
+  expect(await screen.findByText(STORED.lastName)).toBeInTheDocument();
+}
+
+/**
+ * The update screen's saving exit returns to the browse when the browse sent it.
+ *
+ * Assumptions: the save is arranged to succeed but its OUTCOME is immaterial -- the reference performs
+ * `UPDATE-USER-INFO` and then `RETURN-TO-PREV-SCREEN` with no test between them at
+ * `app/cbl/COUSR02C.cbl` L111-L119 -- so what this case fixes is the DESTINATION of a transfer that
+ * happens either way.
+ * @returns {Promise<void>} Resolves once the arrival has been observed.
+ */
+async function theUpdateScreenReturnsToTheBrowseItCameFrom(): Promise<void> {
+  const operator = userEvent.setup();
+  vi.mocked(getUser).mockResolvedValue(STORED);
+  vi.mocked(updateUser).mockResolvedValue(STORED);
+  render(renderAtPerRecordPath(<UserUpdateScreen />, ROUTE, USER_LIST_ROUTE));
+  await waitForTheFetchedRowInControls();
+
+  await operator.click(legendControl(USER_UPDATE_KEY_LABELS.PFK03));
+
+  expect(await screen.findByText(`${ARRIVED} ${USER_LIST_ROUTE} ${NO_ORIGIN}`)).toBeInTheDocument();
+}
+
+/**
+ * The update screen's saving exit falls back to the administrative menu with no origin.
+ *
+ * Assumptions: this is the reference's own blank-field arm -- `app/cbl/COUSR02C.cbl` L113-L118 transfers
+ * to `'COADM01C'` when `CDEMO-FROM-PROGRAM` is spaces or low values -- so the fallback is asserted as
+ * behaviour rather than tolerated as a default. It is also what an operator reaching the screen by a
+ * typed or stale link gets, which is the arrival a forged origin would otherwise redirect.
+ * @returns {Promise<void>} Resolves once the arrival has been observed.
+ */
+async function theUpdateScreenFallsBackToTheAdministrativeMenu(): Promise<void> {
+  const operator = userEvent.setup();
+  vi.mocked(getUser).mockResolvedValue(STORED);
+  vi.mocked(updateUser).mockResolvedValue(STORED);
+  render(renderAtPerRecordPath(<UserUpdateScreen />, ROUTE, undefined));
+  await waitForTheFetchedRowInControls();
+
+  await operator.click(legendControl(USER_UPDATE_KEY_LABELS.PFK03));
+
+  expect(
+    await screen.findByText(`${ARRIVED} ${ADMIN_MENU_ROUTE} ${NO_ORIGIN}`),
+  ).toBeInTheDocument();
+}
+
+/**
+ * The update screen's cancel key returns to the administrative menu even when the browse sent it.
+ *
+ * ⚠️ Assumptions: this key is UNCONDITIONAL where the saving exit is not, and the two are asserted in the
+ * same file for that reason: `app/cbl/COUSR02C.cbl` L124-L125 moves `'COADM01C'` into
+ * `CDEMO-TO-PROGRAM` with no preference for the calling program at all. Resolving the origin on both keys
+ * would be a plausible simplification and would be wrong, so the difference is pinned by a case that
+ * supplies an origin and expects it to be IGNORED.
+ * @returns {Promise<void>} Resolves once the arrival has been observed.
+ */
+async function theUpdateScreenCancelsToTheMenuDespiteAnOrigin(): Promise<void> {
+  const operator = userEvent.setup();
+  vi.mocked(getUser).mockResolvedValue(STORED);
+  render(renderAtPerRecordPath(<UserUpdateScreen />, ROUTE, USER_LIST_ROUTE));
+  await waitForTheFetchedRowInControls();
+
+  await operator.click(legendControl(USER_UPDATE_KEY_LABELS.PFK12));
+
+  expect(
+    await screen.findByText(`${ARRIVED} ${ADMIN_MENU_ROUTE} ${NO_ORIGIN}`),
+  ).toBeInTheDocument();
+}
+
+/**
+ * The deletion screen's back key returns to the browse when the browse sent it.
+ *
+ * Assumptions: the deletion screen is exercised alongside the update screen rather than trusted to match
+ * it, because the two implement the same two-armed decision from two different programs and neither
+ * shares a function with the other -- `app/cbl/COUSR03C.cbl` L111-L118 is its own transcription.
+ * @returns {Promise<void>} Resolves once the arrival has been observed.
+ */
+async function theDeleteScreenReturnsToTheBrowseItCameFrom(): Promise<void> {
+  const operator = userEvent.setup();
+  vi.mocked(getUser).mockResolvedValue(STORED);
+  render(renderAtPerRecordPath(<UserDeleteScreen />, DELETE_ROUTE, USER_LIST_ROUTE));
+  await waitForTheFetchedRowOnTheGlass();
+
+  await operator.click(legendControl(USER_DELETE_KEY_LABELS.PFK03));
+
+  expect(await screen.findByText(`${ARRIVED} ${USER_LIST_ROUTE} ${NO_ORIGIN}`)).toBeInTheDocument();
+}
+
+/**
+ * The deletion screen's back key falls back to the administrative menu with no origin.
+ * @returns {Promise<void>} Resolves once the arrival has been observed.
+ */
+async function theDeleteScreenFallsBackToTheAdministrativeMenu(): Promise<void> {
+  const operator = userEvent.setup();
+  vi.mocked(getUser).mockResolvedValue(STORED);
+  render(renderAtPerRecordPath(<UserDeleteScreen />, DELETE_ROUTE, undefined));
+  await waitForTheFetchedRowOnTheGlass();
+
+  await operator.click(legendControl(USER_DELETE_KEY_LABELS.PFK03));
+
+  expect(
+    await screen.findByText(`${ARRIVED} ${ADMIN_MENU_ROUTE} ${NO_ORIGIN}`),
+  ).toBeInTheDocument();
+}
+
+/**
+ * The deletion screen's cancel key returns to the administrative menu even when the browse sent it.
+ *
+ * Assumptions: the key is invoked from the KEYBOARD rather than from the legend, because this screen
+ * publishes no label for it -- `app/bms/COUSR03.bms` paints four keys on row 24 and PF12 is not among
+ * them -- so `usePfKeys` binds it without rendering a control. `app/cbl/COUSR03C.cbl` L121-L122 makes
+ * it unconditional all the same.
+ * @returns {Promise<void>} Resolves once the arrival has been observed.
+ */
+async function theDeleteScreenCancelsToTheMenuDespiteAnOrigin(): Promise<void> {
+  const operator = userEvent.setup();
+  vi.mocked(getUser).mockResolvedValue(STORED);
+  render(renderAtPerRecordPath(<UserDeleteScreen />, DELETE_ROUTE, USER_LIST_ROUTE));
+  await waitForTheFetchedRowOnTheGlass();
+
+  await operator.keyboard('{F12}');
+
+  expect(
+    await screen.findByText(`${ARRIVED} ${ADMIN_MENU_ROUTE} ${NO_ORIGIN}`),
+  ).toBeInTheDocument();
+}
+
+/** Registers the caller-origin cases. */
+function callerOriginCases(): void {
+  beforeEach(resetSpies);
+  afterEach(resetSpies);
+
+  it('hands the update screen the browse as its origin', theBrowseHandsTheUpdateScreenItsOrigin);
+  it('hands the delete screen the browse as its origin', theBrowseHandsTheDeleteScreenItsOrigin);
+  it('returns from the update screen to the browse', theUpdateScreenReturnsToTheBrowseItCameFrom);
+  it(
+    'returns from the update screen to the menu with no origin',
+    theUpdateScreenFallsBackToTheAdministrativeMenu,
+  );
+  it(
+    'cancels from the update screen to the menu despite an origin',
+    theUpdateScreenCancelsToTheMenuDespiteAnOrigin,
+  );
+  it('returns from the delete screen to the browse', theDeleteScreenReturnsToTheBrowseItCameFrom);
+  it(
+    'returns from the delete screen to the menu with no origin',
+    theDeleteScreenFallsBackToTheAdministrativeMenu,
+  );
+  it(
+    'cancels from the delete screen to the menu despite an origin',
+    theDeleteScreenCancelsToTheMenuDespiteAnOrigin,
+  );
+}
+
+describe('the user screens return to the caller that sent them', callerOriginCases);

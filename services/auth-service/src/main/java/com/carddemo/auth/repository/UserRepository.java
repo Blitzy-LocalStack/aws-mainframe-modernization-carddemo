@@ -15,10 +15,21 @@ import org.springframework.data.repository.query.Param;
  *
  * <p>Every relational equivalent of a file operation the baseline issues against its {@code USRSEC}
  * dataset is either declared in this interface or inherited into it, and none is expressed anywhere
- * else in this module. Two constants, one cursor sentinel, two keyset browse queries and one
+ * else in this module. Two constants, one cursor sentinel, FOUR keyset browse queries and one
  * alternate-key lookup are declared; the keyed operations are inherited. There is no third browse
- * direction and no offset paging of any kind, and both absences are load bearing rather than
+ * DIRECTION and no offset paging of any kind, and both absences are load bearing rather than
  * incidental.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: the browse-query count reads four where it read two, and the two
+ * additions are both OPENING reads rather than a third direction -- which is why the sentence above
+ * capitalises the word it closes off. The first, {@link #findAllByOrderByUserIdAsc(Limit)}, opens the
+ * browse with no lower bound at all; the second,
+ * {@link #findByUserIdGreaterThanEqualOrderByUserIdAsc(String, Limit)}, opens it AT OR AFTER an
+ * identifier a caller supplied. Both answer the baseline's ENTER turn, whose two branches are exactly
+ * those two cases: {@code app/cbl/COUSR00C.cbl} lines 218 to 221 seek on {@code LOW-VALUES} when the
+ * search field is blank and on the typed value when it is not. The count moved in two separate
+ * revisions and neither was an increment of the previous figure -- each was re-measured from the
+ * members below, because a count nobody re-measures becomes false without anything being edited.</p>
  *
  * <p>Assumptions: the alternate-key lookup is the one member here with NO baseline counterpart, and
  * saying so is what keeps the sentence above honest. The baseline reaches a user row by one key only,
@@ -30,23 +41,31 @@ import org.springframework.data.repository.query.Param;
  * had, which is why {@link #findByCognitoSub(UUID)} is documented as net-new rather than cited to a
  * COBOL line that does not exist.</p>
  *
- * <h2>Four file verbs become two queries</h2>
+ * <h2>Four file verbs become four queries in two directions</h2>
  *
- * <p>AAP transformation rule T5 maps each CICS file verb onto exactly one target, and this interface
- * is where the browse ensemble of {@code app/cbl/COUSR00C.cbl} lands. That program drives its file
- * through four paragraphs: {@code STARTBR-USER-SEC-FILE.} at line 586 whose verb spans lines 588 to
- * 595, {@code READNEXT-USER-SEC-FILE.} at line 619 whose verb spans lines 621 to 629,
+ * <p>AAP transformation rule T5 maps each CICS file verb onto exactly one target CATEGORY, collapsing
+ * a positioned browse onto keyset pagination, and this interface is where the browse ensemble of
+ * {@code app/cbl/COUSR00C.cbl} lands. That program drives its file through four paragraphs:
+ * {@code STARTBR-USER-SEC-FILE.} at line 586 whose verb spans lines 588 to 595,
+ * {@code READNEXT-USER-SEC-FILE.} at line 619 whose verb spans lines 621 to 629,
  * {@code READPREV-USER-SEC-FILE.} at line 653 whose verb spans lines 655 to 663, and
- * {@code ENDBR-USER-SEC-FILE.} at line 687 whose verb spans lines 689 to 691. Only the two reads
- * survive as members here, which is what makes the count on this boundary two rather than four.</p>
+ * {@code ENDBR-USER-SEC-FILE.} at line 687 whose verb spans lines 689 to 691. Three of the four
+ * survive as members here and the fourth has no counterpart: the seek becomes the two opening reads,
+ * one per value it is given; each of the two reads becomes the positioned query for its own
+ * direction; and {@code ENDBR} becomes nothing at all, because a query carries its own predicate and
+ * closes its own result set rather than holding a cursor a later statement must release.</p>
  *
- * <p>Assumptions: two is transcribed from the source rather than chosen here. The same program
- * reaches all four verbs from exactly two paragraphs, {@code PROCESS-PAGE-FORWARD} at line 282 and
+ * <p>Assumptions: the DIRECTION count of two is transcribed from the source rather than chosen here,
+ * and it is the count the exclusions above close off. The same program reaches all four verbs from
+ * exactly two paragraphs, {@code PROCESS-PAGE-FORWARD} at line 282 and
  * {@code PROCESS-PAGE-BACKWARD} at line 336, entered in turn from {@code PROCESS-PF7-KEY} at line 237
- * and {@code PROCESS-PF8-KEY} at line 260. Two directions in the baseline is two queries here, so a
- * third query would describe a movement the source does not offer.</p>
+ * and {@code PROCESS-PF8-KEY} at line 260. Two directions in the baseline is two directions here, so a
+ * query reading a third way would describe a movement the source does not offer -- which is a
+ * different statement from the number of query MEMBERS, three of which read ascending because the
+ * baseline opens ascending in both of its ENTER branches and continues ascending on a forward turn.</p>
  *
- * <p>Assumptions: the key both queries page by is {@code SEC-USR-ID}, the eight-character field at
+ * <p>Assumptions: the key every one of the four queries pages by is {@code SEC-USR-ID}, the
+ * eight-character field at
  * zero-based offset 0 of the 80-byte {@code SEC-USER-DATA} layout declared at
  * {@code app/cpy/CSUSR01Y.cpy} lines 17 to 23. It is the whole key rather than the leading part of a
  * compound one, which is what makes a single-column keyset predicate sufficient: each positioned verb
@@ -54,11 +73,11 @@ import org.springframework.data.repository.query.Param;
  * one column reproduces the sequence the baseline reads in. {@code app/csd/CARDDEMO.CSD} line 94
  * declares {@code BROWSE(YES)} on the file, which is why those browse verbs exist at all.</p>
  *
- * <p>Assumptions: the ordering both queries rely on is served by the primary-key index and by nothing
- * else. {@code services/auth-service/src/main/resources/db/migration/V1__auth.sql} creates this table
- * with a single statement and declares {@code user_id CHAR(8) PRIMARY KEY}, adding no further index.
- * That one index is exactly the access path a keyset predicate over {@code user_id} needs, so none
- * is requested here and none is missing.</p>
+ * <p>Assumptions: the ordering all four queries rely on is served by the primary-key index and by
+ * nothing else. {@code services/auth-service/src/main/resources/db/migration/V1__auth.sql} creates
+ * this table with a single statement and declares {@code user_id CHAR(8) PRIMARY KEY}, adding no
+ * further index. That one index is exactly the access path a keyset predicate over {@code user_id}
+ * needs, so none is requested here and none is missing.</p>
  *
  * <h2>What this interface deliberately does not carry</h2>
  *
@@ -227,13 +246,20 @@ public interface UserRepository extends JpaRepository<User, String> {
     //       be: because user_id is CHAR(8) and PostgreSQL ignores trailing blanks when comparing that
     //       type, the empty string is less than every identifier the table can hold, so a strict
     //       greater-than against it admits the whole set beginning at the lowest key.
-    // WHY : Alternatives Considered: a nullable cursor was rejected, and so was a separate
-    //       unfiltered member. A null cursor would make the comparison below evaluate to unknown and
-    //       silently return no rows at all, turning an opening page into an empty list that looks
-    //       like an empty table -- the two are distinguishable outcomes and must stay so. A separate
-    //       unfiltered member would raise the browse-query count on this boundary from two to three,
-    //       which the package charter beside this file closes off, and it would additionally state a
-    //       starting position in a signature where the source states it in a value.
+    // WHY : Alternatives Considered: a nullable cursor was rejected. A null cursor would make the
+    //       comparison below evaluate to unknown and silently return no rows at all, turning an
+    //       opening page into an empty list that looks like an empty table -- the two are
+    //       distinguishable outcomes and must stay so.
+    // WHY : ⚠️ Refactoring Rationale: this constant used also to record that a separate UNFILTERED
+    //       member had been rejected, on the ground that it would raise the browse-query count from
+    //       two to three. That member is findAllByOrderByUserIdAsc below and it exists, so the
+    //       rejection was left behind by the charter revision that admitted it: the reason it was
+    //       admitted is that this constant means "before every key" only by way of a collation detail
+    //       -- user_id is CHAR(8), trailing blanks are ignored in its comparison, so a blank
+    //       identifier would compare equal to this value and be dropped from the first page while
+    //       appearing on later ones. The constant is kept for the tests that drive the strict
+    //       predicate from the bottom of the key space, which is a property of THIS query worth
+    //       asserting; the service's opening read uses the unbounded member instead.
     String BEFORE_FIRST_USER_ID = "";
 
     /**
@@ -242,9 +268,9 @@ public interface UserRepository extends JpaRepository<User, String> {
      * <p>This is the relational form of the forward read at lines 621 to 629 of
      * {@code app/cbl/COUSR00C.cbl}, driven from the fill loop at lines 300 to 306 of
      * {@code PROCESS-PAGE-FORWARD} and probed once more at line 311. Passing
-     * {@link #BEFORE_FIRST_USER_ID} opens the list at the lowest stored key, which is the same
-     * request the baseline makes when it seeds its key field at line 219 and pages forward at line
-     * 228.</p>
+     * {@link #BEFORE_FIRST_USER_ID} opens the list at the lowest stored key, and the tests exercise
+     * that; ⚠️ the service opens through {@link #findAllByOrderByUserIdAsc(Limit)} instead, for the
+     * collation reason recorded on that constant.</p>
      *
      * @param lastKey the identifier of the last row the caller already holds, of type {@code String},
      *     or {@link #BEFORE_FIRST_USER_ID} to open the list; the comparison is STRICT, so a row whose
@@ -268,19 +294,25 @@ public interface UserRepository extends JpaRepository<User, String> {
     //       such. Writing the predicate as a strict comparison makes the page boundary an artifact of
     //       this query instead of an artifact of a file system, and were it inclusive instead, the
     //       first row of every forward page would repeat the last row of the previous one.
-    // WHY : Assumptions: one predicate serves both an inclusive opening page and a strictly
-    //       exclusive continuation, and the baseline draws the distinction the same way -- through
-    //       the value it seeks on, not through a second access path. app/cbl/COUSR00C.cbl guards its
-    //       priming read at line 288 with IF EIBAID NOT = DFHENTER AND DFHPF7 AND DFHPF3, so on the
-    //       opening turn, where the attention identifier IS the enter key, no priming read happens
-    //       and the fill loop returns the row at the seek position; on a forward page turn the guard
-    //       holds and the extra read at line 289 consumes the cursor row so the loop starts after
-    //       it. The backward path is shaped identically at lines 342 to 344, and although the two
-    //       guards name different numbers of keys, three forward and two backward, both yield one
-    //       extra positioning read, so continuation is strictly exclusive in both directions. A
-    //       strict greater-than reproduces both cases here because the sentinel above is not itself a
-    //       stored key: strictly greater than a value below the whole key space is the whole key
-    //       space.
+    // WHY : Assumptions: this predicate serves the CONTINUATION only, and the baseline draws the
+    //       inclusive-versus-exclusive distinction through the number of reads it issues rather than
+    //       through a second access path. app/cbl/COUSR00C.cbl guards its priming read at line 288
+    //       with IF EIBAID NOT = DFHENTER AND DFHPF7 AND DFHPF3, so on the opening turn, where the
+    //       attention identifier IS the enter key, no priming read happens and the fill loop returns
+    //       the row AT the seek position; on a forward page turn the guard holds and the extra read at
+    //       line 289 consumes the cursor row so the loop starts after it. The backward path is shaped
+    //       identically at lines 342 to 344, and although the two guards name different numbers of
+    //       keys, three forward and two backward, both yield one extra positioning read, so
+    //       continuation is strictly exclusive in both directions.
+    // WHY : ⚠️ Refactoring Rationale: this block used to claim that ONE predicate served both the
+    //       inclusive opening page and the exclusive continuation, on the ground that strictly greater
+    //       than a value below the whole key space is the whole key space. That reasoning holds only
+    //       for the sentinel above, which is not a stored key -- and it silently fails the moment the
+    //       opening position is a key a caller SUPPLIED, because the strict comparison then excludes
+    //       the very row whose identifier was typed. That is the row the baseline displays first, so
+    //       reusing this predicate for a positioned opening read would drop it. The inclusive form is
+    //       findByUserIdGreaterThanEqualOrderByUserIdAsc below, and the two are separate members
+    //       precisely so neither has to be told which of the two jobs it is doing.
     // WHY : Refactoring Rationale: a caller must take the returned page's boundary keys from the
     //       ACTUAL first and last rows of the list it receives, never from a predetermined row
     //       position, and this method returns the rows in an order that makes that possible. The
@@ -313,10 +345,12 @@ public interface UserRepository extends JpaRepository<User, String> {
     /**
      * Reads the first page of users, in ascending identifier order.
      *
-     * <p>Assumptions: this is the browse's opening read, the one taken when no cursor has been supplied
-     * yet. It corresponds to the reference starting its browse at the low key rather than positioning on
-     * a value -- {@code app/cbl/COUSR00C.cbl} establishes the position before its first
-     * {@code READNEXT} rather than passing a key it was given.
+     * <p>Assumptions: this is the browse's UNPOSITIONED opening read, the one taken when neither a
+     * cursor nor an opening identifier has been supplied. It is one of the two branches the reference's
+     * ENTER turn has, and specifically the blank one: {@code app/cbl/COUSR00C.cbl} tests its search
+     * field at line 218 and seeds the seek with {@code LOW-VALUES} at line 219 when it holds neither an
+     * identifier nor a value. The other branch, a key the operator typed, is
+     * {@link #findByUserIdGreaterThanEqualOrderByUserIdAsc(String, Limit)}.
      *
      * <p>Alternatives Considered: opening the browse with
      * {@link #findByUserIdGreaterThanOrderByUserIdAsc} passing an empty string, which would remove this
@@ -326,13 +360,68 @@ public interface UserRepository extends JpaRepository<User, String> {
      * from the first page while appearing on later ones. A query with no lower bound states the intent
      * directly and cannot be wrong about it.
      *
-     * <p>Assumptions: the limit is the caller's surplus-of-one, exactly as on the two positioned reads, so
-     * the browse can tell a full page from a last page by whether the extra row arrived.
+     * <p>Assumptions: the limit is the caller's surplus-of-one, exactly as on the other three reads on
+     * this boundary, so the browse can tell a full page from a last page by whether the extra row
+     * arrived.
      *
      * @param limit the greatest number of rows to return, normally the page size plus one
      * @return the lowest-keyed users in ascending order, at most {@code limit} of them; never {@code null}
      */
     List<User> findAllByOrderByUserIdAsc(Limit limit);
+
+    /**
+     * Reads the first page of users at or after a stated identifier, in ascending identifier order.
+     *
+     * <p>This is the relational form of the SEEK the baseline performs before it fills the screen:
+     * {@code app/cbl/COUSR00C.cbl} lines 218 to 221 move the identifier typed into the search field
+     * into {@code SEC-USR-ID}, and {@code STARTBR-USER-SEC-FILE} at lines 588 to 595 positions the
+     * browse on that field. It answers the ENTER turn only, which is the turn on which the baseline
+     * establishes a position; the two positioned queries above answer the page turns that follow.</p>
+     *
+     * @param startKey the identifier to position at, folded exactly as the stored key is folded; the
+     *     comparison is INCLUSIVE, so a row whose identifier equals this value is the first row of the
+     *     page, and a value no row carries positions on the next identifier after it; must not be
+     *     {@code null}
+     * @param limit the maximum number of rows to read, of type {@code Limit}, which the caller builds
+     *     from {@link #FETCH_LIMIT} so that the surplus row answers forward availability; must not be
+     *     {@code null}
+     * @return the rows from that position onwards as a {@code List<User>}, ASCENDING by identifier and
+     *     therefore already in display order, holding up to {@code limit} rows -- so up to
+     *     {@link #PAGE_SIZE} plus one, the surplus row being a probe rather than a row to display --
+     *     and EMPTY when no identifier reaches that far, which is the caller having positioned past
+     *     the end of the set rather than an error
+     */
+    // WHY : Assumptions: the comparison is INCLUSIVE, and that is transcribed from the baseline rather
+    //       than chosen here. Two things establish it. The program's own not-found arm at lines 600 to
+    //       605 answers a seek it could not satisfy by setting USER-SEC-EOF and writing 'You are at the
+    //       top of the page...', which is an END-OF-FILE outcome and not a row-not-found one -- a
+    //       reading that is coherent only if a key naming no row positions on the next higher key, so
+    //       that the only way to fail is to seek past the last row. And the priming read at line 289 is
+    //       skipped on the ENTER turn by the guard at line 288, so the row the seek landed on is the
+    //       first row the fill loop at lines 300 to 306 puts on the screen. An operator who types an
+    //       identifier that exists therefore sees THAT identifier at the top of the page, which a
+    //       strict comparison would not show them.
+    // WHY : Assumptions: the GTEQ option written at line 592 is NOT the evidence for any of this,
+    //       because it is commented out -- the asterisk sits in the indicator column -- so the
+    //       positioning the baseline got came from the access method's default rather than from
+    //       anything the program declares. Commented source is not live behaviour and is cited here
+    //       only to say that it must not be read as such; the two live properties above are what this
+    //       predicate reproduces.
+    // WHY : Alternatives Considered: reading the positioned row by primary key and then reading the
+    //       page after it with the strict predicate above, which is the shape the sibling ledger browse
+    //       uses in com.carddemo.transaction.service.TransactionListService, at its processEnterKey.
+    //       Rejected here because the two browses position differently: the ledger's search field takes
+    //       a whole sixteen-digit identifier and its reference answers an unmatched one with a
+    //       not-found arm, so an equality read models it, whereas this reference answers an unmatched
+    //       key by positioning at the next one. A keyed read would return nothing for a key no row
+    //       carries and the page would come back empty, where the baseline shows the rows that follow.
+    //       It also costs two round trips for one page where this costs one.
+    // WHY : Alternatives Considered: giving the existing forward query a boolean or an enum saying
+    //       whether to include the position. Rejected because Spring Data derives the predicate from
+    //       the method name, so a parameter cannot change it -- expressing the choice that way would
+    //       mean writing a @Query and restating in JPQL what two derived names already say, and a
+    //       caller reading a boolean at a call site could not tell which way round it went.
+    List<User> findByUserIdGreaterThanEqualOrderByUserIdAsc(String startKey, Limit limit);
 
     /**
      * Reads the page of users that precedes a stated position, in descending identifier order.

@@ -476,28 +476,36 @@ EXPOSE 8080
 #       stacks and the direct buffers the AWS SDK clients use to stream report and
 #       statement bytes.
 # WHY : Refactoring Rationale: the ratio was 75.0, justified by "a task whose
-#       entire allocation belongs to one JVM" -- and this task's allocation does
-#       not. infra/modules/ecs-service adds an ESSENTIAL aws-otel-collector
-#       sidecar to every workload, and neither container carries a container-level
-#       hard memory limit, so the JVM's cgroup view is the WHOLE task allocation
-#       and 75.0 sized the heap as though the sidecar were absent. This context is
-#       the worst place in the estate for that error, because it is also started
-#       directly by the batch state machine to render statements and reports, where
-#       it streams whole result sets through the SDK's direct buffers -- the
-#       non-heap region the ratio does not govern. The budget that replaces the
-#       assumption, at the 1024 MiB dev allocation: 192 MiB for the collector (its
-#       memory_limiter is configured at limit_mib 128 with spike_limit_mib 32, plus
-#       Go runtime overhead), about 250 MiB of JVM non-heap, and the heap on top.
-#       At 75.0 that is roughly 1210 MiB against a 1024 MiB task; at 50.0 it is
-#       roughly 954 MiB. The same ratio against the 2048 MiB prod allocation yields
-#       a 1024 MiB heap with about 580 MiB spare.
-# WHY : Alternatives Considered: keeping 75.0 and giving each container an explicit
-#       hard `memory` limit in the task definition so the JVM's cgroup limit
-#       excluded the sidecar. Rejected on two measurements from the module: a hard
-#       limit on an ESSENTIAL container turns a collector spike into a killed TASK
-#       rather than degraded telemetry, and 75.0 of the remaining 832 MiB plus
-#       250 MiB of non-heap would still exceed that container's own limit. The ratio
-#       had to come down either way.
+#       entire allocation belongs to one JVM" -- and even when it does, the ratio
+#       governs the HEAP and not the allocation. This context is the worst place in
+#       the estate for that error, because it is also started directly by the batch
+#       state machine to render statements and reports, where it streams whole
+#       result sets through the SDK's direct buffers -- the non-heap region the
+#       ratio does not govern at all. The budget at the 1024 MiB dev allocation is
+#       about 250 MiB of JVM non-heap plus the heap on top. At 75.0 that is roughly
+#       1018 MiB against a 1024 MiB task, leaving the container runtime nothing; at
+#       50.0 it is roughly 762 MiB. The same ratio against the 2048 MiB prod
+#       allocation yields a 1024 MiB heap with about 770 MiB spare.
+# WHY : Refactoring Rationale: this note derived the same 50.0 from a second premise
+#       -- that infra/modules/ecs-service adds an ESSENTIAL aws-otel-collector
+#       sidecar to every workload, budgeted at 192 MiB -- and that premise is
+#       WITHDRAWN. That module composes no collector container: the sidecar was
+#       outside the frozen specification and was forcing an eleventh ECR repository
+#       against the ten of section 0.4.1.6 and a ninth interface endpoint against
+#       the eight of section 0.4.1.9, so the component went and the mirror with it.
+#       The ratio is unchanged because the non-heap argument above carries it on its
+#       own, and this workload needs that headroom more than any other: the 192 MiB
+#       the collector no longer takes is exactly the kind of margin a whole-result-set
+#       stream consumes in direct buffers. Recorded instead of deleted so a reader
+#       who finds the collector in the git history does not conclude the ratio is
+#       now unjustified.
+# WHY : Alternatives Considered: keeping 75.0 and giving the application container an
+#       explicit hard `memory` limit in the task definition, so the ratio applied to
+#       a tighter number than the task allocation. Rejected because it moves the same
+#       arithmetic into a second file that has to be edited in step with this one,
+#       and because 75.0 of any limit plus 250 MiB of non-heap exceeds that limit
+#       whenever the limit is below about 1000 MiB -- which both allocations are once
+#       the runtime's own share is counted. The ratio had to come down either way.
 # WHY : Refactoring Rationale: an earlier revision of this file rejected "-Xmx or
 #       -XX container flags" as a single category, on the ground that a hard-coded
 #       ceiling would silently override the task definition's memory. That

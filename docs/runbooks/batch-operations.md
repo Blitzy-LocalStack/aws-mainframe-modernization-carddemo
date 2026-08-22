@@ -240,16 +240,76 @@ Their names are published as `bracket_release_alarm_names` in the
 
 ## Start an Ad-Hoc Report
 
+The input carries **three** members, not two: `startDate`, `endDate` and `reportType`.
+`ValidateReportRequest` checks all three as one rule set, so a range with no type is refused exactly
+as a type with no range is.
+
+`reportType` selects one of the three on-demand report kinds — `monthly`, `yearly` or `custom`. The
+value is compared trimmed and lower-cased by `ReportArtifactLocator`, and it decides both the report
+the job generates and the object key it writes, so an unrecognised value is not a cosmetic mistake.
+`daily` is deliberately **not** in that set: it is the nightly chain's own report and is not
+requestable here.
+
 ```bash
-# WHAT: run the report workflow for an inclusive date range.
+# WHAT: run the report workflow for an inclusive date range and one on-demand report kind.
 # WHY : Assumptions: report selection is a record predicate, not a batch-step
-#       gate, so both dates travel as workflow input to reporting-service.
+#       gate, so all three values travel as workflow input to reporting-service.
+# WHY : Refactoring Rationale: this command omitted `reportType`, and the graph's FIRST state refuses
+#       the request without it -- taking the `Default` edge to `InvalidReportRequest`, which sets
+#       `{"error":"InvalidReportRequest","message":"Supply startDate, endDate and reportType"}` under
+#       `$.failure`, notifies, and ends at `AdHocReportFailed`. Every well-formed-looking request
+#       therefore failed with `CardDemoAdHocReportFailed` before any task started, so there is no
+#       task and no task log to read -- which is why the cause has to be read from the execution
+#       history rather than from a container.
+# WHY : Assumptions: the type is validated in the shell before the call, against the same three
+#       tokens the job accepts. The graph only checks that `reportType` is PRESENT, so an
+#       unrecognised value passes validation, starts a Fargate task, and is refused inside it by
+#       `ReportArtifactLocator` -- which costs a task start-up to learn what this line answers for
+#       nothing.
+# WHY : Trade-offs: the range is not checked for ORDER here or in the graph. A startDate after its
+#       endDate satisfies both and is refused by the job, deliberately: the job must validate the
+#       pair anyway for an operator who invokes the image directly, and two implementations of one
+#       rule is how the two drift apart.
+# WHY : Trade-offs: the guard WRAPS the call rather than preceding it with `|| exit 1`. This block is
+#       pasted into an interactive shell, where `exit` closes the terminal along with the `ADHOC_ARN`
+#       resolved at the top of this document; wrapping refuses the start without costing the session.
 START_DATE=2022-07-01
 END_DATE=2022-07-31
-aws stepfunctions start-execution \
-  --state-machine-arn "$ADHOC_ARN" \
-  --name "report-${START_DATE}-${END_DATE}-$(date -u +%H%M%S)" \
-  --input "{\"startDate\":\"${START_DATE}\",\"endDate\":\"${END_DATE}\"}"
+REPORT_TYPE=monthly
+case "$REPORT_TYPE" in
+  monthly|yearly|custom)
+    aws stepfunctions start-execution \
+      --state-machine-arn "$ADHOC_ARN" \
+      --name "report-${REPORT_TYPE}-${START_DATE}-${END_DATE}-$(date -u +%H%M%S)" \
+      --input "{\"startDate\":\"${START_DATE}\",\"endDate\":\"${END_DATE}\",\"reportType\":\"${REPORT_TYPE}\"}"
+    ;;
+  *)
+    printf 'FAIL reportType must be monthly, yearly or custom; got "%s" -- nothing started\n' \
+      "$REPORT_TYPE" >&2
+    ;;
+esac
+```
+
+The graph turns those three into the task's argument vector — `--job=generate-report`,
+`--start-date=`, `--end-date=` and `--report-type=` — so what the shell validated above is exactly
+what the job receives.
+
+Both a refused request and a failed report task end at `AdHocReportFailed`, so `describe-execution`
+reports the same `FAILED` status and the same `CardDemoAdHocReportFailed` error for two problems with
+different remedies. The history is what separates them.
+
+```bash
+# WHAT: name the state that ended the execution, so a refused input is distinguished from a report
+#       task that ran and failed.
+# WHY : Assumptions: `InvalidReportRequest` appearing in the history means the INPUT was refused --
+#       fix the input and start a new execution. Its absence, with `GenerateAdHocReport` present,
+#       means the task ran: read that task's log group instead. Both present is impossible, because
+#       the two are on opposite edges of the first Choice.
+# WHY : Assumptions: `--reverse-order` is used so the terminal states arrive first and the command can
+#       be read without paging a long history.
+aws stepfunctions get-execution-history \
+  --execution-arn "<execution-arn>" --reverse-order --max-items 25 \
+  --query 'events[?stateEnteredEventDetails!=null].stateEnteredEventDetails.name' --output text
 ```
 
 ## Run the Dataset Export/Import Round Trip

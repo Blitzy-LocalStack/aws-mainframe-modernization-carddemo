@@ -32,13 +32,19 @@ import org.junit.jupiter.params.provider.ValueSource;
  * literal, so that no test fixture in this repository is a card-number-shaped constant a scanner has
  * to triage.</p>
  *
- * <p>⚠️ Assumptions: the class carries THREE subjects and not one -- the rendering, the key pairing rule
- * and the amount's own constraints -- and the amount cases are here rather than only at the HTTP boundary
+ * <p>⚠️ Assumptions: the class carries FOUR subjects and not one -- the rendering, the key pairing rule,
+ * the amount's own constraints and the printable domain the five free-text members share -- and the
+ * amount cases are here rather than only at the HTTP boundary
  * for a reason. What they assert is that a malformed amount produces a CONSTRAINT VIOLATION naming the
  * {@code amount} property at all, which is the property a boundary response's per-field entry is keyed
  * by; a boundary case reads the rendered entry and would pass just as well if the entry were synthesised
  * somewhere other than from a constraint. Both levels are asserted, and this is the level at which the
  * mechanism itself is visible.</p>
+ *
+ * <p>Assumptions: the printable-domain cases are here for the same reason and are asserted per COMPONENT
+ * rather than once for the shared expression. All five members apply one constant, so a case that read
+ * the constant would pass while a component that had lost its annotation went unenforced -- and an
+ * unenforced one is exactly the state the finding those cases answer described.</p>
  */
 class TransactionAddRequestTest {
 
@@ -349,6 +355,166 @@ class TransactionAddRequestTest {
         assertThat(withAmount(null).amountValue())
                 .as("nor is an absent one")
                 .isNull();
+    }
+
+    // WHY : Assumptions: these cases exist because none of the five free-text members reached any
+    //       character constraint at all, so a submission could store a carriage return that splits a
+    //       record in the plain-text statement and the 133-column report -- fixed-width artifacts with
+    //       no escaping mechanism -- or a code point the US-ASCII fixed-width codecs cannot encode,
+    //       which is then refused on a later batch run rather than at the request that stored it.
+    /**
+     * Every character the fixed-width sinks cannot carry is refused on every free-text member, by name.
+     *
+     * <p>Assumptions: the specimens are the two record separators, the horizontal tab, the null, the
+     * delete and two code points above the seven-bit range -- one from the Latin-1 supplement and one
+     * outside the basic multilingual plane, submitted as its surrogate pair. The first five round-trip
+     * through US-ASCII intact and so reach a record verbatim; the last two cannot be encoded by it at
+     * all. Both classes are asserted because they fail at different places and only one of them looks
+     * like an attack.</p>
+     *
+     * <p>Assumptions: the refusal is asserted as EXACTLY the field's own sentence, so a case fails if the
+     * width or presence constraint fires alongside it. One inadmissible character is one defect and must
+     * draw one entry, which is what a form renders beside one input.</p>
+     *
+     * @param component the record component under test, of type {@code String}, named so a failure names
+     *     the member rather than only the value
+     */
+    @ParameterizedTest(name = "{0} refuses every unrepresentable and structural character")
+    @ValueSource(strings = {"source", "description", "merchantName", "merchantCity", "merchantZip"})
+    @DisplayName("refuse every character the fixed-width sinks cannot carry, on every text member")
+    void everyTextMemberRefusesTheCharactersTheFixedWidthSinksCannotCarry(String component) {
+        List<String> refused =
+                List.of("\r", "\n", "\t", "\u0000", "\u007F", "\u00E9", "\uD83D\uDCB3");
+
+        refused.forEach(specimen -> assertThat(
+                violationsOn(component, withText(component, "A" + specimen + "B"))
+        )
+                .as("%s must refuse U+%04X", component, (int) specimen.charAt(0))
+                .containsExactly(printableSentenceFor(component)));
+    }
+
+    /**
+     * The domain admits the punctuation of a merchant name and both endpoints of the printable span.
+     *
+     * <p>Assumptions: the specimen carries the space and the tilde, which are the two endpoints, so a
+     * domain narrowed by one position at either end fails here. It also carries every punctuation mark a
+     * merchant name legitimately holds, because narrowing to an alphanumeric set is the more likely
+     * mistake than widening: every value in the five text spans of all 300 records of
+     * {@code app/data/ASCII/dailytran.txt} is inside this domain, and refusing one of them would refuse
+     * the reference's own data.</p>
+     *
+     * <p>Assumptions: the specimen is nine characters so that it fits the narrowest of the five members,
+     * the ten-character postal code, and one specimen can therefore be asserted on all five.</p>
+     *
+     * @param component the record component under test, of type {@code String}
+     */
+    @ParameterizedTest(name = "{0} admits the printable span's endpoints and ordinary punctuation")
+    @ValueSource(strings = {"source", "description", "merchantName", "merchantCity", "merchantZip"})
+    @DisplayName("admit the printable span's endpoints and the punctuation a merchant name holds")
+    void everyTextMemberAdmitsThePrintableSpanAndItsPunctuation(String component) {
+        assertThat(violationsOn(component, withText(component, " &'-./,A~")))
+                .as("%s must admit the space, the tilde and ordinary punctuation", component)
+                .isEmpty();
+    }
+
+    /**
+     * A blank or absent text member draws its presence sentence alone, never the domain sentence too.
+     *
+     * <p>Assumptions: this is the same separation the amount cases above assert, and it is what the
+     * empty alternative in the domain expression exists for: the pattern admits the empty string so that
+     * one omitted value produces one entry. A domain constraint that also fired on a blank value would
+     * show two messages under one empty input, which the reference never does.</p>
+     *
+     * @param component the record component under test, of type {@code String}
+     */
+    @ParameterizedTest(name = "{0} draws its presence sentence alone when blank")
+    @ValueSource(strings = {"source", "description", "merchantName", "merchantCity", "merchantZip"})
+    @DisplayName("a blank or absent text member draws its presence sentence alone")
+    void aBlankTextMemberDrawsItsPresenceSentenceAlone(String component) {
+        assertThat(violationsOn(component, withText(component, "")))
+                .as("%s: an empty value is the blank case, not a domain violation", component)
+                .containsExactly(presenceSentenceFor(component));
+        assertThat(violationsOn(component, withText(component, null)))
+                .as("%s: an absent member is the same blank case", component)
+                .containsExactly(presenceSentenceFor(component));
+    }
+
+    /**
+     * Returns the sentences raised against one named property, ignoring every other component.
+     *
+     * @param component the record component whose violations are wanted; must not be {@code null}
+     * @param request the submission to validate; must not be {@code null}
+     * @return the sentences raised against that property, never {@code null}
+     */
+    private static List<String> violationsOn(String component, TransactionAddRequest request) {
+        return validator.validate(request).stream()
+                .filter(violation -> component.equals(violation.getPropertyPath().toString()))
+                .map(ConstraintViolation::getMessage)
+                .toList();
+    }
+
+    /**
+     * Returns the domain sentence declared for one free-text component.
+     *
+     * @param component one of the five free-text component names; must not be {@code null}
+     * @return the sentence that component's domain constraint carries, never {@code null}
+     * @throws IllegalArgumentException if the name is not one of the five, which would mean a case is
+     *     asserting against a member this helper cannot answer for
+     */
+    private static String printableSentenceFor(String component) {
+        return switch (component) {
+            case "source" -> TransactionAddRequest.SOURCE_NOT_PRINTABLE;
+            case "description" -> TransactionAddRequest.DESCRIPTION_NOT_PRINTABLE;
+            case "merchantName" -> TransactionAddRequest.MERCHANT_NAME_NOT_PRINTABLE;
+            case "merchantCity" -> TransactionAddRequest.MERCHANT_CITY_NOT_PRINTABLE;
+            case "merchantZip" -> TransactionAddRequest.MERCHANT_ZIP_NOT_PRINTABLE;
+            default -> throw new IllegalArgumentException("no domain sentence for " + component);
+        };
+    }
+
+    /**
+     * Returns the presence sentence declared for one free-text component.
+     *
+     * @param component one of the five free-text component names; must not be {@code null}
+     * @return the sentence that component's presence constraint carries, never {@code null}
+     * @throws IllegalArgumentException if the name is not one of the five
+     */
+    private static String presenceSentenceFor(String component) {
+        return switch (component) {
+            case "source" -> TransactionAddRequest.SOURCE_REQUIRED;
+            case "description" -> TransactionAddRequest.DESCRIPTION_REQUIRED;
+            case "merchantName" -> TransactionAddRequest.MERCHANT_NAME_REQUIRED;
+            case "merchantCity" -> TransactionAddRequest.MERCHANT_CITY_REQUIRED;
+            case "merchantZip" -> TransactionAddRequest.MERCHANT_ZIP_REQUIRED;
+            default -> throw new IllegalArgumentException("no presence sentence for " + component);
+        };
+    }
+
+    /**
+     * Builds a submission whose only variable is one named free-text member.
+     *
+     * @param component one of the five free-text component names; must not be {@code null}
+     * @param value the characters to place in that member, or {@code null} to omit it
+     * @return a submission valid in every other respect, never {@code null}
+     * @throws IllegalArgumentException if the name is not one of the five
+     */
+    private static TransactionAddRequest withText(String component, String value) {
+        String source = "POS";
+        String description = "GROCERY PURCHASE";
+        String merchantName = "CORNER STORE";
+        String merchantCity = "SEATTLE";
+        String merchantZip = "98101";
+        switch (component) {
+            case "source" -> source = value;
+            case "description" -> description = value;
+            case "merchantName" -> merchantName = value;
+            case "merchantCity" -> merchantCity = value;
+            case "merchantZip" -> merchantZip = value;
+            default -> throw new IllegalArgumentException("not a free-text member: " + component);
+        }
+        return new TransactionAddRequest(ACCOUNT_ID, "01", "0001", source, description,
+                "125.50", "000000000", merchantName, merchantCity, merchantZip, null,
+                "2026-01-15", "2026-01-16", "Y", null);
     }
 
     /**

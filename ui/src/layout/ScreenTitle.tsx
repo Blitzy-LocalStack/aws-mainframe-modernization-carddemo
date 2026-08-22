@@ -140,8 +140,9 @@ export function screenHeadingSizeStyle(cssVar: GlobalToken): CSSProperties {
 /**
  * Renders one route's caption at the single rank every route shares.
  *
- * Purpose: the component thirteen screens call instead of choosing a `level`, so the outline is a
- * property of this module rather than of each screen.
+ * Purpose: the component every screen painting a caption calls instead of choosing a `level`, so the
+ * outline is a property of this module rather than of each screen. Twenty of the twenty-one screens
+ * paint one; `signon` is the exception, because `app/bms/COSGN00.bms` declares no row-4 caption field.
  *
  * Assumptions: the size members are applied AFTER the caller's style, so a caller cannot displace them
  * by passing a size of its own. The colour and weight a mapset calls for are still the caller's,

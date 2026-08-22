@@ -4,23 +4,115 @@
  * <h2>Purpose and charter</h2>
  *
  * <p>This directory holds the tests of this module that need a real database engine before they can
- * say anything at all, and there are three of them because there are exactly three such properties.
- * It is the test-tree counterpart of the production package of the same name, and the two are
- * deliberately not symmetrical: the production package declares six repository roles, while a role
- * only earns a class here if the property that governs it is invisible to every cheaper gate.
+ * say anything at all. It is the test-tree counterpart of the production package of the same name,
+ * and the two are deliberately not symmetrical: the production package declares six repository roles,
+ * while a role only earns a class here if the property that governs it is invisible to every cheaper
+ * gate.
  *
- * <p>The first property is whether the declared queries PARSE. The roles beside them declare
- * queries -- derived from method names, and written out for the report join -- and a query naming a
+ * <p>⚠️ Refactoring Rationale: this section previously opened by asserting there were "three of them
+ * because there are exactly three such properties", and named three classes. A review re-measured the
+ * directory and found EIGHT. The three named were the first three authored, and the sentence was left
+ * standing as five more landed -- each of which states its own non-overlap in its own class Javadoc, so
+ * the coverage was sound and only this charter was wrong. That is the more dangerous failure of the
+ * two: a reader deciding where a new engine-backed property belongs consults this file, and a census
+ * short by five tells them a boundary is unclaimed when it is owned. The census below is therefore
+ * MEASURED and carries the marker the shared kernel's inventory check re-measures, so the same drift
+ * fails a build instead of surviving a reading. That marker is stated ONCE, below, and it counts the
+ * whole directory the way every sibling charter does -- ten Java files: the
+ * nine container-backed classes, the charter census beside them, and this charter itself.
+ *
+ * <p>Assumptions: the count above is a CENSUS and not a budget. What is durable is the set of
+ * engine-backed properties and which class owns each, because that is what a new class has to be
+ * placed against; the total moves whenever a genuinely new property is claimed, and the marker moves
+ * with it. Each entry states the properties its class owns and the number of cases it DECLARES, being
+ * methods annotated as a test or a parameterised test rather than the larger number a run reports once
+ * a parameterised method expands -- the same metric the inventory check measures:
+ *
+ * <ul>
+ *   <li>{@code ReportingQueryBootstrapIT}, across 1 cases -- establishes no relation at all and proves
+ *       every declared query PARSES against the metamodel.</li>
+ *   <li>{@code StatementHeadingChunkIT}, across 2 cases -- seeds stand-in tables and proves the
+ *       heading walk's keyset predicate reproduces the whole of its own two-component ordering.</li>
+ *   <li>{@code ReportingDeployedRelationIT}, across 9 cases -- applies the SHIPPED definitions and
+ *       proves the projections narrow a card number, that a card joins to its customer and its
+ *       account, and that the login role can read those projections and write nothing.</li>
+ *   <li>{@code StatementCardXrefRepositoryIT}, across 13 cases -- owns the DRIVING cursor of a
+ *       statement run, the fifty-byte cross-reference geometry, and the two-level write refusal
+ *       against a base table in another context's schema.</li>
+ *   <li>{@code StatementCustomerRepositoryIT}, across 10 cases -- owns the whole-key customer read and
+ *       the property that an unresolved identifier stops the run rather than ending it.</li>
+ *   <li>{@code StatementAccountRepositoryIT}, across 12 cases -- owns the keyed account read, its
+ *       eleven-digit key, and the exactness of the money it carries at twelve digits and scale two.</li>
+ *   <li>{@code StatementTransactionRepositoryIT}, across 17 cases -- owns the per-card transaction
+ *       cursor: the statement record geometry rather than the posting one, the job's two-key order,
+ *       and the absence of any arity ceiling where the reference declares fixed tables.</li>
+ *   <li>{@code TransactionReportRepositoryIT}, across 38 cases -- owns the report surface's two
+ *       readings of one date range, the whole-range cursor and the keyset window, which are never
+ *       interchangeable.</li>
+ *   <li>{@code CategoryBalanceReportRepositoryIT}, across 3 cases -- owns the category-balance
+ *       walk, which returns rows in account, then type, then category order. That role declares its
+ *       whole query by METHOD NAME, so the three ordering components and their sequence exist only
+ *       inside an identifier; these cases prove each component RESOLVES against the deployed view and
+ *       that the three are applied in the declared sequence.</li>
+ * </ul>
+ *
+ * <p>Assumptions: the three properties described next are the first three of the eight above rather
+ * than the whole of the directory, and they are set out at length because each is the reason a class
+ * exists at all rather than a restatement of what it asserts. The remaining five state their own
+ * reasoning in their own class Javadoc, each naming the siblings it does not overlap, and are
+ * deliberately not paraphrased here: a paraphrase is the thing that drifted.
+ *
+ * <pre>
+ * this directory: 11 java files = 10 tests + 1 charter
+ * </pre>
+ *
+ * <p>Refactoring Rationale: that census read "three of them because there are exactly three such
+ * properties" while eight classes sat in the directory, and the five it omitted are the five that
+ * cover a repository role each. Nothing detected it, because the figure lived in a different file
+ * from the thing it counted, so every change that falsified it left it untouched. The census is now
+ * measured rather than asserted: the marker line above is re-counted by
+ * {@code com.carddemo.common.architecture.PackageCharterInventoryTest}, which also requires every
+ * class enumerated below to be a file in this directory, and {@code RepositoryCharterCensusTest}
+ * re-counts both censuses inside this module so the drift fails this module's own build too.
+ * Alternatives Considered: keeping the census as prose and reviewing it by eye, which is what was
+ * done before. Rejected on evidence -- this charter carried a stale class count and a stale fixture
+ * count at the same time, and both had survived review.
+ *
+ * <p>The eight are:
+ *
+ * <ul>
+ *   <li>{@code ReportingQueryBootstrapIT} -- whether the declared queries parse. Cross-cutting:
+ *       it establishes no relation at all;</li>
+ *   <li>{@code StatementHeadingChunkIT} -- whether a keyset predicate reproduces the whole of its
+ *       own ordering. Cross-cutting: it seeds stand-ins rather than the shipped relations;</li>
+ *   <li>{@code ReportingDeployedRelationIT} -- whether the shipped relations mask, join and refuse
+ *       writes as shipped. Cross-cutting: it applies the authoritative definitions unchanged;</li>
+ *   <li>{@code StatementTransactionRepositoryIT} -- the statement cursor: one card's whole run in
+ *       the baseline's own order, at exact fixed-point scale, with no arity ceiling;</li>
+ *   <li>{@code StatementCardXrefRepositoryIT} -- the driving traversal of a whole statement run,
+ *       whose exhaustion is what ends the run;</li>
+ *   <li>{@code StatementCustomerRepositoryIT} -- the customer lookup as an exact whole-key read
+ *       whose empty answer aborts rather than skips;</li>
+ *   <li>{@code StatementAccountRepositoryIT} -- the account lookup as an exact whole-key read at
+ *       its declared precision, unwritably;</li>
+ *   <li>{@code TransactionReportRepositoryIT} -- the report surface's two reads of one date range,
+ *       a full-range stream and a keyset window, which are never interchangeable.</li>
+ * </ul>
+ *
+ * <p>The first cross-cutting property is whether the declared queries PARSE. The roles beside them
+ * declare queries -- derived from method names, and written out for the report join -- and a query
+ * naming a
  * property the metamodel does not carry, or joining two entities along a path that does not exist,
  * is a defect no compiler reports and no unit test reaches. It surfaces when the repository proxy is
  * created, which needs an entity manager factory, which needs a data source.
  * {@code ReportingQueryBootstrapIT} provokes that moment and deliberately establishes no relation,
  * because parsing resolves against the metamodel rather than against rows.
  *
- * <p>The second property is whether a keyset predicate reproduces the whole of its own ordering.
- * {@code StatementHeadingChunkIT} proves that for the statement heading walk, and unlike the first
- * it needs ROWS. {@code StatementCardXrefRepository.findHeadingChunk} pages a relation ordered by
- * the masked card rendering and then by the per-card fingerprint; a predicate comparing one
+ * <p>The second cross-cutting property is whether a keyset predicate reproduces the whole of its
+ * own ordering. {@code StatementHeadingChunkIT} proves that for the statement heading walk, and
+ * unlike the first it needs ROWS. {@code StatementCardXrefRepository.findHeadingChunk} pages a
+ * relation ordered by the masked card rendering and then by the per-card fingerprint; a predicate
+ * comparing one
  * component of a two-component ordering parses perfectly, so the first class passes on it, and a
  * stubbed repository answers whatever a unit test arranges, so the service's own tests pass on it
  * too. The property is a relationship between a predicate and an ordering over real rows, so
@@ -29,19 +121,23 @@
  * and others repeated, and neither outcome raised anything -- which is why this charter states the
  * directory's purpose as more than one property.
  *
- * <p>The third property is whether the SHIPPED relations behave as the shipped relations.
- * {@code ReportingDeployedRelationIT} proves that, and it is the only class here that needs rows AND
- * needs the real definitions. Three things this context depends on live entirely inside view
- * definitions and grants rather than inside any Java: a card number is narrowed to its last four
- * digits before it is published, a card resolves across three separate projections to its customer
- * and its account, and the login role those projections are read under can read them and cannot write
- * anything at all. Refactoring Rationale: this charter previously stated the directory's purpose as
- * two properties, and it was written when the card and cross-reference fixtures had a codec-only
+ * <p>The third cross-cutting property is whether the SHIPPED relations behave as the shipped
+ * relations. {@code ReportingDeployedRelationIT} proves that. It is not the only class here that
+ * needs rows AND the real definitions -- the five per-role classes apply the same eleven
+ * authoritative files in the same order -- and what is its own is the SUBJECT: those five each read
+ * one role through the shipped relations, while this one asserts the relations themselves. Three
+ * things this context depends on live entirely inside view definitions and grants rather than inside
+ * any Java: a card number is narrowed to its last four digits before it is published, a card resolves
+ * across three separate projections to its customer and its account, and the login role those
+ * projections are read under can read them and cannot write anything at all. Refactoring Rationale:
+ * this charter previously stated the directory's purpose as two properties, and it was written when
+ * the card and cross-reference fixtures had a codec-only
  * consumer. A codec settles record geometry; it cannot observe a masking expression, a join predicate
- * or a privilege, so all three shipped controls were unasserted anywhere in the repository. Trade-offs:
- * this class is the slowest in the module because it applies eleven script executions before its first
- * assertion. That is accepted, and the alternative was not a faster class but a weaker one -- see
- * "How relations arrive here" below, where the boundary this class sits inside is drawn.
+ * or a privilege, so all three shipped controls were unasserted anywhere in the repository.
+ * Trade-offs: this class and the five per-role classes are the slowest in the module, because each
+ * applies eleven script executions before its first assertion. That is accepted, and the alternative
+ * was not a faster class but a weaker one -- see "How relations arrive here" below, where the
+ * boundary they sit inside is drawn.
  *
  * <p>Six invariants govern every class in this directory, and each is inherited rather than restated
  * from scratch, so that a reader who disagrees with one knows which document to argue with:
@@ -89,33 +185,48 @@
  * executions block and, most consequentially, NO include configuration. The Spring Boot parent's
  * plugin management already binds the {@code integration-test} and {@code verify} goals, so
  * declaring the coordinate alone is what turns those bindings on. Because no include is configured,
- * the plugin's own default selection applies, and that default matches a leading {@code IT} as well
- * as a trailing {@code IT} or {@code ITCase}. Both classes here end in {@code IT} and are therefore
- * selected. {@code services/pom.xml} records that this is deliberate at its L1213-L1215: the naming
+ * the plugin's own default selection applies, and that default -- read from the resolved descriptor
+ * of {@code maven-failsafe-plugin} 3.5.6 -- is the three patterns {@code IT*}, {@code *IT} and
+ * {@code *ITCase}, so it matches a leading {@code IT} as well as a trailing {@code IT} or
+ * {@code ITCase}. EVERY class in this directory ends in {@code IT} and is therefore selected, which
+ * is the invariant to preserve rather than a headcount to maintain.
+ * {@code services/pom.xml} records that this is deliberate at its L1213-L1215: the naming
  * this project uses already matches the default pattern, so an include configuration is neither
  * needed nor wanted.
  *
  * <p>Assumptions: the hazard is consequently the opposite of the one a reader might expect, and it
  * is worth stating precisely because getting it backwards would invite a pointless rename. Nothing
- * is lost by ending a name in {@code IT}. What IS lost is a name matching neither selection: a class
- * ending in {@code Test} is claimed instead by the plugin that runs this module's unit tests, during
- * the {@code test} phase, which for a container-backed class means it runs before packaging and its
- * result is not asserted by {@code verify}; and a name matching neither pattern -- anything that
- * merely reads as though it should, such as a trailing {@code Tests} -- is run by neither plugin.
- * That last case is the dangerous one, because it compiles, the build goes green, and it proves
- * nothing.
+ * is lost by ending a name in {@code IT}. What IS lost is a name the integration-test plugin does not
+ * match: a class ending in {@code Test}, {@code Tests} or {@code TestCase} is claimed instead by the
+ * plugin that runs this module's unit tests -- those three are among Surefire's own four default
+ * patterns, the fourth being a leading {@code Test} -- so for a container-backed class it runs during
+ * the {@code test} phase, before packaging, and its result is not asserted by {@code verify}. A name
+ * matching NEITHER plugin's patterns -- a trailing {@code Spec} or {@code Should}, say -- is run by
+ * neither, and that is the dangerous case, because it compiles, the build goes green, and it proves
+ * nothing. Refactoring Rationale: this paragraph previously offered "a trailing {@code Tests}" as its
+ * example of the name run by neither plugin. That example was wrong: Surefire's defaults include
+ * {@code *Tests}, so such a class runs in the wrong phase rather than not at all, and a reader who
+ * trusted the example would have looked for silence and found a container starting before packaging
+ * instead. The two failure modes are different defects with different symptoms, so each now carries
+ * an example that genuinely produces it.
  *
  * <p>Execution is therefore proven by artifact rather than by assumption:
- * {@code services/reporting-service/target/failsafe-reports} must list a report for every class in
- * this directory. Assumptions: that path and its unit-test counterpart are the plugins' DEFAULTS and
- * are deliberately not relocated, as {@code services/pom.xml} records at its L1216-L1220, because
- * the continuous-integration workflow collects from exactly those two locations -- so moving either
- * would make the build green while the workflow published nothing.
+ * {@code services/reporting-service/target/failsafe-reports} must list a report for every one of the
+ * eight, and {@code surefire-reports} one for the census class. Assumptions: those paths are the
+ * plugins' DEFAULTS and are deliberately not relocated, as {@code services/pom.xml} records at its
+ * L1216-L1220, because the continuous-integration workflow collects from exactly those two
+ * locations -- so moving either would make the build green while the workflow published nothing.
  *
  * <h2>The container mechanism, and the document that is its authority</h2>
  *
- * <p>Each class here declares a {@code static} {@code PostgreSQLContainer} annotated
- * {@code @Container} and {@code @ServiceConnection}, and activates the {@code test} profile. The
+ * <p>Seven of the eight declare a {@code static} {@code PostgreSQLContainer} annotated
+ * {@code @Container} and {@code @ServiceConnection}, and every one of the eight activates the
+ * {@code test} profile. Assumptions: the eighth, {@code ReportingDeployedRelationIT}, starts its
+ * container from a static initialiser and carries neither annotation, and the exception is recorded
+ * in that class rather than argued here: its pool authenticates as a role the bootstrap creates and
+ * runs a connection-initialisation statement naming a schema, so both must exist before the first
+ * pooled connection opens, and class initialisation is ordered before any context is built for it by
+ * the language rather than by an extension. The
  * authority on that mechanism is {@code services/reporting-service/src/test/resources/application-test.yml},
  * and it is an authority by what it OMITS: it declares no datasource location, no login name and no
  * credential of any kind, precisely so those coordinates arrive as a bean from the annotated container.
@@ -144,7 +255,7 @@
  *       changed;</li>
  *   <li>{@code spring.jpa.hibernate.ddl-auto} at its L328 is {@code none}, so the persistence
  *       provider emits no schema-generation statement. Assumptions: this is what makes the read-only
- *       posture provable at all -- generated statements would fabricate exactly the seven mapped
+ *       posture provable at all -- generated statements would fabricate exactly the eight mapped
  *       relations this role must be unable to make, so the assertion would then pass against
  *       relations the test itself had created;</li>
  *   <li>{@code spring.sql.init.mode} at its L425 is {@code never}, so a script arriving in this
@@ -227,6 +338,9 @@
  * L944.
  *
  * <p>That leaves two exceptions, and each is drawn narrowly on purpose rather than waved through.
+ * Assumptions: they are two MECHANISMS and not two classes, and the nine classes divide unevenly
+ * between them -- one class needs no relation at all and creates none, one uses the first mechanism,
+ * and the remaining seven use the second.
  *
  * <p>The first is a STAND-IN. {@code StatementHeadingChunkIT} needs ROWS in an ordered relation, so it
  * applies {@code db/testharness/test-harness-reporting-relations.sql} to its own container as a
@@ -244,20 +358,28 @@
  * masking view.
  *
  * <p>The second is the AUTHORITY ITSELF, and it is what the first exception's rejection deliberately
- * did not cover. {@code ReportingDeployedRelationIT} reads the shipped files out of the working tree
- * and sends them to its own container UNCHANGED -- the bootstrap at
+ * did not cover. SEVEN classes read the shipped files out of the working tree and send them to their
+ * own container UNCHANGED -- {@code ReportingDeployedRelationIT},
+ * {@code CategoryBalanceReportRepositoryIT}, {@code StatementAccountRepositoryIT},
+ * {@code StatementCardXrefRepositoryIT}, {@code StatementCustomerRepositoryIT},
+ * {@code StatementTransactionRepositoryIT} and {@code TransactionReportRepositoryIT} -- and each
+ * applies the SAME eleven entries in the same order: the bootstrap at
  * {@code data-migration/sql/V0__schemas_and_roles.sql}, the four owning services' migrations that
- * create the base tables, and {@code data-migration/sql/V1__reporting_views.sql} -- so it does create
- * views and does issue grants, and it defines neither. Assumptions: the prohibition below exists to
- * stop a SECOND, DRIFTING DEFINITION living on this classpath, and applying the only definition there
+ * create the base tables, and {@code data-migration/sql/V1__reporting_views.sql}. So those classes do
+ * create views and do issue grants, and none of them defines either. Assumptions: each carries its own
+ * copy of that list rather than sharing one, because each starts its own container and a shared holder
+ * would put one class's arrangement inside another's lifecycle; the seven lists are identical entry for
+ * entry, which is a property a reader can check by eye and the reason the list is quoted once here.
+ * Assumptions: the prohibition below exists to stop a SECOND, DRIFTING DEFINITION living on this
+ * classpath, and applying the only definition there
  * is cannot produce one: there is nothing here to drift from the authority, because the authority is
  * what ran. Assumptions: the bootstrap is applied TWICE, before and after the service migrations,
  * because the cross-schema read grants it issues to the projection owner are conditional on base
  * tables existing and on a first pass none of them does; the projections are definer-rights, so
  * without the second pass the first read fails with a privilege diagnostic even for a superuser.
- * Trade-offs: this class is coupled to file PATHS outside its own module, so moving a migration breaks
- * it. That is accepted and is arguably the point -- a shipped DDL file that no longer applies cleanly
- * from a clean database is a defect whether or not a test notices.
+ * Trade-offs: those classes are coupled to file PATHS outside their own module, so moving a migration
+ * breaks all seven at once. That is accepted and is arguably the point -- a shipped DDL file that no
+ * longer applies cleanly from a clean database is a defect whether or not a test notices.
  *
  * <p>The boundary is therefore crisp, and it is a boundary on DEFINITIONS rather than on verbs or on
  * files. Inserting rows is permitted, because fixtures have to be loaded before anything can be read.
@@ -312,8 +434,9 @@
  * that structure is already a keyset cursor. Register row R1 records the decision, and R2 records
  * which key a backward walk returns.
  *
- * <p>The six roles the production package declares therefore take four distinct shapes, and the two
- * classes here reach them accordingly. {@code StatementTransactionRepository} and
+ * <p>The six roles the production package declares therefore take four distinct shapes, and the
+ * eight classes here reach them accordingly -- five of them one role each, and the three
+ * cross-cutting ones through whichever roles their property spans. {@code StatementTransactionRepository} and
  * {@code StatementCardXrefRepository} are streaming cursors with no lookup by identifier;
  * {@code StatementCustomerRepository} and {@code StatementAccountRepository} are keyed lookups
  * returning an optional projection and nothing else; {@code TransactionReportRepository} carries TWO
@@ -338,9 +461,13 @@
  * paragraph the mainline loop calls at L416 reads no file at all, walking instead the in-memory
  * tables that pre-load filled.
  *
- * <p>The projections those roles return live in the sibling {@code domain} package and number seven:
- * {@code StatementTransactionView}, {@code CardXrefView}, {@code CustomerView}, {@code AccountView},
- * {@code ReportTransactionView}, {@code TransactionTypeView} and {@code TransactionCategoryView}.
+ * <p>The projections those roles return live in the sibling {@code domain} package and number
+ * EIGHT: {@code StatementTransactionView}, {@code CardXrefView}, {@code CustomerView},
+ * {@code AccountView}, {@code ReportTransactionView}, {@code TransactionTypeView},
+ * {@code TransactionCategoryView} and {@code TransactionCategoryBalanceView}. Refactoring Rationale:
+ * that figure read seven and omitted the last of them, which is the projection
+ * {@code CategoryBalanceReportRepository} traverses -- the same omission as the class census above
+ * and from the same cause, a count stated in one file and measured in another.
  * Assumptions: each maps to a view rather than to a table another context owns, which is why nothing
  * here references another service's domain package -- agreement with another bounded context is
  * through the physical relation, never through a compile-time dependency.
@@ -352,13 +479,17 @@
  * the compiler notices. From the file section of {@code app/cbl/CBSTM03B.CBL}: the transaction record
  * at L58 is 16 plus 16 plus 318, which is 350; the cross-reference record at L65 is 16 plus 34, which
  * is 50; the customer record at L70 is 9 plus 491, which is 500; and the account record at L75 is 11
- * plus 289, which is 300. THREE of the four are corroborated independently by measurement of the
- * fixtures in this module, whose account rows are 300 bytes, whose customer rows are 500 and whose
- * cross-reference rows are 50. Refactoring Rationale: that read "two of the four" and named only the
- * account and customer rows, which was true of a five-fixture directory; {@code cardxref.txt} now
- * corroborates the 50-byte cross-reference length by the same measurement. The 350-byte transaction
- * record remains the one length no fixture in this module measures, which is why it is still summed
- * from the file section rather than cited as measured.
+ * plus 289, which is 300. ALL FOUR are now corroborated independently by measurement of the fixtures
+ * in this module: {@code acctfile.txt} carries 300-byte rows, {@code custfile.txt} 500-byte rows,
+ * {@code cardxref.txt} and {@code xreffile.txt} 50-byte rows, and {@code tranfile.txt} and
+ * {@code trnxfile.txt} 350-byte rows. Refactoring Rationale: this paragraph read "THREE of the four",
+ * with the 350-byte transaction record called out as "the one length no fixture in this module
+ * measures" -- true of a seven-fixture directory and false since the report and statement transaction
+ * fixtures arrived. The correction matters in one direction only: the sentence invited the next author
+ * to keep the transaction length as a sum nothing checks, when two committed fixtures now measure it,
+ * and a length measured on both sides is the only kind that cannot drift silently. Both derivations
+ * are kept, because they are independent: the sum reads the baseline's own declaration, the
+ * measurement reads bytes, and agreement between them is the evidence.
  *
  * <p>Assumptions: one artifact of the baseline is recorded here because a reader summing those widths
  * will meet it and should not conclude the arithmetic above is wrong. The same field name
@@ -373,39 +504,37 @@
  * <h2>The fixtures, bound by exact name</h2>
  *
  * <p>Fixtures live in {@code services/reporting-service/src/test/resources/fixtures}, and this
- * module currently binds SEVEN by exact name, each with the copybook descriptor it decodes against
- * and the record length and row count the contract test asserts: {@code acctfile.txt} as
+ * module binds TEN fixtures by exact name, each with the copybook descriptor it decodes against and
+ * the record length and row count the contract test asserts: {@code acctfile.txt} as
  * {@code ACCOUNT} at 300 bytes over 4 rows, {@code carddata.txt} as {@code CARD} at 150 bytes over
  * 5 rows, {@code cardxref.txt} as {@code XREF} at 50 bytes over 4 rows, {@code custfile.txt} as
  * {@code CUSTOMER} at 500 bytes over 4 rows, {@code tcatbal.txt} as {@code TCATBAL} at 50 bytes
- * over 8 rows, {@code trancatg.txt} as {@code TRANCAT} at 60 bytes over 9 rows, and
- * {@code trantype.txt} as {@code TRANTYPE} at 60 bytes over 7 rows.
+ * over 8 rows, {@code trancatg.txt} as {@code TRANCAT} at 60 bytes over 9 rows,
+ * {@code tranfile.txt} as {@code TRAN} at 350 bytes over 31 rows, {@code trantype.txt} as
+ * {@code TRANTYPE} at 60 bytes over 7 rows, {@code trnxfile.txt} as {@code TRNX} at 350 bytes over
+ * 700 rows, and {@code xreffile.txt} as {@code XREF} at 50 bytes over 88 rows -- the same descriptor
+ * {@code cardxref.txt} decodes against, that file being the same record under a different
+ * data-definition name rather than a new record type.
  *
- * <p>Refactoring Rationale: this roster read FIVE and omitted {@code carddata.txt} and
- * {@code cardxref.txt}, which the contract test has bound by exact name since the card-number
- * ordering of the statement heading acquired a fixture. The count is not decoration: the same test
- * asserts a CLOSED resource set, so the five-file reading described a directory in which two of the
- * bound files would have been unaccounted-for arrivals. Stating all seven, with the descriptor each
- * decodes against, is what lets a reader reconcile this charter against
- * {@code ReportingFixtureContractTest.EXPECTED_RESOURCES} by eye instead of by running it.
+ * <p>Assumptions: the directory holds an ELEVENTH admitted resource that is not a fixture, its own
+ * {@code README.md}. It is named here because {@code ReportingFixtureContractTest} asserts a CLOSED
+ * resource set of eleven entries, so a reader reconciling that list against this roster meets it and
+ * would otherwise read the difference as a discrepancy. A file arriving in that directory with no
+ * entry in either place fails a case rather than passing unlisted.
  *
- * <p>Assumptions: the figure was FIVE and omitted {@code carddata.txt} and {@code cardxref.txt},
- * which {@code ReportingFixtureContractTest} binds and holds to their descriptors like the other
- * five. The count is not the load-bearing part of that error -- the paragraph below is, because it
- * drew a data-classification conclusion from the same stale inventory.
- *
- * <p>Refactoring Rationale: this inventory said FIVE and omitted the card master and the
- * cross-reference, which are the two files the security attestation below turns on. The list is now
- * closed against {@code ReportingFixtureContractTest}'s own accepted-resource list, which admits
- * exactly these seven names plus that directory's README, so a file added without an entry here fails
- * that case rather than passing unlisted.
- *
- * <p>Refactoring Rationale: this inventory said five and omitted {@code carddata.txt} and
- * {@code cardxref.txt}. Both are bound by exact name in {@code ReportingFixtureContractTest}'s own
- * parameter sources, so the omission was not a difference of opinion about what counts as bound -- and it
- * is the omission that made the attestation below wrong, because the two files it left out are precisely
- * the two that carry card data. A census that is short is not merely incomplete; it is what allows a
- * statement about the whole directory to be written from a subset of it.
+ * <p>Refactoring Rationale: this roster has now been short TWICE, in the same way and from the same
+ * cause. It read FIVE while the contract test bound seven, omitting {@code carddata.txt} and
+ * {@code cardxref.txt} -- which are the two files the security attestation below turns on, so a
+ * census short by two is what allowed a statement about the whole directory to be written from a
+ * subset of it and to be wrong. It then read SEVEN while the contract test bound ten, omitting
+ * {@code tranfile.txt}, {@code trnxfile.txt} and {@code xreffile.txt} -- the two 350-byte
+ * transaction corpora and the second cross-reference, which are precisely the fixtures the report
+ * and statement reads need. Alternatives Considered: correcting the figure a third time and relying
+ * on review to keep it. Rejected on the evidence of the two corrections: the figure lives in a
+ * different file from the directory it counts, so the change that falsifies it never touches it.
+ * {@code RepositoryCharterCensusTest} now re-counts this roster against the fixtures directory and
+ * against {@code ReportingFixtureContractTest}'s own accepted-resource list, so a fixture added
+ * without an entry here fails this module's build.
  *
  * <p>Assumptions: they are decoded through {@code com.carddemo.common.codec.FixedWidthCodec} against
  * a descriptor registered in {@code com.carddemo.common.codec.CopybookLayout} rather than
@@ -416,46 +545,102 @@
  * not part of any record; the declared length excludes it, so reading a fixture as one continuous
  * byte stream would mis-align every record after the first.
  *
- * <p>Assumptions: this directory DOES carry primary account numbers and card verification values,
- * both synthetic, and a reader deciding how to handle a fixture needs the positions rather than a
- * reassurance. {@code carddata.txt} holds {@code CARD-NUM} at offset 0 for 16 bytes and
- * {@code CARD-CVV-CD} at offset 27 for 3, per {@code app/cpy/CVACT02Y.cpy} lines 5 and 7;
- * {@code cardxref.txt} holds {@code XREF-CARD-NUM} at offset 0 for 16, per
- * {@code app/cpy/CVACT03Y.cpy} line 5. The structural evidence that they are synthetic is that the
- * five verification values are {@code 901} through {@code 905}, one per row in key order -- a
- * counter ascending with row position cannot be a value derived from an account number, an expiry
- * and a key, which is what a real verification value is. Section 1.1 of that directory's own README
- * carries the same table, the two card numbers that are shared verbatim with the repository's
- * public sample extract, and the handling guidance that follows.
+ * <p>Assumptions: this directory DOES carry primary account numbers and a card-verification-value
+ * COLUMN, and a reader deciding how to handle a fixture needs the positions and the actual bytes
+ * rather than a reassurance. A card-number column appears in FIVE of the ten fixtures, at two
+ * different offsets, and the offset is the part that is easy to get wrong: {@code carddata.txt} holds
+ * {@code CARD-NUM} at offset 0 for 16 bytes, per {@code app/cpy/CVACT02Y.cpy} line 5;
+ * {@code cardxref.txt} and {@code xreffile.txt} each hold {@code XREF-CARD-NUM} at offset 0 for 16,
+ * per {@code app/cpy/CVACT03Y.cpy} line 5; {@code trnxfile.txt} holds {@code TRNX-CARD-NUM} at offset
+ * 0 for 16, which is why the statement path can read one card's run as a key-ordered scan; and
+ * {@code tranfile.txt} holds {@code TRAN-CARD-NUM} at offset 262 for 16, summed from the field widths
+ * declared in {@code app/cpy/CVTRA05Y.cpy} and corroborated independently by
+ * {@code app/jcl/TRANREPT.jcl} L41, which sorts that record on {@code TRAN-CARD-NUM,263,16,ZD} in
+ * one-based positions. Measured across those five columns the directory holds 90 distinct card
+ * numbers. The verification value, by contrast, appears in ONE file only: {@code carddata.txt} holds
+ * {@code CARD-CVV-CD} at offset 27 for 3 bytes, per {@code CVACT02Y.cpy} line 7.
  *
  * <p>Refactoring Rationale: this paragraph asserted the opposite -- that "no fixture in this module
  * carries a primary account number, a card verification value or an enciphered column", on the
  * ground that "the card master and the cross-reference are not fixtures here". Both halves were
- * false once the roster above grew to seven, and the second was contradicted by the roster in the
+ * false once the roster above grew past five, and the second was contradicted by the roster in the
  * same charter. A false negative of this shape is the costliest documentation error available here,
  * because it is the sentence a reader consults BEFORE deciding a fixture needs no handling care,
  * and it told them there was nothing to care about. Only one clause of it survives and is kept
  * below: no enciphered column appears, which remains true because the target stores the
  * verification value as an encrypted {@code BYTEA} and these are fixed-width baseline records.
  *
- * <p>Assumptions: NO enciphered column appears in any fixture here, and nothing in this module
- * reads offset 27 of {@code carddata.txt}. The verification value is present only because
- * {@code CVACT02Y.cpy} declares it inside the 150-byte record and the contract test proves
- * byte-identical round-tripping, which a record with a hole in it cannot do. No reporting mapper
- * may read it: the target returns the verification value from no endpoint at all. A fixture card
- * number or verification value must therefore never reach a log, an assertion message or a report
- * fixture; {@code com.carddemo.common.security.CardNumberMasker} is what a diagnostic uses instead.
- * The card number this context surfaces reaches it through the cross-reference and is rendered
- * masked, which is also the leading component of the ordering {@code StatementHeadingChunkIT} walks.
+ * <p>Assumptions: that column carries the literal {@code 000} on every one of the five rows, read
+ * from the committed bytes at offset 27 length 3 of each row of {@code carddata.txt}. It is a
+ * PLACEHOLDER occupying the three bytes the 150-byte record declares, not a value, so no row here
+ * stands in any relation to a verification value at all and nothing here can authenticate anything.
+ * The sibling {@code ReportingFixtureContractTest} holds that property mechanically rather than
+ * leaving it to this prose: it reads the whole column and requires it to contain only that one
+ * placeholder, so a distinct per-row value cannot be introduced while the suite stays green. The card
+ * numbers alongside it are synthetic on their own evidence, measured over all 90 distinct values of
+ * the five columns above: 87 open {@code 9900}, a national-assignment major-industry range no issuer
+ * identifier occupies; one more is the orphan sentinel {@code 9999999999999999} that the report path
+ * uses for a deliberately unresolvable card; every one of those 88 additionally fails the Luhn check
+ * digit that every card network requires; and the remaining TWO are keys shared verbatim with
+ * {@code app/data/ASCII/carddata.txt}, itself this project's committed synthetic seed rather than
+ * production data. The sibling contract test asserts both halves per value, over the card columns it
+ * derives from each admitted fixture's registered descriptor rather than from a file list, so the
+ * property survives a fixture being added without this paragraph being reread.
  *
- * <p>Trade-offs: the statement-side and report-side record layouts are consequently NOT represented
- * by a fixture here, and the omission is a consequence of the container strategy rather than an
- * oversight. The three classes reach their relations three different ways, one per property: the
- * parse-only class deliberately establishes none, the ordering class seeds stand-ins through the
- * harness script, and the deployed-relation class applies the shipped definitions and loads four of
- * the seven fixtures into them. A future class binding a new fixture registers it in the contract
+ * <p>Refactoring Rationale: this passage attested that "the five verification values are 901 through
+ * 905, one per row in key order" and offered that ascending run as the structural evidence of
+ * synthesis. The bytes say {@code 000} five times, so the attestation was false about the one column
+ * in this directory that needs no ambiguity -- and false in the shape that costs most, since a
+ * specific-sounding claim about a sensitive column is exactly the sentence a reader accepts without
+ * opening the file. It also cited a table in the fixtures README as carrying "the same" values, which
+ * made a second document appear to corroborate it. The claim is now stated from the fixture bytes and
+ * from nothing else, and the synthesis evidence is re-grounded on the card-number prefixes and on the
+ * published seed, both of which are equally checkable and are not contradicted by the data. An earlier
+ * revision had asserted the reverse error -- that no fixture here carried a card number or
+ * verification value at all -- and the revision that replaced it named THREE card-number columns and
+ * described their synthesis from {@code carddata.txt}'s five rows alone, when five fixtures carry such
+ * a column and the two that were missing hold 88 of the 90 distinct values between them. Every one of
+ * those readings was written from a subset of the directory, which is the single failure mode this
+ * paragraph keeps reproducing, so the positions and the counts above are now stated per column with
+ * the offset each one sits at; the standing
+ * lesson recorded for the next author is that a claim about a column is written by reading the column.
+ *
+ * <p>Assumptions: NO enciphered column appears in any fixture here, and no class in this directory
+ * carries a fixture verification value into a relation. The two classes that load the card master
+ * insert their own {@code PLACEHOLDER_CIPHERTEXT} into {@code card.cards.cvv_encrypted} rather than
+ * the fixture's three bytes, because the target column holds ciphertext and no reporting relation
+ * projects it at all; the only reader of the fixture column anywhere in this module is the contract
+ * test's own placeholder assertion. The column is present only because {@code CVACT02Y.cpy} declares
+ * it inside the 150-byte record and that test proves byte-identical round-tripping, which a record
+ * with a hole in it cannot do. No reporting mapper may read it: the target returns the verification
+ * value from no endpoint at all. A fixture card number must never reach a log, an assertion message
+ * or a report fixture;
+ * {@code com.carddemo.common.security.CardNumberMasker} is what a diagnostic uses instead. The card
+ * number this context surfaces reaches it through the cross-reference and is rendered masked, which is
+ * also the leading component of the ordering {@code StatementHeadingChunkIT} walks.
+ *
+ * <p>Trade-offs: the classes here reach their relations three different ways, one way per kind of
+ * property, and which fixtures a class loads follows from that rather than from convenience. The
+ * parse-only class establishes NO relation and loads nothing. The ordering class seeds stand-in tables
+ * through the harness script and loads no fixture either, because a stand-in's rows are arranged to
+ * exercise an ordering rather than to reproduce a record. The remaining six apply the shipped
+ * definitions and load the fixtures their own property needs -- the deployed-relation class loads the
+ * account, card, cross-reference and customer masters; the driving-cursor class loads those four plus
+ * {@code xreffile.txt}; the customer and account lookups load their own master plus
+ * {@code xreffile.txt} as the driving set; the statement transaction cursor loads
+ * {@code trnxfile.txt} with the three masters its heading needs; and the report surface loads
+ * {@code tranfile.txt} with {@code cardxref.txt}, {@code trantype.txt}, {@code trancatg.txt} and
+ * {@code tcatbal.txt}. Every one of the ten fixtures therefore has at least one consumer in this
+ * directory or in the mapper tests. A future class binding a new fixture registers it in the contract
  * test's own list, which grows by deliberate edit; a fixture with no consumer is indistinguishable
  * from a fixture nobody needs.
+ *
+ * <p>Assumptions: the statement-side and report-side record layouts ARE represented here, by
+ * {@code trnxfile.txt} and {@code tranfile.txt} respectively. Refactoring Rationale: this section
+ * read "the statement-side and report-side record layouts are consequently NOT represented by a
+ * fixture here", which was a conclusion drawn from the seven-name roster and was false as soon as the
+ * two 350-byte corpora were bound. A future class binding a new fixture registers it in the contract
+ * test's own list and in the roster above, both of which grow by deliberate edit.
  *
  * <h2>Filename-case discipline</h2>
  *
@@ -540,14 +725,16 @@
  * comment-driven or annotation-driven suppression filter is configured at all, so compliant Javadoc is
  * the only way through.
  *
- * <p>Refactoring Rationale: this charter replaces a shorter one that described the two classes
+ * <p>Refactoring Rationale: this charter replaces a shorter one that described a two-class directory
  * correctly but stopped there, and the expansion is not decoration -- what it adds is the EVIDENCE
  * behind the shapes, so that the next author changes them from the source rather than from a
- * recollection of it. Four specific misreadings are foreclosed by name because each is plausible,
+ * recollection of it. Five specific misreadings are foreclosed by name because each is plausible,
  * each was reached in practice while this file was written, and each would have caused a wrong edit:
  * that a trailing {@code IT} or {@code ITCase} is skipped by the integration-test plugin, when no
- * include is configured and the default selection accepts both; that the transport fetch size is what
- * makes a read stream, when the two reads that matter carry their own hints; that schema resolution
+ * include is configured and the default selection accepts both; that a trailing {@code Tests} is run
+ * by neither plugin, when Surefire's defaults collect it and it therefore runs in the wrong phase;
+ * that the transport fetch size is what makes a read stream, when the two reads that matter carry
+ * their own hints; that schema resolution
  * names the four source schemas, when it names one and a compiled guard refuses more; and that keyset
  * positioning descends from the keyed-read opcode, when that opcode addresses one row by a whole key
  * and the cursor comes from a different program entirely. Trade-offs: the accepted cost is length. It

@@ -270,21 +270,43 @@ Amazon SQS is the messaging target. The decision has four parts, and each is
 motivated by a property of the flows above rather than by a preference between
 services.
 
-1. **FIFO queues for the authorization request and reply pair.** Ordering per card
-   and duplicate suppression are the two properties the authorization flow needs,
-   and a FIFO queue is the only SQS queue type that provides either.
-2. **Standard queues for the two inquiry flows and the terminal error sink** —
-   four in the delivered set, because the two inquiry request legs are provisioned
-   as separate queues while sharing one reply queue. Neither inquiry flow has an
-   ordering requirement, and the error queue is a sink with no sequencing
-   semantics at all.
-3. **A dead-letter queue on every queue, at `maxReceiveCount` 5.** This is the
-   durable retry tier, and it is one of the two independent reasons
+1. **Two FIFO queues — the authorization request and the authorization reply.**
+   Ordering per card and duplicate suppression are the two properties the
+   authorization flow needs, and a FIFO queue is the only SQS queue type that
+   provides either.
+2. **Three standard queues — `carddemo-inquiry-request-<env>`,
+   `carddemo-inquiry-reply-<env>` and `carddemo-error-<env>`.** The inquiry request
+   queue is **not** fanned out: it is one queue answered by one owning consumer that
+   dispatches on the four-character function code its payload already carries, for
+   the reasons set out in
+   [The five baseline queues become five target queues](#the-five-baseline-queues-become-five-target-queues-and-what-each-one-carries).
+   Neither inquiry leg has an ordering requirement, and the error queue is a sink
+   with no sequencing semantics at all.
+   ⚠️ Refactoring Rationale: this part said **four** standard queues, "because the two
+   inquiry request legs are provisioned as separate queues while sharing one reply
+   queue". That count outlived the per-consumer request split it was derived from, and
+   the figure is re-counted from the module's five source queues rather than decremented,
+   which is how a hand-adjusted tally goes stale in the first place.
+3. **A dead-letter queue on every one of those five, at `maxReceiveCount` 5.**
+   **Five primary queues and five dead-letter queues, ten provisioned queues in
+   total** — the ten `aws_sqs_queue` resources declared in
+   [`infra/modules/sqs/main.tf`](../../infra/modules/sqs/main.tf), which is where
+   this count is enforced rather than asserted. The dead-letter tier is the durable
+   retry tier, and it is one of the two independent reasons
    [ADR-002](ADR-002-compute-platform.md#2-no-external-resilience-library) declares
    no external resilience library.
 4. **A transactional outbox for the authorization reply.** The reply row is
    written inside the same local transaction as the decision and published from
    that row afterwards.
+
+⚠️ Refactoring Rationale: part 2 previously read "**four** in the delivered set,
+because the two inquiry request legs are provisioned as separate queues while sharing
+one reply queue", which normatively created a sixth primary. It contradicted this
+record's own Context section — which withdraws that fan-out and states five — and it
+contradicted the module that provisions the topology, where the inquiry request leg is
+one `aws_sqs_queue` and not two. The Decision now states the five-primary topology the
+Context establishes and the HCL delivers, so the normative sentence and the analysis
+above it can no longer disagree about how many queues exist.
 
 Adopting SQS is not free of consequence, and the cost is named rather than
 implied: the per-message expiry that the baseline obtains from the queue manager
@@ -830,9 +852,52 @@ service itself enforces does not. There is no configuration that reproduces
    > in this design, per part 2; a producer applying it as well applies the rule twice,
    > and the second application destroys the outbox guarantee that §0.4.3 of the
    > technical specification states as *a reply is published for every committed
-   > authorization*. A reply that cannot be delivered within its attempt budget is now
-   > abandoned instead: the row keeps a null publication instant, is excluded from the
-   > sweep, and is logged at error.
+   > authorization*.
+   >
+   > ⚠️ Refactoring Rationale: this record then said a reply that could not be delivered
+   > **within its attempt budget** was abandoned instead. There is no attempt budget any
+   > more, and the sentence is replaced rather than softened because an attempt ceiling
+   > failed the same guarantee twice over — it lost a reply the committed decision says
+   > is owed, and, because both claiming statements derive a group's head from its lowest
+   > unpublished, **unabandoned** identity, abandoning the head released the SAME card's
+   > later replies to be published ahead of it, delivering that card's sequence with a
+   > hole where the abandoned reply belonged. What holds instead:
+   >
+   > - **The head stays retryable until it is delivered.** A failed send records the
+   >   cause chain's digest and a capped next-attempt instant and leaves the row pending
+   >   — `AuthReplyOutbox.recordFailure` writes those two members and nothing else — and
+   >   the backoff doubles from `OutboxPublisher.RETRY_BACKOFF` to the ceiling
+   >   `MAX_RETRY_BACKOFF`, so a durably unreachable destination is retried at that
+   >   ceiling rather than every poll.
+   > - **Neither claim query filters on an attempt ceiling.**
+   >   `OutboxRepository.claimGroupHeads` and `claimGroupFollowers` admit a row on the
+   >   publication instant, the quarantine instant and readiness only, which is what
+   >   stops any same-card follower overtaking an undelivered head.
+   > - **Crossing the threshold escalates rather than terminates.** At
+   >   `carddemo.messaging.outbox-stall-alert-attempts` attempts — default **10**, the
+   >   value the service's `application.yml` sets and the constructor default in
+   >   `OutboxPublisher` — the pass raises `event=auth.reply.stalled` at ERROR and
+   >   changes nothing about the row. Assumptions: that line carries the row identity,
+   >   the attempt count and the next-attempt instant and **never** the card number or
+   >   the acquirer's transaction identifier, because the path from a requester's report
+   >   to the row runs through the governed table under access control and audit, and a
+   >   log line carrying the same identifier would be a link from log access to a
+   >   financial record without either.
+   > - **The row is still outside the retention sweep**, for the reason it always was:
+   >   `OutboxRepository.deletePublishedBefore` requires a publication instant, so an
+   >   undelivered reply is never deleted and stays investigable.
+   >
+   > Trade-offs: a destination that stays unreachable for one card therefore holds that
+   > card's later replies until it recovers or an operator intervenes. That is chosen
+   > rather than tolerated — the alternative, publishing the followers, hands a requester
+   > a reply sequence it cannot reconcile against the decisions behind it — and every
+   > other card keeps moving, because a failed row is ineligible until its backoff
+   > elapses and the claim takes the readiest groups first. Assumptions: the single
+   > release is `abandoned_at`, and **no code path in this service writes it**, as
+   > `AuthReplyOutbox.getAbandonedAt` states. Setting it is what frees that card's
+   > followers, so it is set by a governed administrative statement only AFTER an
+   > operator has reconciled the missing reply by hand; a code path able to reach that
+   > state is a code path able to reach it by accident.
 2. **The consumer honours it by dropping the message and logging the drop.** The
    log record is not optional bookkeeping. Assumptions: a silently dropped reply and
    a lost reply are indistinguishable from outside the consumer — both present as a
@@ -1228,6 +1293,26 @@ cheaply; the database removes the rest correctly. Describing the queue's guarant
 unbounded exactly-once would rest the correctness of the whole flow on a five-minute
 property.
 
+### Accepted trade-off — an undeliverable reply blocks its own card rather than being given up on
+
+Trade-offs: the reply publisher has **no attempt ceiling**. A reply the transport keeps
+refusing is retried at its capped backoff for as long as that takes, so that card's
+later replies wait behind it, and clearing the block is an operator action — reconcile
+the missing reply, then quarantine its row by governed statement. ⚠️ Refactoring
+Rationale: the ceiling existed and is withdrawn; the two costs it carried are why. It
+lost a reply the committed decision says is owed, against the guarantee §0.4.3 of the
+technical specification states as *a reply is published for every committed
+authorization*; and because both claim statements derive a group's head from its lowest
+unpublished, unquarantined row, the abandoned head **released that card's followers**,
+delivering the card's sequence with a hole in it. Alternatives Considered: publishing
+the followers and reporting the gap, which restores liveness for the blocked card.
+Rejected because a requester cannot reconcile a sequence with a hole against the
+decisions behind it, and the reference has no such gap to reproduce. What bounds the
+cost is that only the blocked group waits: a failed row is ineligible until its backoff
+elapses and the claim takes the readiest groups first, so every other card keeps moving,
+and crossing `carddemo.messaging.outbox-stall-alert-attempts` raises
+`event=auth.reply.stalled` so the block is announced rather than merely endured.
+
 ### Accepted trade-off — FIFO throughput is grouped, so one hot card serialises behind itself
 
 Trade-offs: `MessageGroupId` per card means messages in the **same** group are
@@ -1349,6 +1434,16 @@ Downstream obligations this creates:
 
 - `CsvAuthCodec` in the shared kernel owns both payload directions and their
   round-trip tests.
+- **An undelivered reply becomes an operator obligation rather than a background
+  decision.** The publisher has no attempt ceiling, so a reply the transport keeps
+  refusing is retried at its capped backoff indefinitely and, past
+  `carddemo.messaging.outbox-stall-alert-attempts`, reported as
+  `event=auth.reply.stalled`; that card's later replies wait behind it, and the only
+  release is an operator setting `abandoned_at` by governed statement once the missing
+  reply has been reconciled by hand. The obligation is named here because it is the
+  price of the guarantee in
+  [The Message-Expiry Semantic Gap](#the-resolution--three-parts-which-only-work-together)
+  — an alarm nobody owns leaves one card silently stalled.
 - The `authorization` schema carries the outbox table alongside the summary, detail
   and fraud tables, which is what
   [ADR-003](ADR-003-datastore-targets.md#2-the-one-genuinely-multi-record-unit-of-work-stays-a-single-local-transaction)

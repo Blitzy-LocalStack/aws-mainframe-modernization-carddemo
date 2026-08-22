@@ -209,9 +209,12 @@ from carddemo_migration.loaders.protected_columns import (
 )
 
 __all__ = [
+    "CARD_IDENTITY_PROCEDURE",
+    "CARD_IDENTITY_RELATION",
     "TARGETS",
     "TRANSACTION_ID_SEQUENCE",
     "AuroraLoadError",
+    "CardIdentityRefresh",
     "LoadContext",
     "LoadOutcome",
     "LoadStrategy",
@@ -224,6 +227,7 @@ __all__ = [
     "load_records",
     "prepare_record",
     "reconcile_transaction_id_sequence",
+    "refresh_card_identity",
     "target_names",
     "target_for",
 ]
@@ -3177,6 +3181,288 @@ def reconcile_transaction_id_sequence(
         stored_maximum=stored_maximum,
         next_value_before=next_value_before,
         next_value_after=target,
+    )
+
+
+#: The derived per-card relation the reporting projections are served from.
+#:
+#: Assumptions: the name is the one ``sql/V1__reporting_views.sql`` creates, spelled
+#: schema-qualified for the reason every relation name in this module is -- an unqualified name
+#: resolves through the session's search path, and counting rows in some other schema's relation of
+#: the same name would report a reconciliation that never happened.
+CARD_IDENTITY_RELATION: Final[str] = "reporting.card_identity"
+
+#: The maintenance procedure that reconciles that relation against the cross-reference.
+#:
+#: Assumptions: it is a PROCEDURE and is invoked with ``CALL``, not a function invoked with
+#: ``SELECT``. ``sql/V1__reporting_views.sql`` records why: the reporting service reaches it through
+#: a modifying repository method, and the driver that method runs on rejects a result set where none
+#: is expected.
+CARD_IDENTITY_PROCEDURE: Final[str] = "reporting.refresh_card_identity"
+
+
+@dataclass(frozen=True)
+class CardIdentityRefresh:
+    """What one reconciliation of the derived per-card identity relation found and did.
+
+    Purpose
+    -------
+    Report the numbers an operator needs to decide whether a statement run may proceed: how many
+    cards the cross-reference publishes, how many identities were MISSING and how many were
+    DEPARTED before the reconciliation, and how many identities exist after it. A run started
+    against an under-populated relation omits a cardholder's statement and reports nothing, so
+    these are the numbers that make the omission visible BEFORE the run rather than after it.
+
+    Parameters
+    ----------
+    relation : str
+        The schema-qualified relation reconciled.
+    identities_before : int
+        How many identity rows existed when the reconciliation began.
+    identities_after : int
+        How many exist now. Equals :attr:`cards_published` on a reconciled relation.
+    cards_published : int
+        How many cards ``account.card_xref`` holds, which is what the relation must match.
+    missing_before : int
+        How many published cards had no identity row -- the rows the reconciliation inserted, and
+        the cardholders a run started beforehand would have omitted.
+    departed_before : int
+        How many identity rows named a card the cross-reference no longer publishes -- the rows the
+        reconciliation deleted.
+
+    Raises
+    ------
+    None
+    """
+
+    relation: str
+    identities_before: int
+    identities_after: int
+    cards_published: int
+    missing_before: int
+    departed_before: int
+
+    @property
+    def gained(self) -> int:
+        """Report how many identities the reconciliation inserted.
+
+        Returns
+        -------
+        int
+            The number of published cards that had no identity row beforehand.
+        """
+        # WHY : Refactoring Rationale: this was the NET count difference, and a net difference
+        #   cannot see the case that matters most. A card withdrawn and another issued between two
+        #   extracts leaves the cardinality unchanged while both rows are wrong, so the earlier
+        #   form reported zero work for precisely the reconciliation that did the most -- and an
+        #   operator reading a cutover log would have taken a ceremonial step for a real one. The
+        #   anti-join counts the caller measures are each one index-only scan, which is a cost worth
+        #   paying to make the number mean what it says.
+        return self.missing_before
+
+    @property
+    def removed(self) -> int:
+        """Report how many identities the reconciliation deleted.
+
+        Returns
+        -------
+        int
+            The number of identity rows naming a card the cross-reference no longer publishes.
+        """
+        return self.departed_before
+
+    @property
+    def reconciled(self) -> bool:
+        """Report whether the relation now carries exactly one identity per published card.
+
+        Returns
+        -------
+        bool
+            ``True`` when the counts agree, which is the postcondition the step exists for.
+        """
+        return self.identities_after == self.cards_published
+
+    @property
+    def was_stale(self) -> bool:
+        """Report whether the relation disagreed with the cross-reference before this run.
+
+        Returns
+        -------
+        bool
+            ``True`` when either side of the difference was non-empty, so an operator reading a
+            cutover log can tell a step that did work from one that was ceremonial -- including the
+            equal-cardinality case a count comparison alone reports as unchanged.
+        """
+        return bool(self.missing_before or self.departed_before)
+
+    def describe(self) -> str:
+        """Render the outcome as one line, naming no card number.
+
+        Returns
+        -------
+        str
+            A single line carrying the relation and the counts. No value it carries is sensitive:
+            the counts are cardinalities, and the relation name is a schema object.
+        """
+        return (
+            f"reconciled {self.relation}: published={self.cards_published}"
+            f" before={self.identities_before} after={self.identities_after}"
+            f" gained={self.gained} removed={self.removed}"
+        )
+
+
+def refresh_card_identity(
+    connection: _Connection,
+    *,
+    schema: str = "reporting",
+) -> CardIdentityRefresh:
+    """Bring the derived per-card identity relation level with the card cross-reference.
+
+    Purpose
+    -------
+    Close the one ordering hazard the reporting context has that the others do not.
+    ``reporting.card_identity`` holds one row per card, carrying the keyed fingerprint every
+    card-bearing reporting projection publishes and the whole card number the projections join
+    on, and it is what makes a fingerprint lookup an indexed one. Its rows are DERIVED from
+    ``account.card_xref``, and ``sql/V1__reporting_views.sql`` populates it by backfill at the
+    moment it is created -- so on a cutover, where the migration runs before the extract is
+    loaded, it is created against an empty cross-reference and holds nothing. Every card the load
+    then writes is absent from ``reporting.v_card_xref`` and unresolvable by
+    ``reporting.resolve_card`` until this step runs.
+
+    Run this after the last load into ``account.card_xref`` and BEFORE any statement run.
+
+    Parameters
+    ----------
+    connection : _Connection
+        An open connection authenticated as an identity that is a member of the schema's owner
+        role, which for ``reporting`` means the cluster's master user: it is the one context
+        :data:`carddemo_migration.config.MIGRATION_SCHEMA_ROLES` has no ``_migrator`` login for,
+        because reporting-service ships no Flyway migration and the reporting objects are applied
+        by the bootstrap principal. ``carddemo_migration.cli`` resolves it accordingly. The caller
+        owns closing it.
+    schema : str
+        The bounded-context schema owning the relation. Defaults to the only schema that has one,
+        and is a parameter so the owner role is derived rather than named as a literal.
+
+    Returns
+    -------
+    CardIdentityRefresh
+        The published card count, the identity count before and after, and the measured number of
+        missing and departed identities -- which is the whole of what an operator needs to decide
+        whether a statement run may proceed, and to tell a step that did work from one that did
+        none.
+
+    Raises
+    ------
+    AuroraLoadError
+        If the owner role cannot be assumed, either relation cannot be counted, the procedure is
+        absent -- a database the reporting migration has not been applied to -- or the
+        reconciliation is refused. Nothing is left half applied: the procedure is one statement in
+        one transaction, and a failure rolls it back entirely.
+    """
+    # WHY : Assumptions: this needs the OWNER's authority, exactly as the allocator reconciliation
+    #   above does, and for a comparable reason. `sql/V1__reporting_views.sql` grants the runtime
+    #   reporting role SELECT on two of the relation's three columns and nothing else -- no insert,
+    #   no delete -- and grants it EXECUTE on the procedure so the service can reconcile without
+    #   being able to write. The counts below read the THIRD state the service cannot see (the
+    #   cross-reference), so the caller authenticates as the `_migrator` login and this function
+    #   issues the `SET ROLE`, which is also the role membership that file requires of whoever
+    #   applies it.
+    # WHY : Alternatives Considered: a trigger on `account.card_xref` maintaining the row as part
+    #   of every write, which would make this step unnecessary and remove the ordering hazard
+    #   outright. Rejected because `sql/V1__reporting_views.sql` runs under
+    #   `SET LOCAL ROLE carddemo_reporting_owner` and that role holds no TRIGGER privilege on a
+    #   relation the ACCOUNT context owns; granting it would widen a cross-context boundary in the
+    #   direction this architecture forbids, and it would make an account-context write fail
+    #   whenever reporting maintenance failed -- coupling a transaction that must succeed to a
+    #   derived relation that may be repaired later.
+    # WHY : Alternatives Considered: calling this from inside `load_records` when the target is the
+    #   cross-reference, so no caller had to remember it. Rejected on two grounds: that function's
+    #   contract is one dataset in exactly one transaction, and a second commit would break the
+    #   property its own docstring publishes; and the connection it holds authenticates as the
+    #   ACCOUNT schema's role, which holds no privilege in the reporting schema at all.
+    owner = owner_role_for_schema(schema)
+    relation = f"{quote_identifier(schema)}.{quote_identifier('card_identity')}"
+    try:
+        with _cursor_of(connection) as cursor:
+            cursor.execute(f"SET ROLE {quote_identifier(owner)}")
+            cursor.execute(f"SELECT count(*) FROM {relation}")
+            before = cursor.fetchone()
+            # Assumptions: the published count is read from the cross-reference rather than
+            #   inferred from the load's own row count. A load reports the rows IT staged, and the
+            #   relation may already have held cards from an earlier extract; the postcondition
+            #   this step publishes is about the whole relation, so it is measured against the
+            #   whole relation.
+            cursor.execute(
+                f"SELECT count(*) FROM {quote_identifier('account')}"
+                f".{quote_identifier('card_xref')}"
+            )
+            published = cursor.fetchone()
+            # WHY : Assumptions: the two differences are MEASURED rather than inferred from the
+            #   count movement, and the distinction is the difference between a monitoring signal
+            #   and a misleading one. A card withdrawn and another issued between two extracts
+            #   leaves the cardinality identical while both rows are wrong, so a before/after
+            #   comparison reports "unchanged" for the reconciliation that did the most work. Each
+            #   of these is an anti-join over a unique key, so each is one index scan.
+            # WHY : Alternatives Considered: having the procedure return its own inserted and
+            #   deleted counts, which would be exact by construction and would need no extra
+            #   query. Rejected because the reporting service reaches the same procedure through a
+            #   modifying repository method, and a routine returning rows in that position is
+            #   refused by the driver -- so making it a function would break the other caller to
+            #   improve a log line for this one.
+            cursor.execute(
+                f"SELECT count(*) FROM {quote_identifier('account')}"
+                f".{quote_identifier('card_xref')} AS x"
+                f" WHERE NOT EXISTS (SELECT 1 FROM {relation} AS ci"
+                f" WHERE ci.card_num = x.card_num)"
+            )
+            missing = cursor.fetchone()
+            cursor.execute(
+                f"SELECT count(*) FROM {relation} AS ci"
+                f" WHERE NOT EXISTS (SELECT 1 FROM {quote_identifier('account')}"
+                f".{quote_identifier('card_xref')} AS x WHERE x.card_num = ci.card_num)"
+            )
+            departed = cursor.fetchone()
+    except Exception as exc:
+        _rollback_quietly(connection)
+        raise AuroraLoadError(
+            f"{CARD_IDENTITY_RELATION} could not be counted as {owner}, so it was not reconciled"
+            f" and a statement run would omit every card the cross-reference has gained: {exc}"
+        ) from exc
+
+    identities_before = _first_int(before)
+    cards_published = _first_int(published)
+    missing_before = _first_int(missing)
+    departed_before = _first_int(departed)
+    try:
+        with _cursor_of(connection) as cursor:
+            cursor.execute(f"SET ROLE {quote_identifier(owner)}")
+            # WHY : Trade-offs: the procedure is called UNCONDITIONALLY, even when the two counts
+            #   above already agree. An equal count is necessary for a reconciled relation and not
+            #   sufficient for one -- a card removed and another issued between two extracts leaves
+            #   the cardinality unchanged and both rows wrong -- so a guard on the counts would
+            #   skip exactly the case that most needs the work. The procedure is a delta insert and
+            #   a delta delete, so a call against an already-reconciled relation writes nothing.
+            cursor.execute(f"CALL {CARD_IDENTITY_PROCEDURE}()")
+            cursor.execute(f"SELECT count(*) FROM {relation}")
+            after = cursor.fetchone()
+        connection.commit()
+    except Exception as exc:
+        _rollback_quietly(connection)
+        raise AuroraLoadError(
+            f"{CARD_IDENTITY_RELATION} could not be reconciled by {CARD_IDENTITY_PROCEDURE}(),"
+            f" so a statement run must not be started -- it would omit every card the"
+            f" cross-reference has gained since the reporting migration was applied. Apply"
+            f" sql/V1__reporting_views.sql if the procedure is absent: {exc}"
+        ) from exc
+    return CardIdentityRefresh(
+        relation=CARD_IDENTITY_RELATION,
+        identities_before=identities_before,
+        identities_after=_first_int(after),
+        cards_published=cards_published,
+        missing_before=missing_before,
+        departed_before=departed_before,
     )
 
 

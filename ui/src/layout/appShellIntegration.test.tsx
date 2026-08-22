@@ -34,10 +34,12 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { isValidElement } from 'react';
 import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { MemoryRouter } from 'react-router';
+import type { RouteObject } from 'react-router';
 
 import { MESSAGE_BAND_TEST_ID } from './MessageBand';
 import { PF_KEY_BAR_REGION_LABEL } from './PfKeyBar';
@@ -53,6 +55,7 @@ import {
   useShellSlot,
 } from './AppShell';
 import { APP_ORGANISATION_TITLE_DISPLAY, APP_TITLE_DISPLAY } from '../messages/messages';
+import { CARD_DEMO_ROUTES } from '../router';
 import { installApiHarness, removeApiHarness } from '../test/apiHarness';
 import { endAnySession, establishSession } from '../test/sessionHarness';
 import { BMS_TEXT_COLOR_TOKENS } from '../theme/tokens';
@@ -71,12 +74,12 @@ const KEBAB_CASED_TEXT_TOKENS = {
 } as const;
 
 /*
- * WHY : ⚠️ Refactoring Rationale: a `carddemo.id-token` key stood here and `ui/src/hooks/useAuth.ts`
- *       reads no key at all -- the session is module state and the bearer is module state behind a
- *       setter, so nothing script-readable retains a credential. Writing the key established nothing,
- *       so the two cases that needed a session rendered the ANONYMOUS frame: one asserted the sign-off
- *       surface and failed, and the other's key-dispatch assertion held only because the screen's own
- *       handler is installed either way. Sessions are now established through the exchange.
+ * WHY : Assumptions: a session is established through the exchange, never by writing a storage key.
+ *       `ui/src/hooks/useAuth.ts` reads no key at all -- the session is module state and the bearer is
+ *       module state behind a setter, so nothing script-readable retains a credential. A case that
+ *       wrote `carddemo.id-token` would establish nothing and would render the ANONYMOUS frame, so the
+ *       sign-off case would fail and the key-dispatch case would pass for the wrong reason: the
+ *       screen's own handler is installed either way.
  */
 
 /** Groups every session in this file carries; the frame's chrome does not vary by authority. */
@@ -171,14 +174,13 @@ function PublishingScreen({ onKey }: { readonly onKey: (aid: CicsAid) => void })
 /**
  * Mounts the shell around a child inside a router, which is where the shell always runs.
  *
- * ⚠️ Refactoring Rationale: these cases rendered the shell with NO router around it, which
- * worked while the shell consulted no routing. It now reads the current history entry, so that it can
- * clear the sign-off surface when the operator navigates away from the entry they signed off at -- a
- * surface that did not clear left every route beneath this layout unrendered, the sign-on route
- * included. Wrapping here rather than making the routing read optional keeps one code path in the
- * shell: `ui/src/router.tsx` mounts it as a layout route, so a router is present in the application by
- * construction, and the `children` form these cases use is a test affordance rather than a second
- * deployment shape.
+ * Assumptions: a router is required around the shell, because the shell reads the current history
+ * entry so that it can clear the sign-off surface when the operator navigates away from the entry they
+ * signed off at. A surface that never cleared would leave every route beneath this layout unrendered,
+ * the sign-on route included. Wrapping here rather than making the routing read optional keeps one code
+ * path in the shell: `ui/src/router.tsx` mounts it as a layout route, so a router is present in the
+ * application by construction, and the `children` form these cases use is a test affordance rather than
+ * a second deployment shape.
  *
  * Assumptions: `MemoryRouter` rather than `BrowserRouter`, because the cases assert nothing about the
  * address and a memory history needs no `jsdom` navigation. One entry is supplied explicitly so the
@@ -305,15 +307,12 @@ async function dispatchesOneKeyPressOnce(): Promise<void> {
 /**
  * The shell offers sign-off as a rendered control and claims no function key for it.
  *
- * WHY : ⚠️ Refactoring Rationale: this asserted that the shell PUBLISHED a `F12=Cancel`-shaped legend
- *       entry of its own when no screen had claimed the keys, and that pressing F12 then ended the
- *       session. The shell claims no key: `SHELL_SIGN_OFF_LABEL` records why, and the stand-down
- *       condition the key design needed -- "no screen has delegated a legend" -- is true of no delivered
- *       screen, so the key would have been unreachable in the application and reachable only here.
- *       Two properties of the surviving design are asserted in its place, and together they are strictly
- *       stronger than the pair they replace: the legend region is ABSENT for a screen that delegates no
- *       keys, so the shell contributes no entry to it; and the rendered control ends the session, which
- *       is the action the withdrawn key stood for.
+ * WHY : Assumptions: the shell claims NO function key, so the two properties asserted here are that
+ *       the legend region is absent for a screen delegating no keys -- the shell contributes no entry
+ *       to it -- and that the rendered control ends the session. `SHELL_SIGN_OFF_LABEL` records why a
+ *       key of the shell's own was rejected: its stand-down condition, "no screen has delegated a
+ *       legend", is true of no delivered screen, so such a key would be unreachable in the application
+ *       and reachable only from a test.
  * WHY : Assumptions: the F12 press is still performed, and it is asserted to do NOTHING. That is the
  *       half that could regress silently -- a shell that re-installed a document listener would end the
  *       session from a key the screen beneath it may bind, which is the collision the design removed.
@@ -346,15 +345,17 @@ async function offersSignOffOnlyWhenUnclaimed(): Promise<void> {
 /**
  * A paint-time clock reading settles instead of re-rendering without end.
  *
- * WHY : Refactoring Rationale: mounting the shell ABOVE the screens puts a publisher inside its own
- * subscriber, which is the one shape that could turn a per-render value into an unbounded loop - publish,
- * notify, shell re-renders, screen re-renders beneath it, reads a later instant, publish again. It does
- * not loop today, and the reason is precise rather than incidental: `children` is an element built by
- * `ui/src/App.tsx`, which does not re-render, so when the shell re-renders React sees a referentially
- * identical element with identical props and bails out of that subtree entirely. That bailout is load
- * bearing and invisible in the source, so this case pins it. A change that rebuilt the child's props on
- * each shell render - cloning the element, or spreading it into a new one to add a prop - would break the
- * bailout, and the failure would appear as a hung browser rather than as a wrong value.
+ * WHY : Assumptions: mounting the shell ABOVE the screens puts a publisher inside its own subscriber,
+ * which is the one shape that could turn a per-render value into an unbounded loop - publish, notify,
+ * shell re-renders, screen re-renders beneath it, reads a later instant, publish again. It does not loop,
+ * and the reason is precise rather than incidental: the child element is built once and not rebuilt per
+ * shell render -- in production it is a route element created at module scope in `ui/src/router.tsx`, and
+ * in this case it is the element the harness passes as `children` -- so when the shell re-renders React
+ * sees a referentially identical element with identical props and bails out of that subtree entirely.
+ * That bailout is load bearing and invisible in the source, so this case pins it. A change that rebuilt
+ * the child's props on each shell render - cloning the element, or spreading it into a new one to add a
+ * prop - would break the bailout, and the failure would appear as a hung browser rather than as a wrong
+ * value.
  *
  * Assumptions: the published instant is read from the wall clock on every render, which is what
  * `useServerInstant` does once anchored, so the value genuinely differs each pass. The bound is generous
@@ -374,47 +375,108 @@ function settlesAfterPublishingAPaintTimeClock(): void {
 }
 
 /**
- * The application mounts the shell exactly once, wrapping the route tree.
+ * One census of the shell mounts in a route subtree: how many there are, and how many are nested.
  *
- * WHY : Assumptions: read from the source rather than rendered. Rendering `App` mounts the whole lazy
- * route tree and the runtime configuration reader with it, so the case would depend on a dozen stubs
- * and its failure would not name this property. The property itself is syntactic - one mount site, and
- * the router inside it - so reading the module is both narrower and more direct.
+ * Assumptions: the nested count is carried separately from the total because the two failures mean
+ * opposite things. Two mounts are CORRECT when they are siblings -- one frame per access branch -- and
+ * are the double-frame defect when one is inside the other, so a bare count cannot tell them apart.
+ */
+interface ShellMountCensus {
+  /** Shell mounts found anywhere in the subtree. */
+  readonly mounts: number;
+
+  /** Shell mounts that have another shell mount as an ancestor. */
+  readonly nested: number;
+}
+
+/**
+ * Counts the shell mounts in a route subtree and how many of them sit inside another one.
+ * @param {readonly RouteObject[]} routes - Route objects to walk.
+ * @param {boolean} hasShellAncestor - Whether an ancestor of these routes already mounts the shell.
+ * @returns {ShellMountCensus} The mount count and the nested-mount count for this subtree.
+ */
+function countShellMounts(
+  routes: readonly RouteObject[],
+  hasShellAncestor: boolean,
+): ShellMountCensus {
+  let mounts = 0;
+  let nested = 0;
+
+  for (const route of routes) {
+    const mountsShell = isValidElement(route.element) && route.element.type === AppShell;
+    if (mountsShell) {
+      mounts += 1;
+      if (hasShellAncestor) {
+        nested += 1;
+      }
+    }
+
+    const below = countShellMounts(route.children ?? [], hasShellAncestor || mountsShell);
+    mounts += below.mounts;
+    nested += below.nested;
+  }
+
+  return { mounts, nested };
+}
+
+/**
+ * The application mounts one shell per access branch, and never one inside another.
+ *
+ * WHY : Assumptions: the composition is read from the SOURCE rather than rendered. Rendering `App`
+ * mounts the whole lazy route tree and the runtime configuration reader with it, so the case would
+ * depend on a dozen stubs and its failure would not name this property. The mount count and the
+ * provider are syntactic facts about two files, so the two files are read.
+ *
+ * WHY : ⚠️ Refactoring Rationale: the count required exactly ONE mount and required `App.tsx` to
+ * render `<CardDemoRouter />`. Both expectations are replaced rather than relaxed. The route table now
+ * mounts the shell TWICE on purpose -- once for the public sign-on branch, once for the guarded
+ * subtree -- because sign-on must be framed (it delegates its title band, its row-23 message and its
+ * row-24 legend) while sitting outside the guard, and a sibling branch is what gives it a frame
+ * without putting anything above it that could demand a credential. And `App.tsx` renders a
+ * `RouterProvider` over a router object, which is the composition the frozen route specification
+ * names; requiring the old component name here is what previously argued that file into keeping the
+ * element form.
+ *
+ * WHY : Assumptions: what this case must still make impossible is the defect it was written for -- a
+ * shell inside a shell, which framed every guarded screen twice with two banners, two contentinfo
+ * landmarks and both copies reading the one publication a screen makes. Two mounts are safe if and
+ * only if they are SIBLINGS, so the count is asserted in the text and the nesting is asserted over the
+ * exported route objects, where "inside" is a fact about the tree rather than about indentation.
  * @returns {void} Nothing; the assertions carry the outcome.
  */
-function mountsTheShellExactlyOnce(): void {
+function mountsOneShellPerAccessBranch(): void {
   const appSource = readFileSync(join(import.meta.dirname, '..', 'App.tsx'), 'utf8');
   const routerSource = readFileSync(join(import.meta.dirname, '..', 'router.tsx'), 'utf8');
 
   /*
-   * WHY : ⚠️ Refactoring Rationale: the single mount is asserted of the ROUTE TABLE, where this case
-   *       asserted it of `App.tsx` and additionally asserted the exact text
-   *       `<AppShell><CardDemoRouter /></AppShell>`. Both mounts existed at once, which is the state
-   *       this case was written to make impossible and the one it could not see: it read one file, found
-   *       its one mount, and said nothing about the layout route in the other. A shell given `children`
-   *       never reaches its outlet, so the two nested mounts framed every guarded screen twice -- two
-   *       `app-shell` regions, two banners, two contentinfo landmarks, and both reading the one
-   *       publication a screen makes. The layout route is the mount that survives, for the reason
-   *       `ui/src/router.tsx` records, so the count is taken there and `App.tsx` is asserted to mount
-   *       none.
-   * WHY : Assumptions: the router's mount is matched as `<AppShell />` -- the self-closing, outlet form
-   *       -- and `App.tsx` is checked for `<AppShell` in ANY form. That asymmetry is deliberate: the
-   *       children form is the shape that silently disables the outlet, so the file that must not mount
-   *       the shell is checked for both spellings while the file that must is checked for the one
-   *       spelling that works as a layout route.
+   * WHY : Assumptions: the router's mounts are matched as `element: <AppShell />` -- the self-closing,
+   *       outlet form in an `element` position -- while `App.tsx` is checked for `<AppShell` in ANY
+   *       form. That asymmetry is deliberate: the children form is the shape that silently disables the
+   *       outlet, so the file that must not mount the shell is checked for both spellings while the
+   *       file that must is checked for the one spelling that works as a layout route.
    */
-  const routerMounts = routerSource.match(/<AppShell \/>/gu) ?? [];
-  expect(routerMounts, 'router.tsx must mount AppShell exactly once').toHaveLength(1);
-  expect(routerSource, 'the shell must be a layout route, so it renders the outlet').toContain(
-    '<Route element={<AppShell />}>',
-  );
-  expect(appSource, 'App.tsx must not mount a second shell').not.toContain('<AppShell');
-  expect(appSource, 'App.tsx must render the route tree').toContain('<CardDemoRouter />');
+  const routerMounts = routerSource.match(/element: <AppShell \/>/gu) ?? [];
+  expect(routerMounts, 'router.tsx must mount AppShell once per access branch').toHaveLength(2);
+  expect(appSource, 'App.tsx must not mount a shell').not.toContain('<AppShell');
+  /*
+   * Assumptions: the provider is required exactly once. A second one over the same router object would
+   * subscribe twice to one history and render the matched route twice, which is this defect's
+   * composition-level form.
+   */
+  const providerMounts = appSource.match(/<RouterProvider/gu) ?? [];
+  expect(providerMounts, 'App.tsx must render exactly one RouterProvider').toHaveLength(1);
   // Assumptions: the replaced frame is asserted ABSENT as well. `App.tsx` previously composed its own
   //   `Layout.Header` and `Layout.Footer`, and leaving either in place beside the shell would put two
   //   banners and two contentinfo landmarks in one document.
   expect(appSource, 'App.tsx must not compose a second frame').not.toContain('<Layout.Header>');
   expect(appSource, 'App.tsx must not compose a second frame').not.toContain('<Layout.Footer>');
+
+  const census = countShellMounts(CARD_DEMO_ROUTES, false);
+  expect(census.mounts, 'the route tree must mount one shell per access branch').toBe(2);
+  expect(
+    census.nested,
+    'no shell mount may sit inside another, or both would frame one screen',
+  ).toBe(0);
 }
 
 /**
@@ -457,7 +519,7 @@ function shellIntegrationCases(): void {
     'paints its own sentences through the text-grade map',
     paintsItsOwnSentencesThroughTheTextGradeMap,
   );
-  it('is mounted exactly once by the application', mountsTheShellExactlyOnce);
+  it('is mounted once per access branch by the application', mountsOneShellPerAccessBranch);
   it('paints every zone a screen delegates', paintsEveryDelegatedZone);
   it('paints no zone that was not delegated', paintsNoZoneThatWasNotDelegated);
   it('dispatches one key press exactly once', dispatchesOneKeyPressOnce);

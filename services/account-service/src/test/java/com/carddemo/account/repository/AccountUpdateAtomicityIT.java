@@ -4,7 +4,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.carddemo.account.domain.Account;
-import com.carddemo.account.domain.CardXref;
 import com.carddemo.account.domain.Customer;
 import com.carddemo.account.dto.AccountUpdateRequest;
 import com.carddemo.account.mapper.AccountMapper;
@@ -387,7 +386,17 @@ class AccountUpdateAtomicityIT {
 
         this.customers.saveAndFlush(seededCustomer());
         this.accounts.saveAndFlush(seededAccount());
-        this.crossReferences.saveAndFlush(new CardXref(CARD_NUMBER, CUSTOMER_ID, ACCOUNT_ID));
+
+        // WHY : Refactoring Rationale: the cross-reference row is seeded through the same template that
+        //       emptied the table two statements above, where the two masters are seeded through their
+        //       repositories. The asymmetry is deliberate and is the point: CardXrefRepository extends
+        //       the Spring Data MARKER, declaring reads alone, because the relation has no update path
+        //       -- so it publishes no save for this line to call, and a seeding convenience is not a
+        //       reason to widen a deployed type. This statement is not part of what the class asserts;
+        //       both cases below read committed state through this same template for the reason recorded
+        //       on the field, so seeding through it costs the class nothing in fidelity.
+        this.jdbc.update("INSERT INTO account.card_xref (card_num, customer_id, account_id)"
+                + " VALUES (?, ?, ?)", CARD_NUMBER, CUSTOMER_ID, ACCOUNT_ID);
 
         // WHY : Assumptions: the service is constructed here rather than injected, because the context
         //       deliberately scans no service package -- see the nested configuration below -- and because

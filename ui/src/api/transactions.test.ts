@@ -49,7 +49,11 @@ import {
   removeApiHarness,
 } from '../test/apiHarness';
 
-const API_BASE_URL = 'https://api.carddemo.example';
+// Assumptions: the fixture carries the `/api/v1` operation prefix because
+// `normalizeApiBaseUrl` requires it -- a base URL one segment short is refused at
+// start-up rather than producing a 404 on every request. The prefix changes no
+// assertion here: every case below asserts the RELATIVE request path.
+const API_BASE_URL = 'https://api.carddemo.example/api/v1';
 
 const CORRELATION_HEADER = 'X-Correlation-Id';
 

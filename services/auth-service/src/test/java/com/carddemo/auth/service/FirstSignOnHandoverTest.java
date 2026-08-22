@@ -3,6 +3,7 @@ package com.carddemo.auth.service;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.carddemo.auth.domain.User;
 import com.carddemo.auth.dto.SignOnChallenge;
 import com.carddemo.auth.dto.SignOnChallengeRequest;
 import com.carddemo.auth.dto.SignOnOutcome;
@@ -10,6 +11,9 @@ import com.carddemo.auth.dto.SignOnRequest;
 import com.carddemo.auth.dto.SignOnResponse;
 import com.carddemo.auth.repository.UserRepository;
 import com.carddemo.common.error.ClientInputException;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -121,7 +125,7 @@ class FirstSignOnHandoverTest {
     /** The substituted provider both services are built over. */
     private CognitoIdentityProviderClient provider;
 
-    /** The substituted local store the sign-on existence probe reads. */
+    /** The substituted local store the sign-on existence check and the identity binding read. */
     private UserRepository users;
 
     /** The creation half of the journey. */
@@ -259,12 +263,29 @@ class FirstSignOnHandoverTest {
                         + " internally sends it nowhere and the account is unreachable")
                 .isNotBlank()
                 .hasSize(PASSWORD_LENGTH);
+        // Assumptions: ⚠️ this is the assertion the whole class exists for, and it is an EQUALITY against
+        //   the captured request rather than a non-blank check on the return value. The defect it closes
+        //   is not an absent credential -- both broken revisions produced one -- but a credential the
+        //   caller could not obtain: the first sent it nowhere, the second returned only an archive
+        //   locator a browser session cannot read. A caller handed a value that is not the value the pool
+        //   holds is in exactly the same position, and only a comparison against what the pool RECEIVED
+        //   can tell the two apart.
+        assertThat(provisioned.oneTimeCredential())
+                .as("the caller must be handed the SAME credential the pool account was created with;"
+                        + " any other value signs nobody on and the account is unreachable")
+                .isEqualTo(suppliedToPool);
         assertThat(provisioned.credentialSecretName())
-                .as("the caller must be told WHERE the credential was published, since the value itself"
-                        + " never travels in a response; without a locator the account is unreachable")
+                .as("the caller must also be told WHERE the credential was archived, because a response"
+                        + " is delivered once and an operator who loses it has no other recovery")
                 .isEqualTo(this.provisioning.credentialSecretName(USER_ID));
+        // WHY : Assumptions: the diagnostic rendering is asserted to withhold the credential even though
+        //       the record now carries it. Those are not in tension: a value returned to one caller in
+        //       one response is bounded, and the same value in a log line is retained by whatever
+        //       aggregates the logs, for as long as that retains anything. The record's `toString` is the
+        //       only thing standing between the two, because a record logged as `{}` renders every
+        //       component.
         assertThat(provisioned.toString())
-                .as("the credential must not be reachable through the returned pair at all")
+                .as("the credential must not be reachable through the returned record's rendering")
                 .doesNotContain(suppliedToPool);
 
         when(this.users.existsById(USER_ID)).thenReturn(true);
@@ -283,11 +304,53 @@ class FirstSignOnHandoverTest {
                             .build();
                 });
 
-        // WHY : Refactoring Rationale: the credential is read from the request the pool RECEIVED rather
-        //       than from the returned pair, because the pair carries the managed entry's name and not
-        //       the value. That is the point of the published surface: what an operator collects comes
-        //       from the secret store, so the test collects it from the same place the store did.
+        // WHY : Assumptions: the value returned is the value the pool received -- the equality above says
+        //       so -- and the captured one is still what this helper hands back. Returning
+        //       `provisioned.oneTimeCredential()` instead would be indistinguishable here and would make
+        //       every case below anchored to the service's own answer, so a service that returned a
+        //       plausible wrong value would carry the whole journey. The capture is the independent
+        //       witness, and it stays the source.
         return suppliedToPool;
+    }
+
+    /**
+     * Stubs the challenge answer to issue a token set that binds to the row the journey created.
+     *
+     * <p>Purpose: the answer exchange resolves the local row through the {@code sub} claim of the identity
+     * token the pool returns, and holds that row's key, the token's user name and the submitted identifier
+     * to agreement, with the token's group membership held to the row's stored type. This stubs all four
+     * consistently for the account this journey provisions: the subject the substituted pool minted, the
+     * identifier it was created under, and the administrative group it was placed in.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the two cases below used to stub the answer with the literal
+     * {@code "id-token"}, which was sufficient while nothing read the token. It is not a token, so the
+     * journey now stops at it, and a journey that stopped there would be asserting a handover the
+     * deployment cannot perform. Producing the real shape is what keeps this case a test of the handover
+     * rather than of the stub.</p>
+     *
+     * <p>This method takes no parameter and yields no value.</p>
+     */
+    private void bindTheChallengeAnswerToTheCreatedRow() {
+        when(this.users.findByCognitoSub(SUBJECT)).thenReturn(Optional.of(new User(
+                USER_ID, "Ada", "Lovelace", CognitoUserProvisioningService.USER_TYPE_ADMIN, SUBJECT)));
+
+        Base64.Encoder encoder = Base64.getUrlEncoder().withoutPadding();
+        String claims = encoder.encodeToString(("{\"token_use\":\"id\",\"sub\":\"" + SUBJECT
+                + "\",\"cognito:username\":\"" + USER_ID + "\",\"cognito:groups\":[\"" + ADMIN_GROUP
+                + "\"]}").getBytes(StandardCharsets.UTF_8));
+        String idToken = encoder.encodeToString(
+                "{\"alg\":\"RS256\"}".getBytes(StandardCharsets.UTF_8)) + "." + claims + ".c2ln";
+
+        when(this.provider.respondToAuthChallenge(any(RespondToAuthChallengeRequest.class)))
+                .thenReturn(RespondToAuthChallengeResponse.builder()
+                        .authenticationResult(AuthenticationResultType.builder()
+                                .accessToken("access-token")
+                                .idToken(idToken)
+                                .refreshToken("refresh-token")
+                                .tokenType("Bearer")
+                                .expiresIn(3600)
+                                .build())
+                        .build());
     }
 
     /**
@@ -319,16 +382,7 @@ class FirstSignOnHandoverTest {
         assertThat(challenge.userId()).isEqualTo(USER_ID);
         assertThat(challenge.session()).isEqualTo(SESSION);
 
-        when(this.provider.respondToAuthChallenge(any(RespondToAuthChallengeRequest.class)))
-                .thenReturn(RespondToAuthChallengeResponse.builder()
-                        .authenticationResult(AuthenticationResultType.builder()
-                                .accessToken("access-token")
-                                .idToken("id-token")
-                                .refreshToken("refresh-token")
-                                .tokenType("Bearer")
-                                .expiresIn(3600)
-                                .build())
-                        .build());
+        bindTheChallengeAnswerToTheCreatedRow();
 
         SignOnResponse tokens = this.identity.answerChallenge(new SignOnChallengeRequest(
                 USER_ID, challenge.session(), REPLACEMENT_CREDENTIAL));
@@ -405,16 +459,7 @@ class FirstSignOnHandoverTest {
         String credential = createAccountAndBindSignOnToItsCredential();
 
         SignOnOutcome first = this.identity.authenticate(new SignOnRequest(USER_ID, credential));
-        when(this.provider.respondToAuthChallenge(any(RespondToAuthChallengeRequest.class)))
-                .thenReturn(RespondToAuthChallengeResponse.builder()
-                        .authenticationResult(AuthenticationResultType.builder()
-                                .accessToken("access-token")
-                                .idToken("id-token")
-                                .refreshToken("refresh-token")
-                                .tokenType("Bearer")
-                                .expiresIn(3600)
-                                .build())
-                        .build());
+        bindTheChallengeAnswerToTheCreatedRow();
         this.identity.answerChallenge(new SignOnChallengeRequest(
                 USER_ID, ((SignOnChallenge) first).session(), REPLACEMENT_CREDENTIAL));
 

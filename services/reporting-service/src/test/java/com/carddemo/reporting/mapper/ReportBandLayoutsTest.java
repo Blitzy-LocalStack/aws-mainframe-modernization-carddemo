@@ -1116,6 +1116,13 @@ class ReportBandLayoutsTest {
         //       does not fail. They are also anchored to 97 individually rather than compared to each
         //       other, because equality among the three would still hold if all three were wrong by the
         //       same amount.
+        // WHY : Refactoring Rationale: this case also restated the same arithmetic over its own
+        //       expectations -- 11 plus 86, 13 plus 84 and 11 plus 86, each against 97 as lines 51 to
+        //       65 of app/cpy/CVTRA07Y.cpy declare them -- and those three lines are removed rather
+        //       than kept as a record. They were the folded-constant form this comment already
+        //       rejects, so they could not fail for any reason connected to ReportBandLayouts while
+        //       reading in a report as three more covered properties. The arithmetic they recorded is
+        //       stated here and checked against the published constants immediately below.
         assertThat(ReportBandLayouts.PAGE_TOTAL_LABEL_WIDTH
                 + ReportBandLayouts.PAGE_TOTAL_LEADER_WIDTH)
                 .as("app/cpy/CVTRA07Y.cpy lines 51 and 53 declare 11 and 86")
@@ -1127,17 +1134,6 @@ class ReportBandLayoutsTest {
         assertThat(ReportBandLayouts.GRAND_TOTAL_LABEL_WIDTH
                 + ReportBandLayouts.GRAND_TOTAL_LEADER_WIDTH)
                 .as("app/cpy/CVTRA07Y.cpy lines 63 and 65 declare 11 and 86")
-                .isEqualTo(AMOUNT_ZERO_BASED_START);
-
-        // WHY : Assumptions: 11 + 86, 13 + 84 and 11 + 86 all reach 97 as read off lines 51 to 65 of
-        //       app/cpy/CVTRA07Y.cpy. These three are folded constants and cannot fail, so they are
-        //       stated as the arithmetic RECORD that the assertions above are checked against rather
-        //       than as assertions in their own right, and the subject-facing checks sit above them.
-        assertThat(EXPECTED_PAGE_LABEL_WIDTH + EXPECTED_PAGE_LEADER_WIDTH)
-                .isEqualTo(AMOUNT_ZERO_BASED_START);
-        assertThat(EXPECTED_ACCOUNT_LABEL_WIDTH + EXPECTED_ACCOUNT_LEADER_WIDTH)
-                .isEqualTo(AMOUNT_ZERO_BASED_START);
-        assertThat(EXPECTED_GRAND_LABEL_WIDTH + EXPECTED_GRAND_LEADER_WIDTH)
                 .isEqualTo(AMOUNT_ZERO_BASED_START);
 
         // WHY : Assumptions: the compensation is only meaningful if the labels are right too. A pair of

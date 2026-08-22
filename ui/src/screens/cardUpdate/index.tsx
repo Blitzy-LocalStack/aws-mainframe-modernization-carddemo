@@ -27,7 +27,7 @@
 import { Button, Flex, Form, Input, Popconfirm, Result, Spin, Typography, theme } from 'antd';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ReactElement } from 'react';
-import { useNavigate, useParams } from 'react-router';
+import { useLocation, useNavigate, useParams } from 'react-router';
 
 import { getCard, updateCard } from '../../api/cards';
 import type { CardDetail, CardUpdateRequest } from '../../api/cards';
@@ -42,7 +42,12 @@ import type { PfKeyHandlerMap } from '../../layout/usePfKeys';
 import { STATUS_MESSAGES } from '../../messages/messages';
 import type { MapsetName } from '../../messages/messages';
 import { cardDetailPath, isCardSelector, requireCardSelector } from '../../routes/cards';
-import { navigateSafely, navigationHandler } from '../../routes/navigation';
+import {
+  inApplicationRoute,
+  navigateSafely,
+  navigationHandler,
+  screenTransitionState,
+} from '../../routes/navigation';
 import { ScreenTitle } from '../../layout/ScreenTitle';
 import { FIELD_ERROR_TOKENS } from '../../theme/tokens';
 
@@ -440,6 +445,7 @@ function formValuesFrom(loaded: CardDetail): CardFormValues {
  */
 export function CardUpdateScreen(): ReactElement {
   const navigate = useNavigate();
+  const location = useLocation();
   // WHY : Assumptions: read here, at the top of the component and above every early return, because
   //       the rules of hooks require an unconditional call site -- the early returns below would make
   //       a later call conditional. Reading it during render is deliberate rather than incidental: the
@@ -510,6 +516,27 @@ export function CardUpdateScreen(): ReactElement {
   const readGeneration = useRef(0);
   const selector =
     routeIdentifier !== undefined && isCardSelector(routeIdentifier) ? routeIdentifier : null;
+
+  /*
+   * WHY : Refactoring Rationale: the caller is READ rather than assumed. The exit arm below named the
+   *       same card's detail route unconditionally, on the stated ground that the detail screen is
+   *       this route's caller -- which is false: the browse screen's `'U'` arm transfers straight here
+   *       (`app/cbl/COCRDLIC.cbl` L554), so an operator who came from the browse was returned to a
+   *       screen they had never visited and had to press the exit key twice. The reference resolves
+   *       the destination instead of fixing it: `app/cbl/COCRDUPC.cbl` L442-L454 prefers
+   *       `CDEMO-FROM-TRANID`/`CDEMO-FROM-PROGRAM` and takes its own default only when neither was
+   *       recorded, and this is that resolution.
+   * WHY : Assumptions: the claim is validated by `inApplicationRoute` rather than trusted, because
+   *       router state is writable through a hand-edited history entry -- an unchecked path-shaped
+   *       value there would either reach the not-found result or, protocol-relative, leave the
+   *       application entirely on a key the operator believes goes back one screen.
+   * WHY : Alternatives Considered: the browser's own history, through `navigate(-1)`. Rejected for the
+   *       reason `ui/src/routes/navigation.ts` records on `ScreenTransitionState.from`: a history entry
+   *       is not a named origin, need not belong to this application, and does not exist at all on a
+   *       screen reached by typing its address -- which is precisely the arrival this screen's fallback
+   *       has to answer.
+   */
+  const callerOrigin = inApplicationRoute(screenTransitionState(location.state).from);
 
   /*
    * WHY : Refactoring Rationale: the read is a named callback because TWO callers need it -- the mount
@@ -1014,12 +1041,28 @@ export function CardUpdateScreen(): ReactElement {
     },
     PFK03: {
       /**
-       * Returns to the caller, which the source resolves to the screen it was reached from and
-       * otherwise to the main menu (`app/cbl/COCRDUPC.cbl` L435-L477). The detail screen for the same
-       * card is this route's caller, so it is the destination.
+       * Returns to the caller the transition named, and otherwise to this card's own detail screen.
+       *
+       * Assumptions: the source resolves the same two arms in the same order -- it prefers the
+       * recorded caller and falls back only when none was recorded
+       * (`app/cbl/COCRDUPC.cbl` L442-L454). This route has exactly two callers, the browse screen's
+       * `'U'` arm and the detail screen's edit control, and the browse always names itself while the
+       * detail screen forwards whatever named IT. So the fallback answers an arrival with no caller
+       * anywhere in the chain: a typed address, a bookmark, a reload, or a transition that fell back
+       * to a full document navigation and so dropped its state.
+       *
+       * Trade-offs: the fallback is this card's detail screen where the source's is the main menu
+       * (`LIT-MENUPGM` at L451). It is a deliberate divergence: the source could only reach that arm
+       * by being started as a bare transaction with no card, while every arrival here carries a
+       * selector in its own address, so the record is on hand and the nearest screen showing it is
+       * one step away. Returning an operator to the menu from a card they were editing would discard
+       * a context the address still holds. The cost is that the menu is then two presses away rather
+       * than one, by way of the browse the detail screen's own exit key reaches -- and the reference
+       * routes an operator the same way, since `COCRDSLC` L318-L320 also prefers its own recorded
+       * caller, the card list, over the menu it names only when none was recorded.
        */
       onInvoke: () => {
-        navigateSafely(navigate, cardDetailPath(requireCardSelector(selector)));
+        navigateSafely(navigate, callerOrigin ?? cardDetailPath(requireCardSelector(selector)));
       },
       label: CARD_UPDATE_KEY_LABELS.PFK03,
     },

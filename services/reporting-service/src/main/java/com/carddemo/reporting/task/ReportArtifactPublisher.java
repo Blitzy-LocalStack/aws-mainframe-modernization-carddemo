@@ -163,6 +163,13 @@ public class ReportArtifactPublisher {
      * Naming that here rather than at the call site keeps the daily type token and the range that goes with
      * it in one place, so a caller cannot pair the daily token with a period.</p>
      *
+     * <p>Assumptions: the publication has ONE reader-visible commit point. The report is written to two
+     * keys, but only the request-scoped one is resolved by anything that serves a caller, and that one is
+     * completed last -- so a failure at any point in this method leaves every reader on the previous
+     * report rather than on a partial, an empty or a half-published one. The reasoning, and the bounded
+     * residual a failure between the two completions leaves behind, are recorded at the completion
+     * calls.</p>
+     *
      * @param businessDate the business date to report on and key under; must not be {@code null}
      * @return the locator of the published artifact together with the generator's summary; never
      *     {@code null}
@@ -217,6 +224,35 @@ public class ReportArtifactPublisher {
                 primary.write(record);
                 secondary.write(record);
             });
+
+            // WHY : Refactoring Rationale: both keys are published HERE, on the success path, where the
+            //       try-with-resources used to publish them as it closed. Closing published whatever had
+            //       been written, so a generation that failed part way replaced a rerun date's last good
+            //       report with a truncated one, and a generation that failed before its first row
+            //       replaced it with an empty object. Completion is now explicit and the resource clause
+            //       aborts, so a failed rerun leaves the previous report readable.
+            // WHY : ⚠️ Refactoring Rationale: the GENERATION copy completes first and the REQUEST-SCOPED
+            //       copy completes LAST, where the two used to complete in the opposite order. Only the
+            //       request-scoped key is reader-visible: the status surface publishes it, the collection
+            //       route serves it and the runbooks address a report by its range, while nothing
+            //       resolves a generation coordinate at a request edge. Completing it last therefore
+            //       makes it the single moment at which any reader sees this run at all, so a failure
+            //       anywhere before it leaves every reader on the previous report -- which is what a
+            //       failed run should look like. The old order published the reader-visible copy first
+            //       and could leave a failed run looking successful to a caller.
+            // WHY : Trade-offs: the residual of a failure between the two completions is an ORPHAN
+            //       generation object, and it is bounded in three ways. It cannot be partial or empty,
+            //       because the writer publishes only on an explicit completion. It cannot overwrite
+            //       anything, because nextGeneration allocates the first unused number for the date. And
+            //       it cannot mislead, because both copies hold identical bytes, so an orphan is a
+            //       complete report at a coordinate nothing resolves -- the next run allocates past it
+            //       and the five-generation retention rule prunes it. That is why this publication needs
+            //       no pointer object while the statement run does: a statement generation is three
+            //       artifacts holding DIFFERENT content that must agree with each other, so a reader can
+            //       be shown a mixture, whereas here there is only one report and the question is
+            //       whether a second copy of it exists.
+            secondary.complete();
+            primary.complete();
         }
 
         LOG.info("event=reporting.report.generation-published family={}/{} generation={} key={}"
@@ -262,16 +298,21 @@ public class ReportArtifactPublisher {
         //       closed-domain check on the type, which is why no separate check remains at this point.
         String key = locator.key(reportType, rangeStart, rangeEnd, runDate);
 
-        // WHY : Assumptions: the writer is held in its own local so its version can be read AFTER the
-        //       try-with-resources has closed it. The version exists only once the artifact is published,
-        //       and publication happens in close(), so reading it inside the block would always answer
-        //       null. Constructing the writer in the resource clause and reaching back for it afterwards
-        //       is not possible -- the resource variable is out of scope -- which is why it is declared
-        //       first and the sink wraps it.
+        // WHY : Assumptions: the writer is held in its own local so its version can be read after the
+        //       block. The version exists only once the artifact is published, and publication is the
+        //       completion call inside the block, so the local is what makes the value reachable at all;
+        //       constructing the writer in the resource clause and reaching back for it afterwards is not
+        //       possible, the resource variable being out of scope.
         S3ArtifactWriter writer = new S3ArtifactWriter(s3, bucket, key);
         TransactionReportService.ReportGenerationSummary summary;
         try (S3ReportSink sink = new S3ReportSink(writer)) {
             summary = reports.generateReport(rangeStart, rangeEnd, sink);
+
+            // WHY : Refactoring Rationale: publication is this call and no longer the resource clause's
+            //       close, for the reason recorded on the daily path above -- a generation that failed
+            //       part way used to publish its partial output over the last good report for the same
+            //       range.
+            sink.complete();
         }
 
         return new PublishedArtifact(summary, bucket, key, writer.publishedVersionId());

@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.carddemo.batch.domain.BatchRun;
 import com.carddemo.batch.domain.BatchRun.BatchRunStatus;
 import jakarta.persistence.EntityManager;
+import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
@@ -348,27 +349,79 @@ class BatchRunRepositoryIT {
     }
 
     /**
-     * Confirms the production migration applied and that it, and not this test, created the schema.
+     * Confirms the production migrations applied and that they, and not this test, created the schema.
      *
-     * <p>Assumptions: the history row is read for the exact version {@code V1__batch.sql} declares, so
-     * an environment that reached this table by some other route fails here. The two object counts
-     * beside it are what distinguish "the migration ran" from "the migration ran completely": the
-     * Spring Batch job repository is created by the same file, at its L664 through L739, and a job that
-     * started against a half-applied schema would fail naming a missing sequence rather than a missing
-     * migration.</p>
+     * <p>Assumptions: the history rows are read for the exact versions {@code db/migration} declares, so
+     * an environment that reached this table by some other route fails here. The catalog census beside
+     * them is what distinguishes "the migration ran" from "the migration ran completely": the Spring
+     * Batch job repository is created by the same file, at its L703 through L778, and a job that started
+     * against a half-applied schema fails naming a missing sequence rather than a missing migration.</p>
+     *
+     * <p>Assumptions: the history holds one VERSIONLESS successful row beside the two versioned ones,
+     * and it is asserted separately rather than filtered away silently. Flyway writes it when it has to
+     * create the schema before migrating into it -- {@code SchemaHistory} records the marker with the
+     * description asserted below and the type {@code SCHEMA} -- so its presence is the direct evidence
+     * for the second half of this case's own claim, that the schema was created by the migration and
+     * not by this test or by a harness script. The versioned census is therefore taken over
+     * {@code version IS NOT NULL} and the marker is asserted on its own, which is what lets both be
+     * exact: a census mixing the two would have to admit a null, and admitting a null is how it would
+     * also admit a second unexplained versionless row.</p>
+     *
+     * <p>Refactoring Rationale: the object inventory is an EXACT census of named objects, replacing a
+     * count of tables matching {@code batch\_job%}. That prefix count expected four and passed, while
+     * the migration creates six framework tables -- {@code BATCH_STEP_EXECUTION} and
+     * {@code BATCH_STEP_EXECUTION_CONTEXT} are outside the prefix, and all three sequences are outside
+     * the object class -- so a migration that dropped either step table or any sequence would have
+     * satisfied the assertion. A subset predicate cannot detect a missing member of the set it filters
+     * on, which is exactly the failure mode a migration-completeness case exists to catch.</p>
+     *
+     * <p>Trade-offs: the census is closed with {@code containsExactlyInAnyOrder} rather than left open
+     * with {@code contains}, so a migration that ADDS an object fails here until this list names it.
+     * That is deliberate: the cost is one edit per deliberate schema addition, and the benefit is that
+     * the batch schema cannot grow an unreviewed table or sequence. {@code flyway_schema_history} is
+     * Flyway's own bookkeeping table and {@code daily_feed_watermark} arrives from
+     * {@code V2__batch_feed_watermark.sql}; both are named because they are genuinely in this schema,
+     * and their shape is pinned by {@code DailyFeedWatermarkRepositoryIT} rather than here.</p>
+     *
+     * <p>Assumptions: THREE versions are expected and the table and sequence censuses below are
+     * unchanged by the third, which is not an inconsistency.
+     * {@code V3__batch_run_contract_restatement.sql} issues {@code COMMENT ON} statements only -- one
+     * column comment and seven constraint comments -- so it adds no relation for either census to
+     * name. The version list is asserted separately from the relation censuses for exactly this
+     * reason: a migration that documents the schema must still be declared here, because the
+     * assertion's purpose is to prove the schema was reached through EVERY migration rather than
+     * through the first that happened to create a table.</p>
+     *
+     * <p>Assumptions: the sequence census reads {@code information_schema.sequences}, which excludes a
+     * sequence owned by an identity column. So the implicit sequence behind {@code batch_run.id} is
+     * absent from the expected set by construction rather than by oversight, and the three named
+     * sequences are exactly the ones {@code V1__batch.sql} declares with {@code CREATE SEQUENCE}. The
+     * identity column itself is proven by every case here that inserts a row without supplying an
+     * identifier and reads one back.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("Flyway applied V1__batch.sql, creating batch_run and the job repository")
+    @DisplayName("Flyway applied db/migration completely, creating every named table and sequence")
     void flywayAppliedTheProductionBatchMigration() {
         List<String> applied = this.jdbc.queryForList(
-                "SELECT version FROM batch.flyway_schema_history WHERE success ORDER BY installed_rank",
+                "SELECT version FROM batch.flyway_schema_history"
+                        + " WHERE success AND version IS NOT NULL ORDER BY installed_rank",
                 String.class);
 
         assertThat(applied)
-                .as("the batch schema must be reached through db/migration and through nothing else")
-                .contains("1");
+                .as("the batch schema must be reached through db/migration and through nothing else,"
+                        + " and through every migration it declares rather than only the first")
+                .containsExactly("1", "2", "3");
+
+        List<String> schemaCreation = this.jdbc.queryForList(
+                "SELECT description FROM batch.flyway_schema_history"
+                        + " WHERE success AND version IS NULL ORDER BY installed_rank",
+                String.class);
+        assertThat(schemaCreation)
+                .as("the one versionless history row is Flyway's own schema-creation marker, which is"
+                        + " what makes the migration and not this test the creator of the schema")
+                .containsExactly("<< Flyway Schema Creation >>");
 
         Integer batchRunColumns = this.jdbc.queryForObject(
                 "SELECT count(*) FROM information_schema.columns"
@@ -379,13 +432,37 @@ class BatchRunRepositoryIT {
                         + " attempt counter a re-opened row increments")
                 .isEqualTo(8);
 
-        Integer jobRepositoryTables = this.jdbc.queryForObject(
-                "SELECT count(*) FROM information_schema.tables"
-                        + " WHERE table_schema = 'batch' AND table_name LIKE 'batch\\_job%'",
-                Integer.class);
-        assertThat(jobRepositoryTables)
-                .as("the Spring Batch job repository tables arrive from the same migration")
-                .isEqualTo(4);
+        List<String> tables = this.jdbc.queryForList(
+                "SELECT table_name FROM information_schema.tables"
+                        + " WHERE table_schema = 'batch' AND table_type = 'BASE TABLE'"
+                        + " ORDER BY table_name",
+                String.class);
+        assertThat(tables)
+                .as("the batch schema holds exactly the step ledger, the feed watermark, Flyway's"
+                        + " history and the six Spring Batch job-repository tables")
+                .containsExactlyInAnyOrder(
+                        "batch_run",
+                        "daily_feed_watermark",
+                        "flyway_schema_history",
+                        "batch_job_instance",
+                        "batch_job_execution",
+                        "batch_job_execution_params",
+                        "batch_step_execution",
+                        "batch_step_execution_context",
+                        "batch_job_execution_context");
+
+        List<String> sequences = this.jdbc.queryForList(
+                "SELECT sequence_name FROM information_schema.sequences"
+                        + " WHERE sequence_schema = 'batch' ORDER BY sequence_name",
+                String.class);
+        assertThat(sequences)
+                .as("the three Spring Batch sequences arrive from the same migration; the framework"
+                        + " allocates job, job-execution and step-execution identifiers from them and"
+                        + " fails at the first launch if any one of them is absent")
+                .containsExactlyInAnyOrder(
+                        "batch_job_instance_seq",
+                        "batch_job_execution_seq",
+                        "batch_step_execution_seq");
     }
 
     /**
@@ -698,12 +775,77 @@ class BatchRunRepositoryIT {
     }
 
     /**
-     * Confirms the attempt counter is durable across a re-open and defaults to the first attempt.
+     * Confirms every column and every constraint of the ledger carries a comment in the catalogue.
+     *
+     * <p>Purpose: {@code V1__batch.sql} states that its comments exist so an operator inspecting the
+     * table from a session -- during a failed nightly run, with no access to this repository -- reads
+     * the reasoning without the file. That claim was only three-quarters true. It issues a
+     * {@code COMMENT ON COLUMN} for seven of its eight columns, leaving {@code attempt} undescribed,
+     * and it comments none of its seven constraints -- so the operator holding a constraint name
+     * returned by a failed insert had nothing in the catalogue to resolve it against, and the one
+     * column a redrive raises first was the one column with no comment.
+     * {@code V3__batch_run_contract_restatement.sql} writes the missing commentary, and this case is
+     * what holds it there.</p>
+     *
+     * <p>Refactoring Rationale: the assertion is that NO column and NO constraint is uncommented,
+     * rather than that particular comments carry particular words. Asserting text would pin the prose
+     * and fail on an improvement to it; asserting completeness fails on the thing that actually goes
+     * wrong, which is a column or a rule added later and left undocumented. That is the same defect
+     * this case exists because of.</p>
+     *
+     * <p>Assumptions: the catalogue is read rather than the migration text, because the question is
+     * what a session can see. A comment present in the file and absent from the database -- which is
+     * exactly what a migration applied under a role without ownership produces, since {@code COMMENT}
+     * requires it -- would pass a text assertion and fail this one.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("every ledger column and constraint carries a comment a session can read")
+    void everyColumnAndConstraintCarriesACatalogueComment() {
+        List<String> uncommentedColumns = this.jdbc.queryForList(
+                "SELECT a.attname FROM pg_attribute a"
+                        + " WHERE a.attrelid = 'batch.batch_run'::regclass"
+                        + " AND a.attnum > 0 AND NOT a.attisdropped"
+                        + " AND col_description(a.attrelid, a.attnum) IS NULL"
+                        + " ORDER BY a.attname",
+                String.class);
+
+        assertThat(uncommentedColumns)
+                .as("every column of the step ledger must be described in the catalogue; an operator"
+                        + " reading the table from a session has nothing else, and the column a"
+                        + " redrive raises first is the one that was undescribed")
+                .isEmpty();
+
+        List<String> uncommentedConstraints = this.jdbc.queryForList(
+                "SELECT c.conname FROM pg_constraint c"
+                        + " WHERE c.conrelid = 'batch.batch_run'::regclass"
+                        + " AND obj_description(c.oid, 'pg_constraint') IS NULL"
+                        + " ORDER BY c.conname",
+                String.class);
+
+        assertThat(uncommentedConstraints)
+                .as("a violated constraint reports its own name and nothing else, so every named rule"
+                        + " must be resolvable to its meaning from the catalogue the operator already"
+                        + " has open")
+                .isEmpty();
+    }
+
+    /**
+     * Confirms the attempt counter and the re-opened start time are durable across a re-open.
      *
      * <p>Purpose: the counter is the only record that a step was tried more than once. Because
      * {@code uq_batch_run_run_step} admits one row per run and step, a redrive cannot insert a second
      * row -- so the recorded row is re-opened in place and the count is what distinguishes a first
      * attempt from a fourth. A counter that lived only in the entity would be lost on every reload.</p>
+     *
+     * <p>Purpose: the start time is asserted alongside the counter because the two are written by the
+     * same transition and only one of them was being checked. {@code started_at} was mapped
+     * {@code updatable = false} while the constructor was its only writer, and {@code reopen} was added
+     * afterwards -- so the provider omitted the column from the UPDATE and a redriven row durably kept
+     * the FIRST attempt's start while its counter said two. An operator reading a recovered night takes
+     * that column as the start of the attempt that is running, so the stale value is worse than a
+     * missing one.</p>
      *
      * <p>Assumptions: the row is read back through plain SQL after the transaction commits rather than
      * through the persistence context that wrote it, because a context read can be answered from the
@@ -719,7 +861,7 @@ class BatchRunRepositoryIT {
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the attempt counter defaults to one, survives a re-open and refuses a count below one")
+    @DisplayName("a re-open durably counts the attempt, restarts the clock and refuses a count below one")
     void theAttemptCounterIsDurableAcrossAReopen() {
         commitOpenStep(RUN_ID, STEP_NAME, STARTED_AT);
 
@@ -734,20 +876,29 @@ class BatchRunRepositoryIT {
                     .orElseThrow();
             recorded.markFailed(FINISHED_AT, RETURN_CODE_FAIL);
         });
+        LocalDateTime secondAttemptStart = FINISHED_AT.plusMinutes(30);
         this.transactionTemplate.executeWithoutResult(status -> {
             BatchRun recorded = this.repository.findByRunIdAndStepName(RUN_ID, STEP_NAME)
                     .orElseThrow();
-            recorded.reopen(FINISHED_AT.plusMinutes(30));
+            recorded.reopen(secondAttemptStart);
         });
         this.entityManager.clear();
 
         Map<String, Object> reopened = this.jdbc.queryForMap(
-                "SELECT attempt, status, finished_at, return_code FROM batch.batch_run"
+                "SELECT attempt, status, started_at, finished_at, return_code FROM batch.batch_run"
                         + " WHERE run_id = ? AND step_name = ?", RUN_ID, STEP_NAME);
         assertThat(reopened.get("attempt"))
                 .as("re-opening the recorded row counts the attempt rather than inserting a second row")
                 .isEqualTo(2);
         assertThat(reopened.get("status")).isEqualTo(BatchRun.BatchRunStatus.STARTED.name());
+        LocalDateTime storedStart = ((Timestamp) reopened.get("started_at")).toLocalDateTime();
+        assertThat(storedStart)
+                .as("the stored start must be the re-opened attempt's, not the first attempt's, or the"
+                        + " column reads as the start of work that finished half an hour earlier")
+                .isEqualTo(secondAttemptStart);
+        assertThat(storedStart)
+                .as("and it must have moved off the value the first attempt wrote")
+                .isNotEqualTo(STARTED_AT);
         assertThat(reopened.get("finished_at"))
                 .as("the lifecycle constraint requires a started row to carry no finishing instant, so"
                         + " re-opening has to clear the one the failed attempt wrote")

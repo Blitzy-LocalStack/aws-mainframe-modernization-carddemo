@@ -860,6 +860,3 @@ class DisclosureGroupRepositoryIT {
     static class RateLookupPersistenceTestApplication {
     }
 }
-
-
-

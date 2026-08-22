@@ -102,12 +102,13 @@ name: CardDemo Services CI
 # source on the *main* branch", which is why both triggers are scoped to `main`. workflow_dispatch
 # adds a manual entry point plus the image-build toggle documented under Parameters above.
 #
-# Assumptions: the path filters below are the complete set of files whose change
-# can invalidate a gate in this workflow, and the set is wider than the trees the
-# gates read: services/** for the reactor, config/checkstyle/** because the Java
-# documentation gate reads its ruleset from there rather than from the reactor,
-# config/rule1/** because the lexical gate's own source and its self-test live
-# there, data-migration/** for the ETL package, this file itself so that editing
+# Assumptions: the path filters below are this workflow's OWNERSHIP set -- the
+# services reactor and the ETL package, plus everything those two gates read that
+# lives outside them -- and not the complete set of files whose change can invalidate
+# a gate here. They are: services/** for the reactor, config/checkstyle/** because
+# the Java documentation gate reads its ruleset from there rather than from the
+# reactor, config/rule1/** because the lexical gate's own source and its self-test
+# live there, data-migration/** for the ETL package, this file itself so that editing
 # the pipeline revalidates it under its own rules, and the two PROSE AUTHORITIES --
 # docs/CODE_DOCUMENTATION_STANDARD.md and CONTRIBUTING.md.
 # Assumptions: those last two are triggers because they are AUTHORITATIVE over the
@@ -124,6 +125,30 @@ name: CardDemo Services CI
 # and samples/** are the reference-only COBOL baseline and its parity-oracle suite,
 # owned by .github/workflows/tests.yml; including them here would run these gates
 # against trees they do not govern and duplicate that pipeline's authority.
+# Assumptions: ONE gate here reads more than this ownership set, and the gap is stated
+# rather than left for a reader to discover. The rule1-documentation-gate job below
+# runs `python config/rule1/rule1_gate.py` with no path argument, so it walks the whole
+# authored tree -- ui/**, infra/**, every docs/ subtree and the root documents included.
+# A change confined to any of those can therefore carry a finding this workflow would
+# report and will not run at all, because none of them is a trigger above.
+# Refactoring Rationale: the first paragraph above asserted these filters WERE the
+# complete set of files whose change can invalidate a gate here. That was false in the
+# direction that matters, because it invited a reader to conclude a green pull request
+# on a ui/** change had passed the lexical gate when no run of it had happened.
+# Assumptions: coverage of the authored tree is nevertheless complete, and the fallback
+# is .github/workflows/infra-ci.yml rather than this file. That workflow triggers on
+# `paths-ignore: [app/**, tests/**, scripts/**, samples/**]` -- the four reference-only
+# trees -- so every authored change runs it, and its terraform-static job runs the
+# identical fail-closed invocation of the same script at L621-L626. The two workflows
+# overlap deliberately on the paths named above: a services change walks the tree
+# twice, which costs one walk and removes the possibility of an authored file that no
+# pipeline scans.
+# Alternatives Considered: broadening these filters to match the completeness claim
+# rather than correcting the claim. Rejected on cost and on ownership -- a
+# `paths-ignore` here would run the full Maven reactor, the Testcontainers suites and
+# every container image build on a ui/** or documentation-only commit, to repeat a
+# lexical walk infra-ci already performs, and it would make this pipeline the authority
+# over trees whose own gates live elsewhere.
 on:
   push:
     branches: [main]

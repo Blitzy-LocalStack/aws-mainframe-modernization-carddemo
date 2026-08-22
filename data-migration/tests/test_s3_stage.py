@@ -6,6 +6,7 @@ import base64
 import hashlib
 import io
 import os
+import re
 from datetime import date
 from pathlib import Path
 from typing import Any, Final
@@ -78,17 +79,64 @@ class _FakePaginator:
         self._operation = operation
 
     def paginate(self, **kwargs: Any) -> list[dict[str, Any]]:
-        """Return pages registered for the operation and requested prefix."""
+        """Return pages registered for the operation and requested prefix.
+
+        Purpose
+        -------
+        Serve the module's listings either from pages a test registered or, failing that, from
+        the objects the fake actually holds -- honouring ``Delimiter`` the way the service does,
+        so a listing sees the same prefixes a real bucket would report.
+
+        Parameters
+        ----------
+        **kwargs : Any
+            Listing arguments. ``Prefix`` selects the pages; ``Delimiter`` selects between a
+            key listing and a rolled-up common-prefix listing.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            One or more response pages, each carrying ``Contents``, ``CommonPrefixes`` or
+            neither.
+
+        Raises
+        ------
+        None
+            An unregistered prefix over an empty store yields a single empty page, which is what
+            the service returns for a prefix nothing is stored under.
+        """
         prefix = kwargs["Prefix"]
         registered = self._client.pages.get((self._operation, prefix))
         if registered is not None:
             return registered
         # WHY : Assumptions: an unregistered prefix answers with the objects the fake has been
-        #   made to hold, filtered by prefix, rather than with an empty page. Generation CLAIMS
+        #   made to hold, filtered by prefix, rather than with an empty page. Reservation markers
         #   are created by the code under test rather than pre-registered, so a fake that only
         #   ever replayed registered pages could never show the allocator its own earlier claim
         #   -- which is precisely the state the retry-reuse and collision tests turn on.
-        contents = [{"Key": key} for key in sorted(self._client.objects) if key.startswith(prefix)]
+        matching = [key for key in sorted(self._client.objects) if key.startswith(prefix)]
+        delimiter = kwargs.get("Delimiter")
+        if delimiter:
+            # WHY : Refactoring Rationale: a DELIMITED listing now rolls the matching keys up into
+            #   common prefixes, where this double returned raw keys under every listing. The
+            #   difference decides a real property rather than a detail of the double: a
+            #   reservation marker lives INSIDE the ``gen=NNNN/`` prefix it reserves, so it is
+            #   only the roll-up that makes a claimed-but-unstaged generation visible to
+            #   `list_generation_prefixes` -- and that visibility is the whole reason the marker
+            #   sits there rather than in a sibling prefix. Returning keys instead would have let
+            #   the allocator re-offer a number another writer had already claimed and the suite
+            #   would have reported it as correct.
+            rolled: list[str] = []
+            for key in matching:
+                remainder = key[len(prefix) :]
+                head, separator, _ = remainder.partition(delimiter)
+                if not separator:
+                    continue
+                candidate = f"{prefix}{head}{delimiter}"
+                if candidate not in rolled:
+                    rolled.append(candidate)
+            return [{"CommonPrefixes": [{"Prefix": item} for item in rolled]}] if rolled else [{}]
+        contents = [{"Key": key} for key in matching]
         return [{"Contents": contents}] if contents else [{}]
 
 
@@ -285,6 +333,22 @@ def test_prune_generations_permanently_deletes_old_versions_and_markers() -> Non
     ]
 
 
+#: Date partition every reservation test in this module allocates under.
+#:
+#: WHY : Assumptions: the reservation tests share ONE partition literal rather than each
+#: spelling it out, because the marker key, the listing registration and the assertion all have
+#: to name the same partition for a race to be reproduced at all -- and three independent
+#: literals is how one of them ends up naming a different date and the test passes by allocating
+#: from an empty partition instead of a contended one.
+_DATE_PREFIX: Final[str] = "ledger/transact-bkup/dt=2026-08-02/"
+#: The marker object name the reservation contract puts inside each ``gen=NNNN/`` prefix.
+#:
+#: WHY : Assumptions: this is read from the module under test rather than transcribed, so a test
+#: cannot assert a spelling the implementation has stopped using. The cross-language tests below
+#: are what pin the spelling itself, against the batch tier's own declaration.
+_MARKER_NAME: Final[str] = s3_stage._CLAIM_OBJECT_NAME
+
+
 def _settings() -> DatasetStagingSettings:
     """Build the staging settings every test in this module writes through.
 
@@ -478,10 +542,10 @@ def test_reserve_generation_advances_past_a_claim_another_writer_won() -> None:
     """Take the next number when the conditional create loses a race for the first."""
     client = _FakeS3()
     settings = _settings()
-    # Assumptions: the competing claim is planted directly in the fake's object store rather
-    #   than by calling the reservation, so the collision is on the FIRST candidate and the
+    # WHY : Assumptions: the competing marker is planted directly in the fake's object store
+    #   rather than by calling the reservation, so the collision is on the FIRST candidate and the
     #   allocation loop must advance rather than merely returning what discovery suggested.
-    client.objects["ledger/transact-bkup/dt=2026-08-02/_claims/gen=0001"] = b"exec-other"
+    client.objects[f"{_DATE_PREFIX}gen=0001/{_MARKER_NAME}"] = b"exec-other"
 
     reserved = reserve_generation(
         client, settings, "ledger", "transact-bkup", date(2026, 8, 2), "exec-A"
@@ -494,17 +558,16 @@ def test_reserve_generation_loses_a_race_it_could_not_see_coming() -> None:
     """Refuse a generation another writer already claimed even when discovery cannot see it."""
     client = _FakeS3()
     settings = _settings()
-    claim_prefix = "ledger/transact-bkup/dt=2026-08-02/_claims/"
-    # WHY : Assumptions: the competing claim is planted in the object store while the claim prefix
-    #   is registered to list as EMPTY, which is the only arrangement that exercises the
+    # WHY : Assumptions: the competing marker is planted in the object store while the date
+    #   partition is registered to list as EMPTY, which is the only arrangement that exercises the
     #   conditional create as an arbiter. It reproduces the real race: two allocators list the
-    #   prefix, both see nothing, both compute the same candidate, and one of them must be told
+    #   partition, both see nothing, both compute the same candidate, and one of them must be told
     #   no. Every other ordering lets DISCOVERY separate the two callers, so the condition is
-    #   never consulted -- which was measured, not assumed. With the claims visible in the
+    #   never consulted -- which was measured, not assumed. With the marker visible in the
     #   listing, deleting `IfNoneMatch` from the request changed no test result at all; this
     #   arrangement is what makes the exclusivity property observable.
-    client.pages[("list_objects_v2", claim_prefix)] = [{}]
-    client.objects[f"{claim_prefix}gen=0001"] = b"exec-other"
+    client.pages[("list_objects_v2", _DATE_PREFIX)] = [{}]
+    client.objects[f"{_DATE_PREFIX}gen=0001/{_MARKER_NAME}"] = b"exec-other"
 
     reserved = reserve_generation(
         client, settings, "ledger", "transact-bkup", date(2026, 8, 2), "exec-A"
@@ -514,8 +577,18 @@ def test_reserve_generation_loses_a_race_it_could_not_see_coming() -> None:
     # WHY : Assumptions: the refused attempt is also asserted, because returning 2 alone would
     #   pass if the allocator had simply started counting from 2 for an unrelated reason. Seeing
     #   gen=0001 attempted and gen=0002 written is what shows the first was tried and refused.
-    attempted = [put["Key"] for put in client.puts if put.get("IfNoneMatch") == "*"]
-    assert attempted == [f"{claim_prefix}gen=0001", f"{claim_prefix}gen=0002"]
+    #   The replay record is filtered out of the comparison by prefix rather than by position,
+    #   because it is written through the same conditional create and would otherwise appear here
+    #   as a third entry that says nothing about the generation race.
+    attempted = [
+        put["Key"]
+        for put in client.puts
+        if put.get("IfNoneMatch") == "*" and put["Key"].startswith(_DATE_PREFIX)
+    ]
+    assert attempted == [
+        f"{_DATE_PREFIX}gen=0001/{_MARKER_NAME}",
+        f"{_DATE_PREFIX}gen=0002/{_MARKER_NAME}",
+    ]
 
 
 def test_reserve_generation_refuses_a_blank_execution_token() -> None:
@@ -540,6 +613,224 @@ def test_reserve_generation_skips_a_generation_already_staged() -> None:
     #   only claims, which matters for a bucket written before claims existed -- otherwise it
     #   would re-offer gen=0001 and overwrite real data.
     assert reserved == 3
+
+
+#: The batch tier's generation allocator, read as text for the shared-contract assertions.
+#:
+#: WHY : Assumptions: the two implementations are located relative to THIS FILE rather than to
+#: the working directory, matching ``tests/test_config_name_contract.py``, so the assertions hold
+#: whether the suite is invoked from the repository root or from ``data-migration``.
+_JAVA_ALLOCATOR: Final[Path] = (
+    Path(__file__).resolve().parents[2]
+    / "services"
+    / "batch-service"
+    / "src"
+    / "main"
+    / "java"
+    / "com"
+    / "carddemo"
+    / "batch"
+    / "service"
+    / "DatasetGenerationService.java"
+)
+#: The batch tier's family enumeration, whose constant names are the replay-record family tokens.
+_JAVA_FAMILY_ENUM: Final[Path] = (
+    Path(__file__).resolve().parents[2]
+    / "services"
+    / "batch-service"
+    / "src"
+    / "main"
+    / "java"
+    / "com"
+    / "carddemo"
+    / "batch"
+    / "dto"
+    / "DatasetGeneration.java"
+)
+#: The Terraform module that provisions the bucket and scopes the replay records' lifecycle rule.
+_DATASETS_MODULE_MAIN_TF: Final[Path] = (
+    Path(__file__).resolve().parents[2] / "infra" / "modules" / "s3-datasets" / "main.tf"
+)
+
+
+def _java_string_constant(source: Path, name: str) -> str:
+    """Read one ``String`` constant's literal value out of a Java source file.
+
+    Purpose
+    -------
+    Compare this package's reservation literals against the batch tier's own declarations
+    without compiling Java or duplicating the values here, which is what would let the two
+    drift while every test still passed.
+
+    Parameters
+    ----------
+    source : Path
+        The Java file to read.
+    name : str
+        The constant's identifier, for example ``CLAIM_OBJECT_NAME``.
+
+    Returns
+    -------
+    str
+        The declared literal, with the surrounding quotes removed.
+
+    Raises
+    ------
+    AssertionError
+        If the file declares no such ``String`` constant, which means the batch tier renamed or
+        removed it and this contract no longer has two sides.
+    """
+    # WHY : Assumptions: the pattern accepts any modifier order and either visibility, because
+    #   two of the four literals are private to the allocator and two are public. Requiring
+    #   `public` would have made the private pair unreadable here and left half the key shape
+    #   unasserted, which is the half a reader is least likely to check by hand.
+    match = re.search(
+        rf'\bString\s+{re.escape(name)}\s*=\s*"([^"]*)"\s*;',
+        source.read_text(encoding="utf-8"),
+    )
+    assert match is not None, f"{source} declares no String constant named {name}"
+    return match.group(1)
+
+
+def _java_dataset_families() -> dict[str, tuple[str, str]]:
+    """Read the batch tier's ten family constants as name to domain and dataset segment.
+
+    Purpose
+    -------
+    Recover the enum constant NAMES, which are the family tokens the batch tier writes into a
+    replay record's key, together with the path segments this package keys its own registry on.
+
+    Returns
+    -------
+    dict[str, tuple[str, str]]
+        Constant name mapped to its domain segment and its dataset segment.
+
+    Raises
+    ------
+    AssertionError
+        If the enumeration cannot be located, so an empty result can never be mistaken for
+        agreement.
+    """
+    source = _JAVA_FAMILY_ENUM.read_text(encoding="utf-8")
+    # WHY : Assumptions: the constants are matched on the three-argument constructor call the
+    #   enum declares -- baseline base name, domain, dataset segment -- rather than on
+    #   indentation or on a bare identifier. The file also declares a second enumeration whose
+    #   constants take ONE argument, so an identifier-only pattern would collect those too and
+    #   the count assertion below would report agreement over the wrong set.
+    declared = {
+        match.group(1): (match.group(3), match.group(4))
+        for match in re.finditer(
+            r'\b([A-Z][A-Z0-9_]*)\(\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*\)',
+            source,
+        )
+    }
+    assert declared, f"{_JAVA_FAMILY_ENUM} declares no three-argument family constants"
+    return declared
+
+
+def test_the_reservation_object_names_match_the_batch_tier_declarations() -> None:
+    """Declare the claim marker and the replay-record key shape identically in both tiers."""
+    # WHY : Assumptions: all four literals are asserted rather than only the marker name,
+    #   because a replay record is found by its WHOLE key. Agreeing on the root while disagreeing
+    #   on `run=` or on `/family=` produces two records per run under one root, and each tier
+    #   then reads the one it wrote and allocates a second generation for the same retry -- the
+    #   exact defect this contract exists to prevent, with no listing anywhere that looks wrong.
+    assert _java_string_constant(_JAVA_ALLOCATOR, "CLAIM_OBJECT_NAME") == (
+        s3_stage._CLAIM_OBJECT_NAME
+    )
+    assert _java_string_constant(_JAVA_ALLOCATOR, "RUN_CLAIM_ROOT") == s3_stage._RUN_CLAIM_ROOT
+    assert _java_string_constant(_JAVA_ALLOCATOR, "RUN_CLAIM_RUN_MARKER") == (
+        s3_stage._RUN_CLAIM_RUN_MARKER
+    )
+    assert _java_string_constant(_JAVA_ALLOCATOR, "RUN_CLAIM_FAMILY_SEPARATOR") == (
+        s3_stage._RUN_CLAIM_FAMILY_SEPARATOR
+    )
+
+
+def test_the_replay_record_root_matches_the_terraform_module_declaration() -> None:
+    """Scope the module's lifecycle rule and task-role grant to the prefix both tiers write."""
+    match = re.search(
+        r'generation_claim_prefix\s*=\s*"([^"]*)"',
+        _DATASETS_MODULE_MAIN_TF.read_text(encoding="utf-8"),
+    )
+
+    # WHY : Assumptions: the Terraform local is asserted as the THIRD side of the same contract
+    #   rather than assumed to follow the code. It is what the environment roots publish as the
+    #   `generation_claim_prefix` output and scope the batch task role's Get and Put to, so a
+    #   prefix that agrees between the two languages and disagrees with the module produces an
+    #   AccessDenied on the first allocation of a deployed run -- green everywhere a test looks.
+    assert match is not None, f"{_DATASETS_MODULE_MAIN_TF} declares no generation_claim_prefix"
+    assert match.group(1) == s3_stage._RUN_CLAIM_ROOT
+
+
+def test_every_generation_family_maps_to_a_batch_tier_enum_constant() -> None:
+    """Derive each family token from the dataset segment exactly as the batch tier names it."""
+    declared = _java_dataset_families()
+
+    # WHY : Assumptions: the two inventories are compared as SETS of dataset segments first, so a
+    #   family added to one tier and not the other fails here rather than at the token
+    #   derivation. A missing family would otherwise simply not be iterated and the loop below
+    #   would pass over ten agreements while the eleventh family had no counterpart at all.
+    assert {segment for _, segment in declared.values()} == set(s3_stage.GENERATION_FAMILIES)
+    assert len(declared) == len(s3_stage.GENERATION_FAMILIES) == 10
+
+    for constant, (domain, segment) in declared.items():
+        family = s3_stage.GENERATION_FAMILIES[segment]
+        assert family.domain == domain
+        # WHY : Assumptions: the token this package DERIVES is held against the constant name the
+        #   batch tier DECLARES, one family at a time. That is the pair a replay record's key is
+        #   built from on each side, so an upper-casing or hyphen rule that held for nine
+        #   families and not the tenth would be caught on the tenth instead of averaging out.
+        assert s3_stage._run_claim_family_token(segment) == constant
+
+
+def test_reserve_generation_skips_a_generation_the_batch_tier_claimed() -> None:
+    """Refuse a number the Java allocator already claimed, reading its marker as it wrote it."""
+    client = _FakeS3()
+    settings = _settings()
+    # WHY : Assumptions: the marker key is composed from the literal read out of the JAVA source
+    #   rather than from this package's own constant, which is what makes this a cross-language
+    #   case rather than a second self-consistency check. The body is a run identifier the batch
+    #   tier would have written, and it is deliberately not one this suite reserves under.
+    claimed_by_java = (
+        f"{_DATE_PREFIX}gen=0001/{_java_string_constant(_JAVA_ALLOCATOR, 'CLAIM_OBJECT_NAME')}"
+    )
+    client.objects[claimed_by_java] = b"batch-run-0001"
+
+    reserved = reserve_generation(
+        client, settings, "ledger", "transact-bkup", date(2026, 8, 2), "exec-A"
+    )
+
+    # WHY : Assumptions: skipping is asserted through the RESERVED NUMBER and through the marker
+    #   the Java claim is still holding, because a Python writer that had overwritten the marker
+    #   would also return 2 on the next call and the number alone cannot tell the two apart.
+    assert reserved == 2
+    assert client.objects[claimed_by_java] == b"batch-run-0001"
+
+
+def test_reserve_generation_replays_the_generation_the_batch_tier_recorded() -> None:
+    """Return the number the Java allocator recorded for this run rather than taking a new one."""
+    client = _FakeS3()
+    settings = _settings()
+    root = _java_string_constant(_JAVA_ALLOCATOR, "RUN_CLAIM_ROOT")
+    run_marker = _java_string_constant(_JAVA_ALLOCATOR, "RUN_CLAIM_RUN_MARKER")
+    separator = _java_string_constant(_JAVA_ALLOCATOR, "RUN_CLAIM_FAMILY_SEPARATOR")
+    # WHY : Assumptions: the record is planted under a key composed entirely from the Java
+    #   declarations, including the family token, so this case fails if either tier changes any
+    #   part of the key shape. The body is the unpadded decimal form the batch tier writes --
+    #   `Integer.toString` -- and NOT the zero-padded `gen=` segment, because a record written
+    #   with the padded form would parse to the same number here and hide a real divergence.
+    client.objects[f"{root}{run_marker}batch-run-0007{separator}TRANSACT_BKUP"] = b"7"
+
+    replayed = reserve_generation(
+        client, settings, "ledger", "transact-bkup", date(2026, 8, 2), "batch-run-0007"
+    )
+
+    assert replayed == 7
+    # WHY : Assumptions: the absence of any write is asserted alongside the number. A replay that
+    #   returned 7 and still created a marker or a second record would consume nothing visible in
+    #   the return value while leaving bookkeeping the other tier would later read as a claim.
+    assert client.puts == []
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 1.5])

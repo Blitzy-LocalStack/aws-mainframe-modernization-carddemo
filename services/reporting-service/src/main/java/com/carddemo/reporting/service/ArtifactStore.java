@@ -59,6 +59,25 @@ import software.amazon.awssdk.services.s3.model.S3Exception;
  * it is given is composed by this context from a run-wide artifact name or from a report type and a date
  * range, so no key names a card or an account.
  *
+ * <p>⚠️ Assumptions: every one of the three calls this class makes is authorized by
+ * {@code s3:GetObject}, and the task role has to hold it on the reporting key prefixes for any of them
+ * to answer. That is worth stating on the class because two of the three do not look like reads of an
+ * object's CONTENT: {@link #describe(String)} issues {@code HeadObject}, which the store authorizes as
+ * a get rather than under an action of its own, and {@link #readRange(String, long, long)} issues a
+ * ranged {@code GetObject}. A review found the deployed policy granting writes only, on the recorded
+ * ground that no state reads an object and that a read grant should arrive with "a future download
+ * endpoint" -- the endpoint is not future, it is {@code StatementController.collectArtifact} and
+ * {@code ReportController.collectReportArtifact}, both of which reach the store through this class.
+ * Without that grant the statement summary reports no artifact for a run that produced one, and
+ * collection fails as an internal error rather than as an absence.
+ *
+ * <p>Assumptions: the grant belongs on the four reporting key prefixes and NOT on the bucket, because
+ * the same bucket holds the ten nightly dataset generation families whose records carry unmasked
+ * primary account numbers. This class is given keys composed under {@code statements/} and
+ * {@code reports/transaction-detail/} today; a bucket-wide read grant would let a reporting task
+ * enumerate and read every transaction the system has ever posted, which is neither what it does nor
+ * what it should be able to do.
+ *
  * <p>⚠️ Refactoring Rationale: the name of this class is {@code ArtifactStore} and not
  * {@code StatementArtifactStore}, which is what it was first called. Nothing about it is statement-specific
  * -- it takes a key and answers what is stored there -- and the report lifecycle needs exactly the same two

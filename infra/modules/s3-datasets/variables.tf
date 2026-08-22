@@ -7,12 +7,23 @@
 #   versioned, customer-managed-key-encrypted S3 bucket that replaces the
 #   mainframe baseline's generation data groups, carrying one prefix and one
 #   noncurrent-version lifecycle rule for each of the TEN generation-dataset
-#   families, plus the TWO non-generation statement artifacts and the ONE
-#   source-extract prefix the nightly dataset refresh reads its inputs from.
+#   families, plus the THREE non-generation reporting artifacts -- one
+#   `statements/` prefix carrying both the text and the HTML statement, and the
+#   two report prefixes -- and the ONE source-extract prefix the nightly
+#   dataset refresh reads its inputs from. FOURTEEN prefixes in all -- the same
+#   figure as the variable count above, and unrelated to it -- of which only the
+#   TEN are generation families.
 #   Refactoring Rationale: the count read THIRTEEN and the file declared
 #   fourteen from the revision `source_extract_prefix` landed. The sentence now
 #   also names WHY the fourteenth exists, because a bare increment would leave a
-#   reader to infer that the new input was another lifecycle knob.
+#   reader to infer that the new input was another lifecycle knob. The prefix
+#   inventory in the same sentence read TWO non-generation STATEMENT artifacts,
+#   which is exactly what `non_generation_prefixes` held one revision ago --
+#   `statement-text` and `statement-html` -- before those two were merged onto
+#   the single `statements/` prefix the reporting service actually writes and
+#   the two report prefixes were transcribed in beside them. That map now
+#   declares AND ASSERTS exactly three keys, so the sentence understated the
+#   bucket by one prefix and mis-named the pair it kept.
 #
 #   The environment axis is deliberately narrow. Only retention and
 #   lifecycle-transition values differ between the dev and prod roots; the
@@ -31,22 +42,30 @@
 #   should be added.
 #
 # Parameters:
-#   The thirteen `variable` blocks below ARE this file's parameters, so the
+#   The FOURTEEN `variable` blocks below ARE this file's parameters, so the
 #   name, type and description obligation is discharged on each block directly
 #   rather than duplicated into a list here that could drift from it. In
 #   declaration order: name_prefix, environment, kms_key_arn,
-#   dataset_families, non_generation_prefixes, noncurrent_version_retention,
-#   noncurrent_version_transition_days,
+#   dataset_families, non_generation_prefixes, source_extract_prefix,
+#   noncurrent_version_retention, noncurrent_version_transition_days,
 #   noncurrent_version_transition_storage_class,
 #   abort_incomplete_multipart_upload_days, access_log_bucket_name,
 #   s3_gateway_endpoint_id, force_destroy and tags. Exactly THREE of them --
 #   `environment`, `kms_key_arn` and `s3_gateway_endpoint_id` -- have no default
 #   and are therefore required of the caller.
-#   Refactoring Rationale: the count moved from twelve to thirteen and the
-#   required set from two to three when `s3_gateway_endpoint_id` was added. Both
-#   figures are stated because the second is the one that breaks a caller: a
-#   module whose required set grows is a module every existing instantiation must
-#   be revisited for, and both environment roots were updated in the same change.
+#   Refactoring Rationale: the count moved from THIRTEEN to FOURTEEN when
+#   `source_extract_prefix` was added, and the required set did NOT move with
+#   it -- that input carries a default, so the required set stands at three,
+#   where it landed one revision earlier when `s3_gateway_endpoint_id` became
+#   required. Both figures are stated because the second is the one that breaks
+#   a caller: a module whose required set grows is a module every existing
+#   instantiation must be revisited for, which is why the revision that did move
+#   it updated both environment roots in the same change. This enumeration is
+#   what drifted -- it kept thirteen names and omitted `source_extract_prefix`
+#   while the Purpose above already read fourteen, so the file contradicted
+#   itself -- and it is therefore regenerated from the declarations rather than
+#   incremented, because incrementing a count is how a list ends up one name
+#   short of it in the first place.
 #
 # Return values:
 #   None. This file returns nothing: it IS the module's input contract. The
@@ -57,13 +76,34 @@
 #
 # Errors:
 #   `terraform validate` fails before any plan is produced when a caller omits
-#   `environment` or `kms_key_arn`, because neither has a default. Five
-#   variables carry `validation` blocks that reject a value at plan time with
-#   a stated message: `name_prefix` and `environment` on charset and length,
-#   which together guarantee the composed bucket name cannot exceed the S3
+#   `environment`, `kms_key_arn` or `s3_gateway_endpoint_id`, because none of
+#   the three has a default. All THREE are named rather than the two that read as
+#   obviously required, because the third carries a security control: the bucket
+#   policy's VPC-only deny conditions on `aws:SourceVpce` against exactly this
+#   value, so a caller that treats it as optional does not get a bucket reachable
+#   from anywhere -- it gets a plan that fails on a missing required argument,
+#   which is the better of the two outcomes and worth stating so nobody supplies a
+#   placeholder to get past it. TEN of the fourteen carry at least one
+#   `validation` block that rejects a value at plan time with a stated message,
+#   among them: `name_prefix` and `environment` on charset and length, which
+#   together guarantee the composed bucket name cannot exceed the S3
 #   63-character limit; `noncurrent_version_retention` and
 #   `abort_incomplete_multipart_upload_days` on being at least one, because
-#   zero is destructive rather than neutral in both cases.
+#   zero is destructive rather than neutral in both cases; and
+#   `dataset_families`, `non_generation_prefixes` and `source_extract_prefix`
+#   on prefix shape and inventory membership. The four with none are
+#   `kms_key_arn`, `access_log_bucket_name`, `force_destroy` and `tags`.
+#   Assumptions: "at least one" is meant literally -- those ten declare FIFTEEN
+#   `validation` blocks between them, because three of the ten validate more
+#   than one property of the same value and each property gets its own block so
+#   that a plan-time failure names which rule was broken rather than which
+#   variable was wrong.
+#   Refactoring Rationale: this named only two required inputs and put the
+#   validation count at five. Both were inventories of an earlier revision of
+#   the file: `s3_gateway_endpoint_id` is required and was unnamed, so a caller
+#   reading this section for the pre-plan checklist met a third missing-variable
+#   failure it did not predict, and a validation count read as exhaustive
+#   understates where a plan-time rejection can come from.
 #   A misspelled key in `dataset_families` is deliberately NOT an error here:
 #   it is accepted and becomes a prefix that nothing ever writes to, which is
 #   why every entry carries its baseline lineage inside its own `description`
@@ -370,10 +410,16 @@ variable "non_generation_prefixes" {
   # separation exists to prevent: the ten-family count is asserted in the AAP
   # and published by two sibling documents, so folding these into that map
   # would put this module out of step with all of them. The BUCKET carries
-  # fourteen prefixes in total -- these three, the ten families, and
-  # `source_extract_prefix` -- and that total is deliberately not a single
-  # inventory: only ten of the fourteen are generation families, and the count
-  # that has to stay checkable is the ten.
+  # fourteen CALLER-CONFIGURABLE dataset prefixes -- these three, the ten
+  # families, and `source_extract_prefix` -- and that total is deliberately not a
+  # single inventory: only ten of the fourteen are generation families, and the
+  # count that has to stay checkable is the ten. One further prefix exists that
+  # no variable here exposes: the generation-allocation bookkeeping root, fixed
+  # as `local.generation_claim_prefix` in main.tf and published by outputs.tf. It
+  # is deliberately not an input, because its spelling is a contract shared
+  # verbatim with the batch service and the Python stager rather than an
+  # environment choice, so it is excluded from the fourteen rather than added to
+  # it.
   # They still need prefixes, because the GenerateStatements and GenerateReports
   # batch states write all three artifacts to S3. Bucket versioning is
   # bucket-wide and cannot be enabled per prefix, so these objects acquire
@@ -437,7 +483,7 @@ variable "non_generation_prefixes" {
   # whole purpose of holding these prefixes in a separate variable is that they can
   # never be counted as generation families; an unconstrained map defeats that,
   # because a root could move a generation family into this variable, or add a
-  # fourth prefix here, and the fourteen-prefix total would still plan cleanly while
+  # fourth prefix here, and the fourteen-dataset-prefix total would still plan cleanly while
   # the ten-family count the AAP asserts and two sibling documents publish
   # quietly stopped being true of the deployed bucket.
   # Assumptions: the domain is fixed to reporting because all three artifacts are
@@ -452,7 +498,7 @@ variable "non_generation_prefixes" {
       ]) == toset([
       "statements", "transaction-detail-report", "category-balance-report",
     ])
-    error_message = "non_generation_prefixes must be keyed by exactly statements, transaction-detail-report and category-balance-report, the three fixed-key reporting artifacts the baseline writes. Adding a key here would raise the bucket's prefix count above the fourteen the architecture documents publish, and moving a generation family into this variable would drop its LIMIT(5) analogue."
+    error_message = "non_generation_prefixes must be keyed by exactly statements, transaction-detail-report and category-balance-report, the three fixed-key reporting artifacts the baseline writes. Adding a key here would raise the bucket's dataset-prefix count above the fourteen the architecture documents publish, and moving a generation family into this variable would drop its LIMIT(5) analogue."
   }
 
   # Assumptions: the prefix is required to END in a slash and to carry no leading
@@ -488,12 +534,19 @@ variable "non_generation_prefixes" {
 #   runnable from what the runbook already produces.
 # Alternatives Considered: adding a key to `non_generation_prefixes` instead of a
 #   variable of its own. Rejected because that map is CLOSED by validation at exactly
-#   the two statement artifacts, deliberately, so that no third prefix can be
+#   the three fixed-key reporting artifacts -- `statements`,
+#   `transaction-detail-report` and `category-balance-report` -- deliberately, so that
+#   no further prefix can be
 #   miscounted as a generation family -- and because this prefix is categorically
 #   different from both inventories: it is the only prefix in the bucket the stack
 #   READS as an input rather than WRITES as an output, so it carries no generation
 #   convention, no dt=/gen= structure and no LIMIT(5) analogue. Folding it in would
 #   have required loosening the assertion that protects the ten-family count.
+# Refactoring Rationale: the clause above read "at exactly the two statement
+#   artifacts". Two is the number of statement FILES sharing that one key, not the
+#   size of the closed set, so read as the set it made the validation below look as
+#   though it admitted a third key that it in fact refuses -- and it disagreed with
+#   both the header of this file and the module README, which publish three.
 # Alternatives Considered: a separate bucket for the extracts. Rejected on two
 #   grounds: the data-migration task already holds a scoped read on this bucket and a
 #   second bucket would need a second grant, a second key policy and a second

@@ -6,21 +6,22 @@
  * -------
  * Own the ONE concern that is shared by all 21 migrated screens and belongs to none of them: the
  * `ConfigProvider` that carries the BMS-to-antd token bridge. The route tree is `ui/src/router.tsx`'s,
- * and so is the single mount of the shell in `ui/src/layout/` -- the component that paints the four
- * persistent zones the baseline showed on every screen -- which that file declares as a layout route.
- * This module renders the router and adds nothing else.
+ * and so is every mount of the shell in `ui/src/layout/` -- the component that paints the four
+ * persistent zones the baseline showed on every screen -- which that file declares as two sibling
+ * layout routes, one per access branch. This module renders the router and adds nothing else.
  *
  * Refactoring Rationale: the summary line above previously claimed this file was where the persistent
  * frame is mounted, which contradicted the paragraph immediately below it and stopped being true when
- * that mount moved to the layout route recorded further down. A header that disagrees with its own
+ * that mount moved to the layout routes recorded further down. A header that disagrees with its own
  * body is worse than a missing one, because a reader who trusts it looks for the frame here and finds
  * a provider.
  *
  * Parameters
  * ----------
  * Not applicable. This module declares one component and takes no inputs of its own: it reads no
- * environment variable, no query string and no storage key. Both of its collaborators are resolved
- * statically by the imports below, so there is nothing here for a caller to configure.
+ * environment variable, no query string and no storage key. All three of its collaborators -- the
+ * theme, the router instance and the provider component -- are resolved statically by the imports
+ * below, so there is nothing here for a caller to configure.
  *
  * Return values
  * -------------
@@ -30,12 +31,16 @@
  *
  * Exceptions or errors
  * --------------------
- * This module raises none, and deliberately catches none either. Three collaborators already cover
- * the failure modes that reach an operator: `ui/src/main.tsx` reports a start-up failure that
- * prevents mounting at all, `ui/src/router.tsx` resolves an unmatched path to a result screen and a
- * chunk that fails to load through its own `Suspense` boundary, and the two screens whose reference
- * programs carry an abend routine render the `ABEND-DATA` fields of `app/cpy/CSMSG02Y.cpy` L21-L29
- * themselves. The note at the provider below records why no fourth boundary is added here.
+ * This module raises none, and deliberately catches none either. Three collaborators cover the
+ * failure modes that reach an operator: `ui/src/main.tsx` reports a start-up failure that prevents
+ * mounting at all, `ui/src/router.tsx` resolves an unmatched path to a result screen, and the two
+ * screens whose reference programs carry an abend routine render the `ABEND-DATA` fields of
+ * `app/cpy/CSMSG02Y.cpy` L21-L29 themselves. One failure mode is covered by NONE of them and is named
+ * so it is not mistaken for handled: a screen chunk whose lazy import rejects. The `Suspense`
+ * boundary in the route tree supplies a pending fallback only and never sees the rejection, so what
+ * renders is the routing package's own default boundary -- an untranslated heading carrying the error
+ * message and its stack, outside the frame and outside the message catalogue. The note at the
+ * provider below records why this module still adds no boundary of its own.
  *
  * Boundary
  * --------
@@ -80,20 +85,25 @@ import type { ReactElement } from 'react';
 import { ConfigProvider } from 'antd';
 
 /*
- * WHY : Alternatives Considered: the routing package is not imported here at all, and neither is its
- *       DOM companion -- the package whose name is this one's with `-dom` appended, which major
- *       version 6 split the browser entry points into and which a reader familiar with that version
- *       reaches for first. This module imports a COMPONENT from `ui/src/router.tsx` and lets that
- *       file own the router element, so the routing dependency has exactly one importer in the tree
- *       and this file has no opinion about it. The companion is absent from `ui/package.json` on its
- *       own evidence: no 8.x of it was ever published, and its newest release is a compatibility shim
+ * WHY : Assumptions: ONE symbol is imported from the routing package here -- the provider component
+ *       -- and the router OBJECT it renders is imported from `ui/src/router.tsx`, which is the only
+ *       module that declares routes. That split is the data-router API's own division of labour: the
+ *       router object owns the history and the route tree, and the provider merely subscribes a React
+ *       tree to it, so the composition root can mount the application without holding an opinion
+ *       about any path. This file therefore still names no route and no screen.
+ * WHY : Alternatives Considered: the DOM companion package -- the one whose name is this one's with
+ *       `-dom` appended, which major version 6 split the browser entry points into and which a reader
+ *       familiar with that version reaches for first. It is absent from `ui/package.json` on its own
+ *       evidence: no 8.x of it was ever published, and its newest release is a compatibility shim
  *       depending on `react-router@7.18.1`, so requiring it would silently hold routing a major
  *       version behind the pinned 8.3.0 while looking like the more specific choice. Every browser
- *       entry point that justified the original split is exported from the base package at 8.x. The
- *       name is described rather than written so a search proving this module does not depend on it
- *       stays clean.
+ *       entry point that justified the original split, this provider included, is exported from the
+ *       base package at 8.x. The name is described rather than written so a search proving this
+ *       module does not depend on it stays clean.
  */
-import { CardDemoRouter } from './router';
+import { RouterProvider } from 'react-router';
+
+import { cardDemoRouter } from './router';
 import { cardDemoTheme } from './theme/antdTheme';
 
 /**
@@ -150,8 +160,9 @@ export function App(): ReactElement {
     //   `Modal` helper, so the wrapper would bridge a context no caller asks for while adding an
     //   element and a context read to every render.
     //   (2) A top-level error boundary. What it would catch is real -- a render-time throw from a
-    //   screen, which the declarative route API used by `ui/src/router.tsx` does not intercept,
-    //   because that API has no per-route error element -- and it is still rejected on three grounds.
+    //   screen -- and it is still rejected on three grounds. Note that the data router
+    //   `ui/src/router.tsx` now builds DOES offer a per-route error element, so this wrapper is not
+    //   the only shape available; declining it here declines the outermost one specifically.
     //   It would migrate no reference behaviour: the abend surface is already implemented where the
     //   reference raises it, by the two screens whose programs carry an abend routine, from the
     //   `ABEND-DATA` layout of `app/cpy/CSMSG02Y.cpy` L21-L29. It would render OUTSIDE the frame, so
@@ -174,16 +185,20 @@ export function App(): ReactElement {
     //   the migration set out to take apart.
     <ConfigProvider theme={cardDemoTheme}>
       {/*
-        Refactoring Rationale: this file used to build a frame of its own out of generic `Layout`,
-        `Layout.Header` and `Layout.Footer` primitives while the shell component was imported by nothing, so the
-        frame an operator actually saw was this file's approximation of it: an application title, no
-        transaction identifier, no program name, no server clock, no message line and no key legend --
-        and the screens already authored to omit their own title band on the ground that the shell
-        supplies it had no band at all. That frame is gone and no replacement is composed here.
+        Assumptions: this file composes NO frame. The persistent chrome -- the title band, the
+        message line and the key legend the baseline showed on every screen -- is
+        `ui/src/layout/AppShell.tsx`, mounted once as a layout route in `ui/src/router.tsx`. Mounted
+        there it is instantiated once for the whole tree and renders `<Outlet />`, so it persists
+        across navigation between children rather than being remounted per screen, and it can frame
+        some routes and not others: the bare-origin redirect and the not-found result are
+        deliberately outside it. A shell mounted here instead would take the route tree as its
+        `children`, and a shell given `children` never reaches its outlet -- so composing one here
+        beside the layout route would frame every guarded screen twice, with two banners, two
+        contentinfo landmarks and two live regions announcing one message.
 
         ⚠️ Refactoring Rationale: one remedy for that finding mounted the real shell HERE, as
         the shell element wrapping the router as its `children`, and it is withdrawn in favour of the
-        layout route in `ui/src/router.tsx`. Both make the shell apply, and it accepts either shape -- `children`
+        layout routes in `ui/src/router.tsx`. Both make the shell apply, and it accepts either shape -- `children`
         when present, otherwise react-router's `Outlet` -- which is exactly why keeping both was not
         harmless: a shell given `children` never reaches its outlet, so the outer mount rendered the
         router and the inner layout route rendered the matched screen, and every guarded screen was
@@ -191,11 +206,14 @@ export function App(): ReactElement {
         and both shells reading the one publication a screen makes -- so two title bands and two live
         regions announcing one message.
 
-        Assumptions: the layout route is the mount that survives, for the reason it records: mounted
-        there the shell is instantiated once for the whole tree and renders `<Outlet />`, so the frame
-        persists across navigation between children rather than being remounted per screen, and a route
-        that one day needs a different frame can say so in the table instead of here. What this file
-        keeps is the theme, which genuinely is a property of the whole application and of no route.
+        Assumptions: the layout routes are the mounts that survive, for the reason the route table
+        records. There are two of them and they are SIBLINGS -- one holding the public sign-on route,
+        one holding the guarded subtree -- so a location matches one branch or the other and exactly one
+        shell ever renders; within a branch the shell is instantiated once and renders `<Outlet />`, so
+        the frame persists across navigation between that branch's children rather than being remounted
+        per screen. A route that one day needs a different frame says so in the table instead of here.
+        What this file keeps is the theme, which genuinely is a property of the whole application and of
+        no route.
 
         Trade-offs: a screen therefore cannot replace the frame, which is the intended loss -- the 3270
         original had no such affordance either, and a screen that could would be able to hide which
@@ -204,22 +222,27 @@ export function App(): ReactElement {
         without composing a second copy of the chrome.
       */}
       {/*
-        Trade-offs: the route tree arrives here as an ELEMENT to render, not as a router object handed
-        to a provider component. The alternative is the data-router API -- build the routes with the
-        factory, pass the result to the provider the routing package exports -- and `ui/src/router.tsx`
-        records why it is not used, on grounds belonging to that file: two sibling guards assert
-        against its SOURCE TEXT, one requiring exactly one shell mount and one measuring the region
-        between the tags opening and closing its route list, and the factory form would weaken the
-        first and leave the second measuring an empty region. Nothing an operator or a service can
-        observe differs between the two APIs.
+        ⚠️ Refactoring Rationale: the route tree arrives as a ROUTER OBJECT handed to the provider,
+        where this file used to render a component that built its own `BrowserRouter` internally. The
+        note that stood here argued for that element shape on the ground that two sibling guards
+        assert against `ui/src/router.tsx`'s source text, and that argument is withdrawn: it let a
+        test's expectations about the shape of a file decide the application's composition, and the
+        route specification this migration is held to names the data-router form. Both guards are
+        re-anchored -- the shell count on the two sibling layout mounts, the screen census on the route
+        array's own delimiters -- so neither loses the defect it was written to catch.
 
-        What the element shape buys HERE is that the route table stays plain data: `ROUTE_TABLE` in
-        that module is the same graph inert, so a test can import it and assert reachability and access
-        class without mounting React or this provider at all. What it costs is that this file cannot
-        see the routes it renders -- it holds no route constant and cannot be read to learn which paths
-        exist -- which is the intended direction of ignorance for a composition root.
+        Assumptions: EXACTLY ONE provider is rendered, and it is rendered here. A second provider over
+        the same router object would subscribe twice to one history and render the matched route twice,
+        which is the composition-level form of the double-frame defect the route table's two sibling
+        shell mounts are shaped to prevent. `ui/src/router.tsx` is the only module that may build a
+        router, and this is the only module that may render one.
+
+        Trade-offs: this file still cannot see the routes it renders -- it holds no route constant and
+        cannot be read to learn which paths exist -- which is the intended direction of ignorance for a
+        composition root. `ROUTE_TABLE` in the route module is the same graph as inert data, so a test
+        asserts reachability and access class without mounting React or this provider at all.
       */}
-      <CardDemoRouter />
+      <RouterProvider router={cardDemoRouter} />
     </ConfigProvider>
   );
 }

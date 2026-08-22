@@ -2,7 +2,7 @@
  * @file The transaction-type maintenance screen, migrated from
  * `app/app-transaction-type-db2/cbl/COTRTUPC.cbl` (1702 lines) and its mapset
  * `app/app-transaction-type-db2/bms/COTRTUP.bms` (map `CTRTUPA`, `DFHMDI ... SIZE=(24,80)`), mounted
- * by `ui/src/router.tsx` at `/reference/transaction-types/:typeCd`.
+ * by `ui/src/router.tsx` at `/reference/transaction-types/:cd`.
  *
  * Purpose
  * -------
@@ -125,12 +125,20 @@ import { BMS_TEXT_COLOR_TOKENS, FIELD_ERROR_TOKENS, TYPOGRAPHY_TOKENS } from '..
 /**
  * Route pattern that enters this screen, whose parameter is a key or the add sentinel.
  *
- * Assumptions: the parameter is spelled `typeCd`. `ui/src/router.tsx` L360 declares
- * `REF_TYPE_EDIT_PATH = '/reference/transaction-types/:typeCd'` and mounts this screen under it, and
- * `useParams` resolves an unmatched name to `undefined` with no diagnostic -- so a near-miss such as
- * `cd` or `code` would leave this screen permanently prompting for a key the route already carried.
+ * Assumptions: the parameter is spelled `cd`, which is the name AAP section 0.4.1.4 fixes for this
+ * screen's route -- `/reference/transaction-types/:cd` -- and which `ui/src/router.tsx` mounts this
+ * screen under. The spelling is load-bearing rather than cosmetic: `useParams` resolves an unmatched
+ * name to `undefined` with no diagnostic, so a near-miss such as `typeCd` or `code` would leave this
+ * screen permanently prompting for a key the route already carried, with nothing reporting why.
+ *
+ * ⚠️ Refactoring Rationale: the parameter WAS spelled `typeCd`, matching the transport property the
+ * service publishes. That agreement was the wrong one to keep: the route table is fixed by the AAP and
+ * this constant is compared against the router's own declaration by `ui/src/routerRoutes.test.tsx`, so
+ * the two names had to be brought together on the AAP's spelling rather than on the DTO's. The
+ * property name on the wire is unaffected -- `typeCd` is what `ui/src/api/reference.ts` sends and
+ * receives -- and only the route segment's label changed.
  */
-export const REF_TYPE_EDIT_ROUTE = '/reference/transaction-types/:typeCd';
+export const REF_TYPE_EDIT_ROUTE = '/reference/transaction-types/:cd';
 
 /**
  * Route segment that means "no key selected", which is the sentinel the list screen navigates to.
@@ -1937,8 +1945,8 @@ export function refTypeEditReducer(
 /**
  * Renders the transaction-type maintenance screen for one code.
  *
- * Assumptions: the ADMIN guard is not re-implemented here. `ui/src/router.tsx` gates all six
- * administrative routes on the signed `carddemo-admin` group claim, so a second check in this component
+ * Assumptions: the ADMIN guard is not re-implemented here. `ui/src/router.tsx` gates every
+ * administrative route on the signed `carddemo-admin` group claim, so a second check in this component
  * would be a second authority over one decision -- and the one that drifted would either lock out an
  * administrator or admit a user, with nothing failing to say which. The reference's own equivalent,
  * `SET CDEMO-USRTYP-ADMIN TO TRUE` at L448, is a value it writes into the shared area rather than a test
@@ -1955,7 +1963,15 @@ export function RefTypeEditScreen(): ReactElement {
   //       component styled by class but not this one.
   const { cssVar } = theme.useToken();
   const paintedAt = useServerInstant();
-  const { typeCd: routeTypeCd } = useParams<{ typeCd: string }>();
+  /*
+   * WHY : Assumptions: the parameter is read under the name `cd`, which React Router resolves by NAME
+   *       and not by position -- so this identifier and {@link REF_TYPE_EDIT_ROUTE}'s segment have to
+   *       agree letter for letter or every arrival reads `undefined` and this screen prompts for a key
+   *       the address already supplied, silently. It is renamed locally to `routeTypeCd` because the
+   *       VALUE is a transaction-type code and the reducer names it that; the two-letter route label is
+   *       the router's spelling of it, not the domain's.
+   */
+  const { cd: routeTypeCd } = useParams<{ cd: string }>();
   const [state, dispatch] = useReducer(refTypeEditReducer, REF_TYPE_EDIT_INITIAL_STATE);
 
   /*
@@ -2103,11 +2119,24 @@ export function RefTypeEditScreen(): ReactElement {
 
   /*
    * WHY : Assumptions: the exit destination is the REFERRER when the transition named one, and the
-   *       administrative menu otherwise, which is L431-L443 -- `CDEMO-FROM-TRANID` and
-   *       `CDEMO-FROM-PROGRAM` are preferred and `LIT-ADMINTRANID`/`LIT-ADMINPGM` are the fallback. This
-   *       screen is reached from the administrative menu AND from the sibling list screen, so a fixed
-   *       destination would return a list-screen operator to a menu they did not come from.
-   *       `inApplicationRoute` refuses anything that is not one of this application's own routes.
+   *       administrative menu otherwise, which is L429-L443 -- `CDEMO-FROM-TRANID` and
+   *       `CDEMO-FROM-PROGRAM` are preferred and `LIT-ADMINTRANID`/`LIT-ADMINPGM` are the fallback.
+   * WHY : ⚠️ Refactoring Rationale: this resolution now has two reachable arms, and until the sibling
+   *       list screen was fixed it had one. The claim recorded here -- that the screen is entered from
+   *       the administrative menu AND from the list screen, so a fixed destination would strand a
+   *       list-screen operator -- described a flow the tree did not implement: administrative option 6
+   *       hands over no origin because the menu IS the fallback, and the list screen's F2 arm handed
+   *       over none either, so this expression could only ever resolve to the menu. That the reference
+   *       has both callers is explicit in it: its own first-entry arms test
+   *       `CDEMO-FROM-PROGRAM EQUAL LIT-ADMINPGM` at L466 and `EQUAL LIT-LISTTPGM` at L468, declared
+   *       `'COADM01C'` at L209-L210 and `'COTRTLIC'` at L217-L218. The list screen's `openAddScreen`
+   *       now hands over `REFERENCE_TYPE_LIST_ROUTE`, which is the state the sentence always
+   *       described, and `ui/src/screens/refTypeEditScreen.test.tsx` pins both arms so neither can
+   *       become unreachable again without a case failing.
+   * WHY : Assumptions: the referrer is VALIDATED by `inApplicationRoute` rather than navigated to as
+   *       supplied. Router state is writable through a hand-edited history entry, so an unchecked
+   *       path-shaped value would either reach the not-found result or, protocol-relative, leave the
+   *       application entirely on a key the operator believes returns them one screen.
    */
   const exitDestination =
     inApplicationRoute(screenTransitionState(location.state).from) ?? ADMIN_MENU_ROUTE;
@@ -2168,8 +2197,19 @@ export function RefTypeEditScreen(): ReactElement {
 
   /**
    * Dispatches one of the six keys this screen honours.
+   *
+   * Assumptions: PF3 is the one identifier that leaves, and it leaves for {@link exitDestination} --
+   * the validated caller when the transition named one and the administrative menu when it did not.
+   * Both arms are reachable: the list screen's add transfer names this screen's caller and
+   * administrative option 6 names none.
+   *
+   * Assumptions: the reducer is dispatched BEFORE the transition on that arm, matching every other
+   * key, so the mode the screen unmounts in is the mode the key produced. The reference does the same
+   * -- its PF3 arm writes the navigation and session fields at `COTRTUPC.cbl` L445-L451 and only then
+   * issues `EXEC CICS XCTL` at L457-L460 -- and a dispatch after the transition would run against an
+   * unmounted reducer.
    * @param {CicsAid} aid - The identifier `usePfKeys` resolved, or the bar's button reported.
-   * @returns {void} Completion is represented by the dispatched action.
+   * @returns {void} Completion is represented by the dispatched action, and by the transition on PF3.
    */
   function invokeAid(aid: CicsAid): void {
     if (!isRefTypeEditAid(aid)) {

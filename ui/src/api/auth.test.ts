@@ -259,6 +259,57 @@ async function refusesADirectionWithNoCursor(): Promise<void> {
   expect(dispatchedRequests(), 'no request may be dispatched for a refused pair').toHaveLength(0);
 }
 
+/**
+ * Asserts an opening position travels as the one query member the service positions on.
+ *
+ * Assumptions: the asserted params are the WHOLE object rather than one member of it, because the
+ * property under test is that the position travels ALONE on an opening read. A direction alongside it
+ * would be the pair the contract refuses, and a cursor alongside it would be the pair refused below.
+ */
+async function sendsTheOpeningPositionAsTheOnlyMember(): Promise<void> {
+  answerWith(pageOf([USER_ROW]));
+
+  await listUsers({ startUserId: 'USER0011' });
+
+  const request = onlyRequest();
+  expect(request.method).toBe('get');
+  expect(request.url).toBe('/auth/users');
+  expect(request.params).toEqual({ startUserId: 'USER0011' });
+}
+
+/**
+ * Asserts an EMPTY opening position is sent rather than dropped.
+ *
+ * Assumptions: the contract admits the empty form and gives it the same meaning as omission -- the
+ * reference seeks on `LOW-VALUES` when its search field is blank, at `app/cbl/COUSR00C.cbl` L219 -- so
+ * sending it is answerable. It is asserted because dropping it would make an explicit "read from the
+ * start" indistinguishable from a caller that never named a position, in a replayed request.
+ */
+async function sendsAnEmptyOpeningPositionRatherThanDroppingIt(): Promise<void> {
+  answerWith(pageOf([USER_ROW]));
+
+  await listUsers({ startUserId: '' });
+
+  expect(onlyRequest().params).toEqual({ startUserId: '' });
+}
+
+/**
+ * Asserts an opening position and a cursor are refused locally and never dispatched.
+ *
+ * Assumptions: BOTH halves are asserted for the reason the direction case above records -- asserting
+ * only the rejection would pass against a client that sent the refused pair and let the service answer
+ * 400 naming both members, which is the round trip this guard removes.
+ */
+async function refusesAnOpeningPositionWithACursor(): Promise<void> {
+  await expect(listUsers({ startUserId: 'USER0011', cursor: 'opaque-token' })).rejects.toThrow(
+    RangeError,
+  );
+  await expect(listUsers({ startUserId: 'USER0011', cursor: 'opaque-token' })).rejects.toThrow(
+    /not both/u,
+  );
+  expect(dispatchedRequests(), 'no request may be dispatched for a refused pair').toHaveLength(0);
+}
+
 /** Asserts creating a user posts the request body unchanged and reads the created body back. */
 async function createsAUserAtTheCollectionTarget(): Promise<void> {
   answerWith({ ...USER_ROW, cognitoSub: 'sub', credentialSecretName: 'secret' }, HTTP_CREATED);
@@ -379,6 +430,12 @@ function authClientBehaviour(): void {
     defaultsTheDirectionToForwardForACursorAlone,
   );
   it('refuses a direction with no cursor', refusesADirectionWithNoCursor);
+  it('sends the opening position as the only member', sendsTheOpeningPositionAsTheOnlyMember);
+  it(
+    'sends an empty opening position rather than dropping it',
+    sendsAnEmptyOpeningPositionRatherThanDroppingIt,
+  );
+  it('refuses an opening position with a cursor', refusesAnOpeningPositionWithACursor);
   it('creates a user at the collection target', createsAUserAtTheCollectionTarget);
   it('addresses one user by path segment', addressesOneUserByPathSegment);
   it('updates one user at its member target', updatesOneUserAtItsMemberTarget);

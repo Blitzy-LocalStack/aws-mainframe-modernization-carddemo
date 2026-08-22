@@ -2,34 +2,35 @@
 # infra/modules/ecr/main.tf
 # -----------------------------------------------------------------------------
 # Purpose:
-#   Provisions the TEN Amazon ECR container repositories that hold every
-#   image a CardDemo task pulls -- the eight Spring Boot services, the browser SPA
-#   and the ETL image -- one repository per artifact, each independently
-#   versioned, scanned and retained. Every one of the ten is built from this
-#   repository; nothing is mirrored in.
+#   Provisions the Amazon ECR container repositories that hold every image a
+#   CardDemo task pulls, one repository per artifact, each independently versioned,
+#   scanned and retained. There are TWO kinds and they are declared separately: the
+#   TEN deployables this repository builds -- the eight Spring Boot services, the
+#   browser SPA and the ETL image, held in var.repository_names -- and ONE mirror of
+#   a pinned third-party image it does not build, aws-otel-collector, held in
+#   var.third_party_mirror_repository_names. This file unions them into
+#   local.repository_names, so eleven repositories are provisioned from two inputs
+#   and every consumer reference reads one map.
 #
-#   Refactoring Rationale: this module provisioned an ELEVENTH repository, a mirror
-#   of a pinned third-party telemetry collector image that the deployment pushed but
-#   did not build, and the counts in this file and in variables.tf were reconciled
-#   upwards to eleven to match it. That was the wrong direction. Specification
-#   section 0.4.1.6 states ten repositories, and the only thing requiring an eleventh
-#   was a collector sidecar that the specification does not contain either, composed
-#   by infra/modules/ecs-service for every workload. That sidecar is withdrawn -- the
-#   argument, the alternatives and what is kept for the observability concern are
-#   recorded in ecs-service -- so nothing pulls a mirrored image and every count here
-#   is ten again, with no second kind of entry to distinguish.
+#   Assumptions: the mirror exists because a private task cannot reach the public
+#   registry. infra/modules/ecs-service attaches an AWS Distro for OpenTelemetry
+#   collector sidecar to every workload, infra/modules/network enumerates the
+#   application tier's egress and admits no public destination, and Amazon ECR Public
+#   is served by neither the ecr.api nor the ecr.dkr interface endpoint -- so a task
+#   pulling public.ecr.aws directly would fail to start with no route to fix it. The
+#   sidecar is essential, so an unmirrored reference is not a degraded deployment but
+#   one in which no task runs.
 #
-#   Refactoring Rationale, second pass: reconciling the two counts in prose was
-#   not sufficient, because the eleven were still declared as ONE list and the
-#   frozen plan fixes this module's inventory at TEN (AAP sections 0.4.1.6 and
-#   0.5.1.12) -- a count a comment cannot amend however clearly it explains
-#   itself. The two kinds are now declared SEPARATELY: var.repository_names holds
-#   the ten deployables and asserts them as a literal set, and
-#   var.third_party_mirror_repository_names holds the mirror and bounds itself at
-#   one. main.tf unions them into local.repository_names, so eleven repositories
-#   are still provisioned and every consumer reference is unchanged, while the
-#   ten the plan names is now a number this module asserts rather than a number
-#   its comments claim.
+#   Refactoring Rationale: the counts here were once reconciled UPWARDS to eleven as
+#   one list, which the frozen plan's ten (AAP sections 0.4.1.6 and 0.5.1.12)
+#   contradicts and a comment cannot amend; then reconciled DOWNWARDS by withdrawing
+#   the mirror and the sidecar together, which contradicts sections 0.2.1.4 and 0.9.3
+#   -- centralised metrics and tracing are a cross-cutting deliverable, and without
+#   the sidecar the estate published meters nothing collected and spans nothing
+#   exported. Neither direction was right, because the two kinds of entry are not the
+#   same kind of claim. The split above is the resolution: the ten the plan names is a
+#   number this module ASSERTS as a literal set, .github/workflows/infra-ci.yml gates
+#   it as one, and the mirror is bounded at one entry that is visibly not among them.
 #
 #   What those ten replace is ONE shared z/OS load library. The online CICS
 #   region reached `DSNAME01(AWS.M2.CARDDEMO.LOADLIB)` through two library
@@ -46,10 +47,16 @@
 #   live in infra/modules/ecr/variables.tf with their type, default,
 #   nullability and `description`. The ones read here, and what each decides:
 #     repository_names ............ which artifacts get a repository
+#     third_party_mirror_repository_names . any mirrored third-party image,
+#                                   unioned with the deployables above; empty
+#                                   today, because nothing is mirrored in
 #     name_prefix, environment .... the two segments of the composed name
 #     image_tag_mutability ........ whether a pushed tag may be repointed
 #     scan_on_push ................ registry-side vulnerability scanning
-#     kms_key_arn ................. customer-managed key, or null for AES256
+#     kms_key_arn ................. customer-managed key; required, and AES256
+#                                   is not an accepted fallback (variables.tf
+#                                   declares it nullable = false and validates
+#                                   the value as an exact CMK ARN)
 #     max_image_count ............. how many tagged images are retained
 #     untagged_image_expiry_days .. when an untagged image becomes eligible
 #     force_delete ................ whether destroy may delete stored images
@@ -166,15 +173,35 @@ locals {
   #       third-party telemetry mirror in one list. The two are now declared
   #       separately so the ten-deployable count the frozen plan fixes can be
   #       asserted as a literal, and they are unioned back together HERE because
-  #       every repository still needs identical treatment -- the same namespacing,
+  #       every repository needs identical treatment -- the same namespacing,
   #       encryption, scan-on-push and lifecycle policy -- and every output key,
   #       policy lookup and consumer reference in this package addresses a
   #       repository by its bare name without caring which list it came from.
   #       Unioning at this single point is what made the split invisible to all
-  #       fifteen consuming files. Assumptions: the two sets are disjoint, which
-  #       the deployable inventory's exact-set validation and the mirror list's
-  #       one-entry bound together guarantee -- no name can appear in both without
-  #       failing one of those assertions first.
+  #       fifteen consuming files. Assumptions: `setunion` DEDUPLICATES, so a name
+  #       supplied in both inputs yields one repository rather than a duplicate
+  #       resource address or a malformed graph. Note what that does and does not
+  #       promise: neither validation in variables.tf rejects a mirror name equal
+  #       to one of the ten deployables -- the exact-set assertion constrains only
+  #       var.repository_names and the mirror bound only counts entries -- so such
+  #       a mirror is absorbed silently and simply provisions nothing new.
+  #       Alternatives Considered: a cross-variable validation refusing an
+  #       intersection outright. Not added, because the failure it would catch is
+  #       already visible where it matters -- a mirror that collides adds no
+  #       repository to `terraform plan`, which is the diff a reviewer reads before
+  #       the one mirror this module admits is approved -- and a third assertion
+  #       over an input that is empty today buys a guarantee nothing is currently
+  #       positioned to violate.
+  #       Assumptions: the mirror set is EMPTY today, so this expression resolves
+  #       to exactly the ten asserted deployables and ten repositories are created
+  #       -- the count section 0.4.1.6 states. The union is nonetheless kept rather
+  #       than reduced to var.repository_names, because collapsing it would delete
+  #       the separation that lets the ten be asserted at all and would leave a
+  #       future mirror nowhere to go but back inside the fixed count.
+  #       Trade-offs: setunion over an empty set is a no-op, so this line reads as
+  #       machinery for something that is not there. Accepted for that reason: the
+  #       alternative pays for today's brevity with tomorrow's re-derivation of why
+  #       a cached third-party image may not simply join the deployable list.
   repository_names = {
     for name in setunion(var.repository_names, var.third_party_mirror_repository_names) :
     name => "${var.name_prefix}-${var.environment}/${name}"

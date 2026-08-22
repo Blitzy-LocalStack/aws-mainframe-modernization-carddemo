@@ -2,6 +2,7 @@ package com.carddemo.reporting.repository;
 
 import com.carddemo.reporting.domain.StatementTransactionView;
 import jakarta.persistence.QueryHint;
+import java.util.Collection;
 import java.util.List;
 import java.util.stream.Stream;
 import org.hibernate.jpa.AvailableHints;
@@ -130,6 +131,26 @@ import org.springframework.transaction.annotation.Transactional;
  * reader does not work around it: a relation absent at run time is a defect to report against the
  * data-migration package, never something to create from here. </p>
  *
+ * <p>Refactoring Rationale: it declares NO whole-table ordered pass. An ordered cursor over EVERY row
+ * of the projection was declared here, named for the card-then-transaction order
+ * {@code app/jcl/CREASTMT.JCL} L53 sorts the statement input by, and it was reached by nothing. Its
+ * removal is recorded rather than silent because the citation it carried is worth keeping: the
+ * reference really does make one sequential pass over a card-ordered file and break by card in working
+ * storage, so a reader who expects that shape here is not mistaken about the baseline -- only about
+ * this module. Assumptions: every migrated read of this projection selects ONE card at a time. The
+ * request edge is {@code StatementService#compose}, which resolves one card and then reads through
+ * {@link #aggregateByCardFingerprint(String)} and {@link #findWindowByCardFingerprint}; the
+ * whole-portfolio run is {@code StatementService#generateStatements}, which walks the CROSS-REFERENCE in
+ * heading chunks and reads each card's rows through that same bounded window. Nothing drives an
+ * all-cards pass over THIS projection, so a whole-table cursor was a second access path with no driver,
+ * and the ordering it guaranteed is already guaranteed within each card by the per-card queries. </p>
+ *
+ * <p>Alternatives Considered: keeping that method and giving it a caller by adding an all-cards
+ * composition to the statement service. Declined because the orphan would only move one layer up:
+ * nothing would drive THAT method either, so the module would gain an untested public surface and the
+ * same finding would recur against it. The honest resolution is that this access path arrives with the
+ * driver that needs it, and the driver is not in this module. </p>
+ *
  * <p>Refactoring Rationale: the separate index-rebuild step the reference runs has no counterpart
  * here, while the access path it produced survives. That rebuild appears at exactly four sites --
  * {@code app/jcl/XREFFILE.jcl} L100, {@code app/jcl/TRANIDX.jcl} L52, {@code app/jcl/CARDFILE.jcl}
@@ -216,30 +237,6 @@ public interface StatementTransactionRepository
     String STATEMENT_FETCH_SIZE = "512";
 
     /**
-     * The whole-table ordered pass this interface deliberately no longer declares.
-     *
-     * <p>Refactoring Rationale: an ordered cursor over EVERY row of the projection was declared here,
-     * named for the card-then-transaction order {@code app/jcl/CREASTMT.JCL:53} sorts the statement
-     * input by, and it was reached by nothing. Its removal is recorded rather than silent because the
-     * citation it carried is worth keeping: the reference really does make one sequential pass over a
-     * card-ordered file and break by card in working storage, so a reader who expects that shape here
-     * is not mistaken about the baseline -- only about this module.</p>
-     *
-     * <p>Assumptions: the migrated statement flow composes ONE statement per request. Its entry point
-     * is {@code StatementService#compose(StatementRequest)}, which names a single card and reaches
-     * {@link #streamByCardNumber(String)}; nothing drives an all-cards run, because the state of the
-     * nightly chain that would drive one is a batch task rather than a request to this service. A
-     * whole-table cursor was therefore a second access path over the same projection with no driver,
-     * and the ordering it guaranteed is already guaranteed within each card by the per-card query.</p>
-     *
-     * <p>Alternatives Considered: keeping the method and giving it a caller by adding an all-cards
-     * composition to the statement service. Declined because the orphan would only move one layer up:
-     * nothing would drive THAT method either, so the module would gain an untested public surface and
-     * the same finding would recur against it. The honest resolution is that this access path arrives
-     * with the driver that needs it, and the driver is not in this module.</p>
-     */
-
-    /**
      * Opens a forward-only cursor over exactly one card's rows in transaction-identifier order.
      *
      * <p>This is the equivalent of the control break the reference performs in working storage at
@@ -269,11 +266,15 @@ public interface StatementTransactionRepository
      * nothing for a card that does not exist, so it hands a fingerprint only to a caller that already
      * held the whole number it belongs to. </p>
      *
-     * <p>Assumptions: the transaction and batching contracts are the ones the whole-projection cursor
-     * above documents -- mandatory propagation so the cursor outlives this call, and the
-     * {@value #STATEMENT_FETCH_SIZE}-row batch that only applies outside autocommit -- and both hold
-     * identically here because the annotations below are identical. They are cross-referenced rather
-     * than restated so that a change to either is made in one place. </p>
+     * <p>Assumptions: the two transport contracts this method carries are stated HERE, because it is
+     * the only member of this interface that carries either. Propagation is MANDATORY so the cursor is
+     * consumed inside a transaction the caller already opened -- a cursor opened in its own transaction
+     * would be closed the moment this call returned, and the caller would receive a stream that raises
+     * on its first element rather than one it can read. The {@value #STATEMENT_FETCH_SIZE}-row batch
+     * hint applies only outside autocommit, which is the same condition: the driver streams rows in
+     * batches of that size while a transaction is open and materialises the whole result otherwise. The
+     * two sibling reads below declare neither, because each returns a bounded result that is complete
+     * when it returns. </p>
      *
      * @param cardFingerprint the keyed per-card fingerprint the relation publishes, being sixty-four
      *     hexadecimal characters, as obtained from {@code reporting.resolve_card} for a request-time
@@ -284,7 +285,8 @@ public interface StatementTransactionRepository
      *     must close it, for which try-with-resources is the intended form, and must consume it inside
      *     the read-only transaction it requires
      * @throws org.springframework.transaction.IllegalTransactionStateException if no transaction is
-     *     in progress when this method is called, for the reason the cursor above records
+     *     in progress when this method is called, which the mandatory propagation above requires so
+     *     that the cursor outlives the call that opened it
      * @throws org.springframework.dao.DataAccessException if the projection cannot be read, which
      *     includes the relation being absent -- a defect to report against the data-migration
      *     package, as register entry <b>R11</b> records, and never one to work around from here
@@ -396,6 +398,107 @@ public interface StatementTransactionRepository
     List<StatementTransactionView> findWindowByCardFingerprint(
             @Param("cardFingerprint") String cardFingerprint,
             @Param("after") String after,
+            @Param("limit") int limit);
+
+    /**
+     * Reads one bounded window of transactions across a GROUP of cards, in the cards' own walk order.
+     *
+     * <p>Purpose: serves the whole-run statement generator, which needs the transactions of a chunk of
+     * cards rather than of one card, and needs them in an order it can group incrementally.</p>
+     *
+     * <p>Refactoring Rationale: the run held one card's fingerprint at a time and issued a query per
+     * card, so a run over {@code N} cardholders executed {@code N} transaction queries -- the classic
+     * N+1, with the outer heading walk as the one and this as the N. Asking for a chunk of cards in a
+     * single window collapses that to one query per window: a run over a chunk of two hundred cards
+     * issues one heading query and then windows their transactions, rather than two hundred separate
+     * reads each with its own round trip, plan lookup and transaction.</p>
+     *
+     * <p>Assumptions: the ordering tuple is the card number, then the fingerprint, then the transaction
+     * identifier, and its first two components are IDENTICAL to the ordering
+     * {@code StatementCardXrefRepository.findHeadingChunk} declares. That agreement is the whole point
+     * of the method: because both walks visit cards in one order, a caller can advance the two together
+     * and close each card's statement the moment a row with a different card arrives -- so it buffers
+     * one card at a time rather than the whole window, whatever the window's size. An ordering that
+     * agreed only on the fingerprint would force the caller to accumulate every card in the chunk before
+     * it could emit any of them.</p>
+     *
+     * <p>Assumptions: the transaction identifier is the third component and not the second, so a single
+     * card's rows arrive contiguously and in identifier order -- the order
+     * {@code app/cbl/CBSTM03A.CBL} produces a statement's lines in. Ordering by identifier ahead of the
+     * card would interleave cards and make incremental grouping impossible.</p>
+     *
+     * <p>Assumptions: the continuation is the three-arm disjunction rather than a row-value comparison,
+     * and the choice is the opposite of the one the heading walk makes for a reason that is specific to
+     * this relation. This is JPQL over a mapped projection, and the Jakarta Persistence query language
+     * has no row-value constructor to compare with -- the disjunction is the only form expressible here.
+     * It is exactly equivalent because all three components are non-null on every row of this relation:
+     * the card number and the identifier are the mapped identifier's two components, and the fingerprint
+     * cannot be null on a row this predicate admits because the {@code in} clause above it requires a
+     * value.</p>
+     *
+     * <p>Assumptions: the fingerprint predicate is an {@code in} over the chunk's cards, and it is what
+     * keeps this query off a scan of the whole ledger. Equality on text is leakproof, so PostgreSQL
+     * pushes the {@code in} below the projection's security barrier and reaches the fingerprints through
+     * the identity relation's primary key and then the ledger through its card-number index -- measured
+     * on 20 000 cards and 200 000 transactions with no sequential scan of either relation. The keyset
+     * arms cannot be pushed down, because a range comparison on text is not leakproof, so they are
+     * applied above the pushed-down set: correct in either case, and cheap because the pushed-down set
+     * is one chunk of cards rather than the portfolio.</p>
+     *
+     * <p>Assumptions: the empty string is the start sentinel for all three components, for the reason
+     * the sibling methods record -- it sorts below every non-empty value, so the opening call admits
+     * every row of every card in the group.</p>
+     *
+     * <p>Trade-offs: the caller supplies both the group and the limit, so this method decides neither
+     * how many cards a chunk holds nor how many rows a window returns. Sizing belongs to the caller
+     * because the two bounds trade against each other -- a larger card group amortises more round trips
+     * while a larger row window buffers more of one card -- and a value fixed here would have to agree
+     * with the caller's chunk size by coincidence.</p>
+     *
+     * <p>Alternatives Considered: taking the group as a single window over ALL cards, with no
+     * fingerprint predicate at all, which is the shape a whole-run pass over the ledger would have.
+     * Rejected because it reads transactions of cards the run has not reached and cannot use, and
+     * because the predicate is what makes the read index-eligible: without it the relation is scanned
+     * in full and ordered in full.</p>
+     *
+     * @param cardFingerprints the keyed per-card fingerprints of the cards in this chunk, as the
+     *     heading walk produced them; must not be {@code null} and must not be empty, because an empty
+     *     collection makes the {@code in} predicate unsatisfiable and the query returns nothing
+     * @param afterCardNumber the masked card rendering of the last row already consumed, or the empty
+     *     string to start at the beginning of the group; must not be {@code null}
+     * @param afterFingerprint the fingerprint of the last row already consumed, which breaks the tie
+     *     among cards sharing that rendering, or the empty string to start at the beginning; must not
+     *     be {@code null}
+     * @param afterTransactionId the transaction identifier of the last row already consumed, or the
+     *     empty string to start at the beginning; must not be {@code null}
+     * @param limit the greatest number of rows to return, which a caller sets to one more than its
+     *     window size when it needs to know whether a further window exists
+     * @return the rows in ascending card, fingerprint and transaction-identifier order, at most
+     *     {@code limit} of them, empty when the group holds no further transaction; never {@code null}
+     * @throws org.springframework.dao.DataAccessException if the projection cannot be read, which
+     *     includes the relation being absent -- a defect to report against the data-migration
+     *     package, as register entry <b>R11</b> records, and never one to work around from here
+     */
+    @Query("""
+            select t
+            from StatementTransactionView t
+            where t.cardFingerprint in :cardFingerprints
+              and (t.key.cardNumber > :afterCardNumber
+                   or (t.key.cardNumber = :afterCardNumber
+                       and t.cardFingerprint > :afterFingerprint)
+                   or (t.key.cardNumber = :afterCardNumber
+                       and t.cardFingerprint = :afterFingerprint
+                       and t.key.transactionId > :afterTransactionId))
+            order by t.key.cardNumber asc, t.cardFingerprint asc, t.key.transactionId asc
+            limit :limit
+            """)
+    @QueryHints(@QueryHint(name = AvailableHints.HINT_READ_ONLY, value = "true"))
+    @Transactional(readOnly = true)
+    List<StatementTransactionView> findWindowForCardGroup(
+            @Param("cardFingerprints") Collection<String> cardFingerprints,
+            @Param("afterCardNumber") String afterCardNumber,
+            @Param("afterFingerprint") String afterFingerprint,
+            @Param("afterTransactionId") String afterTransactionId,
             @Param("limit") int limit);
 
     /**

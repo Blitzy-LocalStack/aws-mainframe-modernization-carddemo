@@ -387,21 +387,35 @@ async function refusesAnUnmaskedRow(): Promise<void> {
 /**
  * Asserts a national identifier returned in the clear is refused rather than returned to a screen.
  *
- * Assumptions: the fixture is a WHOLE formatted identifier, which is the exact value the contract's own
- * withdrawn example carried and which its `maxLength: 12` admitted -- so this case measures the
- * situation the schema could not exclude. The refusal is asserted to be a `RangeError` and its message
- * asserted NOT to contain the offending value, because a message quoting it would put a national
- * identifier into whatever records the failure.
+ * Assumptions: the fixture is a WHOLE formatted identifier — eleven characters in the `NNN-NN-NNNN`
+ * form the contract's withdrawn `maxLength: 12` admitted — so this case measures the situation the
+ * schema could not exclude. The refusal is asserted to be a `RangeError` and its message asserted NOT
+ * to contain the offending value, because a message quoting it would put a national identifier into
+ * whatever records the failure.
+ *
+ * Assumptions: the digits are `000-00-0000`, the non-issuable sentinel this repository already uses
+ * wherever such a value has to be written down (`ThrowableDigestTest.SSN_SENTINEL` and the cause-chain
+ * case in `GlobalExceptionHandlerTest` spell the same one). The issuing authority has never assigned an
+ * area number of 000, never a group number of 00 and never a serial number of 0000, so it fails three
+ * independent allocation rules at once and can belong to nobody — while still being the same eleven
+ * characters, so both assertions below measure exactly what they measured before: the guard must refuse
+ * a value of this width, and must not name it.
+ *
+ * Alternatives Considered: an issuable-shaped literal, which this fixture carried until a review of
+ * sensitive examples. Rejected because a value shaped like a live identifier reads as a live one to
+ * whoever finds it by search, and this case exists to keep exactly that shape off a screen and out of an
+ * error message. A per-run random draw was rejected in turn: the value has to appear in the
+ * `not.toThrow` pattern below, which needs a literal the source states rather than one a run invents.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
 async function refusesAnUnredactedNationalIdentifier(): Promise<void> {
   answerWith({
     accountId: '00000000011',
-    customer: { ...REDACTED_CUSTOMER, ssnMasked: '123-45-6789' },
+    customer: { ...REDACTED_CUSTOMER, ssnMasked: '000-00-0000' },
   });
 
   await expect(readAccountView('00000000011')).rejects.toThrow(RangeError);
-  await expect(readAccountView('00000000011')).rejects.not.toThrow(/123-45-6789/u);
+  await expect(readAccountView('00000000011')).rejects.not.toThrow(/000-00-0000/u);
 }
 
 /**

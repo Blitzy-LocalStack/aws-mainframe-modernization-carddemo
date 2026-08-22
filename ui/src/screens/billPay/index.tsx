@@ -7,17 +7,27 @@
  * -------
  * Render the reference screen's two-turn workflow: look an account up and report the balance it owes,
  * then pay that balance in full behind an explicit confirmation. It replaces CICS transaction CB00,
- * which `app/csd/CARDDEMO.CSD` L337-L338 binds to that program, and it publishes the mapset's painted
- * literals, its declared field widths and its function-key legend so the screen tests assert against
- * one transcription rather than their own.
+ * which `app/csd/CARDDEMO.CSD` L337-L338 binds to that program.
+ *
+ * Assumptions: this module publishes the mapset's declared FIELD WIDTHS and nothing else that a screen
+ * test would otherwise transcribe; the painted literals, the domain hint and the two screen-owned
+ * legend captions are published by `ui/src/messages/messages.ts` under the `BILL_PAY_*` names and are
+ * imported below. A width is a per-mapset numeric contract rather than user-visible text, which is the
+ * line AAP section 0.2.1.5 draws between what the catalog owns and what a screen keeps.
  *
  * What this screen owns, and what it does not
  * -------------------------------------------
  * Assumptions: rows 4 to 22 of the map are this screen's, and rows 1 to 3, 23 and 24 are the frame's.
  * `ui/src/layout/AppShell.tsx` paints the title band, the row-23 message line and the row-24 legend
- * from a delegated slot, and its own documentation states that no screen composes a `ScreenHeader`, a
- * row-23 `MessageBand` or a `PfKeyBar` of its own. This module therefore renders none of the three and
- * publishes them instead -- see the `useShellSlot` call in {@link BillPayScreen}.
+ * from a delegated slot, and this module renders none of the three: it publishes all three instead --
+ * see the `useShellSlot` call in {@link BillPayScreen}, which carries the reason for the choice.
+ *
+ * Assumptions: delegating is the MAJORITY contract in this tree and not a universal one. Counted over
+ * the 21 screen directories, 18 delegate their three zones and three compose their own --
+ * `ui/src/screens/menu`, `ui/src/screens/admin` and `ui/src/screens/authDetail` -- so a reader who
+ * finds a locally composed band on one of those three has found the documented exception rather than a
+ * defect. ⚠️ The claim that stood here, that no screen composes those bands itself, is WITHDRAWN as
+ * false on that measurement.
  *
  * Assumptions: the transaction record this payment writes is composed ENTIRELY server-side, and none
  * of it appears here. `app/cbl/COBIL00C.cbl` L212-L235 generates the identifier by browsing the ledger
@@ -67,6 +77,10 @@ import { ScreenTitle } from '../../layout/ScreenTitle';
 import { usePfKeys } from '../../layout/usePfKeys';
 import type { PfKeyHandlerMap, PfKeyRejection } from '../../layout/usePfKeys';
 import {
+  BILL_PAY_CONFIRM_DOMAIN_HINT,
+  BILL_PAY_FIELD_LABELS,
+  BILL_PAY_KEY_LABELS,
+  BILL_PAY_TITLE,
   INVALID_KEY_PRESSED,
   MESSAGE_TEMPLATES,
   PROGRAM_MESSAGES,
@@ -108,57 +122,23 @@ export const BILL_PAY_PROGRAM_NAME = 'COBIL00C';
  */
 export const BILL_PAY_MAPSET = 'COBIL00';
 
-/**
- * Screen title, verbatim from `app/bms/COBIL00.bms` L75-L79.
- *
- * Assumptions: the mapset paints this as its own `LENGTH=12` field with `ATTRB=(ASKIP,BRT)` and
- * `COLOR=NEUTRAL`, and the twelve characters here are that literal exactly. It is declared in this
- * module rather than read from the catalog because the catalog carries no entry for it: the nearest
- * value it holds is the main menu's option name, `'Bill Payment                       '`, padded to
- * the 35-character option width, and trimming that to reach this literal would make one field's text
- * depend on another field's padding.
- *
- * Alternatives Considered: `PROGRAM_MESSAGES.COBIL00C.BILL_PAYMENT`, which reads like the obvious
- * source and is the wrong one. That entry is `'BILL PAYMENT'` in upper case and it is the merchant
- * NAME the service writes into the transaction row at `app/cbl/COBIL00C.cbl` L227 -- a data value on a
- * record, not a caption on a screen. Using it would paint the title in the wrong case and would tie
- * this heading to a ledger field.
+/*
+ * WHY : ⚠️ Refactoring Rationale: four groups of painted text were declared in this module -- the row-4
+ *       title, the three field literals, the `(Y/N)` domain hint and the two screen-owned legend
+ *       captions -- each with its own transcription note citing the mapset line and declared width.
+ *       All four now live in `ui/src/messages/messages.ts` as `BILL_PAY_TITLE`,
+ *       `BILL_PAY_FIELD_LABELS`, `BILL_PAY_CONFIRM_DOMAIN_HINT` and `BILL_PAY_KEY_LABELS`, with the
+ *       per-entry mapset lines in `BILL_PAY_PAINTED_TEXT_SOURCES` keyed to
+ *       `BILL_PAY_MAPSET_SOURCE_FILE`, and are imported above. AAP section 0.2.1.5 assigns the strings
+ *       a screen renders to that catalog, and the move is what makes their byte-exactness reviewable:
+ *       two of these values END IN A SPACE that fills a declared BMS field width, and a trailing space
+ *       is a value a reviewer cannot check while it is spread across a component.
+ * WHY : Assumptions: nothing about the values changed in the move, and the provenance did not move
+ *       twice. Each citation is carried once, in the catalog entry that now owns the literal, so a
+ *       reader after the mapset line, the declared width or the reason a full stop stands where a
+ *       question mark reads more naturally finds it there rather than in a copy here that could drift
+ *       from it.
  */
-export const BILL_PAY_TITLE = 'Bill Payment';
-
-/**
- * The three literals the map paints beside this screen's fields, byte for byte.
- *
- * Assumptions: the trailing spaces are part of the values and are not incidental. `app/bms/COBIL00.bms`
- * declares each field's `LENGTH` and each `INITIAL` fills it exactly -- 14, 25 and 53 characters
- * respectively -- so the balance label ends with a space and the confirmation prompt ends with a space,
- * because on the terminal the value followed immediately in the next column. A reformat that trims
- * them, or an editor action that strips trailing whitespace inside these quotes, changes what the
- * screen paints while still reading as correct English.
- *
- * Assumptions: the confirmation prompt ends the first sentence with a FULL STOP and not a question
- * mark -- `'... your balance now. Please confirm: '` -- which reads like a transcription slip and is
- * not one. It is what `app/bms/COBIL00.bms` L109-L114 holds, and rule T8 carries user-visible text
- * across character for character, so it is never corrected.
- */
-export const BILL_PAY_FIELD_LABELS = {
-  /** `app/bms/COBIL00.bms` L80-L84, `LENGTH=14`, the label beside `ACTIDIN`. */
-  accountId: 'Enter Acct ID:',
-  /** `app/bms/COBIL00.bms` L98-L102, `LENGTH=25`, the label beside `CURBAL`. Trailing space included. */
-  currentBalance: 'Your current balance is: ',
-  /** `app/bms/COBIL00.bms` L109-L114, `LENGTH=53`, the prompt beside `CONFIRM`. Trailing space included. */
-  confirmPrompt: 'Do you want to pay your balance now. Please confirm: ',
-} as const;
-
-/**
- * The domain hint the map paints after the confirmation field, from `app/bms/COBIL00.bms` L122-L126.
- *
- * Assumptions: this five-character literal survives even though the single-character field it
- * annotated does not, and it survives because it still names the two answers. The confirmation dialogue
- * labels its controls `Y` and `N`, so the hint describes the choice an operator is actually offered
- * rather than describing a text field that is gone.
- */
-export const BILL_PAY_CONFIRM_DOMAIN_HINT = '(Y/N)';
 
 /**
  * Declared widths of the two data fields this screen renders, from the mapset and its symbolic map.
@@ -188,23 +168,25 @@ export const BILL_PAY_FIELD_WIDTHS = {
 const BALANCE_INTEGER_POSITIONS = 10;
 
 /**
- * Function-key legend labels, split from the single row-24 field at `app/bms/COBIL00.bms` L131-L135.
+ * This screen's row-24 legend, assembled from the two sources that own its three captions.
  *
- * Assumptions: that field is `LENGTH=33` and holds `'ENTER=Continue  F3=Back  F4=Clear'` -- three
- * captions separated by two spaces each, 14 + 2 + 7 + 2 + 8 = 33. It advertises three keys and no
- * others, and `app/cbl/COBIL00C.cbl` L125-L142 dispatches exactly those three from `EIBAID` before
- * answering everything else with the shared invalid-key sentence. So this screen has no PF5, PF7, PF8
- * or PF12 binding at all, and the legend is the evidence rather than an inference.
+ * Assumptions: the assembly exists because the three captions have TWO owners, not because any of them
+ * is transcribed here. `BILL_PAY_KEY_LABELS` in the message catalog carries the two that are this
+ * mapset's own -- ENTER reads `Continue` where other mapsets paint `Process`, and PF3 reads `Back`
+ * where nine others paint `Exit` -- and it deliberately omits `F4=Clear`, which is byte-identical
+ * everywhere it appears and is published by `ui/src/layout/PfKeyBar.tsx`. The catalog cannot reach for
+ * it, because that module imports nothing at load time, so the join happens at the one call site that
+ * needs all three.
  *
- * Assumptions: only PF4's caption is imported. `UNIFORM_PF_KEY_LABELS` holds the captions whose text is
- * identical on every mapset that paints them and `F4=Clear` is one of those, so importing it keeps this
- * module from becoming a second place that spelling could drift. ENTER reads `Continue` here where
- * other mapsets paint `Process`, and PF3 reads `Back` where nine others paint `Exit`, so both are
- * declared locally.
+ * Assumptions: THREE captions and no more, because two independent sources in the reference agree on
+ * three. The row-24 field is one `LENGTH=33` literal, `'ENTER=Continue  F3=Back  F4=Clear'`, and
+ * `app/cbl/COBIL00C.cbl` L125-L142 dispatches exactly those three attention identifiers before
+ * answering everything else with the shared invalid-key sentence. The absence of PF5, PF7, PF8 and
+ * PF12 is therefore the baseline's own.
  */
-const BILL_PAY_KEY_LABELS = {
-  ENTER: 'ENTER=Continue',
-  PFK03: 'F3=Back',
+const BILL_PAY_LEGEND_LABELS = {
+  ENTER: BILL_PAY_KEY_LABELS.ENTER,
+  PFK03: BILL_PAY_KEY_LABELS.PFK03,
   PFK04: UNIFORM_PF_KEY_LABELS.PFK04,
 } as const;
 
@@ -669,6 +651,19 @@ export function BillPayScreen(): ReactElement {
   const [message, setMessage] = useState<string | null>(null);
   const [severity, setSeverity] = useState<MessageBandSeverity>('error');
   const [fieldErrors, setFieldErrors] = useState<readonly BillPayFieldError[]>([]);
+
+  /*
+   * WHY : Assumptions: this one flag is the WHOLE-TURN keyboard lock and not a spinner condition. It is
+   *       set before the request leaves and cleared only when the turn settles, and every control and
+   *       every attention identifier this screen offers is held shut for that entire window: the account
+   *       entry, the confirmation dialogue and its trigger, and the ENTER, PF3 and PF4 bindings. A 3270
+   *       accepted no keystroke between sending the map and receiving the reply, so a screen that moves
+   *       money reproduces that here rather than allowing an exit or a clear to race a commit.
+   * WHY : Trade-offs: the lock is expressed as ONE piece of state rather than per-control flags,
+   *       accepting that no control can be exempted without an edit here. That is the point -- a
+   *       per-control flag is what let PF3 and PF4 stay live while a payment committed, and a single
+   *       flag makes the next control added to this screen locked by default rather than by attention.
+   */
   const [busy, setBusy] = useState(false);
 
   /*
@@ -693,13 +688,14 @@ export function BillPayScreen(): ReactElement {
    *       below, where it used to be performed inline at the point of decision. Measured in a browser
    *       rather than reasoned about: a `focus()` issued inline landed nowhere on every turn that had
    *       reached the network, leaving `document.activeElement` on `<body>`. The cause is a collision
-   *       between two things this screen does deliberately. The account entry and the confirmation
-   *       control are both `disabled` while a turn is in flight -- the keyboard lock a 3270 got from the
-   *       hardware -- and the handler that settles a turn clears that flag and names the cursor's
-   *       destination in the same batch. React commits both together, so an inline call ran while the
-   *       target was still disabled, and a disabled element refuses focus silently, with no error to
-   *       notice. Worse, disabling the element the operator was typing into makes the browser blur it
-   *       first, so the inline form did not merely fail to move the cursor: it lost it.
+   *       between two things this screen does deliberately. Every control the cursor can be sent to is
+   *       `disabled` while a turn is in flight -- the account entry and the confirmation trigger among
+   *       them, since the lock covers the whole turn -- and the handler that settles a turn clears that
+   *       flag and names the cursor's destination in the same batch. React commits both together, so an
+   *       inline call ran while the target was still disabled, and a disabled element refuses focus
+   *       silently, with no error to notice. Worse, disabling the element the operator was typing into
+   *       makes the browser blur it first, so the inline form did not merely fail to move the cursor:
+   *       it lost it.
    * WHY : Alternatives Considered: three. (1) `readOnly` instead of `disabled` on the account entry,
    *       which keeps focus -- rejected because it also keeps the control looking and announcing as
    *       editable during a turn it will not accept, which misstates the lock rather than expressing it.
@@ -1002,10 +998,30 @@ export function BillPayScreen(): ReactElement {
    *       `app/cpy/CSSTRPFY.cpy`'s own aliasing, so F15 and F16 reach the PF3 and PF4 handlers below
    *       without this screen registering them. Verified in a browser: F16 left the screen in a state
    *       byte-identical to the F4 state, and F15 reached the same destination as F3.
+   * WHY : Refactoring Rationale: ALL THREE bindings carry `disabled: busy`, where only ENTER did. A
+   *       3270 keyboard is locked for the whole turn -- the terminal accepts no attention identifier
+   *       at all between sending the map and receiving the region's reply -- so the reference could not
+   *       have taken PF3 or PF4 mid-turn even in principle. Leaving those two live let an operator
+   *       press F3 and leave the screen, or F4 and watch it clear, while `payAccountBalanceInFull` was
+   *       still in flight and about to commit: the screen then showed a cleared or abandoned state for
+   *       a payment that had moved money. Reproducing the lock explicitly is what a browser has to do,
+   *       because nothing between the keyboard and this handler map enforces it.
+   * WHY : Alternatives Considered: keeping the two keys live and CANCELLING the request instead, with
+   *       an abort signal on the client. Rejected because it presents a cancellation this screen cannot
+   *       perform: aborting the HTTP request abandons the response, not the write -- the service posts
+   *       the ledger row and reduces the balance inside one database transaction that has no client-side
+   *       undo -- so the operator would be told the payment was cancelled while it committed. A real
+   *       cancellation would need an idempotent reversal endpoint, which is neither in the baseline nor
+   *       in this checkpoint. Waiting is the honest affordance.
+   * WHY : Trade-offs: for the duration of one request the operator cannot leave this screen by F3 or
+   *       clear it by F4, and the two legend controls render greyed while that lasts. The alternative
+   *       cost is a lost or contradicted payment, so the wait is accepted; it is bounded by the client's
+   *       own request timeout, after which the rejection path re-enables everything and paints the
+   *       reference's own `'Unable to Add Bill pay Transaction...'`.
    */
   const pfKeyHandlers: PfKeyHandlerMap = {
     ENTER: {
-      label: BILL_PAY_KEY_LABELS.ENTER,
+      label: BILL_PAY_LEGEND_LABELS.ENTER,
       disabled: busy,
       onInvoke:
         /**
@@ -1017,7 +1033,8 @@ export function BillPayScreen(): ReactElement {
         },
     },
     PFK03: {
-      label: BILL_PAY_KEY_LABELS.PFK03,
+      label: BILL_PAY_LEGEND_LABELS.PFK03,
+      disabled: busy,
       onInvoke:
         /**
          * Returns to the screen that transferred here, or to the main menu.
@@ -1028,7 +1045,8 @@ export function BillPayScreen(): ReactElement {
         },
     },
     PFK04: {
-      label: BILL_PAY_KEY_LABELS.PFK04,
+      label: BILL_PAY_LEGEND_LABELS.PFK04,
+      disabled: busy,
       onInvoke:
         /**
          * Clears every field and the message, which is `CLEAR-CURRENT-SCREEN` at L552-L555.
@@ -1074,11 +1092,13 @@ export function BillPayScreen(): ReactElement {
          * WHY : Assumptions: only an UNMAPPED identifier paints the sentence; one refused because its
          *       handler is momentarily disabled is answered in silence. The two are different events in
          *       the reference. An unmapped identifier is the `WHEN OTHER` arm, which paints. A disabled
-         *       one only ever arises here because a turn is in flight and the ENTER binding is held
-         *       shut -- and that is the 3270 keyboard lock, which the hardware enforced by refusing the
-         *       keystroke before the program ever saw it, so no sentence was composed and none was
-         *       painted. Answering both alike would invent a message on a keystroke the reference
-         *       discards. The sibling main-menu screen draws the same distinction for the same reason.
+         *       one only ever arises here because a turn is in flight, which holds ALL THREE of this
+         *       screen's bindings shut -- ENTER, PF3 and PF4 -- and that is the 3270 keyboard lock,
+         *       which the hardware enforced by refusing the keystroke before the program ever saw it, so
+         *       no sentence was composed and none was painted. Answering both alike would invent a
+         *       message on a keystroke the reference discards, and it would invent it three times over
+         *       for an operator who kept pressing keys while a payment was being written. The sibling
+         *       main-menu screen draws the same distinction for the same reason.
          */
         if (rejection.reason !== 'unmapped') {
           return;
@@ -1090,13 +1110,26 @@ export function BillPayScreen(): ReactElement {
   });
 
   /*
-   * WHY : Assumptions: this screen composes no title band, no row-23 message line and no row-24 legend of
-   *       its own, and publishes all three here instead. `ui/src/layout/AppShell.tsx` is the frame that
-   *       renders them, and its own documentation states that every screen delegates and none
-   *       self-composes; a screen that also rendered them would produce two live regions announcing one
-   *       message and a duplicate legend. The mechanism is the module-scoped store that module already
-   *       uses for the same job, reached through its `useShellSlot` hook -- not a context provider, which
-   *       that file records as deliberately absent from this tree.
+   * WHY : ⚠️ Assumptions: this screen composes no title band, no row-23 message line and no row-24
+   *       legend of its own, and publishes all three here instead. The claim that stood here -- that
+   *       `ui/src/layout/AppShell.tsx` documents every screen as delegating and none as self-composing
+   *       -- is WITHDRAWN as false. Counted over the 21 screen directories, 18 delegate through this
+   *       hook and three compose their own three bands: `ui/src/screens/menu`, `ui/src/screens/admin`
+   *       and `ui/src/screens/authDetail`. Delegation is the majority contract with three documented
+   *       exceptions, and it is safe to be either because the frame paints a zone only for a screen that
+   *       published one, so a self-composing screen leaves the frame's own bands unrendered rather than
+   *       doubled.
+   * WHY : Assumptions: this screen chooses the majority side because it has nothing to gain from the
+   *       exception and one thing to lose. Publishing keeps the message line a SINGLE live region: a
+   *       payment refusal and a payment success are announced once each, where a screen-composed band
+   *       inside the frame's would announce both twice, and the row-24 legend would offer two controls
+   *       per key with the same handler behind each. The three exceptions are menus and a detail panel
+   *       that own their whole viewport; this screen owns rows 4 to 22 of a frame that is already there.
+   * WHY : Assumptions: the frame is mounted ABOVE this route rather than by it. `ui/src/router.tsx`
+   *       mounts one `AppShell` as the outermost layout route, whose children are the sign-on route and
+   *       a pathless guarded route -- so `RequireSignOn` sits INSIDE the frame and `ui/src/App.tsx`
+   *       composes no frame at all, only the theme and the one router provider. That is why this call
+   *       publishes into a frame it never renders and never needs to check for.
    * WHY : Assumptions: the bindings and the dispatcher published here are the SAME pair `usePfKeys`
    *       resolved above, so a legend control the frame renders and a physical key press run one handler.
    *       Publishing a separately built descriptor list would let the two diverge.
@@ -1109,6 +1142,19 @@ export function BillPayScreen(): ReactElement {
     now: paintedAt,
     message: { text: message, severity, mapset: BILL_PAY_MAPSET },
     pfKeys: { keys: bindings, onInvoke: invoke },
+    /*
+     * WHY : Assumptions: the write-in-flight flag is delegated so the FRAME's sign-off control is held
+     *       shut for the same window this screen holds its own keys and inputs shut. Every other way off
+     *       this screen is already locked for the turn -- Enter, F3, F4 and both entry controls -- and the
+     *       shell's control was the one remaining exit, which is also the most damaging one: it discards
+     *       the session locally while the request already carrying its token completes at the service, so
+     *       the operator lands on sign-on believing the turn was abandoned.
+     * WHY : Trade-offs: the flag is published rather than the shell inferring it. The frame sees a title,
+     *       a message and a legend, none of which distinguishes a read from a write, so inferring it would
+     *       mean the frame reaching into this screen's transport state. `ui/src/layout/AppShell.tsx`
+     *       records the same conclusion on the slot member.
+     */
+    busy,
   });
 
   /*
@@ -1330,6 +1376,23 @@ export function BillPayScreen(): ReactElement {
          *       alone, so it fires on mount and never again; without destruction the panel stays mounted
          *       after the first close and every later opening would leave the cursor outside it.
          */}
+        {/*
+         * WHY : Alternatives Considered: extending the in-flight lock to the panel's own two answer
+         *       buttons the way every other control on this screen carries it, with
+         *       `okButtonProps={{ disabled: busy }}` and `cancelButtonProps={{ disabled: busy }}`.
+         *       REJECTED because it does not work, and measuring it is what established that: this
+         *       version of the design system renders the panel's content once per opening and does not
+         *       propagate a later `okButtonProps` or `cancelButtonProps` change into a panel that is
+         *       already on screen. A minimal case outside this screen -- a `Popconfirm` whose button
+         *       props are driven by outside state -- kept both answer buttons enabled after that state
+         *       flipped, and the same nodes stayed enabled while the panel was leaving. Shipping the
+         *       props would have looked like the lock and enforced nothing, so the lock is enforced in
+         *       the two handlers below, which is the only place this screen can enforce it.
+         * WHY : Assumptions: `disabled` on the TRIGGER still carries its own weight, and this is not a
+         *       duplicate of that. It stops the panel from being OPENED during a turn; it says nothing
+         *       about a panel that was already open when the turn began, or about the answer buttons of
+         *       one that is closing after `Y` -- both of which stay wired to their handlers.
+         */}
         <Popconfirm
           title={BILL_PAY_FIELD_LABELS.confirmPrompt}
           okText={CONFIRMING_ANSWER}
@@ -1423,9 +1486,32 @@ export function BillPayScreen(): ReactElement {
              * carrying no balance and no message. Sending the answer would spend a request to be told
              * what is already known, and would let an unrelated transport failure paint an error on a
              * turn the reference answers silently.
-             * @returns {void} Nothing; the cleared state is the screen's own.
+             * @returns {void} Nothing; the cleared state is the screen's own, and nothing at all when a
+             *   turn is in flight.
              */
             (): void => {
+              /*
+               * WHY : Refactoring Rationale: a decline arriving DURING a turn is dropped, where it used
+               *       to clear the screen. This is the panel's half of the in-flight lock, and it is a
+               *       guard rather than a `disabled` prop because the design system will not carry a
+               *       prop change into a panel it has already rendered -- measured, and recorded at the
+               *       `Popconfirm` above. Without it, `N` on a panel still leaving after `Y` ran
+               *       `INITIALIZE-ALL-FIELDS` over a payment that was still being written: measured with
+               *       a deferred transport, the entry and the balance both went blank while the request
+               *       was outstanding, so the screen showed an abandoned turn for money that then moved.
+               * WHY : Assumptions: dropping it SILENTLY is the faithful answer, not a courtesy. The
+               *       reference's keyboard was locked for the whole turn, so this keystroke never
+               *       reached the program and no sentence was composed for it -- which is the same
+               *       reading the disabled-AID path applies at `onInvalidKey`, and the reason neither
+               *       paints a message.
+               * WHY : Assumptions: the ref is read rather than the `busy` state, for the reason
+               *       `runTurn` records at its own guard -- state updates are batched, so two events
+               *       delivered in one batch would both observe the stale flag.
+               */
+              if (inFlight.current) {
+                return;
+              }
+
               clearScreen();
             }
           }
@@ -1438,15 +1524,23 @@ export function BillPayScreen(): ReactElement {
            * all -- a 3270 keyboard locks while the region works, so the terminal expressed "busy" by
            * refusing input rather than by drawing anything. Gap G5 in AAP section 0.3.4 records that
            * class of addition. It is carried on this control rather than as a separate overlay so the
-           * indication sits on the action it describes, and the same flag disables the account entry and
-           * the ENTER binding, which together reproduce the keyboard lock the hardware provided.
+           * indication sits on the action it describes, and the flag that draws it is the same one that
+           * shuts the account entry, this trigger and all three key bindings -- together the browser's
+           * reconstruction of the lock the hardware provided.
+           * Refactoring Rationale: `disabled` names the in-flight flag as well as the unpayable state,
+           * where it named only the latter. `loading` alone is not a lock: `antd`'s button calls
+           * `preventDefault` on a click while loading, so the dialogue could not be reopened, but it
+           * leaves the element focusable and leaves `aria-disabled` unset -- so assistive software still
+           * announced an available action on a screen that would refuse it. Naming both conditions puts
+           * the DOM `disabled` attribute on the control for the whole turn, and the spinner still renders
+           * because the loading icon does not depend on the enabled state.
            */}
           <Space size={cssVar[SPACING_TOKENS.sectionGapCompact]}>
             <Button
               ref={confirmButtonRef}
               type="primary"
               danger
-              disabled={!payable}
+              disabled={!payable || busy}
               loading={busy}
               data-testid="billpay-confirm"
             >

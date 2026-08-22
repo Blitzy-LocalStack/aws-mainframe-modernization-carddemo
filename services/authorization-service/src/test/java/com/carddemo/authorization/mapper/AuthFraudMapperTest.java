@@ -50,14 +50,23 @@ import tools.jackson.databind.json.JsonMapper;
  * case constructs its subject directly and reads at most a committed byte image; nothing here starts an
  * application context, opens a connection, executes a statement or sends a message.
  *
- * <p>Assumptions: the eleven members this class reaches had NO caller anywhere in this module's test
+ * <p>Assumptions: the eight members this class reaches had NO caller anywhere in this module's test
  * tree before it existed -- {@code toFraudRow}, {@code applyFraudState}, {@code fraudRowKey},
- * {@code detailKey}, {@code fraudFlagColumn}, {@code processingCodeColumn},
- * {@code merchantNameColumn}, {@code markResponse}, {@code toView} and the two package-private
- * constants. The two members that did have callers, the pair that reads and writes the segment's own
- * eight-character report date, are asserted by {@code SegmentConversionContractTest} and are therefore
- * not re-asserted here; this class uses one of them only as the counterpart in the provenance
- * comparison that is its own subject.
+ * {@code detailKey}, {@code markResponse}, {@code toView} and the two package-private constants. The
+ * two members that did have callers, the pair that reads and writes the segment's own eight-character
+ * report date, are asserted by {@code SegmentConversionContractTest} and are therefore not re-asserted
+ * here; this class uses them only as the counterpart in the provenance comparison that is its own
+ * subject.
+ *
+ * <p>Refactoring Rationale: this census read ELEVEN and additionally named {@code fraudFlagColumn},
+ * {@code processingCodeColumn} and {@code merchantNameColumn}. Those three per-column boundaries are
+ * withdrawn from the mapper, for the reason its own class documentation records: no production path
+ * called any of them, so each stood as a second normalisation of a value whose authority is elsewhere,
+ * and THIS CLASS WAS THEIR ONLY CALLER -- which is why a test-tree census was the place the fact became
+ * visible. The cases that exercised them are withdrawn with them rather than repointed, because the
+ * property each asserted is asserted where the surviving authority lives: the stored marker's domain at
+ * {@code PendingAuthDetailMapperTest}, the zero-filled rendering likewise, and the merchant name's
+ * untrimmed length at this class's own row-shape cases.
  *
  * <h2>What this class does not re-prove</h2>
  *
@@ -114,9 +123,11 @@ import tools.jackson.databind.json.JsonMapper;
  *       {@code dcl/AUTHFRDS.dcl} L57 is the HOST VARIABLE the composed twenty-three-character text is
  *       bound through, and {@code cbl/COPAUS2C.cbl} L171 to L172 converts it with
  *       {@code TIMESTAMP_FORMAT} on the way in.
- *   <li>An out-of-domain fraud position is REFUSED and not passed through. Both the decode and this
- *       mapper's own column boundary reject it, and the production code records that passing it
- *       through silently is the behaviour they replaced.
+ *   <li>An out-of-domain fraud position is REFUSED and not passed through. The refusal is the DECODE's,
+ *       at {@code PendingAuthDetailMapper.requireFraudPositionInDomain}, which records that passing
+ *       such a character through silently is the behaviour it replaced. This mapper carries no second
+ *       refusal of its own: the boundary that once held one is withdrawn, and the column it guarded is
+ *       written from the requested action rather than from a stored marker in any case.
  *   <li>The prohibition on binary floating point IS inherited. The shared kernel's rule A3 selects the
  *       whole analysed root rather than the money package alone, and it is re-run against this module's
  *       compiled classes by a dedicated Surefire execution, so a sweep here would re-prove a rule this
@@ -583,57 +594,6 @@ class AuthFraudMapperTest {
         }
 
         /**
-         * The column boundary hands every padding shape back exactly as it arrived.
-         *
-         * <p>Assumptions: an all-blank name is neither converted to {@code null} nor collapsed to an
-         * empty string, which is what separates this field from every other blank-tolerant one in the
-         * context. Twenty-two blanks are what the reference insert path writes into a name it has
-         * nothing for, and they are a legitimate stored value of the declared width rather than an
-         * absence: the column is what carries absence, and this mapper is not asked to invent one.</p>
-         *
-         * <p>Assumptions: {@code null} is answered with {@code null} rather than with blanks, because a
-         * null arriving here can only have come from a column an extract left unset, and padding it
-         * would fabricate a value the source did not hold.</p>
-         *
-         * @param shape the name of the padding shape under test, used to name a failing row
-         * @param stored the merchant name as a segment would hold it, which may be {@code null}
-         * @param expected the value the column boundary must return unchanged
-         */
-        @ParameterizedTest(name = "{0}")
-        @MethodSource(
-                "com.carddemo.authorization.mapper.AuthFraudMapperTest#merchantNamePaddingShapes")
-        @DisplayName("every padding shape crosses the column boundary unchanged")
-        void theBoundaryHandsEveryPaddingShapeBackUnchanged(String shape, String stored,
-                String expected) {
-            assertThat(AuthFraudMapper.merchantNameColumn(stored))
-                    .as("%s: the boundary exists to make the absence of a trim readable", shape)
-                    .isEqualTo(expected);
-        }
-
-        /**
-         * A name wider than the column declares is refused rather than truncated to fit.
-         *
-         * <p>Assumptions: refusal is the only safe answer because the column could not store the value
-         * either. Truncating would produce a row that looked well formed and named a different merchant,
-         * and the twenty-third character is exactly the evidence that something upstream widened a field
-         * the copybook fixes at twenty-two.</p>
-         *
-         * <p>This test takes no parameter and returns no value. It asserts that
-         * {@link IllegalArgumentException} is raised, which is named here because the assertion's
-         * expectation sits inside a lambda where a documentation gate cannot see it.</p>
-         */
-        @Test
-        @DisplayName("a twenty-three character name is refused, naming the declared width")
-        void anOverWideNameIsRefused() {
-            String tooWide = "A".repeat(AuthFraudMapper.MERCHANT_NAME_COLUMN_WIDTH + 1);
-
-            assertThatExceptionOfType(IllegalArgumentException.class)
-                    .isThrownBy(() -> AuthFraudMapper.merchantNameColumn(tooWide))
-                    .withMessageContaining(String.valueOf(
-                            AuthFraudMapper.MERCHANT_NAME_COLUMN_WIDTH));
-        }
-
-        /**
          * The merchant name is the one variable-length column the fraud table declares.
          *
          * <p>Assumptions: the shipped migration is read as TEXT and no statement is executed, so this is
@@ -677,28 +637,6 @@ class AuthFraudMapperTest {
                     .as("the entity declares the same width the column does")
                     .isEqualTo(AuthFraudMapper.MERCHANT_NAME_COLUMN_WIDTH);
         }
-    }
-
-    /**
-     * Supplies the padding shapes the merchant name column boundary must hand back unchanged.
-     *
-     * <p>Assumptions: the shapes are chosen so that each would be altered by a DIFFERENT plausible
-     * implementation -- a trailing trim, a blank-to-null conversion, an empty-to-null conversion and a
-     * null-to-blank padding -- so a single implementation error cannot pass all four.</p>
-     *
-     * @return one argument triple per padding shape, never {@code null}
-     */
-    private static Stream<Arguments> merchantNamePaddingShapes() {
-        int width = AuthFraudMapper.MERCHANT_NAME_COLUMN_WIDTH;
-        return Stream.of(
-                Arguments.of("content with retained trailing blanks", "ACME CO" + " ".repeat(15),
-                        "ACME CO" + " ".repeat(15)),
-                Arguments.of("content filling the declared width", "A".repeat(width),
-                        "A".repeat(width)),
-                Arguments.of("all blank at the declared width", " ".repeat(width),
-                        " ".repeat(width)),
-                Arguments.of("empty rather than blank", "", ""),
-                Arguments.of("absent, which stays absent", null, null));
     }
 
     /**
@@ -766,34 +704,25 @@ class AuthFraudMapperTest {
         /**
          * The processing code reaches its character column as six zero-filled digits.
          *
-         * <p>Assumptions: the fraud row's own column boundary is what is asserted here. The zero-filled
-         * RENDERING itself is proved by {@code PendingAuthDetailMapperTest}, so what this case adds is
-         * that the fraud projection routes through that rendering and that the value landing on
-         * {@code processing_code} is a six-character string rather than a number -- the two halves of the
-         * regime change that a rendering test alone cannot show.</p>
+         * <p>Assumptions: what is asserted is the value the PROJECTION lands on {@code processing_code},
+         * read against the committed image's own span, plus the width of the column it lands in. The
+         * zero-filled rendering itself is proved by {@code PendingAuthDetailMapperTest}, which owns it;
+         * this case adds that the fraud row carries the rendered characters rather than a number, which is
+         * the half of the regime change a rendering test alone cannot show.</p>
          *
-         * <p>Assumptions: an absent code stays absent rather than becoming six zeros, because a code of
-         * zero and no code at all are different readings and the column is nullable.</p>
+         * <p>Refactoring Rationale: this case also called {@code AuthFraudMapper.processingCodeColumn}
+         * with four literal values, and those four assertions are withdrawn with the method itself. It
+         * took the DECODED number, while the projection this class exists to assert receives a detail
+         * entity that already holds the rendered characters -- so no production path could reach it, and
+         * a case that exercised it reported on a boundary the shipped code does not cross. An absent code
+         * staying absent, which those assertions also covered, is a property of the rendering and is
+         * asserted where the rendering lives.</p>
          *
          * <p>This test takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("the processing code is six zero-filled characters, never an unpadded number")
         void theProcessingCodeIsSixZeroFilledCharacters() {
-            assertThat(AuthFraudMapper.processingCodeColumn(42L))
-                    .as("leading zeros are part of the value once the destination is characters")
-                    .isEqualTo("000042")
-                    .hasSize(PROCESSING_CODE_WIDTH);
-            assertThat(AuthFraudMapper.processingCodeColumn(0L))
-                    .as("a zero code fills the whole width rather than collapsing to one digit")
-                    .isEqualTo("000000");
-            assertThat(AuthFraudMapper.processingCodeColumn(999_999L))
-                    .as("the widest code the six declared digit positions admit")
-                    .isEqualTo("999999");
-            assertThat(AuthFraudMapper.processingCodeColumn(null))
-                    .as("an absent code is not a code of zero")
-                    .isNull();
-
             AuthFraud row = fraudRowOf("pautdtl1-canonical.bin", 0, PendingAuthDetail.FRAUD_REPORTED);
 
             assertThat(row.getProcessingCode())
@@ -1585,59 +1514,7 @@ class AuthFraudMapperTest {
     class FraudMarkerDomain {
 
         /**
-         * Each of the three states a stored record can hold reaches the column as it should.
-         *
-         * <p>Assumptions: {@code pautdtl1-auth-fraud-domain.bin} holds one 200-byte record per admitted
-         * state in the order their evidence appears -- {@code F}, then {@code R}, then the blank -- with
-         * the fraud position at offset 174 and the report date at offset 175. The third record's report
-         * date is blank as well, which is the pairing the insert path writes.</p>
-         *
-         * <p>Assumptions: a blank becomes SQL {@code NULL} and never a space. Two absent states in one
-         * nullable column would mean a predicate written for one silently missed rows holding the other,
-         * and the fraud table's column is a bare {@code CHAR(1)} with no check of its own at
-         * {@code ddl/AUTHFRDS.ddl} L24.</p>
-         *
-         * @param state the name of the stored state under test, used to name a failing row
-         * @param ordinal the zero-based record position within the committed image
-         * @param expected the value the column boundary must produce for that state
-         */
-        @ParameterizedTest(name = "{0}")
-        @MethodSource("com.carddemo.authorization.mapper.AuthFraudMapperTest#fraudPositionStates")
-        @DisplayName("each stored fraud state reaches the column, with the blank becoming no value")
-        void eachStoredStateReachesTheColumn(String state, int ordinal, String expected) {
-            PendingAuthDetail detail = detailOf("pautdtl1-auth-fraud-domain.bin", ordinal);
-
-            assertThat(AuthFraudMapper.fraudFlagColumn(detail.getAuthFraud()))
-                    .as("%s: the value auth_fraud receives from a stored record", state)
-                    .isEqualTo(expected);
-        }
-
-        /**
-         * A blank of any declared width, and an absent value, both become no value.
-         *
-         * <p>Assumptions: the widths exercised are the one-character position and the eight-character
-         * report date, because those are the two blank runs this context actually receives; a blank run of
-         * some other width is not a case the segment can produce.</p>
-         *
-         * <p>This test takes no parameter and returns no value.</p>
-         */
-        @Test
-        @DisplayName("a blank marker and an absent marker are both no value, never a space")
-        void aBlankMarkerBecomesNoValue() {
-            assertThat(AuthFraudMapper.fraudFlagColumn(" ")).as("the segment's own blank").isNull();
-            assertThat(AuthFraudMapper.fraudFlagColumn(
-                    " ".repeat(FRAUD_REPORT_DATE_WIDTH))).as("a wider blank run").isNull();
-            assertThat(AuthFraudMapper.fraudFlagColumn(null)).as("a column left unset").isNull();
-            assertThat(AuthFraudMapper.fraudFlagColumn(PendingAuthDetail.FRAUD_REPORTED))
-                    .as("a marked position is carried through unchanged")
-                    .isEqualTo(PendingAuthDetail.FRAUD_REPORTED);
-            assertThat(AuthFraudMapper.fraudFlagColumn(PendingAuthDetail.FRAUD_REMOVED))
-                    .as("as is a withdrawn one")
-                    .isEqualTo(PendingAuthDetail.FRAUD_REMOVED);
-        }
-
-        /**
-         * An out-of-domain fraud position is refused, both at the column boundary and at the decode.
+         * An out-of-domain fraud position is refused at the decode, so no such row can be projected.
          *
          * <p>Assumptions: {@code pautdtl1-auth-fraud-invalid.bin} is one 200-byte image whose fraud
          * position at offset 174 holds {@code Y}, which no condition name declares. Every other field of
@@ -1648,21 +1525,29 @@ class AuthFraudMapperTest {
          * is deliberately invalid and must never be corrected.</p>
          *
          * <p>Refactoring Rationale: passing an out-of-domain character through unchanged is the behaviour
-         * this code REPLACED, and the reason it was wrong is recorded on the production member: the
-         * character was discarded, the entity presented no value, the check constraint never saw the
-         * offending byte, and the row loaded clean while the extract's own record said an authorization
-         * had been marked. Normalising it to unmarked and normalising it to reported were both considered
-         * and both rejected, because each invents a state the source did not hold and the two invent
-         * opposite ones.</p>
+         * this code REPLACED, and the reason it was wrong is recorded on the production member that now
+         * refuses it, {@code PendingAuthDetailMapper.requireFraudPositionInDomain}: the character was
+         * discarded, the entity presented no value, the check constraint never saw the offending byte,
+         * and the row loaded clean while the extract's own record said an authorization had been marked.
+         * Normalising it to unmarked and normalising it to reported were both considered and both
+         * rejected, because each invents a state the source did not hold and the two invent opposite
+         * ones.</p>
          *
          * <p>Assumptions: the database constraint that refuses the same character by name is asserted
          * against a live engine by the fixtures package's recorded-image case, so the two refusals are
          * complementary rather than duplicated -- this one is the mapper's, before any write is
          * attempted.</p>
          *
+         * <p>Refactoring Rationale: this case used to assert the refusal TWICE, once against the decode
+         * and once against a per-column boundary on the projecting mapper. That boundary is withdrawn: no
+         * production path called it, and the column it named is written from the requested action rather
+         * than from a stored marker, so the assertion described a crossing the shipped code does not
+         * make. The refusal that survives is the one the load and the message consumer both depend on,
+         * and the message assertions move onto it so the domain is still named in the failure.</p>
+         *
          * <p>This test takes no parameter and returns no value. It asserts that
-         * {@link IllegalArgumentException} is raised on both paths, named here because both expectations
-         * sit inside lambdas a documentation gate cannot see into.</p>
+         * {@link IllegalArgumentException} is raised, named here because the expectation sits inside a
+         * lambda a documentation gate cannot see into.</p>
          */
         @Test
         @DisplayName("an out-of-domain fraud position is refused rather than normalised or carried")
@@ -1674,13 +1559,11 @@ class AuthFraudMapperTest {
                             FRAUD_FLAG_OFFSET)
                     .isEqualTo("Y");
             assertThatExceptionOfType(IllegalArgumentException.class)
-                    .as("the column boundary refuses it and names the domain")
-                    .isThrownBy(() -> AuthFraudMapper.fraudFlagColumn("Y"))
+                    .as("the decode refuses the record and names the domain, so no such row can be"
+                            + " projected at all")
+                    .isThrownBy(() -> detailOf("pautdtl1-auth-fraud-invalid.bin", 0))
                     .withMessageContaining(PendingAuthDetail.FRAUD_REPORTED)
                     .withMessageContaining(PendingAuthDetail.FRAUD_REMOVED);
-            assertThatExceptionOfType(IllegalArgumentException.class)
-                    .as("and the decode refuses the record, so no such row can be projected at all")
-                    .isThrownBy(() -> detailOf("pautdtl1-auth-fraud-invalid.bin", 0));
         }
 
         /**
@@ -1942,22 +1825,6 @@ class AuthFraudMapperTest {
                     .doesNotContain("\"transactionAmount\":1234.56")
                     .doesNotContain("\"approvedAmount\":1234.56");
         }
-    }
-
-    /**
-     * Supplies the three fraud-position states a stored record can hold, with the value each maps to.
-     *
-     * <p>Assumptions: the ordinals follow the committed image's own order, which the fixture README
-     * records as the order the states' evidence appears -- the two condition names first and then the
-     * blank whose only evidence is the absence of a condition name for it.</p>
-     *
-     * @return one argument triple per stored state, never {@code null}
-     */
-    private static Stream<Arguments> fraudPositionStates() {
-        return Stream.of(
-                Arguments.of("reported, the first condition name", 0, PendingAuthDetail.FRAUD_REPORTED),
-                Arguments.of("withdrawn, the second condition name", 1, PendingAuthDetail.FRAUD_REMOVED),
-                Arguments.of("blank, which no condition name declares", 2, null));
     }
 
     /**

@@ -38,12 +38,13 @@
  *
  * Where the strings and the design values come from
  * ------------------------------------------------
- * Assumptions: every sentence this screen bands comes from `ui/src/messages/messages.ts`, which holds
- * the verbatim monopoly for this tree, and every colour, weight and face resolves through
- * `ui/src/theme/tokens.ts`. The static labels below are transcribed from the mapset with their source
- * line cited, because a label is a per-mapset attribute the catalog does not carry. This file therefore
- * contains no colour literal, no spacing literal and no `ConfigProvider` -- theme injection belongs to
- * `ui/src/App.tsx` alone.
+ * Assumptions: every string an operator reads on this screen comes from `ui/src/messages/messages.ts`,
+ * which holds the verbatim monopoly for this tree -- the banded sentences its program MOVEs, and the
+ * caption, the four field labels, the user-type hint and the legend labels its mapset paints, each
+ * carrying its own mapset line in that module. Every colour, weight and face resolves through
+ * `ui/src/theme/tokens.ts`. This file therefore contains no colour literal, no spacing literal, no
+ * user-visible text literal and no `ConfigProvider` -- theme injection belongs to `ui/src/App.tsx`
+ * alone.
  *
  * Reference-only provenance: `app/bms/COUSR03.bms`, `app/cpy-bms/COUSR03.CPY`,
  * `app/cbl/COUSR03C.cbl`, `app/cpy/CSUSR01Y.cpy`, `app/cpy/COCOM01Y.cpy` and `app/cpy/CSMSG01Y.cpy`
@@ -84,6 +85,10 @@ import {
   MESSAGE_TEMPLATES,
   PROGRAM_MESSAGES,
   SHARED_MESSAGES,
+  USER_DELETE_CAPTION,
+  USER_DELETE_FIELD_LABELS,
+  USER_DELETE_KEY_LABELS as CATALOGUED_USER_DELETE_KEY_LABELS,
+  USER_DELETE_USER_TYPE_HINT,
   formatMessageTemplate,
 } from '../../messages/messages';
 import type { MapsetName } from '../../messages/messages';
@@ -119,46 +124,31 @@ export const USER_DELETE_PROGRAM_NAME = 'COUSR03C';
  */
 export const USER_DELETE_MAPSET = 'COUSR03' as const satisfies MapsetName;
 
-/**
- * The screen's own caption, verbatim from `app/bms/COUSR03.bms` L75-L79.
- *
- * Assumptions: this is a BODY field and not part of the header band. It is painted at `POS=(4,35)` with
- * `ATTRB=(ASKIP,BRT)` and `COLOR=NEUTRAL` over `LENGTH=11`, below the two 40-character title fields the
- * shell owns on rows 1 and 2, so it belongs to this screen rather than to the frame.
- */
-export const USER_DELETE_CAPTION = 'Delete User';
-
 /** The four values this screen holds: the one key it accepts and the three it displays. */
 export type UserDeleteField = 'userId' | 'firstName' | 'lastName' | 'userType';
 
-/**
- * The four field labels this screen renders, verbatim from `app/bms/COUSR03.bms`.
- *
- * Assumptions: the trailing space on `userType` is part of the value. The mapset declares
- * `INITIAL='User Type: '` at `LENGTH=11` (L125-L129) where the visible text is ten characters, so the
- * eleventh is a space the terminal painted. The transcription rule for this tree is character-exact, and
- * trimming it here would be a silent edit to a user-visible string.
+/*
+ * WHY : ⚠️ Refactoring Rationale: the row-4 caption, the four field labels and the user-type domain hint
+ *       were transcribed HERE from `app/bms/COUSR03.bms` and are now imported from
+ *       `ui/src/messages/messages.ts` as `USER_DELETE_CAPTION`, `USER_DELETE_FIELD_LABELS` and
+ *       `USER_DELETE_USER_TYPE_HINT`, with the per-entry mapset lines beside them in
+ *       `USER_DELETE_PAINTED_TEXT_SOURCES`. AAP transformation rule T8 and section 0.2.1.5 give every
+ *       operator-visible string one owner, and this screen had three that its update and add siblings
+ *       hold copies of -- `'User Type: '` and `'(A=Admin, U=User)'` are byte-identical to the add
+ *       screen's, so a correction applied to one spelling would have left the others reading the old
+ *       text with nothing to show the divergence.
+ * WHY : Assumptions: nothing about the values changed in the move. The trailing space on `userType` is
+ *       still part of the value -- `INITIAL='User Type: '` is `LENGTH=11` for ten visible characters at
+ *       `app/bms/COUSR03.bms` L125-L129 -- and the catalog records the `COLOR=GREEN` of the enterable
+ *       field's label against the `COLOR=TURQUOISE` of the three display labels per entry, which is the
+ *       distinction the two label styles below resolve.
+ * WHY : Assumptions: `UserDeleteField` and the widths below stay in this module and the labels no longer
+ *       satisfy that union structurally. The union is this screen's own control vocabulary -- it keys the
+ *       widths and the field-error mapping -- while the catalog's group is a per-mapset transcription
+ *       shared with nothing; binding the catalog to a screen-local union would have made the catalog
+ *       depend on a consumer. The four members are named literally at every use site instead, so a
+ *       renamed member is still a compile error rather than an undefined label.
  */
-export const USER_DELETE_FIELD_LABELS = {
-  /** `app/bms/COUSR03.bms` L80-L84, `COLOR=GREEN`, `LENGTH=14`, `POS=(6,6)`. */
-  userId: 'Enter User ID:',
-  /** `app/bms/COUSR03.bms` L98-L102, `COLOR=TURQUOISE`, `LENGTH=11`, `POS=(11,6)`. */
-  firstName: 'First Name:',
-  /** `app/bms/COUSR03.bms` L111-L115, `COLOR=TURQUOISE`, `LENGTH=10`, `POS=(13,6)`. */
-  lastName: 'Last Name:',
-  /** `app/bms/COUSR03.bms` L125-L129, `COLOR=TURQUOISE`, `LENGTH=11`, `POS=(15,6)`. */
-  userType: 'User Type: ',
-} as const satisfies Readonly<Record<UserDeleteField, string>>;
-
-/**
- * The one hint the mapset paints beside a value, verbatim and in `COLOR=BLUE`.
- *
- * Assumptions: this is the ONLY place the `'A'`/`'U'` domain is named to an operator. The reference
- * performs no domain check on the user type anywhere in `app/cbl/COUSR03C.cbl` -- the field is read from
- * the record and displayed -- so dropping the hint would leave the two characters undecodable to
- * somebody reading the screen.
- */
-export const USER_DELETE_USER_TYPE_HINT = '(A=Admin, U=User)';
 
 /*
  * WHY : Assumptions: each width is the mapset's `LENGTH=` operand corroborated independently by the
@@ -183,30 +173,38 @@ export const USER_DELETE_FIELD_WIDTHS = {
 } as const satisfies Readonly<Record<UserDeleteField, number>>;
 
 /*
- * WHY : Assumptions: the labels are transcribed from the mapset's row-24 literal and passed through
- *       `decodeBmsLegendText` uniformly. BMS source is assembler macro source in which `&` opens a
- *       variable symbol, so a legend containing an ampersand is written doubled there; this mapset's
- *       legend contains none, and the decoder's own contract states it is idempotent, so applying it to
- *       all four lets a reader check every label against the mapset by eye without having to remember
- *       which ones needed unescaping. The four decoded labels reconstruct the field's rendered text
- *       exactly -- `ENTER=Fetch  F3=Back  F4=Clear  F5=Delete`, 41 characters in the `LENGTH=58` field
- *       at `app/bms/COUSR03.bms` L144-L148, with TWO spaces between every pair.
- * WHY : Refactoring Rationale: only `F4=Clear` is taken from `UNIFORM_PF_KEY_LABELS`. That module
- *       publishes defaults for exactly the three keys whose wording is byte-identical across all
- *       measured legends and deliberately publishes none for ENTER, PF3 or PF5, because those differ per
- *       screen -- this mapset says `F3=Back` where its update sibling says `F3=Save&&Exit` and
- *       `F5=Delete` where that one says `F5=Save`. Inheriting a default for either would mislabel a
- *       control, which is the failure that module's omission exists to prevent.
+ * WHY : ⚠️ Refactoring Rationale: the three mapset-specific labels were LITERALS in this block and are
+ *       now the catalog's `USER_DELETE_KEY_LABELS`, for the reason the caption and field labels moved:
+ *       one owner per operator-visible string. `F3=Back` alone is painted by TEN of the twenty-one
+ *       mapsets, so a literal here was one transcription among ten with nothing holding them in
+ *       agreement.
+ * WHY : Assumptions: the catalog's values are still passed through `decodeBmsLegendText` uniformly, and
+ *       the pass is a deliberate no-op rather than a leftover. BMS source is assembler macro source in
+ *       which `&` opens a variable symbol, so a legend containing an ampersand is written doubled there;
+ *       this mapset's legend contains none, and both the decoder's own contract and the catalog entry
+ *       state that it is idempotent over already-decoded text. Applying it to all four labels lets a
+ *       reader check every one against a mapset by eye without having to remember which ones needed
+ *       unescaping, and it keeps this screen's handling identical to the update sibling's, whose
+ *       `F3=Save&&Exit` genuinely needs the decode. The four labels reconstruct the field's rendered
+ *       text exactly -- `ENTER=Fetch  F3=Back  F4=Clear  F5=Delete`, 41 characters in the `LENGTH=58`
+ *       field at `app/bms/COUSR03.bms` L144-L148, with TWO spaces between every pair.
+ * WHY : Refactoring Rationale: only `F4=Clear` is taken from `UNIFORM_PF_KEY_LABELS`, and the catalog
+ *       publishes no PFK04 entry for the same reason. That module publishes defaults for exactly the
+ *       three keys whose wording is byte-identical across all measured legends and deliberately
+ *       publishes none for ENTER, PF3 or PF5, because those differ per screen -- this mapset says
+ *       `F3=Back` where its update sibling says `F3=Save&&Exit` and `F5=Delete` where that one says
+ *       `F5=Save`. Inheriting a default for either would mislabel a control, which is the failure that
+ *       module's omission exists to prevent.
  * WHY : Assumptions: there is NO PF12 label, and its absence is deliberate rather than an oversight.
  *       The reference binds `DFHPF12` at L123-L125 while its row-24 literal advertises only four
  *       actions, so the key works and is not advertised. Both facts are preserved: the binding is
  *       registered below with no `label`, which `PfKeyBar` renders as a keyboard-only handler.
  */
-export const USER_DELETE_KEY_LABELS = {
-  ENTER: decodeBmsLegendText('ENTER=Fetch'),
-  PFK03: decodeBmsLegendText('F3=Back'),
+const USER_DELETE_KEY_LABELS = {
+  ENTER: decodeBmsLegendText(CATALOGUED_USER_DELETE_KEY_LABELS.ENTER),
+  PFK03: decodeBmsLegendText(CATALOGUED_USER_DELETE_KEY_LABELS.PFK03),
   PFK04: UNIFORM_PF_KEY_LABELS.PFK04,
-  PFK05: decodeBmsLegendText('F5=Delete'),
+  PFK05: decodeBmsLegendText(CATALOGUED_USER_DELETE_KEY_LABELS.PFK05),
 } as const;
 
 /** HTTP status the service answers when no user row carries the identifier. */
@@ -979,10 +977,17 @@ export function UserDeleteScreen(): ReactElement {
    * key press they believe goes back one screen. Anything the set does not admit falls through to the
    * administrative menu, which is the reference's own default.
    *
-   * ⚠️ Assumptions: a user-list origin resolves to the fallback today, and that is the closed set's doing
-   * rather than an omission here. No user-list route is declared in `ui/src/routes/navigation.ts`, so
-   * `/users` is not an admissible origin and cannot be one until that screen exists; naming it here as a
-   * literal would produce a transition to a route the router does not serve.
+   * ⚠️ Assumptions: the user browse is the origin this screen is normally entered with, and it now
+   * resolves to itself rather than to the fallback. `ui/src/screens/userList/index.tsx` hands
+   * `{ from: USER_LIST_ROUTE }` over on the row action that opens this screen, matching
+   * `app/cbl/COUSR00C.cbl` L203-L204 where the browse moves its own program name into
+   * `CDEMO-FROM-PROGRAM` before the transfer, and `/users` is declared in `ui/src/routes/navigation.ts`
+   * inside the closed set `inApplicationRoute` matches against -- so the preference arm is reached and
+   * the operator is returned to the page they selected a row on. The administrative menu remains the
+   * answer for an arrival that names no origin: a directly-entered path, a reload, or the full-document
+   * fallback in `navigateSafely`, which starts a history entry carrying no state. That is the
+   * reference's own default arm, so the unnamed case is a behaviour the source has rather than a
+   * degradation introduced here.
    * @returns {void} Completion is the requested route transition.
    */
   function exitToOrigin(): void {

@@ -115,22 +115,40 @@ providers.
 
 | Element | Constraint | Where it appears |
 |---|---|---|
-| Terraform CLI, in the three roots | `~> 1.15.0` | `infra/bootstrap`, `infra/envs/dev`, `infra/envs/prod` |
+| Terraform CLI, in the three roots | `>= 1.15.0` | `infra/bootstrap`, `infra/envs/dev`, `infra/envs/prod` |
 | Terraform CLI, in the sixteen modules | `>= 1.15.0` | every `infra/modules/*/versions.tf` |
 | AWS provider | `~> 6.56` | all nineteen `versions.tf` files |
-| Random-value provider | `~> 3.9` | where credentials are generated at apply time |
+| Random-value provider | `~> 3.9` | the four files where credentials are generated at apply time — both environment roots, `infra/modules/cognito` and `infra/modules/secrets` |
 
-The two CLI constraint forms are deliberate and are the kind of choice Rule 1's
-third forbidden pattern requires be explained where it is made. Assumptions:
-Terraform intersects every `required_version` constraint it encounters across a
-configuration and its modules. A module is a *consumed* artifact, so pinning it
-to one minor series would let any module veto the CLI the root has chosen, and
-sixteen modules would then have to be edited in lockstep with every CLI bump; an
-open floor keeps each module consumable. A **root** is where a version is
-actually selected, so the roots carry the pessimistic form and the reviewed
-series lives in exactly three files. Trade-offs: the floor in a module admits
-a CLI newer than any yet exercised against it — accepted, because the roots
-constrain what is really run and the modules are never applied on their own.
+⚠️ Refactoring Rationale: the roots row read `~> 1.15.0`, and the paragraph below it
+justified a **two-form** design in which "the roots carry the pessimistic form and the
+reviewed series lives in exactly three files". The tree has one form, not two: all
+**nineteen** `versions.tf` files declare `required_version = ">= 1.15.0"`, and AAP §0.6.1.4
+states the same open floor. The row is corrected and the two-form justification is
+withdrawn, because a reader who trusted it would have expected `terraform init` to refuse
+a 1.16 CLI in a root and would have found it accepted — a documented constraint that the
+configuration does not impose is worse than an undocumented one, since it invites a
+review to pass on a guarantee nothing enforces.
+
+**One CLI constraint form, applied uniformly, and the version is selected somewhere
+else.** Assumptions: Terraform intersects every `required_version` constraint it
+encounters across a configuration and its modules, so the effective floor is the highest
+one declared anywhere — and with one value everywhere, the intersection is that value
+and no file can veto another. A module is a *consumed* artifact, so pinning one to a
+single minor series would let it veto the CLI a root has chosen, and sixteen modules
+would then have to be edited in lockstep with every CLI bump. Alternatives Considered:
+the pessimistic form `~> 1.15.0` in the three roots, on the reasoning that a root is
+where a version is selected. Rejected in the delivered tree, and the reason is that the
+premise is false here: **the version is not selected by the constraint at all.** It is
+selected by the installer step that fetches the CLI —
+[`.github/workflows/infra-ci.yml`](../../.github/workflows/infra-ci.yml) pins
+`terraform_version="1.15.8"` and [`deploy.yml`](../../.github/workflows/deploy.yml) pins
+the same literal, each verified against a digest. So `1.15.8` is the **reviewed installer
+version**, not a constraint this record imposes, and a pessimistic root constraint would
+have duplicated the selection in a second place where the two could disagree. Trade-offs:
+the uniform floor admits a CLI newer than any yet exercised — accepted, because the
+digest-verified installer pin is what decides which CLI actually runs in CI and on the
+deploy path, and a module is never applied on its own.
 
 Provider selection is additionally recorded in nineteen committed
 `.terraform.lock.hcl` files, so a provider change is a reviewable diff of

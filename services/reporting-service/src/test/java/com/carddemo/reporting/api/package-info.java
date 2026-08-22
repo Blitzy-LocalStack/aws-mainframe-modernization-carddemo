@@ -90,9 +90,14 @@
  * side: an inherited placeholder with no fallback, left for the framework to resolve, aborts a context
  * refresh while bean definitions are still loading and reports the condition that read it rather than
  * the value that was missing. That document also declares no orchestration resource identifier and no
- * object-store settings, from which it follows that the two context-loading tests in this module are
- * both integration tests in the sibling {@code com.carddemo.reporting.repository} test package. No
- * context-loading test exists in THIS tree and none may be added here.
+ * object-store settings, from which it follows that every context-loading test in this module is an
+ * integration test in the sibling {@code com.carddemo.reporting.repository} test package, carrying the
+ * {@code IT} suffix and {@code @ActiveProfiles("test")}. No context-loading test exists in THIS tree
+ * and none may be added here. Refactoring Rationale: this sentence previously fixed the number of those
+ * tests at two, which was already behind the tree it described and would have gone stale again with the
+ * next one added. The number was never the point -- what this package needs from that document is the
+ * one-sided property that none of them is HERE, which is checkable by grepping this directory for
+ * {@code @SpringBootTest} and {@code @ActiveProfiles} and finding neither.
  *
  * <p>Assumptions: the shared exception advice is registered on the pipeline explicitly rather than
  * relied upon, and that registration is itself the subject of several cases. A standalone pipeline
@@ -109,16 +114,29 @@
  *
  * <h2>How these tests are collected</h2>
  *
- * <p>Every class in this package ends {@code Test}, which is what makes Surefire collect it. A
- * {@code Tests}, {@code TestCase} or {@code Spec} suffix is silently NOT collected, and that is the
+ * <p>Every class in this package ends {@code Test}, which is what makes Surefire collect it. The
+ * collection patterns are Surefire's own defaults, because {@code services/pom.xml} declares
+ * {@code includes} for one execution only -- {@code architecture-rules}, narrowed at its L1191 to
+ * {@code **}{@code /LayeringRulesTest.java} -- and leaves the default test execution untouched. Read
+ * from the resolved descriptor of {@code maven-surefire-plugin} 3.5.6, those defaults are four
+ * patterns: {@code Test*}, {@code *Test}, {@code *Tests} and {@code *TestCase}. A name outside all four
+ * -- {@code *Spec} is the likeliest -- is collected by nothing and silently never runs, which is the
  * worst available outcome for a class whose job is to hold a must-be-green assertion: the build stays
- * green while the cases never run, and a misnamed class looks like coverage indefinitely, whereas a
- * deleted one at least leaves a diff behind. The {@code IT} suffix belongs to Failsafe and never
- * appears here; it runs after packaging and asserts its results in the verify phase, so a
- * container-backed class named {@code Test} would start a container inside the unit-test phase and a
- * unit test named {@code IT} would run late or not at all. Nothing in this package overrides the
- * collection patterns, the report directory or the output redirection, and no case is skipped, ignored
- * or allowed to fail.
+ * green while the cases never run, and such a class looks like coverage indefinitely, whereas a deleted
+ * one at least leaves a diff behind. Refactoring Rationale: this paragraph previously grouped
+ * {@code Tests} and {@code TestCase} with {@code Spec} as suffixes that are "silently NOT collected".
+ * Those two ARE collected by the defaults above, and the error was the dangerous way round: a
+ * maintainer could rename a class to {@code ...Tests} in the belief that this stops it running, or
+ * discount the warning wholesale on discovering half of it false and then hit the half that is true.
+ * The plural-free {@code Test} suffix remains this package's convention, for uniformity rather than
+ * because the alternatives are uncollected.
+ *
+ * <p>The {@code IT} suffix belongs to Failsafe and never appears here; Failsafe's defaults, from the
+ * same descriptor set, are {@code IT*}, {@code *IT} and {@code *ITCase}, it runs after packaging and it
+ * asserts its results in the verify phase -- so a container-backed class named {@code Test} would start
+ * a container inside the unit-test phase and a unit test named {@code IT} would run late or not at all.
+ * Nothing in this package overrides the collection patterns, the report directory or the output
+ * redirection, and no case is skipped, ignored or allowed to fail.
  *
  * <h2>Which assertions live here, and which do not</h2>
  *

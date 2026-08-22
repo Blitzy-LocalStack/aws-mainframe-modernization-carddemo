@@ -68,8 +68,8 @@ baseline keeps them apart too — a search for `CSUTLDTC` across all 524 lines o
 | `COTRTLIC` | `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` | `CTLI` | Transaction-type and category browse, keyset-paged |
 | `COTRTUPC` | `app/app-transaction-type-db2/cbl/COTRTUPC.cbl` | `CTTU` | Transaction-type and category add, edit and delete |
 | `COBTUPDT` | `app/app-transaction-type-db2/cbl/COBTUPDT.cbl` | none | A reference-maintenance **service method**, reached over the API |
-| `CODATE01` | `app/app-vsam-mq/cbl/CODATE01.cbl` | `CDRD` | A date-conversion REST endpoint here; its **queue** route is answered by `account-service`, the single owner of the shared inquiry request queue |
-| `CSUTLDTC` | `app/cbl/CSUTLDTC.cbl` | none | Already migrated into `common-lib` as `DateEditValidator`; **this module calls it and does not re-implement it** |
+| `CODATE01` | `app/app-vsam-mq/cbl/CODATE01.cbl` | `CDRD` | **Nothing here.** Its queue request and reply — which emit the current system date and time — are answered by `account-service`, the single owner of the shared inquiry request queue. What this module holds for that flow is the request geometry, under test |
+| `CSUTLDTC` | `app/cbl/CSUTLDTC.cbl` | none | Already migrated into `common-lib` as `DateEditValidator`; **this module calls it and does not re-implement it**, and publishes it as `GET /date-evaluations` |
 
 The transaction and program bindings above are the baseline's own: `CTLI` is
 defined at `app/app-transaction-type-db2/csd/CRDDEMOD.csd` L25 and bound to
@@ -308,31 +308,33 @@ mvn -B -f services/pom.xml -pl reference-service -am package
 Flyway applies **all four** migrations during startup — `V1__reference.sql` creates
 the six reference tables, `V2__seed_reference.sql` seeds them,
 `V3__reference_inquiry_reply_ledger.sql` creates an operational table for the
-date-inquiry exchange, and `V4__drop_reference_inquiry_reply_ledger.sql` withdraws
-it again, because this module declares no listener and never wrote to it. The schema
-therefore settles at the six reference tables. The actuator health endpoint reports
-not-ready until that finishes.
+date-inquiry exchange, and `V4__drop_reference_inquiry_reply_ledger.sql` drops that
+table again, because this module declares no listener and no code path here can write
+to it. The schema therefore settles at the six reference tables of
+[§2.1](#21-the-six-owned-tables). The actuator health endpoint reports not-ready
+until that finishes.
 
-> ⚠️ **`V1__reference.sql` and `V2__seed_reference.sql` have been applied in real
-> environments and are therefore immutable.** Flyway's checksum covers the whole
-> file, comments included, so an edit to either one — even one that changes only
-> prose — makes every already-migrated environment refuse to start with
-> `Migration checksum mismatch for migration version 1`. That is not hypothetical:
-> a comment-only edit to `V1__reference.sql` did exactly that, and
-> `ReleasedMigrationImmutabilityTest` in `common-lib` now fails the build for any
-> such change. A later change to this schema arrives as a **new** versioned
-> migration.
+> ⚠️ **Every migration in this module is released, so its bytes are frozen.**
+> Flyway's checksum covers the whole file, comments included, so an edit to any of
+> the four — even one that changes only prose — makes a database that already holds
+> the earlier bytes refuse to start, with
+> `FlywayValidateException: Migration checksum mismatch for migration version <n>`
+> naming the edited script. Two engine-backed guards stand in front of that rather
+> than a review convention: `ReleasedMigrationImmutabilityTest` in `common-lib` fails
+> the build for a change to a released script, and `repository/MigrationHistoryIT`
+> here reads each stored checksum back out of `reference.flyway_schema_history` after
+> Flyway has applied the files. A later change to this schema arrives as a **new**
+> versioned migration — see [§9.4](#94-a-released-migration-is-immutable).
 
-Refactoring Rationale: three inquiry queue names, a region and a
-`queue-not-found-strategy` pin used to be startup requirements of this module and
-are all withdrawn. They existed for the queue consumer described in
-[§1](#1-overview), which now lives in `account-service` because the single shared
-request queue has a single owner. `ReferenceServiceStructureTest` asserts that no
-member of this module binds a queue listener AND that the queue-listener annotation
-does not resolve from this module's classpath at all, so the withdrawal is measured
-rather than described — re-adding a consumer here would have to restore the starter,
-the configuration keys and a queue receive grant together, each of which is a
-visible decision.
+Assumptions: this module declares no messaging starter, no queue configuration and
+no listener, so no queue name, no region and no `queue-not-found-strategy` pin is a
+startup requirement of it — the single shared inquiry request queue has a single
+owner, and that owner is `account-service` ([§1](#1-overview)).
+`ReferenceServiceStructureTest` asserts both halves of that mechanically: no member
+of this module binds a queue listener, AND the queue-listener annotation does not
+resolve from this module's classpath at all. Re-adding a consumer here would
+therefore have to restore the starter, the configuration keys and a queue receive
+grant together, each of which is a visible decision rather than an omission.
 
 ---
 
@@ -353,9 +355,15 @@ tree, so adding a test class without updating the marker fails the build.
 | `fixtures` | 2 | `domain` | 1 |
 | root `com.carddemo.reference` | 1 | | |
 
+Assumptions: `ServiceReadmeInventoryTest` machine-checks the two figures in the
+marker above and the delimited file listings — **not** this per-package breakdown — so a
+stale row in that table fails no build and has to be read against `src/test/java` rather
+than trusted. The limit of the check is stated here so the next reader treats the
+breakdown as prose and the marker figures as an assertion.
+
 ⚠️ Refactoring Rationale: the per-package row counts above are corrected, not
 merely decremented. The integration tier lost `repository/InquiryReplyLedgerIT`
-with the table it covered ([§9](#9-schema-and-migrations)), which is the change
+with the table it covered ([§9](#9-database-schema-and-migrations)), which is the change
 this revision makes — but the table also still described a distribution from
 several revisions back, and its column total happened to agree with the tree only
 because the two errors cancelled. The counts are now re-derived from the tree.
@@ -364,35 +372,32 @@ and not this breakdown, so a stale row here fails nothing and has to be read
 rather than trusted; it is stated accurately for the reader's sake and flagged
 here so the next arrival does not assume the breakdown was verified by the build.
 
-Refactoring Rationale: four classes left these counts and one arrived, on the one
-topology fact recorded in [§1](#1-overview) rather than on four decisions.
-`config/SqsConfigTest` covered a queue client this module no longer builds;
-`mapper/DateInquiryReplyMapperTest` covered a renderer that moved to `common-lib`,
-where `DateInquiryReplyCodecTest` now covers it;
-`service/DateInquiryMessageListenerTest` covered a consumer that moved to
-`account-service`, where `InquiryMessageListenerTest` covers it — including the date
-dispatch; and `service/ReferenceQueueConsumerContractTest` asserted that exactly ONE
-consumer was bound here, a claim now inverted inside
-`service/ReferenceServiceStructureTest`, which asserts that none is and that the
-queue-listener annotation does not resolve from this module at all.
-`service/DateConversionFlowContractTest` arrived in place of
-`DateConversionMessageListenerTest`, holding the same flow's surviving properties —
-the withdrawal itself, the copybook-versus-codec offset agreement, the two
-ten-character date pictures, the delegation of every rule to the shared validator,
-and the two separate four-character codes — without driving a transport.
+Assumptions: two concerns a reader might expect in this module's test tree are
+covered elsewhere, because the module holds neither the consumer nor the renderer
+they belong to ([§1](#1-overview)). The date-inquiry queue consumer is
+`account-service`'s `InquiryMessageListener`, covered by `InquiryMessageListenerTest`
+there, including the `DATE` dispatch; the reply renderer is `common-lib`'s
+`DateInquiryReplyCodec`, covered by `DateInquiryReplyCodecTest` there. What this
+module asserts instead is that it binds nothing at all:
+`service/ReferenceServiceStructureTest` holds that no member of this package binds a
+queue listener and that the queue-listener annotation does not resolve from this
+module's classpath, and `service/DateConversionFlowContractTest` holds the flow's
+remaining properties without driving a transport — that no consumer type and no reply
+renderer resolves here while the evaluation member still answers the published verdict
+shape, the copybook-versus-codec offset agreement, the two ten-character date forms as
+non-interchangeable, the delegation of every rule to the shared validator, and the
+severity and message number as two separate four-character codes.
 
-Refactoring Rationale: the integration tier gained one class,
-`repository/MigrationHistoryIT`, which pins the checksum Flyway stores for every
-migration this module ships. It is a test of the module's *released* artefacts
-rather than of its code, and it exists because a migration file that had already
-been applied in a deployed environment was later rewritten — comment text only, no
-SQL — which changed the checksum Flyway compares on startup and left the service
-unable to start against any database holding the earlier bytes. Nothing in the
-build could observe that: a first apply onto an empty database succeeds whatever
-the bytes are. Reading the checksum back out of `reference.flyway_schema_history`
-after Flyway has applied the files makes Flyway itself the oracle, so the pinned
-value is the value a deployment stores rather than one this repository recomputes.
-The remedy that class points at is in [§9.4](#94-a-released-migration-is-immutable).
+Assumptions: `repository/MigrationHistoryIT` pins the checksum Flyway stores for
+every migration this module ships, and reads each value back out of
+`reference.flyway_schema_history` after Flyway has applied the files to a real
+engine rather than recomputing it here. That is what makes it a check on this
+module's *released* artefacts rather than on its code: a first apply onto an empty
+database succeeds whatever the bytes are, so the stored checksum is the only place a
+moved byte in an applied script becomes visible, and a value recomputed here by a
+second implementation of the same algorithm would agree with the files it was
+computed from. Flyway is therefore the oracle. The remedy that class points at is in
+[§9.4](#94-a-released-migration-is-immutable).
 
 One further file under `src/test/java` is deliberately not in those counts:
 `repository/ReferencePersistenceBase.java` is the shared Testcontainers base
@@ -486,14 +491,29 @@ one commit resolve one runtime. The build JDK matches the runtime's vendor and
 Java major version, so a class-file or vendor-specific behaviour cannot first
 appear after the jar is shipped.
 
-> ⚠ **There is no Alpine variant of the Corretto image.** The repository publishes
-> only `-al2` and `-al2023` tags with `headful`, `headless`, `generic` and `jdk`
-> suffixes, and the highest published 21.x is `21.0.12`. An intuitive `21-alpine`
-> tag *does not exist and would have failed every image build.*
+> ⚠ **`21-alpine` does not resolve in the registry this runtime is pinned to.**
+> `public.ecr.aws/amazoncorretto/amazoncorretto` publishes `-al2` and `-al2023`
+> families only, with `headful`, `headless`, `generic`, `jdk` and
+> per-architecture suffixes, and the highest published 21.x is `21.0.12`. A build
+> that substituted `21-alpine` there fails on the pull, not on the compile.
 >
-> Assumptions: this is recorded because the substitution looks like a size
-> optimisation and is in fact an unresolvable reference. It is not a smaller
-> alternative to weigh — the build fails outright.
+> Alternatives Considered: an Alpine Corretto image nevertheless **exists** —
+> Docker Hub's official `amazoncorretto` repository publishes `21.0.12-alpine`
+> and `21.0.12-alpine3.24` from the same `corretto/corretto-docker` project — so
+> this is a declined alternative and not an impossibility, and it is recorded that
+> way because the blanket claim invites a reviewer to disprove the sentence and
+> then reopen the decision. It is declined on patch provenance, and there is no
+> size saving on the other side of that trade to weigh against: compressed amd64
+> layers measure 143.9 MB for the pinned `-al2023-headless` tag against 166.1 MB
+> for `21.0.12-alpine`, because no headless Alpine variant is published and the
+> graphics stack the headless pin omits is larger than the base-distribution
+> difference. What the pin buys is a single advisory feed — `-al2023` takes its
+> package versions from the Amazon Linux 2023 stream, so a CVE in the base layer is
+> described by an ALAS advisory that covers this image, the
+> `maven:3.9.16-amazoncorretto-21-al2023` build stage above it and the managed host
+> underneath, and one feed answers for the whole task. An Alpine runtime would put
+> this module on a second distribution's advisory stream and a second libc while
+> the build stage stayed on the first, for a larger image.
 
 ### 7.2 Shape of the image
 
@@ -519,36 +539,60 @@ group **and** by this container check. Two probes reading one endpoint cannot re
 opposite verdicts about one instance, whereas a container check on a bespoke path
 could report healthy while the load balancer drained the task.
 
-### 7.3 The 9 / 8 / 10 / 11 counts — state them correctly and do not "correct" them
+### 7.3 The 9 / 8 / 10 counts and the two registry inputs — state them correctly and do not "correct" them
 
 | Count | Value | What it is |
 |---|---|---|
 | Maven modules | **9** | `common-lib` plus eight services, as `services/pom.xml` declares |
 | Service Dockerfiles | **8** | One per service; **`common-lib` has none** |
 | Container images this project builds | **10** | The eight services plus `ui` and `data-migration` |
-| ECR repositories provisioned | **11** | Those ten plus `aws-otel-collector`, a mirror of a third-party image this project does not build |
+| ECR repositories for those deployables | **10** | One per built image, from `infra/modules/ecr`'s `repository_names` |
+| ECR repositories holding a mirrored third-party image | **0 or 1** | From that module's separate `third_party_mirror_repository_names`, which names an image this project does not build |
 
 Assumptions: `common-lib` is a library, not a deployable, which is why the first
-two numbers differ; the third and fourth differ for an unrelated reason, which is
-that one repository holds an image built elsewhere. `infra/modules/ecr` is the
-authority for the fourth: its `repository_names` default lists eleven entries and
-a validation block refuses any set that is not exactly those eleven, naming the
-eleventh as "the mirror of the pinned telemetry sidecar image". The mirror exists
-because the observability sidecar every task runs must be pullable without giving
-the application tier egress to the public internet, which the network module does
-not grant. Borrowing the image count for the module count invents a tenth Maven
-module that does not exist; borrowing the module count for either registry figure
-builds one image too few.
+two numbers differ. Borrowing the image count for the module count invents a tenth
+Maven module that does not exist; borrowing the module count for either registry
+figure builds one image too few.
 
-Refactoring Rationale: this table stated **10** for "Container images and ECR
-repositories" as one row, and the paragraph beneath it said that borrowing the
-module count "produces an eleventh phantom repository". The eleventh repository is
-not a phantom -- it is provisioned, it is validated as mandatory, and a plan that
-omitted it would be refused. Keeping the two figures in one row also made the
-sentence unfalsifiable in the direction that matters: a reader reconciling this
-README against `terraform plan` finds eleven repositories and no row that admits
-one, and the available conclusions are that the plan is wrong or that this
-document is. Splitting the row is what lets both be right.
+Assumptions: [`infra/modules/ecr`](../../infra/modules/ecr) is the authority for
+both registry rows, and it declares **two independent inputs** rather than one
+list:
+
+- `repository_names` — the deployable inventory. Its default is the ten names
+  above, and a `validation` block asserts the set is *exactly* those ten
+  (`length(...) == 10` together with a `setunion` equality), so this figure cannot
+  drift: an override can only restate the default, which is why
+  [`infra/envs/dev/main.tf`](../../infra/envs/dev/main.tf) records that it
+  deliberately does not pass it.
+- `third_party_mirror_repository_names` — a mirror cache, not a deployable. Its
+  `validation` bounds it at **at most one** entry and its own description invites
+  an empty set ("pass an empty set to provision none"), so this is the input a
+  caller overrides when an environment wants no mirror. The reason a mirror exists
+  at all is recorded beside that input in
+  [`infra/modules/ecr/variables.tf`](../../infra/modules/ecr/variables.tf), which
+  is where to read it rather than here, because it turns on how the task tier's
+  egress and its telemetry are composed and neither is this module's concern.
+
+`main.tf` folds the two together — `setunion(var.repository_names,
+var.third_party_mirror_repository_names)` builds the one map that drives
+`for_each` — so **repositories provisioned = ten plus the size of the mirror set**:
+ten when that set is empty, eleven when it holds the one mirror its validation
+admits. Read `variables.tf` for the default it currently carries, and the
+environment roots for any override, before quoting a single total; the deployable
+half is asserted and cannot move, the mirror half is a parameter and can.
+
+Refactoring Rationale: this section reported one registry row of **11** and said
+`infra/modules/ecr`'s "`repository_names` default lists eleven entries and a
+validation block refuses any set that is not exactly those eleven", and that the
+eleventh "is validated as mandatory, and a plan that omitted it would be refused".
+Measured against the module, all three claims are wrong and the last is wrong in
+the reverse direction: `repository_names` defaults to ten and asserts ten, the
+mirror is a second input, and its validation is `<= 1`, so a root that passes an
+empty mirror set plans and applies cleanly. A reader reconciling this README
+against `terraform plan` was therefore told to expect a refusal that cannot
+happen, and told to look for the mirror in the one input that would refuse it.
+Splitting the row along the module's own input boundary is what makes the document
+survive the mirror being turned off, which a single hard-coded total does not.
 
 ### 7.4 Publishing and rollback
 
@@ -557,11 +601,45 @@ document is. Splitting the row is what lets both be right.
   non-reproducible and defeats rolling back to a known image.
 - Deployment is **rolling** on the container service. There is no blue-green
   deployment and no canary.
-- Rollback is the documented teardown procedure in
-  [`docs/runbooks/teardown.md`](../../docs/runbooks/teardown.md).
+- **Rolling back this service is another rolling deployment, not a teardown.** Both
+  environment roots resolve a task definition's image as `<repository-url>@<digest>`
+  when `image_digests` carries an entry for that repository and
+  `<repository-url>:<image_tag>` otherwise, so the way back to an earlier release is
+  a deployment that repins the earlier digest: dispatch
+  [`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml) **from the ref
+  that release was built at**, leaving `image_tag` empty so it defaults to that
+  commit's SHA. The cluster then replaces tasks under the same rolling policy, and
+  the rollback is observed the way a deployment is, with
+  `aws ecs wait services-stable` on this service. Because there is no second colour
+  and no traffic split, there is nothing to shift back — the cost is one more rolling
+  replacement.
+- ⚠️ **Setting `image_tag` to an older SHA on a newer ref does not roll anything
+  back.** That job builds each image from the checked-out tree and only then reads
+  the digest back from the registry, so an older value in that input labels the
+  **current** bytes with an old name: the tag would move, the digest pinned into the
+  plan would be the new one, and the deployment would ship exactly what was being
+  rolled back. The ref selects the bytes; the input only names them.
+- **Teardown is a different operation with a different outcome.**
+  [`docs/runbooks/teardown.md`](../../docs/runbooks/teardown.md) destroys the
+  environment from its Terraform root; it removes the service, its cluster and its
+  datastore rather than returning them to an earlier release. Repointing the service
+  at an older task-definition revision by hand is not the documented path either: it
+  diverges from the state the root records, and the next `apply` reverses it.
 - The registry scans on push, so there is no separate scanning step to run.
 - The pipeline authenticates to the registry by short-lived federated role
   assumption. No long-lived credential exists in this repository.
+
+⚠️ Refactoring Rationale: the rollback bullet read "Rollback is the documented
+teardown procedure", pointing an operator at
+[`docs/runbooks/teardown.md`](../../docs/runbooks/teardown.md). The two are not the
+same operation and the wrong one is destructive: a task-definition rollback replaces
+tasks and keeps the environment, while the teardown runbook destroys the root. An
+operator following the sentence during a bad release would have removed the
+environment the release was in — including this module's Aurora schema — instead of
+restoring the image it had a minute earlier. The two are therefore separated above,
+and each states what it changes. The `image_tag` warning is stated with them because
+it is the plausible substitute a reader reaches for once the teardown sentence is
+gone, and it fails silently rather than loudly.
 
 Assumptions: the image build in
 [`.github/workflows/services-ci.yml`](../../.github/workflows/services-ci.yml) is
@@ -579,16 +657,36 @@ Terraform module outputs, delivered through AWS Systems Manager Parameter Store
 and AWS Secrets Manager and read through the active Spring profile.
 
 Assumptions: *"No service hard-codes an endpoint."* The datasource location, the
-queue names, the issuer and every key identifier are resolved at startup, which is
-why no default for any of them exists in
-[`application.yml`](src/main/resources/application.yml) and why a value in this
-document would be wrong as well as unsafe.
+issuer, the expected client identifier and the two credentials are resolved at
+startup and carry **no** default in
+[`application.yml`](src/main/resources/application.yml) — [§8.1](#81-required-to-start)
+enumerates the eight such placeholders — which is why a value for any of them in this
+document would be wrong as well as unsafe. The settings that do carry a default are
+[§8.2](#82-carrying-a-documented-default), and a default is only ever a
+non-sensitive one.
+
+Refactoring Rationale: that sentence listed "the queue names" among the values
+resolved at startup. **This module holds no queue name at all** — it declares no
+messaging starter, builds no queue client and binds no listener ([§11](#11-messaging)),
+and the shared inquiry request queue's single owning consumer is
+`account-service`'s `InquiryMessageListener`. Naming queue values here contradicted
+§11 on the same page and sent an operator looking for variables no task definition
+sets for this service.
 
 ### 8.1 Required to start
 
-Twelve placeholders in the profiles declare **no fallback**, and one further
-setting is required by a bean condition rather than by a placeholder. All
-thirteen must be present or the context fails to refresh.
+**Nine settings must be present or the context fails to refresh.** Eight are
+`${...}` placeholders that declare no fallback; the ninth is demanded by a bean
+condition and appears in no placeholder here at all.
+
+How to re-measure the eight: take every `${...}` in
+[`application.yml`](src/main/resources/application.yml) that carries no `:default`
+segment. Ten occurrences qualify, and two of them — `${carddemo.database.ssl.mode}`
+and `${carddemo.database.ssl.root-cert}` — reference properties declared further
+down that same file rather than operator input, which leaves the eight below.
+[`application-dev.yml`](src/main/resources/application-dev.yml) and
+[`application-prod.yml`](src/main/resources/application-prod.yml) declare **no
+placeholders at all**, so neither profile can add a requirement to this list.
 
 | Variable | Selects |
 |---|---|
@@ -599,21 +697,43 @@ thirteen must be present or the context fails to refresh.
 | `SPRING_FLYWAY_PASSWORD` | Credential for the migration role |
 | `SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI` | Issuer whose keys validate a presented token |
 | `CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID` | App client a presented token must name |
-| `CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD` | Opens the listener keystore; not read while TLS is disabled |
+| `CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD` | Opens the listener keystore, which `server.ssl.enabled: true` makes unconditional; absent, the listener cannot start |
 
-| `CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY` | Seals keyset cursors; binds to `carddemo.pagination.cursor.signing-key` |
+The ninth arrives from the shared kernel rather than from this module's YAML:
 
-Assumptions: the cursor signing key is required even though it appears in no
-`${...}` placeholder here, so a reader auditing the YAML for placeholders will not
-find it and could reasonably conclude it is optional. Spring's relaxed binding maps
-it onto `carddemo.pagination.cursor.signing-key`, which is declared in the shared
-kernel's auto-configuration; the bean that reads it is conditional on that
-property, and **two** controllers in this module — `TransactionTypeController` and
-`TransactionCategoryController` — take that bean as a constructor parameter with no
-optional wrapper. An absent value therefore fails context refresh with a
-missing-bean report that names the bean rather than the setting, which is how it is
-most often missed. `AddressLookupController` uses only the type's validation
-constants and holds no instance of it.
+| Setting | Selects | Why a placeholder audit misses it |
+|---|---|---|
+| `CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY` | Seals keyset cursors | It appears in no `${...}` in this module; relaxed binding maps it onto `carddemo.pagination.cursor.signing-key`, and the bean is `@ConditionalOnProperty` on that name |
+
+Assumptions: a reader auditing the YAML for placeholders will not find the cursor
+signing key and could reasonably conclude it is optional. The shared kernel declares
+the `CursorToken` bean `@ConditionalOnProperty` on
+`carddemo.pagination.cursor.signing-key`, so an absent value removes the bean rather
+than defaulting it, and **three** components in this module take that bean as a
+constructor parameter with no optional wrapper — `TransactionTypeController`,
+`TransactionCategoryController` and `AddressLookupService`. Context refresh
+therefore fails with a missing-bean report that names the bean rather than the
+setting, which is how it is most often missed. `AddressLookupController` reaches
+only the type's two validation constants, `MAX_TOKEN_LENGTH` and
+`SEALED_SHAPE_PATTERN`, on its request parameters, and holds no instance of it.
+
+⚠️ Refactoring Rationale: this section opened with "Twelve placeholders in the
+profiles declare **no fallback** ... All thirteen must be present", and neither
+figure is measurable against the files. Only ten `${...}` occurrences in this
+module's three profiles lack a default and two of those are internal property
+references, so the placeholder count is eight and the total is nine. The excess was
+not harmless: an operator provisioning a task definition against "thirteen" has four
+names to find and no list that yields them, and the one setting that genuinely
+cannot be found by reading the YAML — the cursor signing key — was the row the
+formatting had dropped out of the table, because a blank line above it turned it
+into a second one-row table whose header was the row itself. The consumer count in
+the paragraph beneath was wrong in the same direction that hides work:
+`AddressLookupService` injects the bean too, so an absent key breaks the address
+lookups as well as the two browse controllers. The parenthetical on the keystore
+password said it was "not read while TLS is disabled", and TLS is not disabled here
+— `server.ssl.enabled: true` is fixed in `application.yml`, and that YAML's own
+comment records that an absent password must stop startup rather than fall back to
+cleartext, which is the opposite of the reassurance the parenthetical offered.
 
 ### 8.2 Carrying a documented default
 
@@ -693,14 +813,30 @@ than quietly exposed.
 
 ## 9. Database schema and migrations
 
-Three migrations, all applied at startup.
+**Four** migrations, all applied at startup — the count is
+`ls src/main/resources/db/migration`, which holds `V1` through `V4`. Assumptions:
+it is four rather than the two the end state needs because a released migration is
+reversed, never deleted; `V3` and `V4` below are that pair, and the paragraph after
+the table argues why removing `V3` would refuse to start every already-migrated
+database.
 
 | Migration | Contents |
 |---|---|
 | [`V1__reference.sql`](src/main/resources/db/migration/V1__reference.sql) | The six tables, their keys, the referential constraint and the classification check |
 | [`V2__seed_reference.sql`](src/main/resources/db/migration/V2__seed_reference.sql) | The seed rows, idempotently |
-| [`V3__reference_inquiry_reply_ledger.sql`](src/main/resources/db/migration/V3__reference_inquiry_reply_ledger.sql) | Created `reference.inquiry_reply_ledger`. **Superseded by `V4`** — retained because a released migration cannot be deleted, only reversed |
+| [`V3__reference_inquiry_reply_ledger.sql`](src/main/resources/db/migration/V3__reference_inquiry_reply_ledger.sql) | Creates `reference.inquiry_reply_ledger`. **Superseded by `V4`** — retained because a released migration cannot be deleted, only reversed |
 | [`V4__drop_reference_inquiry_reply_ledger.sql`](src/main/resources/db/migration/V4__drop_reference_inquiry_reply_ledger.sql) | Drops that table, leaving the six reference tables. See [§12.6](#126-date-conversion--two-questions-two-owners-one-set-of-rules) |
+
+Refactoring Rationale: the line above this table read "Three migrations" over its
+four rows. The count was correct when `V3` was the last script and was not
+revisited when `V4` was added, and the pair is exactly where an off-by-one is
+least visible: a reader who takes the three at face value and then counts three
+*surviving* effects concludes the drop was never released, which is the opposite
+of what the table and
+[`MigrationHistoryIT`](src/test/java/com/carddemo/reference/repository/MigrationHistoryIT.java)
+establish — it pins `V4`'s checksum and asserts the dropped table is absent.
+Counting the scripts and stating the cancellation separately keeps both readings
+from colliding.
 
 ⚠️ Refactoring Rationale: `V3` added a table this module cannot write to, and `V4`
 withdraws it. The guarantee it existed for is real and is **not** withdrawn — a
@@ -712,11 +848,12 @@ date function, and records each reply in `account.inquiry_reply_ledger` before s
 it. This module declares no messaging starter and no listener ([§11](#11-messaging)),
 so no delivery ever reached the table here and no code path inserted into it.
 
-Assumptions: `V3` is deliberately **kept** rather than deleted. Removing a released
-migration makes every already-migrated database refuse to start, because Flyway
-validates its applied history against the scripts it can resolve. So the table is
-created and then dropped on every database, and `MigrationHistoryIT` asserts the end
-state — the table absent, the six reference tables present — against a real engine.
+Trade-offs: `V3` is **kept** rather than deleted, so every database creates the table
+and then drops it. Deleting it would be worse: Flyway validates its applied history
+against the scripts it can resolve, so a database that already applied `V3` refuses to
+start the moment the file disappears — withdrawing an object is a forward-only
+operation. `MigrationHistoryIT` asserts the end state against a real engine: that
+table absent, the six reference tables present.
 
 ### 9.1 Why this module carries the only seed migration in the tree
 
@@ -727,14 +864,17 @@ authoritative for one table, and a seed omitted entirely would make the interest
 batch abend. Seeding beside the schema that owns the tables is what keeps one
 owner and one source.
 
-Refactoring Rationale: this heading and its opening sentence said this module carries
-"the only `V2`" and that "no other service in the tree has a second migration", which
-was a claim about migration COUNTS rather than about seeding and is no longer true of
-either — `account-service`, `card-service`, `transaction-service`, `auth-service` and
-`authorization-service` all carry more than one, and this module now carries three.
-The property that is actually distinctive, and the one the paragraph argues for, is
-that the seed lives with the schema that owns the tables; the heading now states
-that instead of a count that has to be re-measured every time a module adds a table.
+⚠️ Refactoring Rationale: this heading and its opening sentence said this module
+carries "the only `V2`" and that "no other service in the tree has a second
+migration", which was a claim about migration COUNTS rather than about seeding and is
+no longer true of either — `account-service`, `card-service`, `transaction-service`,
+`auth-service`, `authorization-service` and `batch-service` all carry more than one, and this module
+carries **four**, not the three the replacement sentence then claimed. The property
+that is actually distinctive, and the one the paragraph argues for, is that the seed
+lives with the schema that owns the tables; the heading now states that instead of a
+count that has to be re-measured every time a module adds a table, and the one count
+this section does still state — the four in [§9](#9-database-schema-and-migrations) —
+names the directory to list for it.
 
 ### 9.2 The referential constraint
 
@@ -786,34 +926,38 @@ and then fails at run time when it tries to select a dialect. Both are managed i
 
 ### 9.4 A released migration is immutable
 
-**Once a migration file has been applied anywhere, its bytes are frozen.** Flyway
-stores a checksum for each applied script and, on every later startup, recomputes it
-from the file and refuses to start when the two differ. That checksum is a cyclic
-redundancy check over the **whole file**, so a change that touches only comment text
-breaks startup exactly as hard as a change to a statement: the schema is still
-correct, and the service is still unstartable, in every environment that applied the
-earlier bytes.
+**Once a migration file has been applied to a database, its bytes are frozen for that
+database.** Flyway stores a checksum for each applied script and, on every later
+startup, recomputes it from the file and refuses to start when the two differ. That
+checksum is a cyclic redundancy check over the **whole file**, so a change that
+touches only comment text breaks startup exactly as hard as a change to a statement —
+the schema is still correct, the service is still unstartable, and the message is
+`FlywayValidateException: Migration checksum mismatch for migration version <n>`.
+That is the migration contract, not a caveat about it.
 
-That is not hypothetical here. `V1__reference.sql` was rewritten for comment style
-after it had been applied — the executable SQL was byte-identical before and after —
-and the result was
-`FlywayValidateException: Migration checksum mismatch for migration version 1`, with
-nothing bound to the port. Two mechanisms now stand between that and a deployment:
+Assumptions: an edit to an applied script cannot be caught by reading either the
+script or the code, which is why two engine-backed mechanisms carry the rule instead
+of a convention:
 
+- `ReleasedMigrationImmutabilityTest` in `common-lib` fails the build for a change to
+  any script this tree has released, across every module that ships one.
 - `repository/MigrationHistoryIT` pins the checksum Flyway stores for every script in
   this module, reading it back out of `reference.flyway_schema_history` after Flyway
-  has applied it. A change to an applied file fails **the build**, on the machine of
-  whoever made the change.
-- The operator remedy for an environment that has already applied superseded bytes is
-  Flyway's `repair`, whose exact procedure and its one precondition are recorded in
+  has applied it to a real engine. A change to a released file fails **the build**, on
+  the machine of whoever made the change. Assumptions: only the stored value can show
+  a moved byte, because a first apply onto an empty database succeeds whatever the
+  bytes are — which is exactly why an assertion that each migration merely applied
+  would stay green through such an edit.
+- The operator remedy for a database that already holds superseded bytes is Flyway's
+  `repair`, whose exact procedure and its one precondition are recorded in
   [`docs/runbooks/data-migration.md`](../../docs/runbooks/data-migration.md).
 
-So a change to this schema — including a change to a comment in an applied
+So a change to this schema — including a change to a comment in a released
 migration — goes into a **new** migration. Trade-offs: the tree therefore accumulates
 small migrations rather than keeping one tidy file per table, and a comment correction
 may have to wait for the next migration that touches the same object. What that buys
-is that no already-deployed environment is ever made unstartable by an edit that a
-reviewer reads as cosmetic.
+is that no database holding an applied migration is ever made unstartable by an edit
+that a reviewer reads as cosmetic.
 
 ---
 
@@ -822,6 +966,9 @@ reviewer reads as cosmetic.
 Nineteen operations across thirteen paths, all under `/api/v1/reference`, as
 published by
 [`openapi/reference-api.yaml`](src/main/resources/openapi/reference-api.yaml).
+Re-measure both figures in that file: thirteen keys under `paths:` and nineteen
+HTTP-method keys beneath them; the table below carries one row per operation, so its
+row count is the second figure.
 Write operations require the `carddemo-admin` authority; reads require a recognized
 CardDemo authority — `carddemo-user` **or** `carddemo-admin`, the two being
 interchangeable for a read. The **Authority** column below states `carddemo-user`
@@ -856,8 +1003,17 @@ described as.
 | `GET` | `/us-states/{stateCd}` | One state code | `carddemo-user` | `CSLKPCDY` |
 | `GET` | `/us-state-zip-prefixes` | Keyset page of state and ZIP-prefix pairs | `carddemo-user` | `CSLKPCDY` |
 | `GET` | `/us-state-zip-prefixes/{stateZipCd}` | One state and ZIP-prefix pair | `carddemo-user` | `CSLKPCDY` |
-| `GET` | `/date-evaluations` | Evaluate a date against the baseline edit rules | `carddemo-user` | `CSUTLDTC`, `CODATE01` |
+| `GET` | `/date-evaluations` | Evaluate a date against the baseline edit rules | `carddemo-user` | `CSUTLDTC` |
 | `POST` | `/maintenance-actions` | Apply a batch of reference maintenance actions | `carddemo-admin` | `COBTUPDT` |
+
+⚠️ Refactoring Rationale: the `/date-evaluations` row derived from
+"`CSUTLDTC`, `CODATE01`", and `CODATE01` does not reach this operation. That program
+emits the current system date and time, reads no field of its request and never calls
+the date-edit utility — a search for `CSUTLDTC` across all 524 lines of
+`app/app-vsam-mq/cbl/CODATE01.cbl` returns zero occurrences — so an integrator
+reading the column as a promise of that program's answer would have called an
+endpoint that evaluates a date it supplies instead. The queue capability and its owner
+are stated in [§11](#11-messaging) and [§12.6](#126-date-conversion--two-questions-two-owners-one-set-of-rules).
 
 The contract is **OpenAPI 3.1**. Assumptions:
 [`ui/src/api/reference.ts`](../../ui/src/api/reference.ts) is written against it —
@@ -872,17 +1028,34 @@ browser-client-breaking change, not an internal one.
 **This module consumes no queue and publishes no message.** It declares no messaging
 starter, builds no queue client, requires no region and holds no queue name.
 
-| Role | Consumed or produced | Notes |
-|---|---|---|
-| Request | consumed by `account-service`'s `InquiryMessageListener` | Standard queue; delete-on-success, with the composed reply recorded in `account.inquiry_reply_ledger` and committed **before** it is sent — see [§12.6](#126-date-conversion--two-questions-two-owners-one-set-of-rules) |
-| Reply | produced | Shared with the account-inquiry flow, which publishes its own replies to the same queue |
-| Error | produced | Terminal sink for a message this service cannot answer |
+The three queues of the migrated inquiry flow are listed here because this module's
+tests hold the wire geometry, **not** because it touches any of them. Every one of
+them belongs to `account-service`:
 
-Assumptions: what this module answers for on that flow is the date **evaluation**
-of `CSUTLDTC`, over REST, plus the shared request GEOMETRY —
-`DateConversionFlowContractTest` holds the independent copybook transcription
-against `common-lib`'s codec, and asserts that no withdrawn consumer has
-returned.
+| Role | Who consumes or produces it | Notes |
+|---|---|---|
+| Request | **consumed** by `account-service`'s `InquiryMessageListener`, through its `@SqsListener` | Standard queue; delete-on-success, with the composed reply recorded in `account.inquiry_reply_ledger` and committed **before** it is sent — see [§12.6](#126-date-conversion--two-questions-two-owners-one-set-of-rules) |
+| Reply | **produced** by that same listener, from its `carddemo.account.inquiry.reply-queue-url` destination | Shared with the account-inquiry flow, which publishes its own replies to the same queue |
+| Error | **produced** by that same listener, from its `carddemo.account.inquiry.error-queue-url` destination | Terminal sink for a message that flow cannot answer |
+
+⚠️ Refactoring Rationale: the Reply and Error rows read "produced" with no producer
+named, under a column headed "Consumed or produced" and directly under a lead
+sentence saying this module publishes no message. Read together, the table said this
+module produced two of the three queues and the lead said it produced none. The
+column now names the owning component on all three rows, so the table and the lead
+cannot be read as disagreeing. Re-measure by search: this module contains no
+`@SqsListener`, no queue-name property and no messaging starter — its
+[`pom.xml`](pom.xml) records the deliberate exclusion — while the three destinations
+above are constructor-validated fields of `InquiryMessageListener` in
+`account-service`.
+
+Assumptions: the table lists the three queues of that exchange, and **no row of it
+names this module** — the one consumer owns the receive and both publications, which
+is why the opening sentence above and the table do not disagree. What this module
+answers for on that flow is the date **evaluation** of `CSUTLDTC`, over REST, plus
+the shared request GEOMETRY — `DateConversionFlowContractTest` holds the independent
+copybook transcription against `common-lib`'s codec, and asserts that no withdrawn
+consumer has returned.
 
 ---
 
@@ -1066,13 +1239,30 @@ only resolves because the column pads it to ten characters.
 
 ### 12.6 Date conversion — two questions, two owners, one set of rules
 
-`CODATE01`'s queue-driven request and reply becomes a synchronous REST endpoint on
-`DateConversionController` here, and a queue route owned by `account-service` as the
-single consumer of the shared inquiry request queue (see [§11](#11-messaging)).
+Two migrated capabilities are easy to read as one, so they are separated first:
 
-Refactoring Rationale: this section described both routes as this module's two front
-doors onto one implementation. That reading was wrong about the relationship even
-before the queue route moved, and the baseline is what settles it: the two routes
+- **The REST endpoint here migrates `CSUTLDTC`'s date EVALUATION.**
+  `DateConversionController` publishes `GET /api/v1/reference/date-evaluations`,
+  taking the caller's `date` and an optional `mask`, and answers whether that value
+  is a valid date under those rules. It reads no clock and writes no row.
+- **`CODATE01`'s queue-driven request and reply is `account-service`'s**, as the
+  single consumer of the shared inquiry request queue (see [§11](#11-messaging)).
+  That program EMITS the current system date and time.
+
+⚠️ Refactoring Rationale: the lead sentence here said `CODATE01`'s queue-driven
+request and reply "becomes a synchronous REST endpoint on `DateConversionController`
+here, and a queue route owned by `account-service`" — one baseline program arriving as
+two transports, one of them this module's. The paragraph immediately below it argues
+the opposite and the baseline settles it, so the section contradicted itself in its
+first line. It is the reading that costs work: an integrator wanting the current date
+and time would have called the endpoint here, which cannot answer that question at
+all, because it evaluates a date the caller supplies. The bullets now name the
+baseline program each capability comes from before the section argues about either.
+
+Refactoring Rationale: this section also once described both routes as this module's
+two front doors onto one implementation. That reading was wrong about the
+relationship even before the queue route moved, and the baseline settles it: the two
+routes
 answer DIFFERENT questions. This one judges a date a caller submits; the queue route
 emits the current system date and time and reads no field of its request —
 `WS-FUNC` and `WS-KEY` are declared at `CODATE01.cbl` L110 and L111 and never read.
@@ -1098,9 +1288,9 @@ commits no business row before it answers, so no committed state a missing reply
 would contradict exists. A drained outbox would therefore be machinery with nothing
 to guarantee.
 
-Refactoring Rationale: this section previously concluded from that observation that
-the baseline discipline "maps cleanly onto visibility timeout plus
-delete-on-success", full stop. The observation is right and the conclusion was not.
+Refactoring Rationale: that observation does **not** license the conclusion that the
+baseline discipline "maps cleanly onto visibility timeout plus delete-on-success",
+full stop. The observation is right and that conclusion is not.
 On the target the send completes **before** the listener acknowledges, and the
 acknowledgement is a separate call — so a task killed between the two leaves the
 request visible again. Because this reply body is the system date and time read at
@@ -1116,13 +1306,21 @@ consumer is `account-service`'s, which is what this section says two paragraphs
 above. An earlier revision named a `reference.inquiry_reply_ledger` instead, and this
 module did ship a migration creating one — but with no listener here, nothing could
 write it, so the sentence described a guarantee this schema did not enforce. `V4`
-drops that table ([§9](#9-schema-and-migrations)) and the attribution now matches the
+drops that table ([§9](#9-database-schema-and-migrations)) and the attribution now matches the
 ownership.
 A redelivery whose row is outstanding re-sends the **recorded bytes**; one whose row
 is retired sends nothing. The guarantee is that one request is never answered with
 two *different* answers — not that the reply is sent only once. The residual window,
 a task dying between the send and the mark, sends a byte-identical duplicate carrying
 the same two echoed identities, and is recorded in [§13](#13-known-limitations).
+
+Assumptions: the ledger is `account.inquiry_reply_ledger`, in the schema of the
+service that owns the consumer — this section opens by naming `account-service` as
+that single consumer. This module's `V3` creates a `reference.inquiry_reply_ledger`
+and its `V4` drops it ([§9](#9-database-schema-and-migrations)): with no listener
+here, no code path in this module can write such a table, so the guarantee is
+enforced where the reply is composed and nowhere else. A ledger left standing in this
+schema would read as a second enforcement point and be none at all.
 
 Assumptions: both requester identities are echoed and both are **bounded at intake**.
 The baseline restores its saved message identifier at L373 and its saved correlation
@@ -1140,10 +1338,11 @@ Assumptions: the delivery guarantees of the queue path — visibility timeout pl
 delete-on-success, and the absence of any transactional outbox on it — belong with
 its consumer and are recorded there rather than restated here.
 
-Refactoring Rationale: a queue configuration class used to be required here and is
-withdrawn with the consumer that used it — a queue client nothing injects still makes
-a region a startup requirement and still reads as evidence of a message flow. There
-is likewise **no** batch configuration class: `COBTUPDT` becomes a
+Refactoring Rationale: this module declares **no** queue configuration class, because
+the consumer that would inject one belongs to `account-service` — a queue client
+nothing injects still makes a region a startup requirement and still reads as
+evidence of a message flow this module does not have. There is likewise **no** batch
+configuration class: `COBTUPDT` becomes a
 reference-maintenance service method reached over `/maintenance-actions`, not a
 Spring Batch job-repository owner.
 
@@ -1163,14 +1362,16 @@ so that no claim above hides a gap.
   either; `account.inquiry_reply_ledger.attempts` counts the **deliveries that reached
   the send step** — one recorded by the claim, one by each redelivery that re-sends —
   which is how an operator measures whether this window was actually entered, in the
-  schema of the service that owns the consumer, not this one. ⚠ Refactoring Rationale:
-  that column counted **completed sends**, and the comment inside its own applied
-  migration still says so; the reasoning for counting deliveries instead, and the
-  frozen-migration reason the correction is documented rather than edited into the DDL,
-  are recorded once where the ledger now lives —
+  schema of the service that owns the consumer, not this one. Assumptions: the comment
+  inside that column's own migration reads *sends* rather than *deliveries*, and it is
+  a released migration whose bytes are frozen
+  ([§9.4](#94-a-released-migration-is-immutable)), so the column's meaning is carried
+  in prose instead of being re-commented in place. It is carried in exactly one place,
+  beside the ledger it belongs to —
   [`services/account-service/README.md`](../account-service/README.md), the
-  `inquiry_reply_ledger` column table. Stating it once keeps two sibling readings of one
-  column from drifting apart, which is how one of them later gets read as the other.
+  `inquiry_reply_ledger` column table. One statement of it keeps two sibling readings
+  of one column from drifting apart, which is how one of them later gets read as the
+  other.
 
   Alternatives Considered: committing the send and the mark together, which would
   close the window entirely. Rejected because that is a distributed transaction across
@@ -1231,12 +1432,11 @@ so that no claim above hides a gap.
     `returnCode` of **4**. That is `9999-ABEND`'s own behaviour — `DISPLAY`,
     `MOVE 4 TO RETURN-CODE`, `EXIT`, and the read loop takes the next record — so one
     refused action costs one action and the rest of the batch still applies.
-    ⚠️ Refactoring Rationale: this bullet said "The maintenance endpoint here surfaces
-    the refusal as a 409 instead", which was true of neither the runtime nor the
-    contract. The published contract declares **no** 409 for that operation at all,
-    and a 409 would mean the whole batch was refused rather than one action within it,
-    which is the opposite of the per-record granularity the paragraph above is
-    describing. The distinction that IS real is the one drawn in
+    Assumptions: this batch route answers **no** 409, and
+    [`openapi/reference-api.yaml`](src/main/resources/openapi/reference-api.yaml)
+    declares none for it — a 409 would mean the whole batch was refused rather than one
+    action within it, which is the opposite of the per-record granularity above. The
+    distinction that is real is the one drawn in
     [§12.1](#121-on-delete-restrict-surfaces-as-http-409-never-500): the *item* routes
     `DELETE /transaction-types/{typeCd}` and `POST /transaction-types` refuse a single
     addressed operation and therefore answer 409, while this batch route reports a
@@ -1339,7 +1539,7 @@ fixed by writing the Javadoc.
 | Transaction-type and category browse | `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` |
 | Transaction-type and category maintenance, and the 409 refusal | `app/app-transaction-type-db2/cbl/COTRTUPC.cbl` L1624, L1638, L1641 |
 | Reference-maintenance batch action | `app/app-transaction-type-db2/cbl/COBTUPDT.cbl` |
-| Date conversion, both transports | `app/app-vsam-mq/cbl/CODATE01.cbl` L2, L285–L286, L296–L299 |
+| The inquiry request geometry held under test here — the queue capability itself is `account-service`'s | `app/app-vsam-mq/cbl/CODATE01.cbl` L2, L285–L286, L296–L299 |
 | Date-edit rules, consumed from `common-lib` | `app/cbl/CSUTLDTC.cbl` |
 | The `DEFAULT` fallback and the rate's use | `app/cbl/CBACT04C.cbl` L436–L439, L443, L455, L458, L464–L465 |
 | The referential constraint | `app/app-transaction-type-db2/ddl/TRNTYCAT.ddl` L6–L7 |
@@ -1352,8 +1552,8 @@ fixed by writing the Javadoc.
 Trade-offs: line numbers are cited for the `app/**` baseline and for the shared
 build configuration, and **not** for this module's own Java. The baseline is
 reference-only and cannot drift, so a line citation into it stays true; a citation
-into a file under active change goes stale silently, and an earlier revision of this
-page had already drifted on two internal line references while reading as precise.
+into a file under active change goes stale silently — a drifted line reference still
+reads as precise, so it misdirects a reader instead of announcing itself.
 Target code is therefore identified by class and member name, which survives editing.
 The cost is one extra hop for a reader who wants the exact statement.
 

@@ -31,12 +31,21 @@
  * ---------------------------------
  * Assumptions: the reference is pseudo-conversational and carries `CDEMO-FROM-TRANID`,
  * `CDEMO-FROM-PROGRAM` and `CDEMO-PGM-CONTEXT` across every turn -- it sets all three immediately
- * before each `XCTL` -- and none of that survives. Navigation is the router's history, identity is the
- * validated token, and the re-entry discriminator has no counterpart at all: a stateless screen that
- * answers with a message has no first-entry-versus-later-turn distinction to draw. The two moves at
- * `app/cbl/COMEN01C.cbl` L181-L182 that would have re-asserted identity on dispatch are commented out
- * in the reference itself, which is the corroborating evidence that identity was carried rather than
- * re-derived; here it is re-derived from the signed claim on every request.
+ * before each `XCTL` -- and only the origin pair survives. Navigation is otherwise the router's
+ * history, identity is the validated token, and the re-entry discriminator has no counterpart at all:
+ * a stateless screen that answers with a message has no first-entry-versus-later-turn distinction to
+ * draw. The two moves at `app/cbl/COMEN01C.cbl` L181-L182 that would have re-asserted identity on
+ * dispatch are commented out in the reference itself, which is the corroborating evidence that
+ * identity was carried rather than re-derived; here it is re-derived from the signed claim on every
+ * request.
+ *
+ * ⚠️ Assumptions: the origin pair is carried because a destination's exit key needs it, and this
+ * section previously said nothing survived. `CDEMO-FROM-TRANID` and `CDEMO-FROM-PROGRAM` become the
+ * one `from` member of `ScreenTransitionState` in `ui/src/routes/navigation.ts`, handed to the option
+ * this screen dispatches -- see the transition in {@link MainMenuScreen}. It is not session state:
+ * one route travels in the history entry rather than in a store, a destination reads it as a hint for
+ * where its exit key returns to, and every request that destination makes still carries the signed
+ * token.
  */
 
 import { Button, Flex, Input, Typography, theme } from 'antd';
@@ -47,10 +56,8 @@ import { useNavigate } from 'react-router';
 
 import { useAuth } from '../../hooks/useAuth';
 import { useServerInstant } from '../../hooks/useServerInstant';
-import { MessageBand } from '../../layout/MessageBand';
+import { useShellSlot } from '../../layout/AppShell';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
-import { PfKeyBar } from '../../layout/PfKeyBar';
-import { ScreenHeader } from '../../layout/ScreenHeader';
 import { usePfKeys } from '../../layout/usePfKeys';
 import {
   INVALID_KEY_PRESSED,
@@ -65,7 +72,7 @@ import {
 } from '../../messages/messages';
 import type { MainMenuOption } from '../../messages/messages';
 import { SIGN_ON_ROUTE } from '../../routes/guards';
-import { navigateSafely } from '../../routes/navigation';
+import { MAIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
 import { routeForProgram } from '../../routes/programRoutes';
 import { TYPOGRAPHY_TOKENS } from '../../theme/tokens';
 import { ScreenTitle } from '../../layout/ScreenTitle';
@@ -160,13 +167,14 @@ export const MAIN_MENU_KEY_LABELS = CATALOGUED_MAIN_MENU_KEY_LABELS;
  * instead of merely fixed, and it retires the dead code -- nothing imported `programRoutes.ts` at all
  * before this, so the module documented as the single source of truth had no callers.
  *
- * Two different reasons produce a `null`, and they are worth separating even though they share one
- * sentence. The first is a screen this delivery does not carry at all. The second, which is now the only
- * one in force, is a screen that IS carried but is addressable only by a value the menu has not got:
- * the card detail and card update screens sit behind an opaque selector that `ui/src/routes/cards.ts`
- * seals and only the card browse mints -- `ui/src/api/cards.ts` records why a card number may not travel
- * in a path at all -- and the transaction view sits behind a transaction identifier. A menu option
- * carries no selection, so for those there is no selector-free address to send an operator to.
+ * ⚠️ Refactoring Rationale: NO live option resolves to `null` any longer, and this paragraph used to
+ * say two different reasons produced one -- a screen the delivery does not carry, and a screen carried
+ * but addressable only per record. The second reason no longer produces a `null` at all: a program in
+ * that position now resolves to the BROWSE that mints its selector, which is the resolution
+ * `PROGRAM_ROUTES` records for `COCRDSLC`, `COCRDUPC` and `COTRN01C` alike. The `null` arm below is
+ * retained for the first reason only, because it is the reference's own answer for a target the region
+ * cannot load and an option added to `app/cpy/COMEN02Y.cpy` ahead of its screen must still be answered
+ * in the operator's vocabulary.
  *
  * Trade-offs: `COCRDSLC` and `COCRDUPC` therefore both enter the card BROWSE rather than a single-card
  * path, which is the registered divergence `D-CARD-SELECTOR` recorded on `PROGRAM_ROUTES`. The
@@ -178,13 +186,15 @@ export const MAIN_MENU_KEY_LABELS = CATALOGUED_MAIN_MENU_KEY_LABELS;
  * the browse is the migrated equivalent of that turn. The cost accepted is that three options share one
  * destination.
  *
- * Assumptions: option 7 is the single option whose program `PROGRAM_ROUTES` still omits, and it keeps
- * answering the not-installed sentence. Its screen IS mounted -- `ui/src/router.tsx` registers
- * `/transactions/:id` -- but that path takes a transaction identifier and a menu option has none, so
- * registering the pattern here would send an operator to a literal `:id` segment and thence to the
- * router's own not-found result, which is a worse answer than the reference's own words. The transaction
- * list, the reports screen and bill payment were once omitted for the other reason and no longer are:
- * each is authored, each is mounted at a literal path, and each is registered.
+ * ⚠️ Refactoring Rationale: option 7 was the last option answering the not-installed sentence and is now
+ * ENTERED, because `PROGRAM_ROUTES` registers `COTRN01C` on the transaction browse. Its screen was
+ * mounted all along -- `ui/src/router.tsx` registers `/transactions/:id` -- so the sentence reported a
+ * program this delivery holds, which is the one thing that sentence does not mean. The browse rather
+ * than the pattern is the destination because a menu option carries no transaction identifier, and the
+ * browse is where a row is marked and the detail screen entered with it; registering the pattern would
+ * put the literal text `:id` in the address and reach the router's not-found result. All eleven options
+ * therefore enter a screen, which is what the reachability contract of AAP section 0.1.3.1 -- program
+ * flow preserving the reachability graph of the eighteen transactions -- asks of this menu.
  */
 export const MAIN_MENU_DESTINATIONS: Readonly<Record<string, string | null>> = Object.freeze(
   Object.fromEntries(
@@ -541,7 +551,30 @@ export function MainMenuScreen(): ReactElement {
     setMessage(outcome.message);
     setSeverity(outcome.severity);
     if (outcome.destination !== null) {
-      navigateSafely(navigate, outcome.destination);
+      /*
+       * WHY : ⚠️ Refactoring Rationale: the transition hands over THIS screen's route as the origin,
+       *       where it handed over nothing. `app/cbl/COMEN01C.cbl` L153-L154 and L178-L180 move
+       *       `WS-TRANID` into `CDEMO-FROM-TRANID` and `WS-PGMNAME` into `CDEMO-FROM-PROGRAM` in the
+       *       statements immediately before each of the two dispatching `XCTL`s, so the reference
+       *       tells every screen it enters where it was entered from -- and
+       *       `app/cbl/COACTVWC.cbl` L328-L339 shows what the receiving program does with it, which is
+       *       prefer it over its own hard-coded menu destination on the exit arm.
+       *       `ui/src/routes/navigation.ts` carries it on the `from` member of
+       *       `ScreenTransitionState`, and while no caller supplied it every screen reading it took
+       *       its fallback arm unconditionally.
+       * WHY : Assumptions: the constant is handed over rather than a literal or `location.pathname`.
+       *       It is one of the routes `inApplicationRoute` admits, so the destination accepts it
+       *       instead of discarding it as an unknown claim; the live path would hand over whatever
+       *       address the operator actually arrived at, which for a query or a trailing segment is
+       *       not a member of that closed set.
+       * WHY : Trade-offs: the two options this menu reaches whose screens read the origin -- account
+       *       enquiry and bill payment -- both fall back to this same route when handed none, so an
+       *       operator sees no difference today. What changes is that the origin is STATED by the
+       *       departing screen instead of assumed by the arriving one, which is the reference's own
+       *       arrangement: a default is only right while a screen has one caller, and it is the
+       *       caller, not the destination, that knows which of them it is.
+       */
+      navigateSafely(navigate, outcome.destination, { from: MAIN_MENU_ROUTE });
     }
   }
 
@@ -638,33 +671,34 @@ export function MainMenuScreen(): ReactElement {
   };
 
   /*
-   * WHY : Alternatives Considered: how the three shared zones this mapset declares -- the rows 1-3
-   *       title band, the row-23 message line and the row-24 key legend -- reach the frame. The
-   *       alternative is `useShellSlot` from `ui/src/layout/AppShell.tsx`, which ten of this tree's
-   *       screens use to DELEGATE those zones upward, and it was measured rather than assumed before
-   *       being set aside. That shell renders each zone only when a screen has delegated it: the header
-   *       is guarded by `activeScreen === undefined ? null :`, the band by
-   *       `activeMessage === undefined ? null :`, and the legend is rendered unconditionally but
-   *       `PfKeyBar` returns `null` for an empty binding list. Because this screen delegates nothing,
-   *       the shell contributes none of the three and the components composed here are the only
-   *       instances in the document -- so composing them locally does NOT produce the two message bands
-   *       or two key legends that delegation exists to prevent, which was the risk worth checking.
-   *       Trade-offs: composing locally keeps this screen inconsistent with the ten that delegate, and
-   *       that cost is accepted for two reasons. Its own suites mount it WITHOUT the shell -- both
-   *       `menu.test.tsx` and `menuScreens.test.tsx` render the bare screen under a `MemoryRouter` and
-   *       assert on the band and the legend -- so delegating would leave those zones rendered by
-   *       nothing and unassertable. And `ui/src/screens/admin/index.tsx`, the 167-line twin this mapset
-   *       shares its shape, selector attributes and footer with, composes them the same way, so the two
-   *       menus stay alike. Delegation is the better long-term shape and belongs in one change that
-   *       moves both twins and their suites together, not in a change to one of them.
+   * WHY : Refactoring Rationale: ⚠️ the three shared zones this mapset declares -- the rows 1-3 title
+   *       band, the row-23 message line and the row-24 key legend -- are DELEGATED to the one `AppShell`
+   *       that `ui/src/App.tsx` mounts. This is the change the previous note here deferred: it recorded
+   *       that composing them locally produced no duplicate zone, which was measured and true, and
+   *       accepted the inconsistency on two grounds that have both now been settled. This screen's own
+   *       suites mounted it WITHOUT a shell, so delegating would have left the zones rendered by nothing
+   *       and unassertable -- `menu.test.tsx` and `menuScreens.test.tsx` now mount the shell, as
+   *       `signon.test.tsx` and the entry-screen suite already did. And the note asked for one change
+   *       moving this screen and `ui/src/screens/admin/index.tsx`, the twin it shares its shape,
+   *       selector attributes and footer with, together; this is that change, and both twins move in it.
+   * WHY : Assumptions: what the absence of a duplicate did NOT establish is the thing that mattered. The
+   *       contract is that the frame OUTLIVES the screen inside it, and a zone composed in the screen's
+   *       own subtree unmounts with the screen -- so on this screen alone a route change, and since
+   *       `ui/src/layout/ShellContentBoundary.tsx` a failed lazy chunk, took the title band and the
+   *       legend away with the content.
+   * WHY : Assumptions: the rendered result is unchanged. The header takes the same two identifiers and
+   *       the same server-anchored instant, the band the same text, severity and mapset width, and the
+   *       legend the same resolved bindings and dispatcher -- only the owner of the three zones moves.
    */
+  useShellSlot({
+    screen: { transactionId: MAIN_MENU_TRANSACTION_ID, programName: MAIN_MENU_PROGRAM_NAME },
+    now: paintedAt,
+    message: { text: message, severity, mapset: MAIN_MENU_MAPSET },
+    pfKeys: { keys: bindings, onInvoke: invoke },
+  });
+
   return (
     <Flex vertical gap="large">
-      <ScreenHeader
-        transactionId={MAIN_MENU_TRANSACTION_ID}
-        programName={MAIN_MENU_PROGRAM_NAME}
-        now={paintedAt}
-      />
       <ScreenTitle>{MAIN_MENU_SUBTITLE}</ScreenTitle>
       {/*
         Trade-offs: the options are a LIST of text lines rather than a control each, and that is design
@@ -784,8 +818,6 @@ export function MainMenuScreen(): ReactElement {
           {MAIN_MENU_KEY_LABELS.ENTER}
         </Button>
       </Flex>
-      <MessageBand mapset={MAIN_MENU_MAPSET} message={message} severity={severity} />
-      <PfKeyBar keys={bindings} onInvoke={invoke} />
     </Flex>
   );
 }

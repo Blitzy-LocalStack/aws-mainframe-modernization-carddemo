@@ -6,7 +6,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -63,6 +66,36 @@ class ProfileConfigurationTopologyTest {
      * one under test.</p>
      */
     private static final String PARAMETER_STORE_PREFIX = "aws-parameterstore:";
+
+    /** The one overlay key that is a structural requirement rather than a value on a profile axis. */
+    private static final String IMPORT_KEY = "spring.config.import";
+
+    /** The production header's sentence stating how many leaf values the overlay sets. */
+    private static final Pattern LEAF_CENSUS_CLAIM = Pattern.compile("It sets ([A-Z]+) leaf values");
+
+    /** The production header's sentence stating how many of those leaves sit on a profile axis. */
+    private static final Pattern AXIS_CENSUS_CLAIM = Pattern.compile("([A-Z]+) sit on the three axes");
+
+    /**
+     * The production header's sentence stating how many axis values repeat the base document.
+     *
+     * <p>Assumptions: the sentence carries TWO figures -- the repeats and the axis total it is taken out of
+     * -- and both are captured, so a corrected repeat count cannot be left sitting inside a stale
+     * denominator.</p>
+     */
+    private static final Pattern REPEAT_CENSUS_CLAIM =
+            Pattern.compile("([A-Z]+) of the ([a-z]+) axis values repeat");
+
+    /**
+     * The spelled numbers a census sentence in these documents may carry.
+     *
+     * <p>Assumptions: the vocabulary stops at nineteen because no census this class reads can plausibly
+     * reach twenty, and a figure outside it is REPORTED by {@link #censusFigure(String, Pattern, int)}
+     * rather than skipped -- so growing past the vocabulary fails loudly instead of disabling the check.</p>
+     */
+    private static final List<String> NUMBER_WORDS = List.of("zero", "one", "two", "three", "four",
+            "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen",
+            "fifteen", "sixteen", "seventeen", "eighteen", "nineteen");
 
 
     /**
@@ -437,6 +470,127 @@ class ProfileConfigurationTopologyTest {
         assertThat(flatten(document("/application-dev.yml")))
                 .as("the dev overlay must inherit the base pin rather than offering a place to lower it")
                 .doesNotContainKey(DRIVER_ERROR_LOGGER);
+    }
+
+    /**
+     * Holds the production overlay's header census to the arithmetic of the document beneath it.
+     *
+     * <p>Refactoring Rationale: this case answers a review finding that the overlay's header said it "sets
+     * NINE leaf values", of which "Eight sit on the three axes" and "FIVE of the nine values repeat what the
+     * base document already says", while the document declared ten leaves, nine of them on those axes and
+     * six of them repeating the base. Every figure had been right when written and all three went stale
+     * together when the driver-error logger asserted by {@link
+     * #theDriverErrorLoggerIsPinnedAboveItsValueBearingLevel()} was pinned here. Nothing in the build could
+     * notice, because a count in a YAML comment is invisible to the YAML parser, to Checkstyle and to every
+     * other case in this class -- so correcting the numbers alone would have left the next key added here
+     * free to make them stale again. The figures are DERIVED here instead of trusted.</p>
+     *
+     * <p>Assumptions: the header is read as TEXT while the counts are taken from the PARSED document,
+     * because the claims live in comments and a parser discards them. Both halves still come from the same
+     * shipped resource, so the case cannot pass against a document other than the one deployed.</p>
+     *
+     * <p>Assumptions: the import list is excluded from the axis count and from the repeat comparison, which
+     * is what the header's own wording requires -- it calls {@code spring.config.import} "not an axis at
+     * all" and counts the repeats among the axis values. The overlay asserts that key's PRESENCE rather
+     * than a value differing from the base's, for the reason argued at the key itself and asserted by
+     * {@link #eachOverlayImportsTheSharedDefaultsAlone()}, so counting it as a repeat would describe the
+     * document's purpose wrongly even where the two values read alike.</p>
+     *
+     * <p>Trade-offs: the sentences are located by their distinctive wording rather than by line number.
+     * Wording is the more stable of the two in a header that is edited often, and a reworded or deleted
+     * census fails this case rather than passing vacuously -- which is the correct outcome, since a claim
+     * that cannot be located is a claim nothing holds.</p>
+     *
+     * @throws IOException if a packaged document cannot be read
+     */
+    @Test
+    @DisplayName("the production overlay's header census is that document's own arithmetic")
+    void theHeaderCensusIsThisDocumentsOwnArithmetic() throws IOException {
+        Map<String, Object> overlay = flatten(document("/application-prod.yml"));
+        Map<String, Object> base = flatten(document("/application.yml"));
+        String header = headerText("/application-prod.yml");
+        long axisValues = overlay.keySet().stream().filter(key -> !IMPORT_KEY.equals(key)).count();
+        long repeats = overlay.entrySet().stream()
+                .filter(leaf -> !IMPORT_KEY.equals(leaf.getKey()))
+                .filter(leaf -> base.containsKey(leaf.getKey()))
+                .filter(leaf -> java.util.Objects.equals(base.get(leaf.getKey()), leaf.getValue()))
+                .count();
+
+        assertThat(censusFigure(header, LEAF_CENSUS_CLAIM, 1))
+                .as("the header's leaf figure must be the document's leaf count; the leaves are %s",
+                        overlay.keySet())
+                .isEqualTo(overlay.size());
+        assertThat(censusFigure(header, AXIS_CENSUS_CLAIM, 1))
+                .as("the header's axis figure must be every leaf but the import list")
+                .isEqualTo((int) axisValues);
+        assertThat(censusFigure(header, REPEAT_CENSUS_CLAIM, 1))
+                .as("the header's repeat figure must be the axis values whose value equals the base's")
+                .isEqualTo((int) repeats);
+        assertThat(censusFigure(header, REPEAT_CENSUS_CLAIM, 2))
+                .as("the repeat sentence restates the axis figure, so it must agree with it too")
+                .isEqualTo((int) axisValues);
+        assertThat(base.keySet())
+                .as("the header says this overlay introduces no key the base document lacks")
+                .containsAll(overlay.keySet());
+    }
+
+    /**
+     * Reads one spelled census figure out of a header.
+     *
+     * @param header the normalised header text
+     * @param claim the pattern locating the sentence, whose groups hold spelled figures
+     * @param group the capturing group to read
+     * @return the figure the sentence states
+     * @throws AssertionError if the sentence is absent, or its figure is outside {@link #NUMBER_WORDS};
+     *     either means the census has stopped being checkable and must fail rather than pass silently
+     */
+    private static int censusFigure(String header, Pattern claim, int group) {
+        Matcher match = claim.matcher(header);
+        assertThat(match.find())
+                .as("the header must carry the census claim %s, or its figure is unchecked prose again",
+                        claim.pattern())
+                .isTrue();
+        String written = match.group(group).toLowerCase(Locale.ROOT);
+        assertThat(NUMBER_WORDS)
+                .as("the census figure '%s' is outside the vocabulary this class reads, so it must be added"
+                        + " here rather than left unchecked", written)
+                .contains(written);
+        return NUMBER_WORDS.indexOf(written);
+    }
+
+    /**
+     * Reads a document's leading comment block as one normalised line of text.
+     *
+     * <p>Assumptions: each line's comment marker and indentation are stripped and the lines are joined by
+     * single spaces, so a sentence soft-wrapped across several comment lines matches as one string. Reading
+     * the raw bytes instead would make every pattern spell out the wrapping, which is whitespace that
+     * changes whenever the block is reflowed.</p>
+     *
+     * <p>Assumptions: only the LEADING comment block is returned, so a census pattern cannot match a
+     * sentence written beside a key further down. The block ends at the first line that is not a comment
+     * and not blank, which in these documents is the first mapping key.</p>
+     *
+     * @param resource the classpath resource name, leading slash included
+     * @return the header's text, normalised for prose matching; never {@code null}
+     * @throws IOException if the resource cannot be read
+     */
+    private static String headerText(String resource) throws IOException {
+        try (InputStream stream = ProfileConfigurationTopologyTest.class.getResourceAsStream(resource)) {
+            assertThat(stream).as("the packaged %s must be readable", resource).isNotNull();
+            String raw = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+            StringBuilder header = new StringBuilder();
+            for (String line : raw.split("\n", -1)) {
+                String trimmed = line.strip();
+                if (trimmed.isEmpty()) {
+                    continue;
+                }
+                if (!trimmed.startsWith("#")) {
+                    break;
+                }
+                header.append(trimmed.replaceFirst("^#+\\s*", "")).append(' ');
+            }
+            return header.toString().replaceAll("\\s+", " ");
+        }
     }
 
     /**

@@ -16,12 +16,14 @@
  *
  * - 10 fields, the rows 1-2 title band: the `'Tran:'`, `'Date:'`, `'Prog:'` and `'Time:'` captions at
  *   L29, L42, L52 and L65 with `TRNNAME` L34, `TITLE01` L38, `CURDATE` L47, `PGMNAME` L57,
- *   `TITLE02` L61 and `CURTIME` L70. Rendered by `ui/src/layout/ScreenHeader.tsx` from the identity
- *   and paint instant this screen hands it; none is re-declared here.
+ *   `TITLE02` L61 and `CURTIME` L70. Rendered by `ui/src/layout/ScreenHeader.tsx` inside the mounted
+ *   `AppShell`, from the identity and paint instant this screen DELEGATES to it; none is re-declared
+ *   here and none is composed here.
  * - 1 field, `ERRMSG` at L154, `POS=(23,1) LENGTH=78 COLOR=RED`: rendered by
- *   `ui/src/layout/MessageBand.tsx`, which takes the text and the severity this screen decides.
- * - 1 field, the row-24 legend at L158-L162: rendered by `ui/src/layout/PfKeyBar.tsx` from the
- *   bindings `ui/src/layout/usePfKeys.ts` resolves.
+ *   `ui/src/layout/MessageBand.tsx` inside the same shell, from the text, severity and mapset width
+ *   this screen delegates.
+ * - 1 field, the row-24 legend at L158-L162: rendered by `ui/src/layout/PfKeyBar.tsx` inside the same
+ *   shell, from the bindings `ui/src/layout/usePfKeys.ts` resolves and this screen delegates.
  * - 1 field, the anonymous `LENGTH=0 POS=(20,44) COLOR=GREEN` spacer at L150-L153: DROPPED. A
  *   zero-length field carries no content and reserves one character cell on a fixed grid, and a
  *   browser layout reserves space through its own spacing primitives, so there is nothing to render.
@@ -49,11 +51,19 @@
  * at `app/cbl/COADM01C.cbl` L91-L96 to tell a first entry from a later turn, painting the map on the
  * first and receiving it on the rest. That discriminator has NO counterpart here, and its absence is
  * the point rather than an omission: a stateless screen that answers with a message has no turn count
- * to consult, so what is displayed follows from the last action alone. `CDEMO-FROM-TRANID`,
- * `CDEMO-FROM-PROGRAM` and `CDEMO-TO-PROGRAM`, which the reference sets immediately before each
- * transfer at L101 and L142-L144, are likewise gone: navigation is the router's history, identity is
- * the validated token's claim, and the administrative gate is `RequireAdmin` in
- * `ui/src/routes/guards.tsx`. This is AAP section 0.7.1 applied to this screen.
+ * to consult, so what is displayed follows from the last action alone. `CDEMO-TO-PROGRAM`, which the
+ * reference defaults at L101 before it signs off, has no counterpart either: no screen names its
+ * successor, because navigation is the router's own history. Identity is the validated token's claim
+ * and the administrative gate is `RequireAdmin` in `ui/src/routes/guards.tsx`, so nothing this screen
+ * holds decides who may see it. This is AAP section 0.7.1 applied to this screen.
+ *
+ * ⚠️ Assumptions: ONE member of that communication area does survive, and this section previously
+ * said otherwise. `CDEMO-FROM-TRANID` and `CDEMO-FROM-PROGRAM`, which L142-L143 set immediately
+ * before the dispatching transfer, are carried as the `from` member of `ScreenTransitionState` in
+ * `ui/src/routes/navigation.ts` and handed to the option this screen dispatches -- see the transition
+ * in {@link AdminMenuScreen}. They are not session state: the value is one route, it travels in the
+ * history entry rather than in a store, and a destination reads it as a hint for its exit key while
+ * every request it makes still carries the signed token.
  */
 
 import { Button, Flex, Input, Typography, theme } from 'antd';
@@ -64,10 +74,8 @@ import { useNavigate } from 'react-router';
 
 import { useAuth } from '../../hooks/useAuth';
 import { useServerInstant } from '../../hooks/useServerInstant';
-import { MessageBand } from '../../layout/MessageBand';
+import { useShellSlot } from '../../layout/AppShell';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
-import { PfKeyBar } from '../../layout/PfKeyBar';
-import { ScreenHeader } from '../../layout/ScreenHeader';
 import { ScreenTitle } from '../../layout/ScreenTitle';
 import { usePfKeys } from '../../layout/usePfKeys';
 import {
@@ -79,7 +87,8 @@ import {
 } from '../../messages/messages';
 import type { AdminMenuOption } from '../../messages/messages';
 import { SIGN_ON_ROUTE } from '../../routes/guards';
-import { navigateSafely } from '../../routes/navigation';
+import { ADMIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
+import { routeForProgram } from '../../routes/programRoutes';
 import { TYPOGRAPHY_TOKENS } from '../../theme/tokens';
 
 /** CICS transaction identifier this screen replaces, from `app/cbl/COADM01C.cbl` L37. */
@@ -151,76 +160,79 @@ export const ADMIN_MENU_KEY_LABELS = {
 } as const;
 
 /**
- * Route each administrative option's target program is entered at, or `null` when it is not mounted.
+ * Route each administrative option's target program is entered at, or `null` when this delivery
+ * cannot enter it.
  *
- * Assumptions: five of the six are entered and one answers with the reference's own
- * unavailable-option sentence, and the reference establishes that answer rather than this delivery
- * inventing one -- `app/cbl/COADM01C.cbl` L141-L157 composes exactly
+ * ⚠️ Refactoring Rationale: this map is DERIVED from `ui/src/routes/programRoutes.ts` rather than
+ * written out here, which is how `ui/src/screens/menu/index.tsx` already resolves the main-menu
+ * options. It was a second, hand-maintained table of program-to-route pairs -- the thing that
+ * module's own docstring forbids, since it states the resolution is declared once there "because
+ * both menus need it, `ui/src/router.tsx` needs the same set of destinations to declare its routes,
+ * and a route-closure test needs to compare the two". Being a copy it was free to drift, and it had:
+ * it still named a selector-free `/users/edit` for `COUSR02C` after `ui/src/router.tsx` withdrew
+ * that path as a twenty-second screen route for a twenty-one screen inventory, so administrative
+ * option 3 navigated to the router's not-found result. Deriving the map makes that class of
+ * disagreement unrepresentable rather than merely repaired, and it leaves ONE table for a
+ * route-closure test to hold both menus to.
+ *
+ * Assumptions: the map stays keyed by PROGRAM NAME, because that is what `app/cpy/COADM02Y.cpy`
+ * stores and what the reference dispatches on -- `EXEC CICS XCTL
+ * PROGRAM(CDEMO-ADMIN-OPT-PGMNAME(WS-OPTION))` at `app/cbl/COADM01C.cbl` L145-L148. Transformation
+ * Rule T5 turns that transfer into a client route change, so the VALUE is a route where the
+ * reference held a program name: there is no `CDEMO-TO-PROGRAM` field, no `COMMAREA` and no
+ * server-side "next program" anywhere in the target, and the program name survives only as this
+ * map's key, which is what keeps the traceability matrix able to line each option up with the
+ * program it replaces.
+ *
+ * ⚠️ Assumptions: ALL SIX options resolve to a route and none answers the unavailable-option
+ * sentence, where options 3 and 4 previously resolved to `null`. That sentence is the reference's
+ * answer for a program the region cannot LOAD -- `app/cbl/COADM01C.cbl` L141-L157 composes exactly
  * `'This option ' 'is not installed ...'` whenever the target program name begins `DUMMY`, and its
- * `PGMIDERR` handler at L270-L283 composes the same sentence when the named program cannot be
- * loaded, so a target that is absent already has a defined behaviour on this screen. Option 4 alone
- * takes that path, and for the reason recorded on its entry below: its screen IS mounted, but only at a
- * route that requires a user identifier this screen has not got.
+ * `PGMIDERR` handler at L270-L283 composes the same sentence when the named program cannot be loaded
+ * -- so spending it on a screen this delivery MOUNTS reported a gap that does not exist:
+ * `ui/src/router.tsx` mounts user maintenance at `/users/:id/edit` and user deletion at
+ * `/users/:id/delete`. AAP section 0.1.3.1 keeps the reachability graph of the eighteen
+ * transactions, and an administrator has no other way in, because the session is memory-only and any
+ * hard load of an administrative route bounces to sign-on.
  *
- * Refactoring Rationale: the value is a ROUTE where the reference held a program name.
- * `EXEC CICS XCTL PROGRAM(CDEMO-ADMIN-OPT-PGMNAME(WS-OPTION))` at `app/cbl/COADM01C.cbl` L145-L148
- * becomes a client-side route change under Transformation Rule T5, so there is no `CDEMO-TO-PROGRAM`
- * field, no `COMMAREA` and no server-side "next program" anywhere in the target. The program name
- * survives only as this map's KEY, which is what keeps the traceability matrix able to line each
- * option up with the program it replaces.
+ * Assumptions: options 3 and 4 both resolve to the user BROWSE, and that is one rule rather than two
+ * workarounds -- the same rule `COTRN01C` takes on the main menu. Their screens are addressed only
+ * per record and a menu option carries no selection, which is exactly the state the reference's own
+ * first turn paints: `app/cbl/COUSR02C.cbl` L99-L104 and `app/cbl/COUSR03C.cbl` L99-L104 pre-fill
+ * the identifier only when their selection carrier arrives non-blank and otherwise leave the screen
+ * waiting for a typed key. The browse is where that key is chosen and is the reference's own caller
+ * for both programs -- `app/cbl/COUSR00C.cbl` L192-L207 transfers to them from there, naming itself
+ * in `CDEMO-FROM-PROGRAM` so their PF3 returns to the list. Trade-offs: three of the six options
+ * therefore land on `/users`, and one extra operator action -- marking a row -- is accepted in
+ * exchange for both screens being reachable at all.
  *
- * Assumptions: option 3 is entered at a path carrying NO identifier, and that is the reference's own
- * first-entry shape rather than a gap. The reference's `XCTL` landed on a screen that PROMPTED for
- * the key, and a typed route table needs the key in the path, so the two are reconciled by entering
- * the selector-free form -- `ui/src/router.tsx` declares it for exactly this caller and names this
- * screen at its `USER_UPDATE_PATH` constant, while `ui/src/screens/userUpdate/index.tsx` reads
- * nothing on mount when the route carries no row. Trade-offs: a placeholder identifier such as
- * `/users/0/edit` would have kept one uniform parameterised shape and was rejected, because it asks
- * the next screen to read a record the operator never selected.
+ * Alternatives Considered: a placeholder identifier such as `/users/0/edit`, which would have kept
+ * one uniform parameterised shape per option. Rejected because it asks the receiving screen to read
+ * a record the operator never selected, and on option 4 that record would arrive under a live delete
+ * trigger. Alternatives Considered: publishing a second selector-free path per screen, which is what
+ * `/users/edit` was. Rejected because the route table is frozen at the twenty-one paths AAP section
+ * 0.4.1.4 enumerates, and a twenty-second path for a screen that already has one is exactly the
+ * duplication that made the published contract and the code disagree.
  *
- * ⚠️ Refactoring Rationale: the user-list option was one of the unavailable three and is now entered,
- * because the screen it names became mounted. `COUSR00C: null` was CORRECT while `/users` was not in the
- * route table -- naming an unmounted path would have sent the operator to a route that resolves to
- * nothing -- and became stale the moment `ui/src/screens/userList/index.tsx` was delivered and
- * `ui/src/router.tsx` registered its path. Leaving the null would have made a delivered screen
- * unreachable from inside the application: the reference enters it from exactly here
- * (`app/cbl/COUSR00C.cbl` L124-L125 returns to `COADM01C` on PF3, so the admin menu is its caller), and
- * a browser reload cannot substitute because the session is memory-only and any hard load of an admin
- * route bounces to sign-on. `everyMenuDestinationIsRegistered` in `ui/src/routerRoutes.test.tsx` checks
- * every non-null destination against the registered paths, so this entry is now verified rather than
- * asserted.
- *
- * Assumptions: the user-update option is entered at a path carrying NO identifier, which is the
- * reference's own first-entry shape rather than a gap. `app/cbl/COUSR02C.cbl` L99-L104 uses the
- * selection carrier only when it is present and otherwise leaves the screen waiting for a typed
- * identifier, and `ui/src/screens/userUpdate/index.tsx` reproduces exactly that -- its mount effect
- * returns without reading when the route names no row. The identifier-bearing form of the same route
- * exists for a caller that HAS a selection, which is what the carrier was for.
+ * Assumptions: the declared value type still admits `null` and the arm in {@link resolveAdminOption}
+ * that answers it is retained even though no entry takes it today, because it is the reference's own
+ * behaviour for a target it cannot load and a future option added to `app/cpy/COADM02Y.cpy` ahead of
+ * its screen would need it.
  */
-export const ADMIN_MENU_DESTINATIONS: Readonly<Record<string, string | null>> = Object.freeze({
-  COUSR00C: '/users',
-  /*
-   * WHY : Refactoring Rationale: option 2 names a route where it previously carried `null`. The null was
-   *       correct while no add-user screen existed; `ui/src/screens/userAdd/index.tsx` is now authored
-   *       and `ui/src/router.tsx` mounts it at this literal path, so leaving the null would answer the
-   *       option with the not-installed sentence for a screen that IS installed -- making a delivered
-   *       screen unreachable from inside the application, which matters here because the session is
-   *       memory-only and any hard load of an administrative route bounces to sign-on.
-   */
-  COUSR01C: '/users/new',
-  COUSR02C: '/users/edit',
-  /*
-   * WHY : Assumptions: option 4 stays `null` even though `ui/src/router.tsx` mounts its screen, and the
-   *       reason is the route's SHAPE rather than a missing delivery. The delete screen is mounted at
-   *       `/users/:id/delete`, which cannot be entered without an identifier, and a menu option carries
-   *       no selection -- so the only honest answer from here is the baseline's own not-installed
-   *       sentence. The identifier-bearing route exists for the user browse, which is where a row is
-   *       selected. `COTRN01C` is omitted from `ui/src/routes/programRoutes.ts` for the same reason.
-   */
-  COUSR03C: null,
-  COTRTLIC: '/reference/transaction-types',
-  COTRTUPC: '/reference/transaction-types/new',
-});
+export const ADMIN_MENU_DESTINATIONS: Readonly<Record<string, string | null>> = Object.freeze(
+  Object.fromEntries(
+    ADMIN_MENU_OPTIONS.map(
+      /**
+       * Pairs one administrative option's target program with the route this delivery enters it at.
+       * @param {AdminMenuOption} option - One entry of the transcribed administrative option table.
+       * @returns {readonly [string, string | null]} The program name and the route it is entered at,
+       *   or `null` when this delivery cannot enter that program's screen.
+       */
+      (option: AdminMenuOption) =>
+        [option.programName, routeForProgram(option.programName)] as const,
+    ),
+  ),
+);
 
 /** Matches an entry consisting only of decimal digits, which is COBOL's `IS NUMERIC` on a `PIC X`. */
 const DIGITS_ONLY = /^[0-9]+$/u;
@@ -410,7 +422,28 @@ export function AdminMenuScreen(): ReactElement {
     setMessage(outcome.message);
     setSeverity(outcome.severity);
     if (outcome.destination !== null) {
-      navigateSafely(navigate, outcome.destination);
+      /*
+       * WHY : ⚠️ Refactoring Rationale: the transition hands over THIS screen's route as the origin,
+       *       where it handed over nothing. `app/cbl/COADM01C.cbl` L142-L143 moves `WS-TRANID` into
+       *       `CDEMO-FROM-TRANID` and `WS-PGMNAME` into `CDEMO-FROM-PROGRAM` in the two statements
+       *       immediately before the dispatching `XCTL` at L145-L148, so the reference tells every
+       *       screen it enters where it was entered from. `ui/src/routes/navigation.ts` carries that
+       *       on its `from` member and five delivered screens read it through `inApplicationRoute` to
+       *       decide their exit key -- `ui/src/screens/refTypeEdit/index.tsx` is the one this menu
+       *       reaches -- and while no caller supplied it, every one of them took its fallback arm
+       *       unconditionally. Supplying it is the caller's half of that contract.
+       * WHY : Assumptions: the constant is used rather than a literal or `location.pathname`. It is
+       *       one of the routes `inApplicationRoute` admits, so the destination will accept it
+       *       instead of discarding it, and reading the live path would hand over whatever address
+       *       the operator arrived at -- which for a route with a trailing segment or a query is not
+       *       the value the admissible set contains.
+       * WHY : Trade-offs: every destination this menu reaches leaves for this route on its exit key
+       *       today anyway -- the three that read no origin name it outright, and `refTypeEdit` falls
+       *       back to it -- so an operator sees no difference. What changes is that `refTypeEdit` is
+       *       no longer ASSUMING where it came from: it is also opened from the transaction-type
+       *       browse, and only a handed-over origin can tell those two arrivals apart.
+       */
+      navigateSafely(navigate, outcome.destination, { from: ADMIN_MENU_ROUTE });
       return;
     }
 
@@ -521,13 +554,34 @@ export function AdminMenuScreen(): ReactElement {
     inlineSize: `calc(${String(ADMIN_MENU_OPTION_WIDTH)}ch + ${cssVar.controlHeight})`,
   };
 
+  /*
+   * WHY : Refactoring Rationale: ⚠️ the three persistent zones are DELEGATED to the one `AppShell` that
+   *       `ui/src/App.tsx` mounts, where this screen composed all three itself. The local composition
+   *       was argued from a measurement -- that the shell paints a zone only when a screen delegates it,
+   *       so a non-delegating screen produced no duplicate band and no duplicate legend -- and the
+   *       measurement was right while the conclusion was not. Absence of a duplicate is not the contract;
+   *       the contract is that the frame OUTLIVES the screen inside it, and a zone composed in the
+   *       screen's own subtree unmounts with the screen. That is what a route change and, since
+   *       `ui/src/layout/ShellContentBoundary.tsx`, a failed lazy chunk both do -- so on this screen
+   *       alone the title band and the key legend went with the content, while on the eighteen that
+   *       delegate they stayed.
+   * WHY : Assumptions: the rendered result is unchanged. The header takes the same two identifiers and
+   *       the same server-anchored instant, the band the same text, severity and mapset width, and the
+   *       legend the same resolved bindings and dispatcher -- only the owner of the three zones moves.
+   * WHY : Assumptions: `ScreenTitle` below is NOT delegated, and no shell slot exists for it. The
+   *       subtitle is this mapset's own `'Admin Menu'` caption at `app/bms/COADM01.bms` L75-L79 rather
+   *       than one of the three shared zones, so it belongs to the screen exactly as it does on the
+   *       eighteen delegating screens.
+   */
+  useShellSlot({
+    screen: { transactionId: ADMIN_MENU_TRANSACTION_ID, programName: ADMIN_MENU_PROGRAM_NAME },
+    now: paintedAt,
+    message: { text: message, severity, mapset: ADMIN_MENU_MAPSET },
+    pfKeys: { keys: bindings, onInvoke: invoke },
+  });
+
   return (
     <Flex vertical gap="large">
-      <ScreenHeader
-        transactionId={ADMIN_MENU_TRANSACTION_ID}
-        programName={ADMIN_MENU_PROGRAM_NAME}
-        now={paintedAt}
-      />
       {/*
         Assumptions: the caption is rendered through `ScreenTitle`, which owns the heading RANK for
         every screen, and it is given neither a colour nor a grade. `app/bms/COADM01.bms` L75-L79
@@ -620,8 +674,6 @@ export function AdminMenuScreen(): ReactElement {
           {ADMIN_MENU_KEY_LABELS.ENTER}
         </Button>
       </Flex>
-      <MessageBand mapset={ADMIN_MENU_MAPSET} message={message} severity={severity} />
-      <PfKeyBar keys={bindings} onInvoke={invoke} />
     </Flex>
   );
 }

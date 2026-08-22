@@ -18,6 +18,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.carddemo.common.CardDemoCommonAutoConfiguration;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ApiErrorSecurityHandlers;
 import com.carddemo.common.error.ClientInputException;
@@ -87,6 +88,8 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.support.AnnotationConfigWebApplicationContext;
 import org.springframework.web.servlet.config.annotation.EnableWebMvc;
+import tools.jackson.core.StreamReadFeature;
+import tools.jackson.databind.DeserializationFeature;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
@@ -105,10 +108,13 @@ import tools.jackson.databind.json.JsonMapper;
  * {@code @RestControllerAdvice} from a context, so without it a refusal would surface as a raw servlet
  * error and the status and body this contract publishes would go unverified.
  *
- * <p>Assumptions: the money module is registered on the converter for the same reason. Without it a
- * monetary amount serialises as a bare JSON number, which is the one thing the published contract
- * forbids, and a test that did not register it would assert against a payload no deployed service
- * emits.
+ * <p>Assumptions: the converter's mapper is assembled from the four reader controls a deployment
+ * configures, and not from a bare builder. The money module is one of them: without it a monetary
+ * amount serialises as a bare JSON number, which is the one thing the published contract forbids, and
+ * a test that did not register it would assert against a payload no deployed service emits. The other
+ * three -- undeclared-member refusal, duplicate-member refusal and the non-textual-to-textual coercion
+ * refusal -- are the reason RC-13 below exists, and every case in this class reads its request body
+ * through all four.
  *
  * <h2>What this class does not answer for</h2>
  *
@@ -130,7 +136,7 @@ import tools.jackson.databind.json.JsonMapper;
  *
  * <h2>The labelled decision register</h2>
  *
- * <p>Twelve decisions govern what this class asserts. Each is recorded once here under the label the
+ * <p>Thirteen decisions govern what this class asserts. Each is recorded once here under the label the
  * user-specified explainability rule names, and each cites measured evidence rather than describing
  * it.
  *
@@ -229,6 +235,22 @@ import tools.jackson.databind.json.JsonMapper;
  * would not have been highlighted at all. A stateless handler keeps no turn count, so a first
  * submission now returns the whole field-error array. The divergence is intended and documented, and
  * no request, response, stub or helper in this class carries a turn discriminator of any kind.
+ *
+ * <p>RC-13 ⚠️ Refactoring Rationale: the request body is read through the DEPLOYED reader, where this
+ * class previously read it through a bare mapper carrying only the money module. Three deployed
+ * controls were therefore unexercised at the one boundary they act on, and Jackson 3 leaves all three
+ * off by default, so the harness was strictly more permissive than any deployment: an undeclared member
+ * was discarded, a member named twice was resolved by keeping the last occurrence, and a bare number
+ * reaching a member the contract declares as a string was converted. The three are
+ * {@code spring.jackson.deserialization.fail-on-unknown-properties} at L353 and
+ * {@code spring.jackson.read.strict-duplicate-detection} at L370 of
+ * {@code services/common-lib/src/main/resources/carddemo-common-defaults.yml}, which this module's
+ * {@code application.yml} imports at its L501, and the coercion refusal
+ * {@code CardDemoCommonAutoConfiguration} publishes as a mapper-builder customiser. The customiser is
+ * applied as the production OBJECT rather than restated, so its deliberate asymmetry -- text may reach
+ * a numeric target, a number may not reach a textual one, because money crosses every boundary as a
+ * JSON string -- cannot drift apart from the deployed one. {@code OnTheDeployedRequestReader} asserts
+ * one refusal per control.
  */
 class ReportControllerTest {
 
@@ -337,12 +359,27 @@ class ReportControllerTest {
         artifacts = Mockito.mock(ArtifactStore.class);
         reports = Mockito.mock(TransactionReportService.class);
 
-        // WHY : Assumptions: the money module is registered on the converter rather than left out,
-        //       because without it a monetary amount serialises as a bare JSON number -- which is the
-        //       one encoding the published contract forbids -- and a test asserting against that
-        //       payload would be asserting against a shape no deployed service emits.
-        JsonMapper mapper = JsonMapper.builder().addModule(new MoneyModule()).build();
-        JacksonJsonHttpMessageConverter converter = new JacksonJsonHttpMessageConverter(mapper);
+        // WHY : Assumptions: the converter reads with the FOUR controls a deployment configures, and all
+        //       four are named because each one refuses a different body. (1) The money module, without
+        //       which a monetary amount serialises as a bare JSON number -- the one encoding the
+        //       published contract forbids. (2) Undeclared-member refusal, from
+        //       spring.jackson.deserialization.fail-on-unknown-properties at L353 of
+        //       services/common-lib/src/main/resources/carddemo-common-defaults.yml, which this module's
+        //       application.yml imports at its L501. (3) Duplicate-member refusal, from
+        //       spring.jackson.read.strict-duplicate-detection at L370 of that same document. (4) The
+        //       non-textual-to-textual coercion refusal, published as a builder customiser by
+        //       CardDemoCommonAutoConfiguration and applied here as the object itself.
+        // WHY : ⚠️ Refactoring Rationale: this converter was built from a BARE mapper carrying only the
+        //       money module, which left controls (2), (3) and (4) untested at the one boundary they act
+        //       on. Jackson 3 leaves all three off by default, so the harness read the wire more leniently
+        //       than any deployment does: an undeclared member was DISCARDED, a member named twice was
+        //       resolved by keeping the last occurrence, and a bare number reaching a declared string
+        //       member was CONVERTED. Each of those three bodies would have been ADMITTED by this harness
+        //       and answered 400 by a deployment. No case in this class asserted that admission -- the
+        //       sibling StatementControllerTest did, which is what a permissive harness eventually buys:
+        //       an assertion that pins the opposite of the shipped contract.
+        JacksonJsonHttpMessageConverter converter =
+                new JacksonJsonHttpMessageConverter(deployedRequestReader());
 
         // WHY : Assumptions: a REAL sealer is built over fixed test key material rather than mocked,
         //       because the boundary tokens this controller returns are opened again by the next
@@ -362,6 +399,49 @@ class ReportControllerTest {
                 .setControllerAdvice(new GlobalExceptionHandler(
                         Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC)))
                 .build();
+    }
+
+    /**
+     * Assembles the mapper a deployment reads a request body with, from its four constituent controls.
+     *
+     * <p>Assumptions: the two feature keys are enabled here by their framework feature names rather than
+     * read out of the configuration document, because a standalone pipeline binds no document at all.
+     * The pairing is exact: {@code spring.jackson.deserialization.fail-on-unknown-properties} is
+     * {@link DeserializationFeature#FAIL_ON_UNKNOWN_PROPERTIES} and
+     * {@code spring.jackson.read.strict-duplicate-detection} is
+     * {@link StreamReadFeature#STRICT_DUPLICATE_DETECTION}, and both are declared once for every service
+     * in {@code services/common-lib/src/main/resources/carddemo-common-defaults.yml} at L353 and L370.</p>
+     *
+     * <p>Assumptions: the coercion refusal is applied by INVOKING the production customiser rather than
+     * by restating its three coercion settings. A restatement would be a second copy of a deployed
+     * decision, and the copy would stop tracking the original silently -- a future narrowing or widening
+     * of the deployed refusal would leave these cases asserting the previous one. Invoking the bean means
+     * the change arrives here on the same edit.</p>
+     *
+     * <p>Assumptions: the customiser's ASYMMETRY is load-bearing and is preserved by using it rather than
+     * reproducing it. It refuses an integer, a floating-point value and a boolean reaching a TEXTUAL
+     * target and refuses nothing in the other direction, because money crosses every boundary in this
+     * migration as a JSON string read into a {@code BigDecimal}. Writing the refusal symmetrically -- for
+     * instance through {@code spring.jackson.mapper.allow-coercion-of-scalars} -- would take the money
+     * path down with it, which is why no case here may substitute that property for this bean.</p>
+     *
+     * <p>Alternatives Considered: obtaining the mapper from a started application context, so the
+     * framework assembled it. Rejected for the reason this class already records for the pipeline as a
+     * whole: this module's configuration package builds a token decoder that resolves an issuer's
+     * discovery document over the network at bean-creation time, so any context including it fails here
+     * for a reason unrelated to the controller under test.</p>
+     *
+     * @return the request reader configured as a deployment's web layer is, never {@code null}
+     */
+    private static JsonMapper deployedRequestReader() {
+        JsonMapper.Builder builder = JsonMapper.builder()
+                .addModule(new MoneyModule())
+                .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+                .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION);
+        new CardDemoCommonAutoConfiguration()
+                .carddemoRefuseNonTextualScalarsForTextTargets()
+                .customize(builder);
+        return builder.build();
     }
 
     // WHY : Assumptions: the accepting arm transcribed here is app/cbl/CORPT00C.cbl L478, whose
@@ -3680,6 +3760,139 @@ class ReportControllerTest {
             assertThat(result.getResponse().getHeader(HttpHeaders.SET_COOKIE))
                     .as("no session may be advertised either")
                     .isNull();
+        }
+    }
+
+    /**
+     * Groups the cases that hold this boundary to the request reader a deployment configures.
+     *
+     * <p>Assumptions: every body here is assembled as RAW TEXT rather than serialised from
+     * {@link ReportRequest}, and that is the mechanism of the group rather than a stylistic choice. A
+     * member the record does not declare, a member written twice and a scalar of the wrong JSON type are
+     * all shapes the writer cannot emit, so a case built by serialising an object would send the
+     * canonical form and assert that the canonical form is accepted.</p>
+     *
+     * <p>Assumptions: each case also asserts the resolver was NEVER consulted, because what is under
+     * assertion is that the refusal happens while the body is being READ. A 400 on its own would be
+     * equally consistent with a body that bound successfully and was then refused by a constraint or by
+     * the resolver, which is a different control arriving at the same status.</p>
+     *
+     * <p>Assumptions: no case here asserts that a conforming body still reads, because every other case
+     * in this class now does -- all of them bind through the same reader, so a control configured too
+     * broadly would fail them rather than pass unnoticed.</p>
+     *
+     * <p>Of the four content elements the explainability rule enumerates, only Purpose applies to a
+     * type declaration, so this block carries no parameter, return or exception tag.</p>
+     */
+    @Nested
+    @DisplayName("on the deployed request reader")
+    class OnTheDeployedRequestReader {
+
+        // WHY : Assumptions: the undeclared member sent is `reportType`, which is the member a caller
+        //       reading the RESPONSE would expect the request to carry -- the acceptance sentence
+        //       interpolates a resolved report name -- while the request declares three selectors and no
+        //       such member. Under the reader's default it was DISCARDED, so a body naming it was
+        //       answered from the selectors instead, and a body naming only it was refused for having no
+        //       report type selected: a true sentence about a request the caller had not sent, with
+        //       nothing in the response to say which member had been dropped.
+        /**
+         * Confirms an undeclared member is refused and named, rather than discarded.
+         *
+         * <p>Assumptions: the reflected member NAME is asserted, not merely the status, because naming it
+         * is the whole value of separating this arm from the generic parse refusal: a caller that has
+         * mistaken this contract for one that carries a report type has to be told which member to
+         * remove.</p>
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("an undeclared member is refused and named")
+        void anUndeclaredMemberIsRefusedAndNamed() throws Exception {
+            mockMvc.perform(post(ReportController.BASE_PATH + ReportController.SUBMISSION_PATH)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"monthly\":\"" + MARK + "\",\"confirm\":\"Y\","
+                                    + "\"reportType\":\"Monthly\"}"))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION))
+                    .andExpect(jsonPath("$.message")
+                            .value(GlobalExceptionHandler.MESSAGE_UNKNOWN_MEMBER))
+                    .andExpect(jsonPath("$.fieldErrors", org.hamcrest.Matchers.hasSize(1)))
+                    .andExpect(jsonPath("$.fieldErrors[0].field").value("reportType"))
+                    .andExpect(jsonPath("$.fieldErrors[0].state")
+                            .value(FieldValidationFlag.NOT_OK.name()))
+                    .andExpect(jsonPath("$.fieldErrors[0].message")
+                            .value(GlobalExceptionHandler.MESSAGE_UNKNOWN_MEMBER));
+
+            verify(executions, never()).resolveReportName(any());
+            verify(executions, never()).start(any(), any(), any(), any(), any());
+        }
+
+        // WHY : Assumptions: the two occurrences carry DIFFERENT answers, 'Y' then 'N', and that pairing
+        //       is what makes the case meaningful. app/cbl/CORPT00C.cbl L478 accepts and its L480
+        //       declines, so a reader resolving the ambiguity by keeping the last occurrence would answer
+        //       200 having CANCELLED a run the same body also asked to confirm -- and the caller reading
+        //       its own request back would see the confirmation. A duplicate carrying one value twice
+        //       would be refused identically and would prove nothing about what the leniency costs.
+        /**
+         * Confirms a member named twice is refused rather than resolved by position.
+         *
+         * <p>Assumptions: the generic malformed-request sentence is asserted with an EMPTY field array,
+         * because a duplicate is a streaming failure rather than a binding failure -- the reader stops
+         * before any member is bound, so there is no member to attribute the refusal to and inventing one
+         * would name a field that is present and well formed.</p>
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("a member named twice is refused rather than resolved by position")
+        void aMemberNamedTwiceIsRefused() throws Exception {
+            mockMvc.perform(post(ReportController.BASE_PATH + ReportController.SUBMISSION_PATH)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"monthly\":\"" + MARK + "\",\"confirm\":\"Y\","
+                                    + "\"confirm\":\"N\"}"))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION))
+                    .andExpect(jsonPath("$.message")
+                            .value(GlobalExceptionHandler.MESSAGE_MALFORMED_REQUEST))
+                    .andExpect(jsonPath("$.fieldErrors", org.hamcrest.Matchers.hasSize(0)));
+
+            verify(executions, never()).resolveReportName(any());
+            verify(executions, never()).resolveConfirmation(any());
+        }
+
+        // WHY : Assumptions: the wrong-typed scalar is placed in `title01`, whose only constraint is a
+        //       forty-position width, so every token below CONVERTS into a value the constraint admits --
+        //       which is exactly what made the leniency undetectable. A member carrying a pattern would
+        //       answer 400 either way and the case would pass against an unconfigured reader while
+        //       proving nothing.
+        // WHY : Assumptions: the three tokens are one per input shape the deployed customiser names --
+        //       integer, floating point and boolean -- rather than a representative one, because the
+        //       three are configured as three separate coercion entries and a refusal could be lost from
+        //       any one of them independently.
+        /**
+         * Confirms an integer, a floating-point value and a boolean are each refused for a string member.
+         *
+         * @param scalar the raw JSON token to place where the request declares a character member, of
+         *     type {@link String}; it is written into the body verbatim and unquoted, so it arrives as a
+         *     JSON number or a JSON boolean rather than as text
+         * @throws Exception if the request cannot be performed
+         */
+        @ParameterizedTest(name = "scalar={0}")
+        @ValueSource(strings = {"12345", "1.5", "true"})
+        @DisplayName("a non-textual scalar is refused for a member the contract declares as a string")
+        void aNonTextualScalarIsRefusedForAStringMember(String scalar) throws Exception {
+            mockMvc.perform(post(ReportController.BASE_PATH + ReportController.SUBMISSION_PATH)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"monthly\":\"" + MARK + "\",\"confirm\":\"Y\","
+                                    + "\"title01\":" + scalar + "}"))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION))
+                    .andExpect(jsonPath("$.message")
+                            .value(GlobalExceptionHandler.MESSAGE_MALFORMED_REQUEST))
+                    .andExpect(jsonPath("$.fieldErrors", org.hamcrest.Matchers.hasSize(0)));
+
+            verify(executions, never()).resolveReportName(any());
+            verify(executions, never()).start(any(), any(), any(), any(), any());
         }
     }
 

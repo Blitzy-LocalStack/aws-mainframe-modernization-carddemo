@@ -215,11 +215,21 @@ const ACCOUNT_ID_DIGITS = /^[0-9]{11}$/u;
  *
  * Refactoring Rationale: the pattern is asserted at the client boundary because the CONTRACT could not
  * assert it. Both properties were published as `type: string` with a `maxLength` alone — 12 and 20, the
- * screen-field widths — and a bare maximum admits a whole formatted national identifier: `123-45-6789`
- * is eleven characters and satisfies `maxLength: 12` exactly as the ten-character marker does. So a
- * service, a stub or a proxy that returned the clear value would have satisfied the schema, and this
- * screen would have painted it. The contract now publishes the marker as a `pattern` on all four
- * declarations, and this guard is what makes a violation fail HERE rather than on screen.
+ * screen-field widths — and a bare maximum admits a whole formatted national identifier, whose
+ * `NNN-NN-NNNN` form is eleven characters and satisfies `maxLength: 12` exactly as the ten-character
+ * marker does. So a service, a stub or a proxy that returned the clear value would have satisfied the
+ * schema, and this screen would have painted it. The contract now publishes the marker as a `pattern`
+ * on all four declarations, and this guard is what makes a violation fail HERE rather than on screen.
+ *
+ * Assumptions: the width above is stated as a FORM and never as an instance, and the case in
+ * `./accounts.test.ts` that drives this guard with a clear value uses the non-issuable sentinel
+ * `000-00-0000` rather than a realistic one. The issuing authority has never assigned an area number of
+ * 000, never a group number of 00 and never a serial number of 0000, so that value fails three
+ * independent allocation rules at once and can belong to nobody, while remaining the same eleven
+ * characters the withdrawn maximum admitted. A literal shaped like an ISSUABLE identifier — written
+ * here, or as a fixture — reads as a live one to whoever finds it by search, which is the disclosure
+ * this guard exists to stop; that is why the reasoning sits beside the pattern rather than only in the
+ * test.
  */
 const REDACTED_IDENTIFIER = /^\[REDACTED\]$/u;
 

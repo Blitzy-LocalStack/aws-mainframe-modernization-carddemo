@@ -88,8 +88,8 @@ the two to disagree.
 
 ### 1.4 The 9 / 8 / 10 / 11 asymmetry — do not "correct" it
 
-Four counts in this repository deliberately disagree, and every one of them is
-right:
+Four inventories of "the services" are counted in this repository and they yield four
+different figures. Every one of them is right:
 
 - **9** Maven modules under `services/` — verified by counting `services/*/pom.xml`
 - **8** Dockerfiles under `services/` — this module has none
@@ -97,29 +97,58 @@ right:
   `ui` plus `data-migration`, which is exactly the number of Dockerfiles it holds
 - **11** ECR repositories provisioned — those ten plus `aws-otel-collector`, which
   is **mirrored from a public registry rather than built here**
-  ([`infra/modules/ecr`](../../infra/modules/ecr) declares the eleven names and
-  asserts the count is exactly eleven)
+  ([`infra/modules/ecr`](../../infra/modules/ecr) declares the two kinds through two
+  separate inputs: `repository_names` asserts the ten deployables as an exact set,
+  `third_party_mirror_repository_names` holds the mirror and bounds itself at one,
+  and `main.tf` unions them)
 
 `common-lib` is the ninth module and the reason the first two figures differ. It is
 **non-deployable by design**: it holds a POM and Java sources and no Dockerfile, it
 is compiled from source inside each service's Maven reactor build, no deployment
 pushes it and no task definition pulls it. Reconciling the module count with the
-image count is a real and recorded hazard, because the surplus repository would be
-empty and *"whose emptiness would not make `terraform apply` fail"*
-[`infra/modules/ecr/README.md`] — a failure that does not fail the apply is the
-worst kind, which is why the asymmetry is documented in three places on purpose.
+image count would provision an **eleventh** repository for a module that publishes
+no image, and the hazard in that is not the cost of an unused repository but its
+silence — the surplus would simply stay empty, and an empty repository does not make
+`terraform apply` fail. A failure that does not fail the apply is the worst kind,
+which is why the same asymmetry is stated here, in [this module's own POM
+header](pom.xml) and in the ECR module on purpose.
 
-Refactoring Rationale: this section listed three counts and treated ten as both the
-image count and the repository count, so it described a `common-lib` repository as
-the **eleventh** phantom. Eleven repositories are already provisioned, so the
-phantom would now be the **twelfth**. The two sources quoted here — this module's
-own POM and the ECR module's README — both still say "eleventh", and they are
-quoted accurately: each was written when ten repositories were provisioned, and
-the mirrored collector took the eleventh slot afterwards. The fix is therefore to
-separate *images built* from *repositories provisioned* rather than to renumber a
-quotation, because the two counts answer different questions and will keep
-diverging whenever a repository is added for something this repository does not
-build.
+Refactoring Rationale: this section briefly published the fourth count as **ten** and
+told a reader that the mirror and the collector sidecar it serves were both withdrawn.
+Neither withdrawal holds in this tree, and the prose is corrected rather than softened,
+because a count reading ten against a module provisioning eleven is the reading that
+sends someone to delete a live input.
+[`infra/modules/ecs-service`](../../infra/modules/ecs-service) composes an AWS Distro for
+OpenTelemetry collector sidecar for every workload — `enable_telemetry_collector`
+defaults to `true` and neither environment root overrides it — and
+[`infra/modules/ecr`](../../infra/modules/ecr) unions its two name inputs, so the
+eleventh repository exists and has a consumer. Both environment roots resolve
+`module.ecr.repository_urls["aws-otel-collector"]` when they compose their task
+definitions, so deleting that input does not simplify the module: it fails
+`terraform plan` in `dev` and `prod` alike.
+
+Assumptions: the four counts answer four different questions, which is why none of them
+can be derived from another — **9** is what Maven builds, **8** is what `services/`
+containerises, **10** is what this repository containerises anywhere, and **11** is what
+the registry holds. The surplus hazard described above is unchanged: a repository
+provisioned for a module that publishes no image would simply stay empty, and an empty
+repository does not make `terraform apply` fail. What moves is only the number attached
+to that hazard, because the eleventh slot is already held by an artifact that does have a
+publisher — [`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml) mirrors
+the pinned image into it as its own step, so an empty mirror is a failed deployment step
+rather than a repository that silently never reports.
+
+Trade-offs: what the sidecar buys is span **export**, and this module supplies only the
+span *creation* half, so reading either half alone gives the wrong answer about whether
+tracing is delivered. `common-lib` carries `spring-boot-starter-opentelemetry` and the
+shared console pattern in
+[`carddemo-common-defaults.yml`](src/main/resources/carddemo-common-defaults.yml) prints
+`traceId` and `spanId` beside the `correlationId` that `CorrelationIdFilter` sets, while
+that same document leaves `management.tracing.export.otlp.enabled` **false** — a local
+run therefore creates spans and exports none, which is the right default for a developer
+with no collector beside them. `infra/modules/ecs-service` sets
+`OTEL_TRACES_EXPORTER=otlp` in the task environment, which resolves onto that property,
+so export is switched on by the deployment rather than by this module.
 
 ---
 
@@ -293,7 +322,7 @@ test, name by name.
 <!-- source-inventory: 46 production classes + 11 charters = 57 compilation units -->
 **Eleven packages** — a root and ten flat subpackages — each with one
 `package-info.java` under `src/main/java` (see §8, they are mandatory), holding
-**45** production classes for **56** compilation units. That census is machine-checked the
+**46** production classes for **57** compilation units. That census is machine-checked the
 same way the test census in §10.1 is: `ServiceReadmeInventoryTest` parses the
 `source-inventory` comment below and re-measures all three figures against this module's own
 tree, so a class added without a listing edit fails the build instead of ageing quietly in
@@ -328,17 +357,22 @@ step silently. Each caption is now derivable from the listing directly beneath i
 derivable from `find src/main/java -name '*.java'` and its `src/test/java` counterpart, so a
 reader who doubts a number can settle it in one command rather than by trusting this paragraph.
 
-⚠ Assumptions: the test-side caption is **61 `*Test` + 1 `*IT`**, so this module carries 62 test
-classes. A second draft of this paragraph stated 56 (55 plus one); that figure was measured
-before `architecture/DiagnosticRenderingRulesTest` and the two codec cases beside it were added,
-and it is not restated here, because the caption below is the copy `ServiceReadmeInventoryTest`
+⚠ Assumptions: the test-side caption is **62 `*Test` + 1 `*IT`**, so this module carries 63 test
+classes. Two earlier drafts of this paragraph stated 56 (55 plus one) and then 61 plus one; each
+was measured before the cases that overtook it were added, and neither is a figure to carry
+forward, because the `test-inventory` marker in §10.1 is the copy `ServiceReadmeInventoryTest`
 re-measures and a second spelling of the same census in prose is exactly what the withdrawn
-`main-inventory` marker was.
+`main-inventory` marker was. The rule this paragraph exists to state: when a census is repeated
+here, re-derive **every** copy of it from `find src/test/java -name '*Test.java' | wc -l` and its
+`*IT.java` counterpart in the same sitting — a prose copy corrected in one place and left stale
+two sections later is the drift the marker cannot catch, because the marker is not what a reader
+reads.
 
 The set is deliberately flat: there is no nested subpackage, and `SharedKernelInventoryTest`
 re-derives the root charter's inventory table from the directory one level deep, so a nested
 package would be reported as drift rather than folded into its parent's row. `src/test/java`
-holds twelve directories, each with its own charter.
+holds **thirteen** package directories, each with its own charter — the eleven that mirror
+`src/main/java` plus `architecture` and `profile`, which have no production counterpart.
 
 <!-- source-inventory: 46 production types + 11 charters in 11 packages -->
 <!-- source-listing:begin -->
@@ -494,23 +528,23 @@ its regeneration command beside it can only ever be out of date, never misleadin
 what it is. Assumptions: a reader who measures a different total has added or removed
 tests, which is expected drift -- §2's commands are the authority that cannot go stale, and
 the last re-measurement of this table found each row exactly as printed and the total at
-1422:
+1427:
 
 | Package | Classes | Executions |
 |---|---|---|
 | `codec` | `CopybookLayoutTest` 150 · `FixedWidthCodecTest` 150 · `CsvAuthCodecTest` 126 · `PackedDecimalCodecTest` 106 · `ZonedDecimalCodecTest` 62 · `InquiryRequestCodecTest` 16 · `AuthorizationDisclosurePolicyTest` 13 · `DateInquiryReplyCodecTest` 7 | **630** |
 | `validation` | `DateEditValidatorTest` 93 across 8 `@Nested` groups · `FieldValidationFlagTest` 29 | **122** |
-| `error` | `GlobalExceptionHandlerTest` 69 · `ApiErrorTest` 36 · `AbendDetailTest` 21 · `GlobalExceptionHandlerPathMaskingTest` 20 · `ApiErrorSecurityHandlersTest` 9 · `ProtocolRefusalRenderingTest` 9 · `AbsentAndUnconvertibleValueTest` 8 across 1 `@Nested` group · `RejectedParameterOrderingTest` 5 across 1 `@Nested` group · `ApiErrorWireShapeTest` 4 | **181** |
-| `security` | `OpaqueIdentifierTest` 30 · `HtmlTextEncoderTest` 24 · `SealedSelectorTest` 18 · `ApprovedOriginPolicyTest` 15 · `CardNumberMaskerTest` 13 · `InternalServiceTokenTest` 12 · `CognitoAccessTokenValidatorTest` 11 · `MaskedCardNumberTest` 9 · `JwtRoleConverterTest` 7 | **139** |
+| `error` | `GlobalExceptionHandlerTest` 71 · `ApiErrorTest` 36 · `AbendDetailTest` 21 · `GlobalExceptionHandlerPathMaskingTest` 20 · `ApiErrorSecurityHandlersTest` 9 · `ProtocolRefusalRenderingTest` 9 · `AbsentAndUnconvertibleValueTest` 8 across 1 `@Nested` group · `RejectedParameterOrderingTest` 5 across 1 `@Nested` group · `ApiErrorWireShapeTest` 4 | **183** |
+| `security` | `OpaqueIdentifierTest` 30 · `HtmlTextEncoderTest` 24 · `SealedSelectorTest` 18 · `ApprovedOriginPolicyTest` 15 · `InternalServiceTokenTest` 14 · `CardNumberMaskerTest` 13 · `CognitoAccessTokenValidatorTest` 11 · `MaskedCardNumberTest` 9 · `JwtRoleConverterTest` 7 | **141** |
 | `money` | `MoneyTest` 31 · `MoneyModuleTest` 10 | **41** |
 | `web` | `PageResponseTest` 17 · `CursorTokenTest` 16 · `RequestBodySizeFilterTest` 14 · `CorrelationIdFilterTest` 9 | **56** |
 | `messaging` | `MessagingCorrelationIdTest` 16 · `RethrowingDigestErrorHandlerTest` 14 · `MessageExpiryTest` 11 · `QueueDestinationTest` 11 · `QueueClientBudgetTest` 8 · `MessageSinkSuppressionTest` 6 | **66** |
-| `observability` | `FailureSummaryTest` 17 · `MetricsConfigTest` 12 · `ThrowableDigestTest` 11 · `StructuredLoggingDefaultsTest` 7 · `SensitiveLoggingAndJsonStrictnessDefaultsTest` 7 · `LogSafeTextTest` 5 | **59** |
+| `observability` | `FailureSummaryTest` 17 · `MetricsConfigTest` 12 · `ThrowableDigestTest` 11 · `StructuredLoggingDefaultsTest` 8 · `SensitiveLoggingAndJsonStrictnessDefaultsTest` 7 · `LogSafeTextTest` 5 | **60** |
 | `architecture` | `LayeringRulesTest` 10 · `PublishedContractClosureTest` 8 · `SharedKernelInventoryTest` 12 across 1 `@Nested` group · `RuntimeConfigurationContractTest` 5 · `PackageCharterInventoryTest` 4 across 1 `@Nested` group · `ServiceCatalogInventoryTest` 4 across 1 `@Nested` group · `ServiceReadmeInventoryTest` 6 across 1 `@Nested` group · `ApplicationContextWiringContractTest` 3 · `CrossSchemaPrivilegeContractTest` 3 across 1 `@Nested` group · `DiagnosticRenderingRulesTest` 3 · `ReleasedMigrationImmutabilityTest` 2 · `RuntimeDeletePrivilegeContractTest` 2 | **62** |
 | `control` | `OnlineWriteGateTest` 16 across 5 `@Nested` groups · `OnlineWriteGateInterceptorTest` 12 across 5 `@Nested` groups | **28** |
 | `time` | `TimestampFormatterTest` 24 | **24** |
 | `profile` | `ProfileConfigurationTest` 14 | **14** |
-| | **module total** | **1422** |
+| | **module total** | **1427** |
 
 Three reconciliation notes, because each looks like a discrepancy until named.
 `DateEditValidatorTest`, both `control` classes, two of the `error` classes and five
@@ -518,8 +552,8 @@ of the `architecture` classes report `Tests run: 0` against their own class name
 report their executions under `@Nested` or `@DisplayName` labels instead, so a reader
 grepping the console output for a class name finds a zero. The table above is
 therefore read from `target/surefire-reports/*.xml`, where each case still carries the
-suite it belongs to, and the console total agrees with it: 1243 executions report
-under a class name and 179 under a display name, summing to 1422.
+suite it belongs to, and the console total agrees with it: 1248 executions report
+under a class name and 179 under a display name, summing to 1427.
 
 **These figures had drifted, and one class was missing from the table entirely.**
 `SensitiveLoggingAndJsonStrictnessDefaultsTest` was absent from the `observability`
@@ -559,8 +593,15 @@ read 1355 -- account for that movement, which is stated rather than smoothed ove
 the reason the paragraph above gives: the table and the total are now read from one source,
 so they can only disagree if that source is not consulted.
 
-The current run measures **1422**, and the whole of the movement from the preceding **1417** sits in ONE
-row: `error` arrives at **181**, contributed entirely by `GlobalExceptionHandlerTest` going from 64 to 69.
+The current run measures **1427**, and the movement from the preceding **1422** sits in THREE rows:
+`error` arrives at **183** (`GlobalExceptionHandlerTest` 69 to 71), `security` at **141**
+(`InternalServiceTokenTest` 12 to 14) and `observability` at **60**
+(`StructuredLoggingDefaultsTest` 7 to 8). Every other row is unchanged and was re-read from
+`target/surefire-reports/*.xml` rather than assumed. Assumptions: three rows moving at once is
+why the whole table is re-derived in one pass from the report files rather than the moved rows
+being edited -- with three simultaneous movements, adjusting the ones a reader happens to notice
+is how a total ends up agreeing with no row at all. ⚠️ The measurement before this one moved in ONE
+row: `error` arrived at **181**, contributed entirely by `GlobalExceptionHandlerTest` going from 64 to 69.
 Those five cases hold the refusal shape an accumulating edit driver produces -- that a refusal carrying
 per-field entries renders each field's own state and own sentence rather than one sentence against every
 name, that a LABELLED reference sentence carrying a colon survives the message gate, that an over-long or
@@ -599,10 +640,10 @@ the table never gained. A total maintained as "the previous total plus what I be
 reproduces exactly that error, which is why this one is read from the report files -- the same
 argument the paragraph above makes, reached a second time by a second route.
 
-`CardDemoCommonAutoConfigurationIT` contributes **nothing** to the 1422: it is an
+`CardDemoCommonAutoConfigurationIT` contributes **nothing** to the 1427: it is an
 `*IT`, so Failsafe runs it at `verify` and Surefire does not run it at `test`
 (§2.3); it reports its own **13** executions under Failsafe instead, which is why a
-`verify` console shows 1422 and 13 as two separate totals. And a full `mvn -f services/pom.xml clean test` reports
+`verify` console shows 1427 and 13 as two separate totals. And a full `mvn -f services/pom.xml clean test` reports
 `LayeringRulesTest` **nine** times rather than once — once through this module's own
 `default-test` execution, and once in each of the eight service modules through the
 inherited `architecture-rules` execution that scans this module's test artifact. Only
@@ -613,7 +654,7 @@ module.
 > not copied from a plan — the tree from `find`, the counts from Surefire XML, and both
 > re-measured together rather than adjusted. Both trees are complete as listed: every
 > `.java` on disk appears in the tree above and nothing appears there that is not on disk —
-> eleven main packages with eleven charters, twelve test directories with twelve charters,
+> eleven main packages with eleven charters, thirteen test packages with thirteen charters,
 > and
 > `LayeringRulesTest` present in the `architecture` package under the filename §7
 > pins. It is annotated with a pointer to §7 because its filename is a build
@@ -665,7 +706,7 @@ repeats in the type's own Javadoc.
 
 | Class | Responsibility | Source authority |
 |---|---|---|
-| `Money` | `BigDecimal` scale-2 arithmetic under two fixed modes — `HALF_UP` for general operations, `DOWN` for the accrual; exposes the multiply-then-divide interest helper | `app/cpy/CVACT01Y.cpy` line 7; `app/cbl/CBACT04C.cbl` lines 464 to 465 |
+| `Money` | `BigDecimal` scale-2 arithmetic under **one** fixed mode, `GENERAL_ROUNDING` = `HALF_UP`, governing every reduction to cents including the accrual quotient; exposes the multiply-then-divide interest helper. The reference truncates that quotient instead, which is registered divergence `C-ROUNDING`, never target behaviour — see §5.3.1 | `app/cpy/CVACT01Y.cpy` line 7; `app/cbl/CBACT04C.cbl` lines 464 to 465 |
 | `MoneyModule` | Jackson module serialising money as a JSON **string** | §5.1 |
 | `CopybookLayout` | The layout descriptor — offset, length and type per field; one descriptor, many readers | `app/cpy/**` record copybooks |
 | `FixedWidthCodec` | Record ⇄ field-map by offset and length | all base record copybooks |
@@ -1761,13 +1802,20 @@ comment above and re-measures both figures against this module's own test tree, 
 the build when it drifts rather than ageing quietly in prose.
 
 Refactoring Rationale: this module publishes the marker although the class that reads it lives here,
-which looks circular and is not. `ServiceReadmeInventoryTest` names seven READMEs as marked and
-requires at least seven, while only the six service READMEs ever carried one — so the floor was
-already one above the truth and the last marked README could have lost its marker without the count
-noticing. Adopting the marker here is what makes the roster and the floor agree, and it does so by
-extending the check rather than by lowering it: the alternative was to drop the floor to six, which
-would have left the module whose test tree is the largest of the nine as the only one publishing an
-unchecked census.
+which looks circular and is not. `ServiceReadmeInventoryTest` requires at least seven marked
+READMEs, and at the time the floor was written only **six** carried one — so the floor sat one above
+the truth and the last marked README could have lost its marker without the count noticing. Adopting
+the marker here is what made the roster and the floor agree, and it did so by extending the check
+rather than by lowering it: the alternative was to drop the floor to six, which would have left the
+module whose test tree is the largest of the nine as the only one publishing an unchecked census.
+The roster now stands at **nine** — this module and all eight services — so every published test
+census in the reactor is re-measured against its own tree and none is carried on prose alone.
+The floor stays a minimum and is deliberately left at seven rather than raised to nine: raising it
+on each adoption makes every adoption a two-file change and turns a README edit into a test edit,
+which is the coupling the floor was chosen to avoid. Assumptions: the roster is a **measurement,
+not a constant** — `grep -l 'test-inventory:' services/*/README.md | wc -l` settles it in one
+command, and that command is the thing to run rather than this sentence to trust, because the
+roster moves whenever a module adopts the marker and this paragraph does not.
 
 All `*Test` classes run under Surefire in the `test` phase; the one `*IT` class
 runs under Failsafe (§2.3). This module needs no database and no container for

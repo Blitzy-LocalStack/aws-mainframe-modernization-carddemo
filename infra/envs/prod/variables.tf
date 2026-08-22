@@ -686,10 +686,29 @@ variable "vpc_cidr" {
 #       questions -- which releases exist, and which are still supported -- are
 #       ones no regex can answer, and .github/workflows/infra-ci.yml asserts this
 #       pin against its support review horizon separately.
+# WHY : ⚠️ Refactoring Rationale: this default was "16.6" while terraform.tfvars
+#       pinned "16.8" and this description already offered 16.8 as its example. The
+#       tfvars value wins whenever it is passed, so the divergence was invisible in
+#       every ordinary plan -- and 16.6's Aurora STANDARD SUPPORT ended on
+#       2026-05-31, so the one path that reached the default reached an unsupported
+#       release, in the production root. That path is not hypothetical: a
+#       `-var-file` omission, a plan run from a scratch copy of the root, or a
+#       `terraform console` session all resolve the default, and the outcome is a
+#       cluster force-upgraded on Aurora's schedule or attracting Extended Support
+#       charges. Both values now name the reviewed long-term-support pin, and
+#       .github/workflows/infra-ci.yml's "Verify the Aurora engine pin against its
+#       support review horizon" gate asserts the DEFAULT against the tfvars pin as
+#       well as the marker date, so the two cannot part again without failing the
+#       build.
+#       Alternatives Considered: removing the default so the value is required from
+#       the caller, which makes divergence structurally impossible. Rejected because
+#       every other input in this file carries a reviewed default, and a required
+#       input here would make the root unplannable without a var-file -- which the
+#       documentation-generation and lint gates exercise.
 variable "aurora_engine_version" {
-  description = "Aurora PostgreSQL engine version for the production cluster, forwarded to the database module, which requires the value and supplies no default. Must be a numeric version such as 16.8 -- not an engine name and not a parameter-group family -- and its major line must match aurora_parameter_group_family, which that module verifies."
+  description = "Aurora PostgreSQL engine version for the production cluster, forwarded to the database module, which requires the value and supplies no default. Must be a numeric version such as 16.8 -- not an engine name and not a parameter-group family -- and its major line must match aurora_parameter_group_family, which that module verifies. Defaults to the reviewed long-term-support pin this root's terraform.tfvars sets, so an omitted tfvars cannot select an unsupported release."
   type        = string
-  default     = "16.6"
+  default     = "16.8"
 }
 
 # WHY : Assumptions: this and aurora_engine_version above are ONE decision made in
@@ -865,7 +884,7 @@ variable "batch_schedule_maximum_event_age_seconds" {
 #       image_digests below is populated as well, and the ECS service module then
 #       deploys by digest -- this input remains the tag those images are PUSHED under.
 variable "image_tag" {
-  description = "Immutable image tag applied to all ten ECR repositories for this deployment, normally the source commit SHA supplied by the OIDC deployment workflow. The tag latest is rejected: it cannot identify a revision to roll back to."
+  description = "Immutable image tag applied to the ten deployable ECR repositories this deployment builds, normally the source commit SHA supplied by the OIDC deployment workflow. The tag latest is rejected: it cannot identify a revision to roll back to. The mirrored telemetry collector is not one of them: it is a cached third-party image and carries its own upstream version tag."
   type        = string
   nullable    = false
 
@@ -916,18 +935,28 @@ variable "github_oidc_provider_arn" {
 
 # WHY : Assumptions: this one window governs EVERY secret the deployment generates, and
 #       the inventory is stated because "generated credentials" is too vague to check.
-#       It reaches the six purpose secrets this root creates directly -- the card
-#       selector key, the messaging HMAC key, the TWO pairwise internal-identity keys
-#       (authorization and transaction), the pagination-cursor key and the
-#       reporting-artifact key -- plus the per-service database credentials the secrets
-#       module creates and the Cognito seed-user secrets.
+#       It reaches the FIVE purpose secrets this root creates directly -- the card
+#       selector key, the TWO pairwise internal-identity keys (authorization and
+#       transaction), the pagination-cursor key and the reporting-artifact key -- plus
+#       the per-service database credentials the secrets module creates and the Cognito
+#       seed-user secrets.
+# WHY : ⚠️ Refactoring Rationale: this inventory said SIX and led with a messaging HMAC
+#       key. No such resource exists in this root: the withdrawal note in main.tf above
+#       the card-selector resource records that the ephemeral generator, the secret and
+#       its write-only version went together with the injection when the one Spring bean
+#       that read the property was deleted. Five aws_secretsmanager_secret resources are
+#       declared. An inventory stated to be checkable and then not checked is worse than
+#       a vague one, because the reader who does check it finds a credential this window
+#       supposedly governs and cannot locate the resource -- so the count is now asserted
+#       by the "Verify hand-written Terraform prose counts against the declarations" gate
+#       in .github/workflows/infra-ci.yml against those declarations.
 # WHY : ⚠️ Refactoring Rationale: this description named "database, TLS and Cognito
 #       credentials". There is NO TLS secret: the service-certificate feature it referred
 #       to is withdrawn, and neither root creates a secret for listener material. The
 #       word survived the feature, which is the kind of leftover that has a reader
 #       looking for a resource that does not exist.
 variable "secret_recovery_window_in_days" {
-  description = "Secrets Manager recovery window, in days, applied to every secret this deployment generates: the six purpose secrets this root creates -- card-selector, messaging HMAC, the two pairwise internal-identity keys, pagination-cursor and reporting-artifact -- plus the per-service database credentials from the secrets module and the Cognito seed-user secrets."
+  description = "Secrets Manager recovery window, in days, applied to every secret this deployment generates: the five purpose secrets this root creates -- card-selector, the two pairwise internal-identity keys, pagination-cursor and reporting-artifact -- plus the per-service database credentials from the secrets module and the Cognito seed-user secrets."
   type        = number
   default     = 30
 
@@ -1255,20 +1284,30 @@ variable "image_digests" {
         "authorization-service",
         "reporting-service",
         "data-migration",
+        "aws-otel-collector",
       ], artifact)
     ])
-    error_message = "Every image_digests key must name one of the nine ECR artifacts this deployment runs as a task: the eight services and data-migration. A key that names no repository would be silently ignored."
+    error_message = "Every image_digests key must name one of the ten ECR artifacts this deployment runs inside a task: the eight services, data-migration, and the mirrored telemetry collector every task runs as a sidecar. A key that names no repository would be silently ignored."
   }
 
-  # WHY : Refactoring Rationale: `aws-otel-collector` was an admissible key, and it is
-  #       WITHDRAWN. It named a mirror of a pinned third-party telemetry image, pushed
-  #       rather than built, whose digest this root resolved for a collector sidecar
-  #       that infra/modules/ecs-service no longer composes -- so the key now names no
-  #       repository, and specification section 0.4.1.6 states ten repositories rather
-  #       than the eleven the mirror made. `ui` is absent for a different and unchanged
-  #       reason: the browser bundle is published to S3 and its image runs no ECS task,
-  #       so a digest for it would configure nothing. That leaves nine admissible keys
-  #       against ten repositories, and the two numbers differ for that one reason.
+  # WHY : Refactoring Rationale: `aws-otel-collector` is an admissible key again,
+  #       restored with the collector sidecar infra/modules/ecs-service composes. It
+  #       names the mirror repository infra/modules/ecr provisions from
+  #       third_party_mirror_repository_names -- a third-party image this deployment
+  #       caches rather than builds -- so recording its digest here is what makes the
+  #       task definition state WHICH collector bytes ran, which its mirror tag alone
+  #       cannot answer after the fact.
+  # WHY : Assumptions: production's own posture makes the collector digest effectively
+  #       mandatory in practice even though this variable leaves every key optional --
+  #       infra/modules/ecs-service refuses a mutable tag for the application image
+  #       here, and an operator who records nine digests and omits the tenth is
+  #       running a pinned application beside an unpinned sidecar. The runbook's
+  #       mirror procedure therefore prints the pushed digest for this key.
+  # WHY : Assumptions: `ui` is absent for a different and unchanged reason -- the
+  #       browser bundle is published to S3 and its image runs no ECS task, so a
+  #       digest for it would configure nothing. That is why ten admissible keys sit
+  #       against the eleven repositories the ecr module provisions, ten deployables
+  #       plus the one mirror.
 }
 
 # WHY : Assumptions: an ACM certificate ARN identifies the listener credential

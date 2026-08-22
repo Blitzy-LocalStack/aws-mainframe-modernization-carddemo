@@ -782,7 +782,7 @@ public class AuthFraud {
      * picture of the authorization as it stood at the FIRST fraud report, so a row marked a
      * second time still returns the first report's value here.</p>
      *
-     * @return the six-character processing code, or {@code null} on a row this type's own factory did not build. The stored form is CHARACTER even though the segment holds it as a number, which {@code AuthFraudMapper.processingCodeColumn} is the single authority for
+     * @return the six-character processing code, or {@code null} on a row this type's own factory did not build. The stored form is CHARACTER even though the segment holds it as a number, and {@code PendingAuthDetailMapper.renderProcessingCode} is the single authority for that rendering
      */
     public String getProcessingCode() {
         return this.processingCode;

@@ -265,8 +265,10 @@ tags:
   - name: statements
     description: >-
       The account statement pair rendered from one card's posted transactions,
-      and the transactions a statement was rendered from. Each operation
-      carries x-required-authority carddemo-user.
+      and the transactions a statement was rendered from. The two per-card
+      operations carry x-required-authority carddemo-user; the artifact
+      collection operation carries carddemo-admin, because the objects it
+      serves cover a whole statement run rather than one card.
 
 paths:
 
@@ -729,6 +731,17 @@ paths:
         plain-text form is the byte-for-byte parity artifact compared against
         the golden masters, and inlining it would require an encoding step that
         no longer preserves those bytes.
+
+
+        THE FIVE RUN-WIDE MEMBERS ARE OPERATOR-ONLY. plainTextUri, htmlUri,
+        generatedAt, firstRecord and recordCount describe the two objects a
+        statement RUN produced, and those objects hold every cardholder's
+        statement in the portfolio -- so they are returned only to a token
+        carrying carddemo-admin and are null for a carddemo-user token, which
+        receives the figures of the card it asked for and no handle to anything
+        wider. The collection operation is restricted to the same authority, so
+        the two halves agree: an ordinary caller is neither told an address nor
+        able to use one.
       parameters:
         - $ref: '#/components/parameters/CorrelationIdHeader'
       requestBody:
@@ -885,7 +898,7 @@ paths:
       operationId: collectArtifact
       tags:
         - statements
-      x-required-authority: carddemo-user
+      x-required-authority: carddemo-admin
       summary: Collects one stored statement rendering.
       description: >-
         Streams the bytes of the artifact the selector names: the 80-byte plain
@@ -893,6 +906,25 @@ paths:
         markup of FD-HTMLFILE-REC at its L47, whichever the selector was minted
         for. Take the selector from the plainTextUri or htmlUri of a statement
         response and pass the whole path back unchanged.
+
+
+        ADMINISTRATORS ONLY. Each artifact covers a whole statement run -- one
+        object holding every cardholder's statement in the portfolio -- so this
+        operation requires carddemo-admin where the two per-card statement
+        operations require carddemo-user. An earlier revision of this contract
+        required carddemo-user here and published the selectors to every
+        caller, which made an entitlement to one card an address for all of
+        them. A cardholder collects its own statement as structured data
+        through the two per-card operations instead.
+
+
+        A SELECTOR NAMES ONE ARTIFACT OF ONE RUN. A run writes its objects
+        under keys carrying its own identifier and then publishes itself by
+        naming that identifier in a manifest, so a selector stops resolving
+        once a later run has been published: it is answered with 404 rather
+        than with the newer run's bytes, because it was issued beside the
+        firstRecord and recordCount positions of the run it names and those
+        positions describe nothing in any other run.
 
 
         Refactoring Rationale: this operation exists because a location the two
@@ -1132,10 +1164,11 @@ components:
       required: true
       description: >-
         The opaque selector naming one stored statement artifact, taken verbatim
-        from the plainTextUri or htmlUri of a statement response. It is resolved
-        against the two artifacts this service publishes and is never treated as
-        an object key, so no selector -- however manipulated -- can address
-        another object of the dataset bucket.
+        from the plainTextUri or htmlUri of an administrator's statement
+        response. It is resolved against the two artifacts of the currently
+        published run and is never treated as an object key, so no selector --
+        however manipulated -- can address another object of the dataset
+        bucket, and a selector of a superseded run resolves to nothing.
       schema:
         $ref: '#/components/schemas/ArtifactSelector'
 
@@ -2479,16 +2512,52 @@ components:
     # match a stored row under any circumstances. The cost is that a caller
     # must left-pad; the gain is that a malformed request is refused as
     # malformed instead of being answered as an absent record.
+    # Alternatives Considered: stating exactly-one-of as a pair of oneOf
+    # branches, each requiring one component and forbidding the other, rather
+    # than as prose alone or as a top-level required array. A required array
+    # cannot express it, because either component may be the omitted one. Prose
+    # alone leaves a generated client and a validating proxy with no rule to
+    # apply, and prose was all this schema carried: the branches below replace a
+    # sentence that described the rule as one only the service could state.
     StatementRequest:
       type: object
       additionalProperties: false
       description: >-
-        Names one card or one account. Exactly one of the two must be supplied;
-        neither is declared required because either may be the omitted one, and
-        the exactly-one-of rule is applied by the service rather than expressible
-        here -- a request supplying both, or neither, is answered 400 with a
-        fieldErrors entry naming the component at fault. The component list of
+        Names one card or one account, and EXACTLY ONE of the two. That rule is
+        stated here machine-readably as two mutually exclusive oneOf branches:
+        the first requires cardNumber and forbids accountId, the second requires
+        accountId and forbids cardNumber. A body supplying BOTH therefore
+        satisfies neither branch, and a body supplying NEITHER satisfies neither
+        branch, so both are invalid against this contract; neither component
+        appears in a top-level required array, because either may be the omitted
+        one. The deployed service applies the same rule and is what answers: a
+        request supplying both, or neither, is answered 400 with a fieldErrors
+        entry naming the component at fault. The rule is stated in two places on
+        purpose -- the runtime validates this body against the constraints
+        com.carddemo.reporting.dto.StatementRequest declares on its own
+        components and never against this document, so the branches are what a
+        caller validates against before sending and the service is what refuses
+        on arrival. The component list of
         com.carddemo.reporting.dto.StatementRequest name for name.
+      oneOf:
+        - title: By card
+          description: >-
+            Selects the one card the reference's control break already works in.
+            cardNumber is required and accountId must be absent.
+          required:
+            - cardNumber
+          not:
+            required:
+              - accountId
+        - title: By account
+          description: >-
+            Selects the account, whose cards are resolved through the
+            cross-reference. accountId is required and cardNumber must be absent.
+          required:
+            - accountId
+          not:
+            required:
+              - cardNumber
       properties:
         cardNumber:
           type: string
@@ -2532,12 +2601,15 @@ components:
         from the statement layout block at app/cbl/CBSTM03A.CBL L85 to L146.
 
 
-        FIVE MEMBERS ARE NULLABLE AND THEY MOVE TOGETHER. Each location is
-        present exactly when that artifact is stored, the instant is present
-        exactly when at least one of them is, and the two artifact positions are
-        present exactly when the run's index names this card -- so a response
-        describes a statement that has been rendered or one that has not, and
-        never claims both.
+        FIVE MEMBERS ARE NULLABLE AND THEY MOVE TOGETHER. For a carddemo-admin
+        token, each location is present exactly when that artifact is stored,
+        the instant is present exactly when at least one of them is, and the two
+        artifact positions are present exactly when the run's index names this
+        card -- so a response describes a statement that has been rendered or
+        one that has not, and never claims both. For a carddemo-user token all
+        five are null, because each of them describes the run-wide objects
+        rather than this card, and the operation that serves those objects
+        admits carddemo-admin alone.
 
 
         It is a METADATA ENVELOPE POINTING AT THE ARTIFACTS rather than a
@@ -2607,9 +2679,10 @@ components:
             The value is a PATH THIS DEPLOYMENT SERVES, always beneath
             /api/v1/reports/statements/artifacts/, ending in an opaque selector.
             Follow it with the collect-artifact operation of this contract and the
-            same bearer token. It is null exactly when no such artifact is stored,
-            which is the state before the statement run of the current period has
-            produced one.
+            same bearer token, which must carry carddemo-admin. It is null when no
+            such artifact is stored -- the state before any statement run has
+            published one -- and null for every carddemo-user token, since the
+            object it names covers the whole portfolio rather than this card.
 
 
             Assumptions: this member carries a FOLLOWABLE location on this
@@ -2637,11 +2710,11 @@ components:
 
 
             A path of the same shape as the plain-text location, null on the same
-            terms, and described independently of it: a run interrupted between
-            its two writes leaves one artifact stored, and this contract reports
-            the one that exists rather than both or neither. The collect operation
-            returns it as a binary attachment and never as text/html, for the
-            reason recorded there.
+            terms, and described independently of it: a retention rule that
+            expires one object of a superseded run leaves the other stored, and
+            this contract reports the one that exists rather than both or
+            neither. The collect operation returns it as a binary attachment and
+            never as text/html, for the reason recorded there.
           examples:
             - /api/v1/reports/statements/artifacts/9tB4mE7kXw2pQzA5nR8vLj
         generatedAt:
@@ -2651,15 +2724,16 @@ components:
           description: >-
             WHEN THE STORED ARTIFACT WAS WRITTEN, as an opaque
             twenty-six-character stamp taken from the object store's own record of
-            the completed object. A rerun REPLACES both artifacts rather than
-            appending to them -- the delete step at app/jcl/CREASTMT.JCL L66
-            removes both before the generator step recreates them -- so this value
-            moves with each run while the two locations stay stable.
+            the completed object. A rerun publishes a NEW pair of objects under
+            its own run keys and then names itself as current, rather than
+            overwriting the pair it replaces, so this value and both locations
+            move together with each run.
 
 
-            It is null exactly when no artifact is stored, and where both are
-            stored it is the plain-text artifact's instant, that being the one the
-            reference job writes first at app/jcl/CREASTMT.JCL L87.
+            It is null when no artifact is stored and null for a carddemo-user
+            token, on the same terms as the two locations. Where both artifacts
+            are stored it is the plain-text artifact's instant, that being the one
+            the reference job writes first at app/jcl/CREASTMT.JCL L87.
 
 
             Assumptions: this field is NULLABLE rather than carrying a fixed
@@ -2690,9 +2764,11 @@ components:
             this contract deliberately does not publish.
 
 
-            Null when no plain-text artifact is stored, and null when the run's
-            index does not name this card, which is the state for a card added
-            after the last statement run.
+            Null when no plain-text artifact is stored, null when the run's index
+            does not name this card -- the state for a card added after the last
+            statement run -- and null for a carddemo-user token, since a position
+            inside a run-wide object is of no use to a caller that may not
+            collect it.
           examples:
             - 240
         recordCount:

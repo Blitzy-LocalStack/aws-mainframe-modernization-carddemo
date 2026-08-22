@@ -19,9 +19,17 @@
  * Refactoring Rationale: every callback is a named declaration rather than an inline arrow, for the two
  * reasons the card screen tests record -- the lint rule requires a documentation block on a function
  * expression in any position, and Prettier detaches a block comment that follows an argument comma.
+ *
+ * ⚠️ Refactoring Rationale: two cases cover the INTEGRITY of the fraud confirmation's target, which
+ * nothing here covered while the prompt was held as a bare boolean -- every case asserted the write
+ * from a screen that had not moved underneath it, so a confirmation retargeted by the eighth key or by
+ * a re-read satisfied all of them. Both new cases exercise a transition between opening the prompt and
+ * confirming it, and both assert on the TRANSPORT: what was written, to which selector, in which
+ * direction. A case that asserted the prompt's visibility alone would pass against a screen that
+ * merely hid a prompt whose confirmation still wrote.
  */
 
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactElement } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router';
@@ -33,7 +41,9 @@ import {
   setAuthorizationFraudState,
 } from '../api/authorization';
 import { ApiRequestError } from '../api/client';
-import type { ApiError, PendingAuthDetailScreen } from '../api/types';
+import type { ApiError, PendingAuthDetail, PendingAuthDetailScreen } from '../api/types';
+import { AppShell } from '../layout/AppShell';
+import { MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
 import { PROGRAM_MESSAGES, UNEXPECTED_ABEND_OCCURRED } from '../messages/messages';
 import { DFH_RUNTIME_COLOR_TOKENS } from '../theme/tokens';
 import {
@@ -132,6 +142,164 @@ const DETAIL: PendingAuthDetailScreen = {
 };
 
 /**
+ * Synthetic sealed selector of the authorization the eighth key steps to.
+ *
+ * Assumptions: distinct from {@link SELECTOR} and nothing more, because the property under test is
+ * that a captured confirmation target and the selector on the route can DIFFER -- so the two values
+ * only have to be told apart, never parsed.
+ */
+const NEXT_SELECTOR = 'fake-selector-example-not-a-real-sealed-value-000001';
+
+/**
+ * The rendering the authorization after {@link SELECTOR} answers with.
+ *
+ * ⚠️ Assumptions: this record is already MARKED while {@link DETAIL} is not, and the asymmetry is the
+ * point. `nextFraudAction` derives the transition from the rendered mark, so an unmarked record asks
+ * for a report and a marked one asks for a removal -- which means a confirmation opened on `DETAIL`
+ * and confirmed against this record would invert the write as well as retargeting it. A fixture that
+ * differed only in its identifier would prove half the property.
+ */
+const NEXT_DETAIL: PendingAuthDetailScreen = {
+  ...DETAIL,
+  transactionId: 'TRAN0000000002',
+  fraudMark: `${FRAUD_REPORTED}-01/02/25`,
+};
+
+/**
+ * The member record the paging operation answers with for that same authorization.
+ *
+ * Assumptions: the full member shape is built out rather than cast, because the screen reads only
+ * `key` from it and a partial fixture would let a later contract member appear with no test noticing.
+ * The card number carries the masked rendering every non-administrative read returns.
+ */
+const NEXT_ROW: PendingAuthDetail = {
+  key: NEXT_SELECTOR,
+  accountId: '00000000011',
+  authDate: 25002,
+  authTime: 36672000,
+  authOrigDate: '250102',
+  authOrigTime: '101112',
+  cardNum: DETAIL.cardNumber,
+  authType: 'A',
+  cardExpiryDate: '0127',
+  messageType: '0100',
+  messageSource: 'POS',
+  authIdCode: '000001',
+  authRespCode: '00',
+  authRespReason: '0000',
+  processingCode: '000000',
+  transactionAmt: '125.50',
+  approvedAmt: '125.50',
+  merchantCategoryCode: '5411',
+  acqrCountryCode: '840',
+  posEntryMode: '01',
+  merchantId: 'MERCH000001',
+  merchantName: 'EXAMPLE GROCER',
+  merchantCity: 'EXAMPLE CITY',
+  merchantState: 'TX',
+  merchantZip: '75001',
+  transactionId: NEXT_DETAIL.transactionId,
+  matchStatus: 'P',
+  authFraud: FRAUD_REPORTED,
+  fraudRptDate: '2025-01-02',
+};
+
+/**
+ * A read whose completion the case controls, so the screen can be observed mid-read.
+ *
+ * Assumptions: the in-flight state is produced by withholding a resolution rather than by timers,
+ * because `userEvent` flushes microtasks on every interaction -- a read delayed by a resolved promise
+ * would already have completed by the time the next keystroke returned, and the state under test
+ * would never be entered.
+ */
+interface DeferredRead {
+  /** The pending read, handed to the transport spy in place of a resolved value. */
+  readonly promise: Promise<PendingAuthDetailScreen>;
+  /** Completes that read with one rendering, at the moment the case chooses. */
+  readonly release: (screen: PendingAuthDetailScreen) => void;
+}
+
+/**
+ * Builds a read the case completes itself.
+ * @returns {DeferredRead} The pending read and the handle that completes it.
+ */
+function deferRead(): DeferredRead {
+  const holder: { resolve?: (screen: PendingAuthDetailScreen) => void } = {};
+
+  /**
+   * Publishes the promise's own resolver so it can be called from outside the executor.
+   * @param {(screen: PendingAuthDetailScreen) => void} resolve - The promise's resolver.
+   * @returns {void} Nothing; the resolver is published on the holder.
+   */
+  function captureResolver(resolve: (screen: PendingAuthDetailScreen) => void): void {
+    holder.resolve = resolve;
+  }
+
+  const promise = new Promise<PendingAuthDetailScreen>(captureResolver);
+
+  /**
+   * Completes the withheld read with one rendering.
+   * @param {PendingAuthDetailScreen} screen - The rendering the service answers with.
+   * @returns {void} Nothing; the screen observes the resolution.
+   * @throws {Error} If the executor has not run, which would leave the read uncompletable.
+   */
+  function release(screen: PendingAuthDetailScreen): void {
+    if (holder.resolve === undefined) {
+      throw new Error('The deferred read has no resolver, so the promise executor never ran.');
+    }
+    holder.resolve(screen);
+  }
+
+  return { promise, release };
+}
+
+/**
+ * Answers each read with the rendering that belongs to the selector it was asked about.
+ *
+ * Assumptions: the spy is driven by the ARGUMENT rather than by call order, because the case under
+ * test changes which authorization is addressed part way through -- an order-driven mock would answer
+ * correctly whatever the screen asked for, which is exactly the fault being tested.
+ * @param {string} key - The selector the screen asked about.
+ * @returns {Promise<PendingAuthDetailScreen>} The rendering for that selector.
+ */
+function readAddressed(key: string): Promise<PendingAuthDetailScreen> {
+  return Promise.resolve(key === NEXT_SELECTOR ? NEXT_DETAIL : DETAIL);
+}
+
+/**
+ * Confirms an open prompt, and does nothing when none is offered.
+ *
+ * Assumptions: the confirmation is ATTEMPTED rather than assumed present, so one case can cover both
+ * admissible outcomes of a stale prompt -- a screen that closed it and a screen that kept it open
+ * against the authorization it was opened on. The write assertions that follow are what separate
+ * them, and neither is satisfied by a write against the authorization that arrived.
+ * @returns {Promise<void>} Resolves once the confirmation has been accepted, or immediately.
+ */
+async function confirmIfStillOffered(): Promise<void> {
+  const confirmation = screen.queryByRole('button', { name: /^OK$/u });
+  if (confirmation !== null) {
+    await userEvent.click(confirmation);
+  }
+}
+
+/**
+ * Asserts no fraud write was addressed to the authorization the prompt was NOT opened on.
+ *
+ * Assumptions: both members of the action domain are named, because `FraudAction` admits exactly `F`
+ * and `R` -- so refusing both is exhaustive over every request that could reach that selector, and
+ * needs no reasoning about which direction a defect would have chosen.
+ * @returns {void} Nothing; failure is reported by the expectations.
+ */
+function assertNothingWrittenAgainstTheNextAuthorization(): void {
+  expect(vi.mocked(setAuthorizationFraudState)).not.toHaveBeenCalledWith(NEXT_SELECTOR, {
+    action: FRAUD_REPORTED,
+  });
+  expect(vi.mocked(setAuthorizationFraudState)).not.toHaveBeenCalledWith(NEXT_SELECTOR, {
+    action: FRAUD_WITHDRAWN,
+  });
+}
+
+/**
  * Renders the screen at a concrete detail path with a probe at the summary destination.
  * @param {string} selector - Path segment the route parameter receives.
  * @returns {ReactElement} The composed tree under test.
@@ -139,13 +307,25 @@ const DETAIL: PendingAuthDetailScreen = {
 function renderScreen(selector: string): ReactElement {
   return (
     <MemoryRouter initialEntries={[`/authorizations/${selector}`]}>
-      <Routes>
-        <Route path={AUTHORIZATION_DETAIL_ROUTE} element={<AuthDetailScreen />} />
-        <Route
-          path={AUTHORIZATION_SUMMARY_ROUTE}
-          element={<div>{`${ARRIVED} ${AUTHORIZATION_SUMMARY_ROUTE}`}</div>}
-        />
-      </Routes>
+      {/*
+        Refactoring Rationale: ⚠️ the screen is rendered INSIDE `AppShell`, where it was rendered bare.
+        It now DELEGATES its title band, its row-23 message line and its row-24 legend to the shell
+        rather than composing them, so a bare mount would leave all three rendered by nothing -- the
+        message assertions below would find no band and the fraud case, which requires more than one
+        control carrying the fifth key's label, would find only the one in the record block.
+        Assumptions: `ui/src/App.tsx` mounts the shell around the router and `AppShell` renders
+        `children ?? <Outlet />`, so mounting it around the routes here paints the same frame the
+        application paints. This is the arrangement `ui/src/screens/entryScreens.test.tsx` uses.
+      */}
+      <AppShell>
+        <Routes>
+          <Route path={AUTHORIZATION_DETAIL_ROUTE} element={<AuthDetailScreen />} />
+          <Route
+            path={AUTHORIZATION_SUMMARY_ROUTE}
+            element={<div>{`${ARRIVED} ${AUTHORIZATION_SUMMARY_ROUTE}`}</div>}
+          />
+        </Routes>
+      </AppShell>
     </MemoryRouter>
   );
 }
@@ -289,7 +469,129 @@ async function submitsTheFraudTransitionOnTheFifthKey(): Promise<void> {
   expect(vi.mocked(setAuthorizationFraudState)).toHaveBeenCalledWith(SELECTOR, {
     action: FRAUD_REPORTED,
   });
+  expect(vi.mocked(setAuthorizationFraudState)).toHaveBeenCalledTimes(1);
   expect(vi.mocked(getPendingAuthorizationScreen)).toHaveBeenCalledTimes(2);
+  /*
+   * WHY : Assumptions: the SEVERITY is asserted alongside the sentence, through the band's own live
+   *       region and the design system's rendered variant. `COPAUS1C.cbl` L531 to L538 reaches this
+   *       sentence only from the `STATUS-OK` arm after a syncpoint, so it reports a completed write --
+   *       and `ui/src/layout/MessageBand.tsx` renders a completed write as a polite `status` region in
+   *       the success variant while every refusal on this screen is an assertive `alert`. Asserting the
+   *       text alone would pass with the confirmation painted as a failure, which is the one thing an
+   *       operator reads the band's colour for.
+   */
+  const band = screen.getByTestId(MESSAGE_BAND_TEST_ID);
+  expect(within(band).getByRole('status').className).toContain('ant-alert-success');
+  expect(within(band).queryByRole('alert')).toBeNull();
+}
+
+/**
+ * Asserts a confirmation opened on one authorization cannot write against the one PF8 steps to.
+ *
+ * ⚠️ Refactoring Rationale: this case exists because the step changes only the route PARAMETER, so
+ * the component survives it while everything it renders is replaced. A confirmation held as a bare
+ * boolean therefore stayed open across the step and composed its request from whatever was current by
+ * the time it was confirmed -- the authorization that ARRIVED, in the direction that authorization's
+ * own mark implied. Both halves are exercised here: {@link NEXT_DETAIL} is a different selector AND
+ * carries the opposite mark, so a retargeted write would be visible as either the wrong address or the
+ * wrong direction.
+ *
+ * Assumptions: the confirmation is attempted after the step rather than assumed unavailable, and the
+ * write assertions are what the case turns on -- nothing may be written against the authorization that
+ * arrived, whatever the prompt chose to do about its own visibility.
+ * @returns {Promise<void>} Resolves once the step has completed and the confirmation been attempted.
+ */
+async function refusesAConfirmationAfterTheEighthKeySteps(): Promise<void> {
+  vi.mocked(getPendingAuthorizationScreen).mockImplementation(readAddressed);
+  /*
+   * WHY : Assumptions: the write spy is given an answer even though no write is expected, so a
+   *       regression fails on the expectation below rather than on an unhandled rejection from the
+   *       screen awaiting an unstubbed spy -- the second reports the same fault as a stack trace in
+   *       production code, which reads as a screen defect rather than as the assertion it is.
+   */
+  vi.mocked(setAuthorizationFraudState).mockResolvedValue({
+    updateStatus: 'ADDED',
+    message: FRAUD_MESSAGES.ADD_SUCCESS,
+  });
+  vi.mocked(getNextPendingAuthorization).mockResolvedValue({
+    authorization: NEXT_ROW,
+    endOfData: false,
+    message: null,
+  });
+  render(renderScreen(SELECTOR));
+  expect(await screen.findByText(DETAIL.transactionId)).toBeInTheDocument();
+
+  await userEvent.keyboard('{F5}');
+  expect(await screen.findByRole('button', { name: /^OK$/u })).toBeInTheDocument();
+
+  await userEvent.keyboard('{F8}');
+  expect(await screen.findByText(NEXT_DETAIL.transactionId)).toBeInTheDocument();
+
+  await confirmIfStillOffered();
+
+  assertNothingWrittenAgainstTheNextAuthorization();
+  /*
+   * WHY : Assumptions: the delivered screen closes the prompt rather than keeping it aimed at the
+   *       authorization it was opened on, so nothing is written at all -- and that is asserted as the
+   *       behaviour on top of the invariant above. An open confirmation names ONE authorization to a
+   *       reviewer, and the record it names has left the glass, so holding the question open over a
+   *       record nobody can read would be a second way to get consent wrong.
+   */
+  expect(vi.mocked(setAuthorizationFraudState)).not.toHaveBeenCalled();
+  expect(vi.mocked(getPendingAuthorizationScreen)).toHaveBeenLastCalledWith(NEXT_SELECTOR);
+}
+
+/**
+ * Asserts a confirmation cannot survive a read that replaces the record it was opened over.
+ *
+ * ⚠️ Assumptions: the mark flips WITHOUT the selector changing, which is the second, quieter half of
+ * the same defect: the transition is derived from the rendered mark, so a re-read of the very same
+ * authorization -- another reviewer's write, or this screen's own Enter -- is enough to invert the
+ * direction under an open prompt. A confirmation read as "mark this as fraud" would then submit a
+ * removal, against the right record.
+ *
+ * Assumptions: the read is withheld rather than delayed, so the screen is genuinely mid-read while the
+ * case presses keys at it; and the fifth key is exercised in that state too, because a control that
+ * could open a prompt with no record on the glass would be capturing a target from nothing.
+ * @returns {Promise<void>} Resolves once the withheld read has completed and been probed.
+ */
+async function refusesAConfirmationAcrossAReadThatReplacesTheRecord(): Promise<void> {
+  const reread = deferRead();
+  const marked: PendingAuthDetailScreen = { ...DETAIL, fraudMark: NEXT_DETAIL.fraudMark };
+  // Assumptions: the write spy answers for the reason the step case records -- a regression must fail
+  //   on the expectation, not on an unhandled rejection inside the screen.
+  vi.mocked(setAuthorizationFraudState).mockResolvedValue({
+    updateStatus: 'UPDATED',
+    message: FRAUD_MESSAGES.UPDT_SUCCESS,
+  });
+  vi.mocked(getPendingAuthorizationScreen)
+    .mockResolvedValueOnce(DETAIL)
+    .mockReturnValueOnce(reread.promise);
+  render(renderScreen(SELECTOR));
+  expect(await screen.findByText(DETAIL.transactionId)).toBeInTheDocument();
+
+  await userEvent.keyboard('{F5}');
+  expect(await screen.findByRole('button', { name: /^OK$/u })).toBeInTheDocument();
+
+  /*
+   * WHY : Assumptions: the re-read is started with an UNMAPPED key rather than with Enter, and the
+   *       difference is only about what the keystroke can collide with. `COPAUS1C.cbl` L194 to L196
+   *       re-runs the enter path for any key it does not admit, so this reaches the same
+   *       `PROCESS-ENTER-KEY` read; Enter itself is claimed by whichever control holds focus, and an
+   *       open confirmation may hold it, which would make the keystroke a confirmation rather than a
+   *       read and the case would prove nothing about either.
+   */
+  await userEvent.keyboard('{F4}');
+  expect(screen.queryByText(DETAIL.transactionId)).toBeNull();
+  await userEvent.keyboard('{F5}');
+  expect(screen.queryByRole('button', { name: /^OK$/u })).toBeNull();
+
+  reread.release(marked);
+  expect(await screen.findByText(marked.fraudMark)).toBeInTheDocument();
+
+  await confirmIfStillOffered();
+
+  expect(vi.mocked(setAuthorizationFraudState)).not.toHaveBeenCalled();
 }
 
 /**
@@ -519,13 +821,23 @@ async function reportsAFailedRead(): Promise<void> {
 async function rendersABoundedDeadEndWithNoSelector(): Promise<void> {
   render(
     <MemoryRouter initialEntries={['/authorizations/detail']}>
-      <Routes>
-        <Route path="/authorizations/detail" element={<AuthDetailScreen />} />
-        <Route
-          path={AUTHORIZATION_SUMMARY_ROUTE}
-          element={<div>{`${ARRIVED} ${AUTHORIZATION_SUMMARY_ROUTE}`}</div>}
-        />
-      </Routes>
+      {/*
+        ⚠️ Assumptions: the shell is mounted here TOO, and the dead end is still expected to render with
+        no frame around it. The screen publishes an empty key list for this state and no header or band
+        at all, and `PfKeyBar` renders `null` for an empty list -- so the shell contributes nothing, and
+        the one control carrying the third key's label is the exit inside the bounded result. That is
+        what makes the unqualified query below unambiguous, and it is the property this mount asserts
+        that a bare one could not.
+      */}
+      <AppShell>
+        <Routes>
+          <Route path="/authorizations/detail" element={<AuthDetailScreen />} />
+          <Route
+            path={AUTHORIZATION_SUMMARY_ROUTE}
+            element={<div>{`${ARRIVED} ${AUTHORIZATION_SUMMARY_ROUTE}`}</div>}
+          />
+        </Routes>
+      </AppShell>
     </MemoryRouter>,
   );
 
@@ -608,6 +920,14 @@ function authDetailCases(): void {
   it('renders no data entry control', rendersNoDataEntryControl);
   it('guards every fraud entry point behind one confirmation', guardsEveryFraudEntryPoint);
   it('reports the confirmation for each transition', reportsTheConfirmationForEachTransition);
+  it(
+    'refuses a confirmation after the eighth key steps away',
+    refusesAConfirmationAfterTheEighthKeySteps,
+  );
+  it(
+    'refuses a confirmation across a read that replaces the record',
+    refusesAConfirmationAcrossAReadThatReplacesTheRecord,
+  );
 }
 
 describe('pending-authorization detail screen', authDetailCases);

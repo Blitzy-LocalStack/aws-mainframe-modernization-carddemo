@@ -13,11 +13,13 @@ import com.carddemo.reporting.ReportingTask;
 import com.carddemo.reporting.ReportingTaskRunner;
 import com.carddemo.reporting.service.CategoryBalanceReportService;
 import com.carddemo.reporting.service.ReportArtifactLocator;
+import com.carddemo.reporting.service.StatementIndexEntry;
 import com.carddemo.reporting.service.StatementRunOutcome;
 import com.carddemo.reporting.service.StatementService;
 import com.carddemo.reporting.service.TransactionReportService;
 import com.carddemo.reporting.sink.S3StatementSink;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.util.HashMap;
 import java.util.List;
@@ -28,6 +30,7 @@ import org.mockito.ArgumentCaptor;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
+import software.amazon.awssdk.core.exception.SdkClientException;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
@@ -502,18 +505,24 @@ class TaskDispatchWiringTest {
                         + ReportArtifactPublisher.TRANREPT_GENERATION_OBJECT);
     }
 
-    // WHY : Assumptions: the statement task's two artifacts are asserted by KEY and by COUNT, because
-    //       the reference produces exactly two datasets for a whole run -- one eighty-column plain-text
-    //       and one hundred-column markup -- and a task that wrote one object per statement would still
+    // WHY : Assumptions: the statement task's objects are asserted by KEY and by COUNT, because the
+    //       reference produces exactly two datasets for a whole run -- one eighty-column plain-text and
+    //       one hundred-column markup -- and a task that wrote one object per statement would still
     //       satisfy an assertion that only counted records.
+    // WHY : ⚠️ Refactoring Rationale: the ORDER is now asserted too, and it is the property a review
+    //       found missing. The three objects went to fixed keys, so each became visible as it was
+    //       written and a reader between two of them held one run's index over another run's artifact --
+    //       a position that addressed an unrelated cardholder. The manifest is the run's commit, so
+    //       asserting it is written LAST is asserting that no reader can see half a run; asserting the
+    //       other three share ONE run prefix is asserting that a rerun cannot overwrite them.
     /**
-     * Asserts that a statement run publishes exactly the two artifacts the reference declares.
+     * Asserts that a run publishes its three objects under one run prefix and the manifest last.
      *
      * @throws Exception if the run raises, which the assertions below would not reach
      */
     @Test
-    @DisplayName("a statement run publishes exactly the three run-wide artifacts")
-    void aStatementRunPublishesTwoArtifacts() throws Exception {
+    @DisplayName("a statement run publishes three run objects and then the manifest")
+    void aStatementRunPublishesThreeObjectsThenTheManifest() throws Exception {
         StatementService statements = mock(StatementService.class);
         when(statements.generateStatements(any())).thenAnswer(invocation -> {
             StatementService.StatementSink sink = invocation.getArgument(0);
@@ -526,10 +535,89 @@ class TaskDispatchWiringTest {
                 .run(Map.of(ReportingTaskRunner.BUSINESS_DATE_PARAMETER, DATE_TOKEN));
 
         ArgumentCaptor<PutObjectRequest> put = ArgumentCaptor.forClass(PutObjectRequest.class);
-        verify(s3, org.mockito.Mockito.times(3)).putObject(put.capture(), any(RequestBody.class));
+        ArgumentCaptor<RequestBody> body = ArgumentCaptor.forClass(RequestBody.class);
+        verify(s3, org.mockito.Mockito.times(4)).putObject(put.capture(), body.capture());
+        List<String> keys = put.getAllValues().stream().map(PutObjectRequest::key).toList();
+        assertThat(keys.get(3))
+                .as("the manifest is the run's commit and is written after every object it names")
+                .isEqualTo(StatementService.manifestKey(STATEMENT_PREFIX));
+
+        String runId = publishedRunOf(body.getAllValues().get(3));
+        assertThat(runId)
+                .as("a run identifier is 32 lower-case hexadecimal characters, so no two runs collide")
+                .matches("[0-9a-f]{" + StatementService.RUN_ID_LENGTH + "}");
+        assertThat(keys.subList(0, 3))
+                .as("the three objects of one run share that run's own prefix and overwrite nothing")
+                .containsExactlyInAnyOrderElementsOf(expectedStatementKeys(runId));
+    }
+
+    // WHY : Refactoring Rationale: this is the case the retired shape could not pass at all. Its three
+    //       writes went to fixed keys, so a run failing after the first one had already replaced part of
+    //       the previous run and left a reader pairing objects from two of them. Nothing a failed run
+    //       writes is addressable now, and the assertion is that the pointer never moved: the previous
+    //       run stays whole and current, which is what makes a redrive of the state safe to attempt.
+    /**
+     * Asserts that a run failing before its objects are complete publishes no manifest.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("a failed statement run publishes no manifest, leaving the previous run current")
+    void aFailedStatementRunPublishesNoManifest() {
+        StatementService statements = mock(StatementService.class);
+        when(statements.generateStatements(any()))
+                .thenThrow(new IllegalStateException("a cross-reference row names no customer"));
+        S3Client s3 = storageAnsweringVersion(null);
+
+        assertThatExceptionOfType(IllegalStateException.class)
+                .isThrownBy(() -> new GenerateStatementsTask(statements, s3, BUCKET, STATEMENT_PREFIX)
+                        .run(Map.of(ReportingTaskRunner.BUSINESS_DATE_PARAMETER, DATE_TOKEN)));
+
+        ArgumentCaptor<PutObjectRequest> put = ArgumentCaptor.forClass(PutObjectRequest.class);
+        verify(s3, org.mockito.Mockito.atLeast(0)).putObject(put.capture(), any(RequestBody.class));
         assertThat(put.getAllValues().stream().map(PutObjectRequest::key).toList())
-                .as("a run publishes the three run-wide datasets and no per-statement object")
-                .containsExactlyInAnyOrderElementsOf(expectedStatementKeys());
+                .as("a run that did not finish must not be published to a single reader")
+                .doesNotContain(StatementService.manifestKey(STATEMENT_PREFIX));
+    }
+
+    // WHY : Refactoring Rationale: the case above fails the run in its GENERATOR, before any of the four
+    //       writes is attempted, so it cannot distinguish an ordering guarantee from a run that simply
+    //       never started writing. This one fails the run at its THIRD write -- the index -- which is the
+    //       last point at which the two artifacts are already stored and only the pointer is outstanding,
+    //       and therefore the one point where an implementation that published the manifest unaware of
+    //       the index's outcome would leave a reader resolving a run whose positions do not exist. The
+    //       failure is selected by KEY SHAPE rather than by call ordinal, so the case keeps asserting the
+    //       index specifically if the two artifact writes are ever reordered between themselves.
+    /**
+     * Asserts that a failure publishing the run index leaves the manifest unwritten.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("a failed index write publishes no manifest, so no reader resolves a positionless run")
+    void aFailedIndexWritePublishesNoManifest() {
+        StatementService statements = mock(StatementService.class);
+        when(statements.generateStatements(any())).thenAnswer(invocation -> {
+            StatementService.StatementSink sink = invocation.getArgument(0);
+            sink.replaceArtifacts();
+            return new StatementRunOutcome(
+                    1, List.of(new StatementIndexEntry("a".repeat(64), 0L, 24L)));
+        });
+        S3Client s3 = storageRefusingKeysEndingIn(StatementService.INDEX_OBJECT);
+
+        assertThatExceptionOfType(IOException.class)
+                .isThrownBy(() -> new GenerateStatementsTask(statements, s3, BUCKET, STATEMENT_PREFIX)
+                        .run(Map.of(ReportingTaskRunner.BUSINESS_DATE_PARAMETER, DATE_TOKEN)));
+
+        ArgumentCaptor<PutObjectRequest> put = ArgumentCaptor.forClass(PutObjectRequest.class);
+        verify(s3, org.mockito.Mockito.atLeast(0)).putObject(put.capture(), any(RequestBody.class));
+        List<String> keys = put.getAllValues().stream().map(PutObjectRequest::key).toList();
+        assertThat(keys)
+                .as("a run whose index did not store must not be named by the manifest any read resolves")
+                .doesNotContain(StatementService.manifestKey(STATEMENT_PREFIX));
+        assertThat(keys)
+                .as("the index was attempted, so the run failed at the write this case is about")
+                .anyMatch(key -> key.endsWith(StatementService.INDEX_OBJECT));
     }
 
     // WHY : Assumptions: the business date is tolerated as absent by the statement task and required by
@@ -552,7 +640,7 @@ class TaskDispatchWiringTest {
         new GenerateStatementsTask(statements, s3, BUCKET, STATEMENT_PREFIX).run(Map.of());
 
         verify(statements).generateStatements(any());
-        verify(s3, org.mockito.Mockito.times(3))
+        verify(s3, org.mockito.Mockito.times(4))
                 .putObject(any(PutObjectRequest.class), any(RequestBody.class));
     }
 
@@ -677,6 +765,37 @@ class TaskDispatchWiringTest {
         return s3;
     }
 
+    /**
+     * Builds a storage client that refuses any put whose key ends with a given object name.
+     *
+     * <p>Assumptions: the refusal is keyed on the object NAME rather than on the call ordinal, because
+     * the run prefix carries an identifier minted inside the task under test and is therefore not known
+     * to the caller. Selecting by name also keeps the case pinned to the write it is about if the two
+     * artifact writes are ever reordered relative to each other.</p>
+     *
+     * <p>Assumptions: {@code SdkClientException} stands for the store refusing the write, because that is
+     * the shape the real client raises when a put cannot be completed. The writer translates it into an
+     * {@code IOException} before the task sees it, so a case built on this helper asserts the translated
+     * type rather than this one -- which is the propagation path the task actually meets.</p>
+     *
+     * @param objectName the trailing object name whose put must fail; must not be {@code null}
+     * @return the client
+     */
+    private static S3Client storageRefusingKeysEndingIn(String objectName) {
+        S3Client s3 = mock(S3Client.class);
+        when(s3.putObject(any(PutObjectRequest.class), any(RequestBody.class)))
+                .thenAnswer(invocation -> {
+                    PutObjectRequest request = invocation.getArgument(0);
+                    if (request.key().endsWith(objectName)) {
+                        throw SdkClientException.create("the object store refused " + request.key());
+                    }
+                    return PutObjectResponse.builder().build();
+                });
+        when(s3.listObjectsV2(any(ListObjectsV2Request.class)))
+                .thenReturn(ListObjectsV2Response.builder().build());
+        return s3;
+    }
+
     // WHY : Assumptions: the stand-in publisher answers a real summary rather than being left at its
     //       Mockito default. The nightly task reads the returned locator and line count into its journal
     //       line, so a default null answer would fail every nightly case with a null dereference from a
@@ -700,19 +819,41 @@ class TaskDispatchWiringTest {
     }
 
     /**
-     * Renders the two artifact keys a statement run publishes, for readability in a failure message.
+     * Renders the three object keys one statement run publishes, for readability in a failure message.
      *
-     * @return the two expected keys, in the order the reference declares its two datasets
+     * @param runId the run identifier the manifest names, recovered from the run under assertion
+     * @return the three expected keys, in the order the reference declares its datasets
      */
-    private static List<String> expectedStatementKeys() {
-        // WHY : ⚠️ Refactoring Rationale: a run publishes THREE objects, where it published two. The
-        //       third is the run index, and it is asserted here rather than in a case of its own because
-        //       the property worth pinning is the WHOLE set a run writes -- a case naming only the index
-        //       would pass while one of the two artifacts silently stopped being written.
+    private static List<String> expectedStatementKeys(String runId) {
+        // WHY : ⚠️ Refactoring Rationale: a run publishes THREE objects, where it published two, and all
+        //       three now sit under the run's OWN prefix. The third is the run index, and it is asserted
+        //       here rather than in a case of its own because the property worth pinning is the WHOLE
+        //       set a run writes -- a case naming only the index would pass while one of the two
+        //       artifacts silently stopped being written. The prefix is composed by the value under test
+        //       rather than spelled out, so a change of convention cannot pass by being made twice.
+        String runPrefix = StatementService.runKeyPrefix(STATEMENT_PREFIX, runId);
         return List.of(
-                STATEMENT_PREFIX + S3StatementSink.PLAIN_TEXT_OBJECT,
-                STATEMENT_PREFIX + S3StatementSink.HTML_OBJECT,
-                STATEMENT_PREFIX + StatementService.INDEX_OBJECT);
+                runPrefix + S3StatementSink.PLAIN_TEXT_OBJECT,
+                runPrefix + S3StatementSink.HTML_OBJECT,
+                runPrefix + StatementService.INDEX_OBJECT);
+    }
+
+    /**
+     * Reads back the run identifier a captured manifest write names.
+     *
+     * <p>Assumptions: the BODY is read rather than the identifier being taken from one of the object
+     * keys. The manifest and the run objects are written by separate calls, and a task that minted a
+     * second identifier for the manifest would satisfy every key assertion while publishing a run whose
+     * objects no reader could find.</p>
+     *
+     * @param body the request body the manifest write was handed; must not be {@code null}
+     * @return the identifier the manifest names, with its line ending removed
+     * @throws IOException if the captured body cannot be read
+     */
+    private static String publishedRunOf(RequestBody body) throws IOException {
+        try (var stream = body.contentStreamProvider().newStream()) {
+            return new String(stream.readAllBytes(), StandardCharsets.US_ASCII).trim();
+        }
     }
 
     /**

@@ -24,8 +24,9 @@
  *       {@code task} -- {@code task} already depends on it. The writer delegates to it instead.</li>
  *   <li>{@code StatementIndexEntry} is one fixed-width row of the statement run index: a card
  *       fingerprint and the record range that card's statement occupies.</li>
- *   <li>{@code StatementRunOutcome} is what one statement run produced -- a count and the index --
- *       cross-checked so a count that disagrees with the index it came with is refused.</li>
+ *   <li>{@code StatementRunOutcome} is what one statement run produced -- three counts and no
+ *       collection -- cross-checked so a statement count that disagrees with the index or record
+ *       counts it came with is refused.</li>
  * </ul>
  *
  * <p>Every inventory, file name, class name and count here is a measurement of that directory, and the
@@ -126,7 +127,9 @@
  *       {@code app/csd/CARDDEMO.CSD} with DDNAME(INREADER) on L501 and reached
  *       from the paragraph at L462 of {@code app/cbl/CORPT00C.cbl}. Here it
  *       becomes a {@code states:StartExecution} call on a second, smaller state
- *       machine.</li>
+ *       machine, and the same class answers the status half of that lifecycle
+ *       with a {@code states:DescribeExecution} call the reference has no
+ *       counterpart for -- the queue hands back no identity at all.</li>
  *   <li>{@code CategoryBalanceReportService} produces the category-balance report
  *       of {@code app/jcl/PRTCATBL.jcl} (66 lines). That job has no COBOL program
  *       at all -- the whole report is a DFSORT step, so its {@code SORT FIELDS}

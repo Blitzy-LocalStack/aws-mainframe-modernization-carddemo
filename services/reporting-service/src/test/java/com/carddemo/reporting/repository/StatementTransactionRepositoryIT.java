@@ -7,6 +7,7 @@ import com.carddemo.common.codec.CopybookLayout;
 import com.carddemo.common.codec.FixedWidthCodec;
 import com.carddemo.common.codec.ZonedDecimalCodec;
 import com.carddemo.common.money.Money;
+import com.carddemo.common.security.CardNumberMasker;
 import com.carddemo.reporting.domain.AccountView;
 import com.carddemo.reporting.domain.CardXrefView;
 import com.carddemo.reporting.domain.CustomerView;
@@ -49,9 +50,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Stream;
 import org.hibernate.annotations.Immutable;
 import org.hibernate.jpa.AvailableHints;
+import org.hibernate.resource.jdbc.spi.StatementInspector;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -168,7 +171,15 @@ import org.testcontainers.utility.MountableFile;
     //       second key NAMES a credential store while its VALUE is what stops one from being
     //       read, so neither key is a credential and this class supplies no signing material at all.
     "spring.cloud.aws.parameterstore.enabled=false",
-    "spring.cloud.aws.secretsmanager.enabled=false"
+    "spring.cloud.aws.secretsmanager.enabled=false",
+    // WHY : Assumptions: the plan cases below have to examine the plan of the statement the PROVIDER
+    //       emits, and the only way to be sure they examine that one is to record it as it is issued.
+    //       Alternatives Considered: writing the expected SQL into the case and explaining that.
+    //       Rejected because it is a second transcription of the query -- the case would then pass
+    //       while the repository executed something else entirely, which is the exact failure the
+    //       finding these cases answer was about.
+    "spring.jpa.properties.hibernate.session_factory.statement_inspector="
+            + "com.carddemo.reporting.repository.StatementTransactionRepositoryIT$EmittedStatements"
 })
 class StatementTransactionRepositoryIT {
 
@@ -602,22 +613,6 @@ class StatementTransactionRepositoryIT {
     private static final String WINDOW_FIRST_PAGE = "";
 
     /**
-     * The number of trailing digits the projection publishes of a card number, four.
-     */
-    private static final int PUBLISHED_TAIL_LENGTH = 4;
-
-    /**
-     * The narrowing prefix the projection substitutes for the leading digits of a card number.
-     *
-     * <p>Assumptions: twelve characters, so the narrowed rendering occupies the declared sixteen-byte
-     * width exactly and needs no pad. {@code data-migration/sql/V1__reporting_views.sql} L397 area
-     * projects the card number as twelve asterisks concatenated with the last four digits and casts
-     * the result to {@code character(16)}. Writing the prefix out is what lets every assertion and
-     * every failure message below handle a rendering rather than a card number.</p>
-     */
-    private static final String NARROWING_PREFIX = "************";
-
-    /**
      * The separator joining a narrowed card rendering to a transaction identifier in one comparable.
      *
      * <p>Assumptions: both joined components are fixed width, 16 and 16, so the separator carries no
@@ -693,9 +688,17 @@ class StatementTransactionRepositoryIT {
      * at L140 and a close at L146, with no keyed-read arm and sequential access declared at L33.
      * And there is no whole-table cursor: the interface's own Javadoc records that one was declared,
      * was reached by nothing and was withdrawn.</p>
+     *
+     * <p>Refactoring Rationale: the set gained {@code findWindowForCardGroup}, the bulk window that
+     * reads a CHUNK of cards in one statement. It is the fourth read and not a replacement for the
+     * third: the per-card window remains the one a single-card request uses, where a group predicate
+     * over one fingerprint would be the same read with a wider predicate. What the fourth removes is
+     * the whole-run pass issuing one query per cardholder -- so the set grew because the module gained
+     * a read, which is exactly the kind of change this assertion is meant to make visible.</p>
      */
     private static final Set<String> DECLARED_READ_METHOD_NAMES = Set.of(
-            "streamByCardFingerprint", "aggregateByCardFingerprint", "findWindowByCardFingerprint");
+            "streamByCardFingerprint", "aggregateByCardFingerprint", "findWindowByCardFingerprint",
+            "findWindowForCardGroup");
 
     /**
      * The mapping annotations whose absence proves the four-participant join is composed by query.
@@ -750,15 +753,42 @@ class StatementTransactionRepositoryIT {
             "services/account-service/src/main/resources/db/migration/V1__account.sql";
 
     /**
-     * The one ordinary table the projection schema is expected to hold.
+     * The two ordinary tables the projection schema is expected to hold, in catalog name order.
      *
-     * <p>Assumptions: {@code data-migration/sql/V1__reporting_views.sql} creates exactly one table in
-     * that schema, a one-row keyed table holding the grouping key, and revokes it from the service
-     * role in the same file. Every other relation there is a view. Naming it is what lets the
+     * <p>Assumptions: {@code data-migration/sql/V1__reporting_views.sql} creates exactly these two
+     * tables in that schema and every other relation it creates is a view. Naming them is what lets the
      * assertion below distinguish "the schema holds no second copy of the transaction rows" from "the
      * schema holds no table at all", which would be false.</p>
+     *
+     * <p>Refactoring Rationale: this was one name and is now two, because the identity relation joined
+     * the grouping key there. The point of the assertion is unchanged and the second name does not
+     * weaken it: {@code card_grouping_key} holds one row of key material and {@code card_identity}
+     * holds one row per CARD, so neither is a copy of the transaction rows, and the case below proves
+     * that of the new one by cardinality and by column list rather than by asserting it here.</p>
      */
-    private static final String GROUPING_KEY_TABLE = "card_grouping_key";
+    private static final List<String> PROJECTION_SCHEMA_TABLES =
+            List.of("card_grouping_key", "card_identity");
+
+    /**
+     * The identity relation the statement walk is served from, schema-qualified.
+     */
+    private static final String CARD_IDENTITY_TABLE = "reporting.card_identity";
+
+    /**
+     * The cross-reference relation the identity relation is derived from, schema-qualified.
+     */
+    private static final String CARD_XREF_TABLE = "account.card_xref";
+
+    /**
+     * The three columns the identity relation is allowed to carry.
+     *
+     * <p>Assumptions: naming the whole column list, rather than asserting the absence of a column that
+     * would be wrong, is what makes the check total. A relation that acquired an amount, a timestamp or
+     * a customer attribute would become a partial copy of data another context owns, and the failure
+     * mode of a negative assertion is that it passes for every column nobody thought of.</p>
+     */
+    private static final List<String> CARD_IDENTITY_COLUMNS =
+            List.of("card_fingerprint", "card_num", "card_num_masked");
 
     /**
      * The schema the projections live in.
@@ -771,16 +801,88 @@ class StatementTransactionRepositoryIT {
     private static final String VIEW_RELATION_KIND = "v";
 
     /**
-     * The two indexes the transaction context declares on the relation this projection reads.
+     * The index on the base relation every statement read must reach the transactions through.
      *
-     * <p>Assumptions: both are created by {@link #TRANSACTION_TABLE_OWNER}, the card-number one at
-     * its L288 and the processing-timestamp one at its L310, and this class neither creates nor drops
-     * either. Register entry <b>R8</b> records that the reference's separate index-rebuild step
-     * retires because the engine maintains an index transactionally as rows change, while the access
-     * path the step produced survives.</p>
+     * <p>Assumptions: it is created by {@link #TRANSACTION_TABLE_OWNER} at its L288 and this class
+     * neither creates nor drops it. Register entry <b>R8</b> records that the reference's separate
+     * index-rebuild step retires because the engine maintains an index transactionally as rows change,
+     * while the access path the step produced survives.</p>
+     *
+     * <p>Refactoring Rationale: this replaces a list of index NAMES that the class asserted merely
+     * EXISTED. Existence was the wrong property and the assertion was worse than absent: a statement
+     * read selects by fingerprint, so it reached this index only if the engine could resolve the
+     * fingerprint to a card number first, and while the fingerprint was a computed expression it could
+     * not -- every read was a sequential scan of the ledger with both indexes present and unused. A
+     * name census cannot see that. The cases below assert instead that the chosen PLAN uses this
+     * index, at a cardinality where a sequential scan is what the engine would otherwise
+     * prefer.</p>
      */
-    private static final List<String> TRANSACTION_TABLE_INDEXES =
-            List.of("idx_transactions_card_num", "idx_transactions_proc_ts");
+    private static final String LEDGER_CARD_INDEX = "idx_transactions_card_num";
+
+    /**
+     * The identity relation's primary key, which every fingerprint lookup must be resolved through.
+     */
+    private static final String CARD_IDENTITY_PRIMARY_KEY = "pk_card_identity";
+
+    /**
+     * The scan descriptions a statement read's plan must not contain at production cardinality.
+     *
+     * <p>Assumptions: the engine prints an unqualified relation name in a scan node, and prefixes the
+     * node with {@code Parallel} when it splits the scan across workers -- so matching on
+     * {@code "Seq Scan on <relation>"} would pass on a parallel sequential scan, which is the same
+     * defect with more processes. Matching on the relation and the words that precede it in both forms
+     * is what closes that. The identity relation is named as well as the two base relations: a walk
+     * that scanned it would be reading the whole portfolio to answer for one card.</p>
+     */
+    private static final List<String> FORBIDDEN_PLAN_SCANS = List.of(
+            "Seq Scan on transactions", "Seq Scan on card_xref", "Seq Scan on card_identity");
+
+    /**
+     * The unqualified name of the projection every statement read names, used to select its statement.
+     */
+    private static final String STATEMENT_VIEW_RELATION = "v_statement_transactions";
+
+    /**
+     * The leading digit group the plan cases seed cards and transaction identifiers with.
+     *
+     * <p>Assumptions: the committed fixture leads with {@code 0500}, {@code 4859} and {@code 9900} in
+     * both columns, so this group cannot collide with it. The value is a marker rather than a plausible
+     * card number precisely so that a residue left behind by a failure is recognisable at a glance.</p>
+     */
+    private static final String PLAN_CARD_PREFIX = "1700";
+
+    /**
+     * How many cards the plan cases seed, five thousand.
+     *
+     * <p>Assumptions: the size is chosen so that a sequential scan is what the engine would pick for a
+     * predicate it cannot index, which is the condition under which "no sequential scan" says
+     * something. It is also small enough that the seeding is two statements and a few hundred
+     * milliseconds, so the case does not dominate the module's build.</p>
+     */
+    private static final int PLAN_CARD_COUNT = 5_000;
+
+    /**
+     * How many transactions the plan cases seed, fifty thousand -- ten per seeded card.
+     *
+     * <p>Assumptions: ten per card is what makes the per-card access path matter. With one transaction
+     * per card the engine could reach the same rows by scanning either relation, so a plan that
+     * happened to be indexed would not be evidence that the index was necessary.</p>
+     */
+    private static final int PLAN_TRANSACTION_COUNT = 50_000;
+
+    /**
+     * The window size the plan cases request, one hundred.
+     */
+    private static final int PLAN_WINDOW_LIMIT = 100;
+
+    /**
+     * The continuation anchor the plan cases pass, a transaction identifier inside the seeded range.
+     *
+     * <p>Assumptions: the value only has to be a plausible identifier, because the plan is taken with
+     * the parameters unknown -- what the continuation call establishes is that it issues the same
+     * statement text as the opening call, not what that value selects.</p>
+     */
+    private static final String PLAN_CONTINUATION_ANCHOR = "1700000000000500";
 
 
     /**
@@ -1175,9 +1277,15 @@ class StatementTransactionRepositoryIT {
                     assertThat(card.fingerprint())
                             .as("the fingerprint is a hexadecimal rendering of a 256-bit digest")
                             .hasSize(FINGERPRINT_WIDTH);
+                    // WHY : Assumptions: the shape is checked against the authority's published
+                    //       expression rather than against a leading-asterisk test. A prefix test
+                    //       passes on a rendering whose masked region is the right length but whose
+                    //       tail is not four digits, and it passes on a value longer than the
+                    //       declared width -- so it admits renderings the deployment could not have
+                    //       produced. The expression pins both the masked run and the digit tail.
                     assertThat(card.narrowedRendering())
                             .as("the rendering publishes only the last four digits")
-                            .startsWith(NARROWING_PREFIX)
+                            .matches(CardNumberMasker.MASKED_FORM_PATTERN)
                             .hasSize(KEY_COMPONENT_WIDTH);
                 });
     }
@@ -1736,7 +1844,9 @@ class StatementTransactionRepositoryIT {
      * <p>Assumptions: the whole declared surface is named rather than one absence, because that form
      * fails on a method removed as well as on one added. It pins two absences at once: no keyed
      * single-row read, and no ordered pass over every card -- the latter having been declared,
-     * reached by nothing and withdrawn, as the interface's own Javadoc records.</p>
+     * reached by nothing and withdrawn, as the interface's own Javadoc records. The bulk window this
+     * module gained is a read over a BOUNDED group of cards and is not that pass: it takes the group
+     * as an argument, so it cannot be issued without naming the cards it covers.</p>
      *
      * <p>This method takes no parameter and returns no value.</p>
      */
@@ -1749,7 +1859,7 @@ class StatementTransactionRepositoryIT {
         }
 
         assertThat(declaredNames)
-                .withFailMessage("the declared surface must be exactly the three reads this module"
+                .withFailMessage("the declared surface must be exactly the four reads this module"
                         + " accounts for; a keyed single-row read has no branch in app/cbl/"
                         + "CBSTM03B.CBL L133 to L155, and the withdrawn whole-table pass has no"
                         + " driver in this module")
@@ -1828,12 +1938,12 @@ class StatementTransactionRepositoryIT {
      * than of a query. Nothing here defines or discards anything: the statements are catalog reads and
      * two row counts.</p>
      *
-     * <p>Assumptions: the access path the retired rebuild step produced survives, and it is owned
-     * elsewhere. Both indexes on the base relation are created by
-     * {@code services/transaction-service/src/main/resources/db/migration/V1__ledger.sql}, the
-     * card-number one at its L288 and the processing-timestamp one at its L310, and this class creates
-     * and drops neither. Register entry <b>R8</b> records that the reference's separate index-rebuild
-     * step retires outright, because the engine maintains an index transactionally as rows change.</p>
+     * <p>Refactoring Rationale: this case no longer asserts that the base relation's indexes exist by
+     * name. That assertion read as evidence about the statement path and was evidence about nothing:
+     * the reads select by fingerprint, and while the fingerprint was computed per row from a secret in
+     * another table they could not reach an index at all -- so the census passed on a database where
+     * every statement read was a sequential scan. What replaced it is a plan assertion at
+     * representative cardinality, in the case below, which fails if the index is present and unused.</p>
      *
      * <p>This method takes no parameter and returns no value.</p>
      *
@@ -1863,40 +1973,57 @@ class StatementTransactionRepositoryIT {
                     .isEqualTo("0");
 
             // WHY : Assumptions: the schema is not empty of tables and asserting that it were would be
-            //       false. data-migration/sql/V1__reporting_views.sql creates one keyed single-row
-            //       table there to hold the grouping key and withdraws it from the service role in the
-            //       same file; every other relation it creates is a view. Naming that one table is
-            //       what lets this assertion mean "no second copy of the transaction rows" rather
-            //       than "no table at all". The baseline does materialise a second copy --
+            //       false. data-migration/sql/V1__reporting_views.sql creates two tables there -- one
+            //       keyed single-row table holding the grouping key, withdrawn from the service role
+            //       outright, and one identity relation carrying a row per card, of which the service
+            //       role may read two columns -- and every other relation it creates is a view. Naming
+            //       both is what lets this assertion mean "no second copy of the transaction rows"
+            //       rather than "no table at all". The baseline does materialise a second copy --
             //       app/jcl/CREASTMT.JCL L44 to L61 runs PGM=SORT into TRXFL.SEQ and then PGM=IDCAMS
             //       with REPRO INFILE(INFILE) OUTFILE(OUTFILE) at L61 -- and this schema declines it.
             assertThat(namesOf(connection,
                     "select c.relname::text from pg_class c join pg_namespace n"
                             + " on n.oid = c.relnamespace where n.nspname = '" + PROJECTION_SCHEMA
                             + "' and c.relkind = 'r' order by c.relname"))
-                    .withFailMessage("the projection schema must hold no ordinary table other than"
-                            + " the grouping key that %s creates; a further table there would be a"
-                            + " copy of rows another context owns", STATEMENT_VIEW_OWNER)
-                    .containsExactly(GROUPING_KEY_TABLE);
+                    .withFailMessage("the projection schema must hold no ordinary table beyond the two"
+                            + " %s creates; a further table there would be a copy of rows another"
+                            + " context owns", STATEMENT_VIEW_OWNER)
+                    .containsExactlyElementsOf(PROJECTION_SCHEMA_TABLES);
+
+            // WHY : Assumptions: the identity relation earns its place in the schema by being an
+            //       ACCESS PATH rather than a copy, and the two checks below are what establish that
+            //       rather than assert it. Its cardinality is one row per card in the cross-reference,
+            //       so it cannot hold a transaction; and its column list is closed at three, so it
+            //       cannot hold an amount, a timestamp or a customer attribute. Either property alone
+            //       would be insufficient: a relation of the right size can still carry the wrong
+            //       column, and a relation with the right columns can still be duplicated per
+            //       transaction.
+            assertThat(singleValue(connection, "select count(*)::text from " + CARD_IDENTITY_TABLE))
+                    .withFailMessage("%s must hold exactly one row per card in %s; a different count"
+                            + " means it is not a per-card identity relation, and a count above it"
+                            + " means it has become a copy of something", CARD_IDENTITY_TABLE,
+                            CARD_XREF_TABLE)
+                    .isEqualTo(singleValue(connection,
+                            "select count(*)::text from " + CARD_XREF_TABLE));
+            assertThat(namesOf(connection,
+                    "select column_name::text from information_schema.columns where table_schema = '"
+                            + PROJECTION_SCHEMA + "' and table_name = 'card_identity'"
+                            + " order by column_name"))
+                    .withFailMessage("%s must carry exactly its three identity columns; a monetary,"
+                            + " temporal or customer column there would make it a partial copy of a"
+                            + " relation another context owns", CARD_IDENTITY_TABLE)
+                    .containsExactlyElementsOf(CARD_IDENTITY_COLUMNS);
 
             assertThat(singleValue(connection, "select count(*)::text from " + STATEMENT_VIEW))
                     .withFailMessage("the projection must present exactly the rows the base relation"
-                            + " holds; the cross join it applies is over a single-row keyed table, so"
-                            + " it can neither multiply nor lose a row")
+                            + " holds; the identity relation it joins holds at most one row per card"
+                            + " and the join is an outer one, so it can neither multiply nor lose a"
+                            + " row")
                     .isEqualTo(singleValue(connection,
                             "select count(*)::text from " + TRANSACTION_TABLE));
             assertThat(singleValue(connection, "select count(*)::text from " + STATEMENT_VIEW))
                     .as("and that is the whole committed fixture")
                     .isEqualTo(String.valueOf(TRANSACTION_ROW_COUNT));
-
-            assertThat(namesOf(connection,
-                    "select indexname::text from pg_indexes where schemaname = 'ledger'"
-                            + " and tablename = 'transactions' order by indexname"))
-                    .withFailMessage("the access path the statement order relies on must be present"
-                            + " under the names %s gives it; an absence is a defect to report against"
-                            + " that file, and this class creates and drops no index",
-                            TRANSACTION_TABLE_OWNER)
-                    .containsAll(TRANSACTION_TABLE_INDEXES);
         }
     }
 
@@ -2185,17 +2312,25 @@ class StatementTransactionRepositoryIT {
     /**
      * Applies the narrowing rule the projection applies, to one whole card number.
      *
-     * <p>Assumptions: the result occupies the declared sixteen-byte width exactly, because the prefix
-     * is twelve characters and the published tail is four, so the projection's cast to that width
-     * neither pads nor truncates. A whole card number never leaves this method: the value it returns
-     * is the only card rendering any assertion, map key or message in this class handles.</p>
+     * <p>Assumptions: the rendering is produced by {@link CardNumberMasker#mask(String)} -- the one
+     * authority this repository has for a masked card -- rather than by a prefix and a tail composed
+     * here. A whole card number never leaves this method: the value it returns is the only card
+     * rendering any assertion, map key or message in this class handles.</p>
+     *
+     * <p>Refactoring Rationale: this concatenated a local twelve-asterisk constant with the last four
+     * characters of the argument, which agreed with the authority by coincidence rather than by
+     * construction. A local rule is free to be MORE PERMISSIVE than the authority and that is how a
+     * masking control drifts: the authority masks a value at or below the visible-tail length
+     * entirely, whereas the local form's tail arithmetic would have returned a short value as itself
+     * -- so a rendering this class accepted could have been a card number the deployment would have
+     * refused to publish. Delegating removes the second rule rather than aligning it, so no future
+     * change to the authority can leave this class asserting the old one.</p>
      *
      * @param wholeCardNumber a whole card number as the fixture carries it
-     * @return that card narrowed to a constant prefix and its last four digits, never {@code null}
+     * @return that card as the shared authority masks it, never {@code null} for a non-null argument
      */
     private static String narrowedRenderingOf(String wholeCardNumber) {
-        return NARROWING_PREFIX
-                + wholeCardNumber.substring(wholeCardNumber.length() - PUBLISHED_TAIL_LENGTH);
+        return CardNumberMasker.mask(wholeCardNumber);
     }
 
 
@@ -2302,10 +2437,45 @@ class StatementTransactionRepositoryIT {
             requireDeployedRelation(connection, CROSS_REFERENCE_TABLE, CROSS_REFERENCE_TABLE_OWNER);
             requireDeployedRelation(connection, TRANSACTION_TABLE, TRANSACTION_TABLE_OWNER);
             loadCardCrossReferences(connection);
+            refreshCardIdentity(connection);
             loadTransactions(connection);
             publishedCards = resolvePublishedCards(connection);
         } catch (SQLException cause) {
             throw new IllegalStateException("cannot load the statement-path fixture corpus", cause);
+        }
+    }
+
+    /**
+     * Brings the identity relation level with the cross-reference this class has just loaded.
+     *
+     * <p>Assumptions: this call is not an arrangement convenience but the SAME step the load path
+     * performs in the deployment. {@code reporting.card_identity} carries one row per card and is
+     * populated by a backfill when {@code data-migration/sql/V1__reporting_views.sql} creates it, so
+     * any card inserted AFTER that script ran -- which is every card this class inserts, since the
+     * migrations are applied before the fixture -- has no identity row until the maintenance procedure
+     * runs. {@code data-migration/src/carddemo_migration/loaders/aurora.py} publishes the same step
+     * as {@code refresh_card_identity(connection)}, to be run after its cross-reference load, and a
+     * whole-run statement pass is required to call it before it walks the heading cursor.</p>
+     *
+     * <p>Assumptions: the omission this closes is SILENT rather than loud, which is why the call
+     * belongs in the load and not in a case. A card with no identity row is absent from
+     * {@code reporting.v_card_xref} and unresolvable by {@code reporting.resolve_card}, so a statement
+     * run over a stale relation emits fewer statements and reports nothing -- the failure surfaces as
+     * a missing cardholder rather than an error.</p>
+     *
+     * <p>Alternatives Considered: a trigger on {@code account.card_xref} that maintained the identity
+     * row as part of the write, which would make this call unnecessary everywhere. Rejected because
+     * {@code data-migration/sql/V1__reporting_views.sql} runs under
+     * {@code SET LOCAL ROLE carddemo_reporting_owner} and that role holds no {@code TRIGGER} privilege
+     * on a relation the account context owns; granting it would widen a cross-context boundary and
+     * would make an account-context write fail whenever reporting maintenance failed.</p>
+     *
+     * @param connection an open connection able to execute the maintenance procedure
+     * @throws SQLException if the procedure cannot be executed, which includes it being absent
+     */
+    private static void refreshCardIdentity(Connection connection) throws SQLException {
+        try (Statement refresh = connection.createStatement()) {
+            refresh.execute("call reporting.refresh_card_identity()");
         }
     }
 
@@ -2633,6 +2803,383 @@ class StatementTransactionRepositoryIT {
         }
         throw new IllegalStateException(
                 "no ancestor of the working directory carries services/pom.xml");
+    }
+
+    /**
+     * Records every statement the persistence provider emits, so a generated read can be planned.
+     *
+     * <p>Assumptions: the provider instantiates this type by name from the property declared on the
+     * class above, so it is public with an implicit no-argument constructor and its store is static --
+     * the instance the provider builds is not one a case could otherwise reach.</p>
+     *
+     * <p>Assumptions: the store is cleared by the case before each read it plans, unlike the sibling
+     * recorder in {@code StatementAccountRepositoryIT} which never clears. The difference is required
+     * by the question asked: that one asks whether ANY emitted statement names a forbidden column,
+     * which earlier statements cannot affect, while these cases ask what THIS read emitted, which
+     * earlier statements would answer wrongly.</p>
+     */
+    public static final class EmittedStatements implements StatementInspector {
+
+        /**
+         * The serialized form's version, fixed at one.
+         */
+        // WHY : Assumptions: the provider's inspector interface extends the serialization marker, so
+        //       this type is serializable whether or not anything serializes it, and the compiler
+        //       reports a missing version under the build's warning set. A fixed value is declared
+        //       rather than derived because a derived one changes whenever a member is added.
+        private static final long serialVersionUID = 1L;
+
+        /**
+         * Every statement seen since the last clear, in emission order, safe for concurrent append.
+         */
+        private static final List<String> SEEN = new CopyOnWriteArrayList<>();
+
+        /**
+         * Records one statement and returns it unchanged.
+         *
+         * <p>Assumptions: the statement is returned exactly as received, because this inspector
+         * observes and never rewrites -- a returned change would alter what the provider executes, and
+         * the case would then plan a statement the deployment never issues.</p>
+         *
+         * @param sql the statement the provider is about to issue
+         * @return that same statement, unchanged
+         */
+        @Override
+        public String inspect(String sql) {
+            SEEN.add(sql);
+            return sql;
+        }
+
+        /**
+         * Discards every recorded statement.
+         *
+         * <p>This method takes no parameter and returns no value.</p>
+         */
+        static void clear() {
+            SEEN.clear();
+        }
+
+        /**
+         * Returns the one recorded statement that reads the named relation.
+         *
+         * @param relation the unqualified relation name the wanted statement must name
+         * @return that statement, never {@code null}
+         * @throws IllegalStateException if no recorded statement names the relation, which means the
+         *     read under examination did not reach the database at all
+         */
+        static String theOneNaming(String relation) {
+            List<String> matching = SEEN.stream()
+                    .filter(sql -> sql.toLowerCase(Locale.ROOT).contains(relation))
+                    .toList();
+            if (matching.isEmpty()) {
+                throw new IllegalStateException("no statement naming " + relation + " was emitted, so"
+                        + " there is nothing to plan; the read under examination did not reach the"
+                        + " database. Recorded statements: " + SEEN);
+            }
+            return matching.getLast();
+        }
+    }
+
+    /**
+     * Confirms every statement read reaches the transactions by index at production-like cardinality.
+     *
+     * <p>Purpose: this is the evidence the review finding asked for and the class previously lacked.
+     * What stood here was a census of index NAMES on the base relation, which passed on a database
+     * where every statement read was a sequential scan -- the reads select by fingerprint, and while
+     * the fingerprint was an expression computed per row from a secret held in another table it was
+     * not {@code IMMUTABLE}, so no index could serve it and both named indexes sat unused. An
+     * assertion that an index exists is not an assertion that a query uses it.</p>
+     *
+     * <p>Assumptions: the plan examined is the plan of the statement the PROVIDER emitted, recorded as
+     * it was issued rather than transcribed here. A transcription would let this case pass while the
+     * repository executed something else, which is the shape of the defect it exists to catch.</p>
+     *
+     * <p>Assumptions: the plan is taken with {@code GENERIC_PLAN}, so the engine plans the statement
+     * with its parameters UNKNOWN. That is deliberately harder than planning with the values bound: a
+     * plan that survives without knowing the fingerprint cannot have been chosen because one
+     * particular constant happened to look selective. It also removes any need to map a bind value
+     * onto a placeholder position, which for the three-armed continuation would mean depending on the
+     * provider's placeholder ordering.</p>
+     *
+     * <p>Assumptions: the four shapes share ONE seeded population, in one case rather than four,
+     * because seeding is the expensive part and none of the four writes anything. Splitting them would
+     * quadruple the load for no additional property.</p>
+     *
+     * <p>Assumptions: the population is seeded to {@value #PLAN_CARD_COUNT} cards and
+     * {@value #PLAN_TRANSACTION_COUNT} transactions and then analysed, because the committed fixture
+     * is far too small for a plan to mean anything about production -- at a few hundred rows a
+     * sequential scan is genuinely the cheapest way to read the table, so "no sequential scan" would
+     * be asserting that the engine had made the wrong choice. At the seeded size a sequential scan of
+     * the ledger is what the engine picks for any predicate it cannot index, which is what gives the
+     * assertion teeth.</p>
+     *
+     * <p>Assumptions: the seeded rows are removed in a {@code finally} arm and the committed counts are
+     * asserted afterwards, because sibling cases in this class assert the fixture's exact size. The
+     * removal doubles as the only exercise of the maintenance procedure's DELETE arm: the identity rows
+     * for the departed cards must disappear, and the count assertion after the refresh is what
+     * establishes it.</p>
+     *
+     * <p>This method takes no parameter and returns no value.</p>
+     *
+     * @throws SQLException if the container connection cannot be opened, the population cannot be
+     *     seeded or removed, or a plan cannot be taken -- all arrangement failures rather than the
+     *     property under test
+     */
+    @Test
+    @DisplayName("every statement read reaches the transactions by index at production cardinality")
+    void everyStatementReadReachesTheTransactionsByIndexAtProductionCardinality() throws SQLException {
+        try (Connection connection = POSTGRES.createConnection("")) {
+            // WHY : Trade-offs: the seeding is INSIDE the try whose finally discards it, not before
+            //       it, so a failure part-way through leaves nothing behind. Seeding before the try
+            //       reads more naturally but leaves a half-written population committed on the
+            //       container the rest of this class then asserts exact counts against, turning one
+            //       failure into every subsequent case failing for an unrelated reason.
+            try {
+                seedRepresentativePopulation(connection);
+                String fingerprint = aSeededFingerprint(connection);
+
+                EmittedStatements.clear();
+                transactions.aggregateByCardFingerprint(fingerprint);
+                assertReachesTransactionsByIndex("the per-card aggregate",
+                        EmittedStatements.theOneNaming(STATEMENT_VIEW_RELATION));
+
+                EmittedStatements.clear();
+                transactions.findWindowByCardFingerprint(fingerprint, "", PLAN_WINDOW_LIMIT);
+                String firstWindow = EmittedStatements.theOneNaming(STATEMENT_VIEW_RELATION);
+                assertReachesTransactionsByIndex("the first window of one card", firstWindow);
+
+                // WHY : Assumptions: the continuation is asserted to emit the SAME statement text as
+                //       the opening window rather than being planned a second time. The two differ
+                //       only in a bind value, so a second plan of the same text would restate the
+                //       assertion above; what is worth establishing is that the continuation is not a
+                //       DIFFERENT statement -- which is the only way it could reach a different plan
+                //       -- and that is a property of the text.
+                EmittedStatements.clear();
+                transactions.findWindowByCardFingerprint(
+                        fingerprint, PLAN_CONTINUATION_ANCHOR, PLAN_WINDOW_LIMIT);
+                assertThat(EmittedStatements.theOneNaming(STATEMENT_VIEW_RELATION))
+                        .withFailMessage("the continuation must issue the same statement as the"
+                                + " opening window, since only then is it served by the plan asserted"
+                                + " for that statement; a different text means the continuation has"
+                                + " its own plan and its own cost")
+                        .isEqualTo(firstWindow);
+
+                EmittedStatements.clear();
+                transactions.findWindowForCardGroup(
+                        List.of(fingerprint), "", "", "", PLAN_WINDOW_LIMIT);
+                assertReachesTransactionsByIndex("the bulk window over a card group",
+                        EmittedStatements.theOneNaming(STATEMENT_VIEW_RELATION));
+            } finally {
+                discardRepresentativePopulation(connection);
+            }
+
+            assertThat(singleValue(connection, "select count(*)::text from " + TRANSACTION_TABLE))
+                    .as("the committed fixture must be all that remains of the transaction relation")
+                    .isEqualTo(String.valueOf(TRANSACTION_ROW_COUNT));
+            assertThat(singleValue(connection, "select count(*)::text from " + CARD_IDENTITY_TABLE))
+                    .withFailMessage("the maintenance procedure must have removed the identity row of"
+                            + " every departed card; a residue here means its delete arm does not"
+                            + " work, and a stale identity row keeps a card resolvable after the"
+                            + " cross-reference has stopped publishing it")
+                    .isEqualTo(singleValue(connection,
+                            "select count(*)::text from " + CARD_XREF_TABLE));
+        }
+    }
+
+    /**
+     * Takes the plan of one emitted statement and fails unless it reaches the ledger by index.
+     *
+     * <p>Assumptions: the placeholders the provider emits are rewritten from {@code ?} to {@code $n}
+     * in textual order, because {@code EXPLAIN (GENERIC_PLAN)} accepts only the numbered form. The
+     * rewrite is textual and assumes no question mark appears inside a string literal, which holds for
+     * every statement generated from the queries this class exercises -- their literals are the view
+     * bodies' and not the queries'.</p>
+     *
+     * <p>Assumptions: the assertion names the indexes that MUST appear and the scans that must NOT,
+     * rather than comparing the whole plan against a committed copy. A whole-plan comparison would
+     * fail on every cost model change and would say nothing about which part mattered.</p>
+     *
+     * @param label how the failure message should describe the read, for a reader who has to find it
+     * @param emitted the statement the provider issued, with {@code ?} placeholders
+     * @throws SQLException if the statement cannot be planned, which is an arrangement failure
+     */
+    private static void assertReachesTransactionsByIndex(String label, String emitted)
+            throws SQLException {
+        List<String> plan = genericPlanOf(emitted);
+
+        assertThat(plan)
+                .withFailMessage("%s must resolve the fingerprint through %s; without it the engine"
+                        + " has no way from a fingerprint to a card number and must read the whole"
+                        + " ledger. Plan:%n%s", label, CARD_IDENTITY_PRIMARY_KEY,
+                        String.join(System.lineSeparator(), plan))
+                .anySatisfy(line -> assertThat(line).contains(CARD_IDENTITY_PRIMARY_KEY));
+        assertThat(plan)
+                .withFailMessage("%s must reach the transactions through %s; that index is the whole"
+                        + " of the access path the reference's rebuilt alternate index became."
+                        + " Plan:%n%s", label, LEDGER_CARD_INDEX,
+                        String.join(System.lineSeparator(), plan))
+                .anySatisfy(line -> assertThat(line).contains(LEDGER_CARD_INDEX));
+        for (String forbidden : FORBIDDEN_PLAN_SCANS) {
+            assertThat(plan)
+                    .withFailMessage("%s must not scan %s sequentially at this cardinality; a"
+                            + " sequential scan here is the defect the finding named, and it is"
+                            + " invisible from the result. Plan:%n%s", label, forbidden,
+                            String.join(System.lineSeparator(), plan))
+                    .noneSatisfy(line -> assertThat(line).contains(forbidden));
+        }
+    }
+
+    /**
+     * Plans one statement with its parameters unknown and returns the plan, line by line.
+     *
+     * <p>Assumptions: the plan is taken over a connection of its own, opened in the driver's SIMPLE
+     * query mode, and that mode is required rather than preferred. In the driver's default extended
+     * mode every statement is parsed and then bound, and the server registers a {@code $n} it sees
+     * during parsing as a parameter of the statement being prepared -- so the bind that follows
+     * supplies none and the server refuses with "bind message supplies 0 parameters, but prepared
+     * statement requires 1". Simple mode has no bind step, which leaves the placeholder for
+     * {@code EXPLAIN (GENERIC_PLAN)} itself to interpret, exactly as it is interpreted when the same
+     * statement is typed into a terminal client.</p>
+     *
+     * <p>Alternatives Considered: binding a plausible value for each placeholder and planning with
+     * {@code EXPLAIN} alone. Rejected on two grounds: it would make the case depend on the provider's
+     * placeholder ORDER, which for the three-armed continuation means depending on how the query was
+     * written rather than on what it does; and a plan chosen with the values known can be indexed
+     * because one particular constant looked selective, which is a weaker property than the one under
+     * assertion.</p>
+     *
+     * @param emitted the statement to plan, with {@code ?} placeholders
+     * @return every line of the plan, in the engine's order, never empty
+     * @throws SQLException if the statement cannot be planned
+     */
+    private static List<String> genericPlanOf(String emitted) throws SQLException {
+        StringBuilder numbered = new StringBuilder(emitted.length() + 16);
+        int placeholder = 0;
+        for (int index = 0; index < emitted.length(); index++) {
+            char character = emitted.charAt(index);
+            if (character == '?') {
+                placeholder++;
+                numbered.append('$').append(placeholder);
+            } else {
+                numbered.append(character);
+            }
+        }
+        List<String> plan = new ArrayList<>();
+        try (Connection planner = POSTGRES.createConnection("?preferQueryMode=simple");
+                Statement explain = planner.createStatement();
+                ResultSet answer = explain.executeQuery(
+                        "explain (generic_plan, costs off) " + numbered)) {
+            while (answer.next()) {
+                plan.add(answer.getString(1));
+            }
+        }
+        if (plan.isEmpty()) {
+            throw new SQLException("the engine returned no plan for " + numbered);
+        }
+        return plan;
+    }
+
+    /**
+     * Reads one fingerprint belonging to a seeded card, so a plan is taken for a card that exists.
+     *
+     * <p>Assumptions: the fingerprint is READ from the identity relation rather than computed here.
+     * Computing it would need the grouping key and would restate the digest expression a second time,
+     * and the two could then disagree -- at which point the plan would be taken for a card that does
+     * not exist and would look indexed while returning nothing.</p>
+     *
+     * @param connection an open connection able to read the identity relation
+     * @return the fingerprint of one seeded card, never {@code null}
+     * @throws SQLException if the read fails
+     * @throws IllegalStateException if the seeding did not take effect
+     */
+    private static String aSeededFingerprint(Connection connection) throws SQLException {
+        String fingerprint = singleValue(connection,
+                "select card_fingerprint from " + CARD_IDENTITY_TABLE
+                        + " where card_num like '" + PLAN_CARD_PREFIX + "%' limit 1");
+        if (fingerprint.isBlank()) {
+            throw new IllegalStateException("no identity row exists for a seeded card, so the"
+                    + " maintenance procedure did not run or the seeding did not commit");
+        }
+        return fingerprint;
+    }
+
+    /**
+     * Seeds a production-like population of cards and transactions and analyses the relations.
+     *
+     * <p>Assumptions: the transactions are inserted by copying every non-key column from a committed
+     * fixture row, so the seeded rows carry values the deployed schema already accepts and this method
+     * need not know which columns are constrained. Writing literal values instead would have to be
+     * revisited whenever the ledger's own migration adds a constraint.</p>
+     *
+     * <p>Assumptions: the identity rows for the seeded cards are created by CALLING the deployed
+     * maintenance procedure rather than by inserting them here. Inserting them would be a second
+     * implementation of the digest, and a plan taken against rows this class computed would prove
+     * nothing about the rows the deployment computes.</p>
+     *
+     * <p>Assumptions: the relations are analysed before anything is planned. Without fresh statistics
+     * the engine plans against the fixture's size and would reasonably choose a sequential scan, so an
+     * un-analysed seeding would produce a failure that is a property of the arrangement rather than of
+     * the query.</p>
+     *
+     * @param connection an open connection able to write the base relations
+     * @throws SQLException if the population cannot be seeded
+     */
+    private static void seedRepresentativePopulation(Connection connection) throws SQLException {
+        try (Statement seed = connection.createStatement()) {
+            seed.executeUpdate("insert into " + CARD_XREF_TABLE
+                    + " (card_num, customer_id, account_id) select '" + PLAN_CARD_PREFIX
+                    + "' || lpad(g.i::text, 12, '0'), 800000000 + g.i, 80000000000 + g.i"
+                    + " from generate_series(1, " + PLAN_CARD_COUNT + ") as g(i)");
+            seed.executeUpdate("insert into " + TRANSACTION_TABLE
+                    + " (transaction_id, card_num, type_cd, category_cd, source, description,"
+                    + " amount, merchant_id, merchant_name, merchant_city, merchant_zip,"
+                    + " orig_ts, proc_ts)"
+                    + " select '" + PLAN_CARD_PREFIX + "' || lpad(g.i::text, 12, '0'),"
+                    + " '" + PLAN_CARD_PREFIX + "' || lpad(((g.i % " + PLAN_CARD_COUNT
+                    + ") + 1)::text, 12, '0'),"
+                    + " template.type_cd, template.category_cd, template.source,"
+                    + " template.description, template.amount, template.merchant_id,"
+                    + " template.merchant_name, template.merchant_city, template.merchant_zip,"
+                    + " template.orig_ts, template.proc_ts"
+                    + " from generate_series(1, " + PLAN_TRANSACTION_COUNT + ") as g(i)"
+                    + " cross join (select * from " + TRANSACTION_TABLE + " limit 1) as template");
+            seed.execute("call reporting.refresh_card_identity()");
+            analyseSeededRelations(seed);
+        }
+    }
+
+    /**
+     * Removes every seeded row and returns the relations to the committed fixture.
+     *
+     * <p>Assumptions: the rows are matched by the leading digit group this class seeds with, which the
+     * committed fixture does not use -- its cards and identifiers lead with {@code 0500}, {@code 4859}
+     * and {@code 9900}. A collision would not go unnoticed: the caller asserts the committed counts
+     * afterwards, so a delete that took a fixture row with it fails there.</p>
+     *
+     * @param connection an open connection able to write the base relations
+     * @throws SQLException if the rows cannot be removed
+     */
+    private static void discardRepresentativePopulation(Connection connection) throws SQLException {
+        try (Statement discard = connection.createStatement()) {
+            discard.executeUpdate("delete from " + TRANSACTION_TABLE
+                    + " where transaction_id like '" + PLAN_CARD_PREFIX + "%'");
+            discard.executeUpdate("delete from " + CARD_XREF_TABLE
+                    + " where card_num like '" + PLAN_CARD_PREFIX + "%'");
+            discard.execute("call reporting.refresh_card_identity()");
+            analyseSeededRelations(discard);
+        }
+    }
+
+    /**
+     * Refreshes the statistics of the three relations the seeded plans depend on.
+     *
+     * @param statement an open statement on a connection able to analyse the relations
+     * @throws SQLException if a relation cannot be analysed
+     */
+    private static void analyseSeededRelations(Statement statement) throws SQLException {
+        statement.execute("analyze " + TRANSACTION_TABLE);
+        statement.execute("analyze " + CARD_XREF_TABLE);
+        statement.execute("analyze " + CARD_IDENTITY_TABLE);
     }
 
     /**

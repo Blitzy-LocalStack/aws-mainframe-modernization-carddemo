@@ -72,7 +72,10 @@ import java.util.TreeSet;
  * <p>Assumptions: the lifetime is MINUTES and deliberately short. The token is minted per call by a process
  * that already holds the key, so a short life costs nothing -- there is no refresh to arrange and no cache to
  * invalidate -- while a long one turns a single captured request into a durable credential. The bound is
- * enforced by the verifier's own expiry check rather than by convention.</p>
+ * enforced on the verifying side as well as here:
+ * {@link #isWithinMaximumLifetime(Instant, Instant, Instant)} is the one rule both ends apply, and it is
+ * anchored to the VERIFIER's clock so that a token cannot declare a short life at a moment of its own
+ * choosing.</p>
  *
  * <p>Assumptions: the audience and the scope are separate claims and both are verified. The audience says
  * which service the token was minted FOR, so a token minted for one callee cannot be replayed against
@@ -352,6 +355,30 @@ public final class InternalServiceToken {
     public static final Duration MAX_LIFETIME = Duration.ofMinutes(5);
 
     /**
+     * The allowance made for two containers' clocks disagreeing, applied only where a token's own claim is
+     * compared against the VERIFIER's clock.
+     *
+     * <p>Assumptions: an allowance is needed at all only because
+     * {@link #isWithinMaximumLifetime(Instant, Instant, Instant)} now compares a claim written from the
+     * MINTER's clock against a reading of a SECOND clock. Two containers whose time daemon keeps them within
+     * a second of each other are still not one clock, so without an allowance a token minted a few hundred
+     * milliseconds "ahead" of its verifier would be refused -- and that refusal reaches an operator as an
+     * intermittent 401 on a deployment in which nothing is wrong. Nothing is allowed between the token's own
+     * two instants, because those are one clock's single reading and there is no disagreement to absorb.</p>
+     *
+     * <p>Trade-offs: thirty seconds is a bound on the harm rather than a measurement of the drift. The
+     * allowance is added to the window in which a captured token stays usable -- five and a half minutes
+     * rather than five -- so it is set to the smallest value that is still orders of magnitude wider than the
+     * sub-second drift a synchronised deployment exhibits. Alternatives Considered: sixty seconds, to match
+     * the framework's own default expiry tolerance, whose {@code JwtTimestampValidator} ships a
+     * sixty-second maximum clock skew. Rejected because that tolerance is spent forgiving an expiry that has
+     * ALREADY passed, which cannot extend a credential's usable life beyond its declared one, whereas this
+     * allowance widens the window before it opens; adopting it would add thirty seconds to the capture window
+     * for drift nothing in this deployment has measured.</p>
+     */
+    public static final Duration MAX_CLOCK_SKEW = Duration.ofSeconds(30);
+
+    /**
      * The key material, held as a copy so a caller's array cannot reach it.
      */
     private final byte[] key;
@@ -537,7 +564,7 @@ public final class InternalServiceToken {
     }
 
     /**
-     * Reports whether a presented token's DECLARED lifetime is within {@link #MAX_LIFETIME}.
+     * Reports whether a presented token is inside {@link #MAX_LIFETIME} of the VERIFIER's own clock.
      *
      * <h2>Why this exists beside the constructor that already checks the same bound</h2>
      *
@@ -550,11 +577,26 @@ public final class InternalServiceToken {
      * the five-minute bound is the whole mitigation. This method is the rule as a rule, so the minting side
      * and the verifying side apply one definition rather than two that agree today.</p>
      *
-     * <p>⚠️ Assumptions: what is bounded is {@code exp - iat}, the lifetime the token DECLARES, and not the
-     * time remaining on it. The remaining time is a different question and is already answered elsewhere: the
-     * framework's default validator refuses a token whose expiry has passed. Bounding the remaining time here
-     * instead would accept an eight-hour token for its first five minutes and refuse it afterwards, which is
-     * the opposite of the intent -- the long lifetime is the defect, not the lateness of its use.</p>
+     * <h2>Why the verifier's own instant is a parameter</h2>
+     *
+     * <p>⚠️ Refactoring Rationale: this rule bounded {@code exp - iat} and nothing else, and a bound on a
+     * DIFFERENCE leaves the window itself free to float. Both instants are written by whoever mints the
+     * token, so a token declaring {@code iat} eight hours in the future and {@code exp} five minutes after
+     * that declared a five-minute lifetime, satisfied every clause, and was admitted -- for eight hours. No
+     * other check on the path closed it: the framework's default validator set refuses an expiry that has
+     * already PASSED and reads {@code iat} not at all, so a future-dated pair is unexpired for as long as it
+     * says. Anchoring the decision to the verifier's clock is what turns two mutually consistent claims into
+     * a bounded window, and it is why the instant is a parameter rather than a reading taken inside this
+     * method: the caller supplies the clock it already holds, and a test can fix it.</p>
+     *
+     * <p>⚠️ Assumptions: exactly TWO of the three comparisons need a skew allowance and one does not, and the
+     * distinction is what {@link #MAX_CLOCK_SKEW} is applied to. Comparing {@code exp} against {@code iat} is
+     * comparing two claims of ONE token, written by one minter from one clock reading, so there is no second
+     * clock in that comparison and no disagreement for a tolerance to absorb -- an allowance there would only
+     * widen the declared-lifetime bound. Comparing either claim against {@code verifiedAt} does put two
+     * containers' clocks side by side, so those two comparisons each carry the allowance. The earlier
+     * revision of this block stated that no tolerance was applied and that its absence was deliberate; that
+     * was sound while the rule read the token alone and is withdrawn now that it reads a second clock.</p>
      *
      * <p>⚠️ Assumptions: an ABSENT issue time or an ABSENT expiry is REFUSED rather than passed over. A token
      * with no issue time declares no lifetime to bound, so admitting it would be a bypass of exactly the rule
@@ -563,22 +605,40 @@ public final class InternalServiceToken {
      * an expiry-less token is otherwise refused by nothing at all. {@link #mint(String, String)} always writes
      * both, so no token this system issues is affected.</p>
      *
-     * <p>Assumptions: NO clock-skew tolerance is applied, and its absence is deliberate rather than an
-     * omission. Both instants are claims of the SAME token, written by one minter from one clock reading, so
-     * their difference involves no comparison between two parties' clocks and there is no skew for a tolerance
-     * to absorb. Adding one would only widen the bound this method exists to hold.</p>
+     * <p>Trade-offs: the expiry cap is IMPLIED by the two clauses before it and is stated anyway. Given a
+     * declared lifetime of at most {@link #MAX_LIFETIME} and an issue time no further ahead than the
+     * allowance, the expiry cannot exceed {@code verifiedAt + MAX_LIFETIME + MAX_CLOCK_SKEW} arithmetically,
+     * so the clause refuses nothing the others admit. It is kept because it names the INVARIANT the rule
+     * exists for -- the furthest moment a presented token may still be usable -- rather than a step towards
+     * it, so a later edit that relaxes either of the other two cannot widen the capture window without
+     * failing here. No claim is made that it catches a shape the others miss.</p>
      *
-     * <p>Assumptions: the comparison is inclusive, so a token declaring exactly {@link #MAX_LIFETIME} is
-     * accepted. That is the same boundary the constructor applies -- it refuses a lifetime that
-     * {@code compareTo(MAX_LIFETIME) > 0} -- so a token this class would mint is a token this method admits,
-     * which is the agreement the two sides must have.</p>
+     * <p>Assumptions: the declared-lifetime comparison is inclusive, so a token declaring exactly
+     * {@link #MAX_LIFETIME} is accepted. That is the same boundary the constructor applies -- it refuses a
+     * lifetime that {@code compareTo(MAX_LIFETIME) > 0} -- so a token this class would mint is a token this
+     * method admits, which is the agreement the two sides must have. The two clock-anchored comparisons are
+     * inclusive for the same reason: a token minted exactly at the allowance, or expiring exactly at the cap,
+     * is at a boundary this class publishes and is admitted at it.</p>
      *
      * @param issuedAt the token's issue time, or {@code null} when the claim is absent
      * @param expiresAt the token's expiry, or {@code null} when the claim is absent
-     * @return {@code true} only when both instants are present, the expiry is not before the issue time, and
-     *     their difference is at most {@link #MAX_LIFETIME}
+     * @param verifiedAt the instant the VERIFYING side reads from its own clock, which is what makes the
+     *     window a window rather than a difference; must not be {@code null}
+     * @return {@code true} only when both claims are present, the expiry is not before the issue time, their
+     *     difference is at most {@link #MAX_LIFETIME}, the issue time is no more than
+     *     {@link #MAX_CLOCK_SKEW} after {@code verifiedAt}, and the expiry is no later than
+     *     {@code verifiedAt} plus {@link #MAX_LIFETIME} plus {@link #MAX_CLOCK_SKEW}
+     * @throws NullPointerException if {@code verifiedAt} is {@code null}
      */
-    public static boolean isWithinMaximumLifetime(Instant issuedAt, Instant expiresAt) {
+    public static boolean isWithinMaximumLifetime(Instant issuedAt, Instant expiresAt,
+            Instant verifiedAt) {
+        // WHY : Assumptions: an absent verifier instant is a PROGRAMMING error and is raised, while an
+        //   absent claim is a token shape and is refused. The two are not the same kind of missing thing:
+        //   the claims are attacker-controlled, so a verdict is the only safe answer, whereas verifiedAt is
+        //   this deployment's own clock reading and a null one means a caller wired no clock -- which would
+        //   otherwise be absorbed as "refuse everything" and read to an operator as every internal call
+        //   failing authorization rather than as a context that is misconfigured.
+        Objects.requireNonNull(verifiedAt, "verifiedAt must not be null");
         if (issuedAt == null || expiresAt == null) {
             return false;
         }
@@ -590,7 +650,20 @@ public final class InternalServiceToken {
         if (expiresAt.isBefore(issuedAt)) {
             return false;
         }
-        return Duration.between(issuedAt, expiresAt).compareTo(MAX_LIFETIME) <= 0;
+        if (Duration.between(issuedAt, expiresAt).compareTo(MAX_LIFETIME) > 0) {
+            return false;
+        }
+        // WHY : Assumptions: the future-issue clause is the one that closes the bypass, and it is written as
+        //   a one-sided test on purpose. An issue time in the PAST is ordinary -- a token minted four
+        //   minutes ago is still live -- so a symmetric window around the verifier's clock would refuse a
+        //   correct token. Alternatives Considered: the framework's own JwtIssuedAtValidator, which was
+        //   read rather than assumed: it admits iat only within plus-or-minus its skew, so it is exactly
+        //   that symmetric window, and widening its skew far enough to accept a token minted four minutes
+        //   ago would readmit one issued nearly five minutes in the future. It cannot express this rule.
+        if (issuedAt.isAfter(verifiedAt.plus(MAX_CLOCK_SKEW))) {
+            return false;
+        }
+        return !expiresAt.isAfter(verifiedAt.plus(MAX_LIFETIME).plus(MAX_CLOCK_SKEW));
     }
 
     /**

@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.carddemo.common.web.CursorToken;
 import com.carddemo.reporting.api.ReportController;
 import com.carddemo.reporting.config.OpenApiConfig;
+import com.carddemo.reporting.dto.StatementRequest;
 import com.carddemo.reporting.dto.StatementTransactionCollection;
 import com.carddemo.reporting.service.ReportExecutionService;
 import com.carddemo.reporting.service.StatementService;
@@ -87,14 +88,33 @@ class ReportingApiContractTest {
     private static final Set<String> ADMITTED_AUTHORITIES = Set.of("carddemo-user", "carddemo-admin");
 
     /**
-     * The authority this context's filter chain actually requires of every operation.
+     * The authority this context's filter chain requires of every operation the catch-all rule governs.
      *
      * <p>Assumptions: the ordinary group and not the administrative one, because
      * {@code SecurityConfig}'s catch-all rule admits a token carrying either group and refuses one
-     * carrying neither. Declaring the administrative authority on any operation here would describe
-     * a restriction the chain does not apply, which is the drift this constant pins.</p>
+     * carrying neither. Declaring the administrative authority on an operation the catch-all governs
+     * would describe a restriction the chain does not apply, which is the drift this constant pins.</p>
      */
     private static final String ENFORCED_AUTHORITY = "carddemo-user";
+
+    /**
+     * The authority the chain requires of the operations it guards with a rule of their own.
+     *
+     * <p>⚠️ Assumptions: this map is keyed by operation identifier and is the only admitted exception to
+     * {@link #ENFORCED_AUTHORITY}. It exists because {@code SecurityConfig} now declares a rule BEFORE
+     * its catch-all: the statement artifact collection route admits the administrative authority alone,
+     * because the objects it serves cover a whole statement run rather than one card. A review found
+     * that route inheriting the catch-all, so the document and the chain agreeing about it is exactly
+     * what wants pinning -- a contract still promising the ordinary group here would tell a caller it
+     * may collect what the chain refuses.</p>
+     *
+     * <p>Alternatives Considered: dropping the per-operation assertion and checking only that each
+     * authority is one the model admits. Rejected because that is the assertion this class was written
+     * to avoid: it passes for a contract that declares the administrative group on every operation, and
+     * would have passed for the defect this exception records.</p>
+     */
+    private static final Map<String, String> OPERATION_AUTHORITY_EXCEPTIONS =
+            Map.of("collectArtifact", "carddemo-admin");
 
     /** Number of references the document is known to declare, guarding the textual check below. */
     private static final int MINIMUM_EXPECTED_REFERENCES = 20;
@@ -249,7 +269,12 @@ class ReportingApiContractTest {
 
     /**
      * Verifies that every operation carries a unique identifier and the authority the chain
-     * enforces.
+     * enforces for it.
+     *
+     * <p>Assumptions: the expected authority is the catch-all's, except for the operations
+     * {@link #OPERATION_AUTHORITY_EXCEPTIONS} names, which the chain guards with a rule of their own.
+     * The exception is stated per operation rather than admitted for any operation, so a contract that
+     * quietly widened or narrowed a second route would still fail here.</p>
      *
      * @throws Exception if the packaged document is absent or unreadable
      */
@@ -274,9 +299,11 @@ class ReportingApiContractTest {
                 identifiers.add((String) identifier);
 
                 Object authority = operation.get("x-required-authority");
+                String expected = OPERATION_AUTHORITY_EXCEPTIONS
+                        .getOrDefault((String) identifier, ENFORCED_AUTHORITY);
                 assertThat(authority)
-                        .as("%s must declare x-required-authority", identifier)
-                        .isEqualTo(ENFORCED_AUTHORITY);
+                        .as("%s must declare x-required-authority %s", identifier, expected)
+                        .isEqualTo(expected);
                 assertThat(ADMITTED_AUTHORITIES).contains((String) authority);
             }
         }
@@ -464,6 +491,74 @@ class ReportingApiContractTest {
                 .isEqualTo(StatementService.MAX_RESPONSE_TRANSACTIONS);
     }
 
+    // WHY : Refactoring Rationale: this case exists because the exactly-one-of rule of the statement
+    //       selector was stated in prose on BOTH sides and the two sentences disagreed --
+    //       StatementRequest's Javadoc said the document declared the rule, and the document said the
+    //       rule was one only the service could state. Neither sentence could fail a build, so the
+    //       contradiction survived every green run. The rule is now in the document as two mutually
+    //       exclusive branches, and it is asserted here so a later edit cannot quietly drop it back to
+    //       prose. Alternatives Considered: asserting the two prose blocks agree, by text. Rejected:
+    //       two sentences can agree with each other and both be wrong about the schema, which is the
+    //       exact failure this replaces.
+    /**
+     * Asserts the statement selector publishes exactly-one-of as two mutually exclusive branches.
+     *
+     * <p>Assumptions: the branches are read STRUCTURALLY rather than by searching the document for a
+     * sentence. A generated client and a validating proxy apply {@code oneOf} and {@code not}, and
+     * neither reads a description, so the structure is the only part of this rule that has an effect
+     * on a caller.</p>
+     *
+     * <p>Assumptions: the absence of a top-level {@code required} array is asserted too, because that
+     * absence is what makes the branches necessary -- either component may be the omitted one, so
+     * neither can be required unconditionally, and a reader who finds no required array needs to see
+     * that the rule is carried somewhere rather than nowhere.</p>
+     *
+     * @throws Exception if the document is absent from the classpath or unreadable
+     */
+    @Test
+    @DisplayName("the statement selector publishes exactly-one-of as two exclusive branches")
+    void theStatementSelectorPublishesExclusiveBranches() throws Exception {
+        Map<String, Object> schemas = mapping(mapping(contractRoot(), "components"), "schemas");
+        Map<String, Object> selector = mapping(schemas, "StatementRequest");
+
+        List<String> components = new ArrayList<>();
+        for (RecordComponent component : StatementRequest.class.getRecordComponents()) {
+            components.add(component.getName());
+        }
+
+        assertThat(mapping(selector, "properties").keySet())
+                .as("the published members must be the record's own, name for name")
+                .containsExactlyInAnyOrderElementsOf(components);
+        assertThat(selector.get("additionalProperties"))
+                .as("the body is closed, which is what makes an undeclared member a refusal rather"
+                        + " than a value the reader discards")
+                .isEqualTo(false);
+        assertThat(selector.get("required"))
+                .as("neither component may be required unconditionally, because either may be the"
+                        + " omitted one")
+                .isNull();
+
+        List<?> branches = (List<?>) selector.get("oneOf");
+        assertThat(branches)
+                .as("exactly-one-of over two components is two branches: one per component")
+                .hasSize(2);
+
+        for (String required : components) {
+            String forbidden = components.get(1 - components.indexOf(required));
+
+            assertThat(branches)
+                    .as("a body supplying only %s must satisfy one branch, and a body supplying both"
+                            + " must satisfy neither -- so the branch requiring %s has to forbid %s",
+                            required, required, forbidden)
+                    .anySatisfy(branch -> {
+                        Map<?, ?> arm = (Map<?, ?>) branch;
+                        assertThat(namesOf(arm.get("required"))).containsExactly(required);
+                        assertThat(namesOf(((Map<?, ?>) arm.get("not")).get("required")))
+                                .containsExactly(forbidden);
+                    });
+        }
+    }
+
     /**
      * Asserts that the zero-mark refusal sentence is one the contract publishes for this operation.
      *
@@ -499,6 +594,27 @@ class ReportingApiContractTest {
         assertThat(document)
                 .as("the precedence order must be stated where a client can read it")
                 .contains("monthly, yearly, custom");
+    }
+
+    /**
+     * Reads a document sequence as member names.
+     *
+     * <p>Assumptions: the values are rendered through {@code String.valueOf} rather than cast, which
+     * is the same conversion the sibling cases in this class apply to a sequence read from the
+     * document. A member name is a string in every document this contract admits, and converting
+     * rather than casting means a document that carried something else fails on the comparison that
+     * follows -- naming the value it carried -- instead of on a cast inside the helper.</p>
+     *
+     * @param sequence the value read from the document, expected to be a sequence; must not be
+     *     {@code null}, which is the caller's own assertion
+     * @return the sequence's entries as strings, in document order, never {@code null}
+     */
+    private static List<String> namesOf(Object sequence) {
+        List<String> names = new ArrayList<>();
+        for (Object entry : (List<?>) sequence) {
+            names.add(String.valueOf(entry));
+        }
+        return names;
     }
 
     /**

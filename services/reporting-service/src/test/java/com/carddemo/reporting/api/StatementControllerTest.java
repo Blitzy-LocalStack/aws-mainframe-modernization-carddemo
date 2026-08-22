@@ -15,6 +15,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.carddemo.common.CardDemoCommonAutoConfiguration;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ApiErrorSecurityHandlers;
 import com.carddemo.common.error.ClientInputException;
@@ -49,6 +50,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
@@ -70,6 +72,8 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.support.AnnotationConfigWebApplicationContext;
 import org.springframework.web.servlet.config.annotation.EnableWebMvc;
+import tools.jackson.core.StreamReadFeature;
+import tools.jackson.databind.DeserializationFeature;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
@@ -103,7 +107,7 @@ import tools.jackson.databind.json.JsonMapper;
  *
  * <h2>The labelled decision register</h2>
  *
- * <p>Ten decisions govern what this class asserts. Each is recorded once here under the label the
+ * <p>Eleven decisions govern what this class asserts. Each is recorded once here under the label the
  * user-specified explainability rule names, and each cites measured evidence rather than describing
  * it.
  *
@@ -197,6 +201,24 @@ import tools.jackson.databind.json.JsonMapper;
  * relies on the framework's, which is derived from a configured location that
  * {@code src/test/resources/application-test.yml} declares EMPTY for exactly this reason; a
  * substituted decoder is supplied instead and no case here presents a token header at all.
+ *
+ * <p>SC-11 ⚠️ Refactoring Rationale: the request body is read through the DEPLOYED reader, where this
+ * class previously read it through a bare mapper carrying only the money module. Three deployed controls
+ * were therefore unexercised at the one boundary they act on, and Jackson 3 leaves all three off by
+ * default, so the harness was strictly more permissive than any deployment: an undeclared member was
+ * discarded, a member named twice was resolved by keeping the last occurrence, and a bare number
+ * reaching a member the contract declares as a string was converted. The three are
+ * {@code spring.jackson.deserialization.fail-on-unknown-properties} at L353 and
+ * {@code spring.jackson.read.strict-duplicate-detection} at L370 of
+ * {@code services/common-lib/src/main/resources/carddemo-common-defaults.yml}, which this module's
+ * {@code application.yml} imports at its L501, and the coercion refusal
+ * {@code CardDemoCommonAutoConfiguration} publishes as a mapper-builder customiser. The customiser is
+ * applied as the production OBJECT rather than restated, so its deliberate asymmetry -- text may reach a
+ * numeric target, a number may not reach a textual one, which is what SC-08 depends on -- cannot drift
+ * apart from the deployed one. {@code OnTheDeployedRequestReader} asserts one refusal per control, and
+ * the leniency mattered here in the strongest available way: one case had sent a body carrying three
+ * undeclared members and asserted 200 with the composer invoked, so it documented the opposite of the
+ * shipped contract until this revision corrected it.
  */
 class StatementControllerTest {
 
@@ -248,17 +270,13 @@ class StatementControllerTest {
     private static final byte[] ARTIFACT_BYTES =
             "STATEMENT RECORD ONE\n".getBytes(StandardCharsets.UTF_8);
 
-    /** The whole address of the operation that answers the rows behind one statement. */
     private static final String TRANSACTIONS_ROUTE =
             StatementController.BASE_PATH + StatementController.TRANSACTIONS_PATH;
 
-    /** A well-formed selector body, so a case can turn on something other than the body's shape. */
     private static final String SELECTOR_BODY = "{\"cardNumber\":\"" + SAMPLE_CARD + "\"}";
 
-    /** The narrowed rendering of a second card, so an ordering case has two cards to order. */
     private static final String SECOND_MASKED_CARD = "************2222";
 
-    /** The identifier component of the first stubbed row, at the declared sixteen positions. */
     private static final String SAMPLE_TRANSACTION_ID = "0000000000000001";
 
     /**
@@ -271,10 +289,8 @@ class StatementControllerTest {
      */
     private static final String SECOND_TRANSACTION_ID = "0000000000000009";
 
-    /** The originating instant a stubbed row carries, at the twenty-six declared positions. */
     private static final String ORIGIN_TIMESTAMP = "2022-07-18 09:00:00.000000";
 
-    /** The processing instant a stubbed row carries, at the twenty-six declared positions. */
     private static final String PROCESSING_TIMESTAMP = "2022-07-18 09:00:01.000000";
 
     /**
@@ -282,7 +298,8 @@ class StatementControllerTest {
      *
      * <p>Assumptions: the value is derived from the whole one by removing its last two positions rather
      * than being typed independently, so it cannot drift away from the value it is a prefix of. Two is
-     * the shortfall {@code app/jcl/CREASTMT.JCL} L54 produces, recorded on this class under SC-07.</p>
+     * the shortfall the rearranging step at {@code app/jcl/CREASTMT.JCL} L54 leaves, so a caller
+     * legitimately receives a value this short.</p>
      */
     private static final String SHORT_PROCESSING_TIMESTAMP =
             PROCESSING_TIMESTAMP.substring(0, TimestampFormatter.TIMESTAMP_LENGTH - 2);
@@ -294,7 +311,6 @@ class StatementControllerTest {
     /** The declared width of the description item, from {@code app/cpy/COSTM01.CPY} L28. */
     private static final int DESCRIPTION_WIDTH = 100;
 
-    /** A description occupying every declared position, so a shortening would be visible. */
     private static final String FULL_WIDTH_DESCRIPTION = "GROCERIES ".repeat(DESCRIPTION_WIDTH / 10);
 
     /**
@@ -306,10 +322,8 @@ class StatementControllerTest {
      */
     private static final String UNRECOGNISED_AUTHORITY = "carddemo-visitor";
 
-    /** The substituted statement composer every case in this class stubs or verifies against. */
     private StatementService statements;
 
-    /** The entry point every case outside the secured group issues its requests through. */
     private MockMvc mockMvc;
 
     /**
@@ -319,18 +333,80 @@ class StatementControllerTest {
     void setUp() {
         statements = Mockito.mock(StatementService.class);
 
-        JsonMapper mapper = JsonMapper.builder().addModule(new MoneyModule()).build();
+        // WHY : Assumptions: the JSON converter reads with the FOUR controls a deployment configures on
+        //       the mapper its web layer uses, and each of the four refuses a different body. (1) The
+        //       money module, without which an amount serialises as a bare JSON number -- the encoding
+        //       SC-08 on this class records as forbidden. (2) Undeclared-member refusal, from
+        //       spring.jackson.deserialization.fail-on-unknown-properties at L353 of
+        //       services/common-lib/src/main/resources/carddemo-common-defaults.yml, which this module's
+        //       application.yml imports at its L501. (3) Duplicate-member refusal, from
+        //       spring.jackson.read.strict-duplicate-detection at L370 of that same document. (4) The
+        //       non-textual-to-textual coercion refusal CardDemoCommonAutoConfiguration publishes as a
+        //       mapper-builder customiser, applied here as the production object itself.
+        // WHY : ⚠️ Refactoring Rationale: this converter was built from a BARE mapper carrying only the
+        //       money module, so controls (2), (3) and (4) were unexercised at the only boundary they act
+        //       on. Jackson 3 leaves all three off by default, which made this harness strictly more
+        //       permissive than any deployment: an undeclared member was discarded, a member named twice
+        //       was resolved by keeping the last occurrence, and a bare number reaching a member the
+        //       contract declares as a string was converted. One case in this class had gone further than
+        //       leaving those untested -- it sent a body carrying three undeclared members and asserted
+        //       200 with the composer invoked, which is the OPPOSITE of what a deployment answers; see
+        //       OnTheSelectorContract.aSuppliedDateRangeIsRefused.
         // WHY : Assumptions: TWO converters are registered, and the resource one is not optional here.
         //       setMessageConverters REPLACES the default list, so a pipeline carrying only the JSON
         //       converter cannot write the artifact body at all and the collection cases would fail on
         //       the harness rather than on the controller. A running application registers the resource
         //       converter itself, so this restores the production shape rather than extending it.
         mockMvc = MockMvcBuilders.standaloneSetup(new StatementController(statements))
-                .setMessageConverters(new JacksonJsonHttpMessageConverter(mapper),
+                .setMessageConverters(
+                        new JacksonJsonHttpMessageConverter(deployedRequestReader()),
                         new ResourceHttpMessageConverter())
                 .setControllerAdvice(new GlobalExceptionHandler(
                         Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC)))
                 .build();
+    }
+
+    /**
+     * Assembles the mapper a deployment reads a request body with, from its four constituent controls.
+     *
+     * <p>Assumptions: the two feature keys are enabled by their framework feature names rather than read
+     * out of the configuration document, because a standalone pipeline binds no document at all. The
+     * pairing is exact: {@code spring.jackson.deserialization.fail-on-unknown-properties} is
+     * {@link DeserializationFeature#FAIL_ON_UNKNOWN_PROPERTIES} and
+     * {@code spring.jackson.read.strict-duplicate-detection} is
+     * {@link StreamReadFeature#STRICT_DUPLICATE_DETECTION}, and both are declared once for every service
+     * in {@code services/common-lib/src/main/resources/carddemo-common-defaults.yml} at L353 and L370.</p>
+     *
+     * <p>Assumptions: the coercion refusal is applied by INVOKING the production customiser rather than
+     * by restating its three coercion settings. A restatement would be a second copy of a deployed
+     * decision that stops tracking the original silently, so a future narrowing or widening of the
+     * refusal would leave these cases asserting the previous one; invoking the bean means the change
+     * arrives here on the same edit.</p>
+     *
+     * <p>Assumptions: the customiser's ASYMMETRY is load-bearing and is preserved by using it rather than
+     * reproducing it. It refuses an integer, a floating-point value and a boolean reaching a TEXTUAL
+     * target and refuses nothing in the other direction, because money crosses this surface as a JSON
+     * string read into a {@code BigDecimal} -- SC-08 on this class. A symmetric refusal, such as
+     * {@code spring.jackson.mapper.allow-coercion-of-scalars}, would take the money path down with it,
+     * which is why no case here may substitute that property for this bean.</p>
+     *
+     * <p>Alternatives Considered: obtaining the mapper from a started application context so the
+     * framework assembled it. Rejected for the reason SC-10 already records for the pipeline as a whole:
+     * this module's configuration package builds a token decoder that resolves an issuer's discovery
+     * document over the network at bean-creation time, so any context including it fails here for a
+     * reason unrelated to the controller under test.</p>
+     *
+     * @return the request reader configured as a deployment's web layer is, never {@code null}
+     */
+    private static JsonMapper deployedRequestReader() {
+        JsonMapper.Builder builder = JsonMapper.builder()
+                .addModule(new MoneyModule())
+                .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+                .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION);
+        new CardDemoCommonAutoConfiguration()
+                .carddemoRefuseNonTextualScalarsForTextTargets()
+                .customize(builder);
+        return builder.build();
     }
 
     // WHY : Assumptions: the three asserted members are the reference's own heading figures. The
@@ -347,7 +423,7 @@ class StatementControllerTest {
     @Test
     @DisplayName("the description answers the narrowed number, a quoted total and the headers")
     void theDescriptionAnswersTheNarrowedNumber() throws Exception {
-        when(statements.describe(any())).thenReturn(heading());
+        when(statements.describe(any(), any())).thenReturn(heading());
 
         mockMvc.perform(post(StatementController.BASE_PATH)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -375,17 +451,17 @@ class StatementControllerTest {
     /**
      * Asserts that the transactions operation answers the statement's rows and nothing else.
      *
-     * <p>Refactoring Rationale: the body is asserted to carry the ROWS alone, and an earlier revision
-     * asserted a body carrying the heading summary beside them. The published contract declares two
-     * operations here -- the summary above and the rows below -- so a body carrying both would be a
-     * body no deployed route serves. The heading is still asserted, by the summary case above.</p>
+     * <p>Refactoring Rationale: the body is asserted to carry the ROWS alone rather than the heading
+     * summary beside them. The published contract declares two operations here -- the summary above
+     * and the rows below -- so a body carrying both would be a body no address of this surface
+     * serves. The heading is asserted by the summary case above.</p>
      *
      * @throws Exception if the request cannot be performed
      */
     @Test
     @DisplayName("the transactions operation answers the statement's rows alone")
     void theDocumentAnswersHeadingAndLines() throws Exception {
-        when(statements.compose(any())).thenReturn(new StatementDocument(heading(), List.of(line())));
+        when(statements.compose(any(), any())).thenReturn(new StatementDocument(heading(), List.of(line())));
 
         mockMvc.perform(post(StatementController.BASE_PATH + StatementController.TRANSACTIONS_PATH)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -431,7 +507,7 @@ class StatementControllerTest {
     @Test
     @DisplayName("a bounded window reports the whole count and flags itself truncated")
     void aBoundedWindowReportsTheWholeCountAndFlagsItself() throws Exception {
-        when(statements.compose(any())).thenReturn(new StatementDocument(
+        when(statements.compose(any(), any())).thenReturn(new StatementDocument(
                 headingCounting(4211), List.of(line(), line())));
 
         mockMvc.perform(post(StatementController.BASE_PATH + StatementController.TRANSACTIONS_PATH)
@@ -471,7 +547,7 @@ class StatementControllerTest {
                 "2026-08-05 09:14:27.481903",
                 FIRST_RECORD,
                 RECORD_COUNT);
-        when(statements.compose(any())).thenReturn(new StatementDocument(empty, List.of()));
+        when(statements.compose(any(), any())).thenReturn(new StatementDocument(empty, List.of()));
 
         String body = mockMvc.perform(
                         post(StatementController.BASE_PATH + StatementController.TRANSACTIONS_PATH)
@@ -504,7 +580,7 @@ class StatementControllerTest {
     @Test
     @DisplayName("an unknown card answers 404 through the shared advice")
     void anUnknownCardAnswersNotFound() throws Exception {
-        when(statements.describe(any()))
+        when(statements.describe(any(), any()))
                 .thenThrow(new NoSuchElementException("no cross-reference row for the requested card"));
 
         mockMvc.perform(post(StatementController.BASE_PATH)
@@ -516,14 +592,14 @@ class StatementControllerTest {
                 .andExpect(jsonPath("$.status").value(404));
     }
 
-    // WHY : Refactoring Rationale: this case previously stubbed a MASKED-COLLISION refusal -- "the
-    //       requested card number masks to a rendering shared by 2 distinct cards". That refusal no
-    //       longer exists and cannot be reached: selection is an equality on the whole number performed
-    //       by a definer-rights function, which matches at most one row, so a collision has nothing to
-    //       collide on. Stubbing a message the service can no longer raise leaves a green test asserting
-    //       a contract nothing implements, so the stub is replaced with a refusal the service does
-    //       raise -- an account holding more than one card -- and the advice mapping being asserted is
-    //       unchanged.
+    // WHY : Refactoring Rationale: the stub raises a refusal the service can actually raise -- an
+    //       account holding more than one card -- rather than a MASKED-COLLISION refusal, "the
+    //       requested card number masks to a rendering shared by 2 distinct cards". No collision
+    //       refusal is reachable: selection is an equality on the whole number performed by a
+    //       definer-rights function, which matches at most one row, so a collision has nothing to
+    //       collide on. Stubbing a message the service cannot raise would leave a green test
+    //       asserting a contract nothing implements, and the advice mapping being asserted is the
+    //       same under either refusal.
     // WHY : Assumptions: an account maps to MANY cards because the cross-reference is keyed on the card
     //       -- app/cpy/CVACT03Y.cpy L5 declares XREF-CARD-NUM PIC X(16) as the leading item and its L7
     //       carries XREF-ACCT-ID PIC 9(11) as an attribute -- so an account selector can name a set the
@@ -536,7 +612,7 @@ class StatementControllerTest {
     @Test
     @DisplayName("a multi-card account answers 400 naming the account field")
     void aMultiCardAccountAnswersBadRequest() throws Exception {
-        when(statements.compose(any())).thenThrow(new ClientInputException(
+        when(statements.compose(any(), any())).thenThrow(new ClientInputException(
                 ApiError.CODE_VALIDATION, "accountId",
                 "the requested account holds more than one card, so name the card instead"));
 
@@ -573,7 +649,7 @@ class StatementControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.fieldErrors[0].field").value("cardNumber"));
 
-        verify(statements, never()).describe(any());
+        verify(statements, never()).describe(any(), any());
     }
 
     // WHY : Assumptions: sixteen positions is the whole of the field and not a ceiling --
@@ -594,7 +670,7 @@ class StatementControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.fieldErrors[0].field").value("cardNumber"));
 
-        verify(statements, never()).describe(any());
+        verify(statements, never()).describe(any(), any());
     }
 
     // WHY : Assumptions: the account case is asserted separately and with an UNPADDED value, because
@@ -618,7 +694,7 @@ class StatementControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.fieldErrors[0].field").value("accountId"));
 
-        verify(statements, never()).describe(any());
+        verify(statements, never()).describe(any(), any());
     }
 
     // WHY : Assumptions: the width alone does not settle the alphabet, because an X(16) picture holds
@@ -638,7 +714,7 @@ class StatementControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.fieldErrors[0].field").value("cardNumber"));
 
-        verify(statements, never()).describe(any());
+        verify(statements, never()).describe(any(), any());
     }
 
     // WHY : Assumptions: a value at exactly the declared width is asserted to be ADMITTED, so no case
@@ -655,14 +731,25 @@ class StatementControllerTest {
     @Test
     @DisplayName("a sixteen-digit card number is admitted and reaches the service")
     void anExactWidthCardNumberIsAdmitted() throws Exception {
-        when(statements.describe(any())).thenReturn(heading());
+        when(statements.describe(any(), any())).thenReturn(heading());
 
         mockMvc.perform(post(StatementController.BASE_PATH)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"cardNumber\":\"" + SAMPLE_CARD + "\"}"))
                 .andExpect(status().isOk());
 
-        verify(statements).describe(any());
+        // WHY : Assumptions: the audience is asserted HERE as well as in the secured group, because
+        //       this group dispatches with no chain and therefore no authentication at all -- which is
+        //       the state a handler could most easily read as "nothing to restrict". The narrowest
+        //       audience is what an absent principal must yield, and a call that reached the service is
+        //       the only place that is observable from -- which is why it is asserted on an ADMITTED
+        //       body rather than on a refused one, where the service is never reached at all.
+        ArgumentCaptor<StatementService.ArtifactAudience> audience =
+                ArgumentCaptor.forClass(StatementService.ArtifactAudience.class);
+        verify(statements).describe(any(), audience.capture());
+        assertThat(audience.getValue())
+                .as("an unauthenticated dispatch discloses nothing of the run")
+                .isEqualTo(StatementService.ArtifactAudience.CARDHOLDER);
     }
 
     // WHY : Assumptions: the refusal body is asserted to carry NEITHER the specimen number nor its
@@ -687,7 +774,7 @@ class StatementControllerTest {
         //       cross-check no longer exists and the message is replaced with the refusal the service
         //       actually raises for this request. The request still carries both selectors, because that
         //       is the shape whose refusal body is most likely to quote a card number.
-        when(statements.describe(any())).thenThrow(new ClientInputException(
+        when(statements.describe(any(), any())).thenThrow(new ClientInputException(
                 ApiError.CODE_VALIDATION, "accountId",
                 "exactly one of cardNumber and accountId must be supplied, not both"));
 
@@ -915,18 +1002,18 @@ class StatementControllerTest {
      * others, because a mapping admits methods individually and a case naming one would pass while
      * another was silently opened.</p>
      *
-     * <p>Of the four content elements the explainability rule enumerates, only Purpose applies to a
-     * type declaration, so this block carries no parameter, return or exception tag.</p>
+     * <p>This type declares no parameter, returns no value and raises nothing, so no parameter,
+     * return or exception tag applies.</p>
      */
     @Nested
     @DisplayName("on the method register of this surface")
     class OnTheMethodRegister {
 
-        // WHY : Refactoring Rationale: SC-01 on this class. The baseline statement pair is a batch
-        //       generator driven from one job step, app/jcl/CREASTMT.JCL L79, so retrieval is the only
-        //       online-equivalent operation and a mutating verb here would have no baseline analogue.
-        //       An earlier revision of this class asserted no method refusal at all, which left the
-        //       register to be inferred from the absence of a case.
+        // WHY : Assumptions: the method register of this address is asserted POSITIVELY rather than
+        //       left to the absence of a case. The baseline statement pair is a batch generator driven
+        //       from one job step -- the whole of app/cbl/CBSTM03A.CBL runs from app/jcl/CREASTMT.JCL
+        //       L79 -- so retrieval is the only online-equivalent operation and a mutating verb here
+        //       would name an operation the baseline has no analogue for.
         /**
          * Confirms a mutating verb is refused on the describing address with the shared problem shape.
          *
@@ -947,12 +1034,12 @@ class StatementControllerTest {
                     .andExpect(jsonPath("$.code").value(ApiError.CODE_METHOD_NOT_ALLOWED))
                     .andExpect(jsonPath("$.status").value(ApiError.METHOD_NOT_ALLOWED_STATUS));
 
-            verify(statements, never()).describe(any());
+            verify(statements, never()).describe(any(), any());
         }
 
-        // WHY : Refactoring Rationale: SC-01 on this class, asserted a second time because the rows
-        //       address is a SECOND address. A mapping admits methods per address, so a register proved
-        //       on one of the two would leave the other unproved while appearing to cover it.
+        // WHY : Assumptions: a mapping admits methods per ADDRESS, so the register proved on the
+        //       describing address above leaves this second one unproved. A case naming one of the two
+        //       would appear to cover both while the other was silently opened.
         // WHY : Assumptions: the rows address answers the reference's detail band, moved into place at
         //       app/cbl/CBSTM03A.CBL L676 to L678 by the one job step app/jcl/CREASTMT.JCL L79 runs, and
         //       nothing in the baseline writes a row back.
@@ -971,15 +1058,14 @@ class StatementControllerTest {
                     .andExpect(status().isMethodNotAllowed())
                     .andExpect(jsonPath("$.code").value(ApiError.CODE_METHOD_NOT_ALLOWED));
 
-            verify(statements, never()).compose(any());
+            verify(statements, never()).compose(any(), any());
         }
 
-        // WHY : Assumptions: SC-01 on this class reaches the collection address too, and here the
-        //       refused set includes the verb the other two addresses ADMIT. The program named at
-        //       app/jcl/CREASTMT.JCL L79 writes both renderings from that single step -- the datasets its
-        //       L87 to L91 and its L92 to L96 declare -- and nothing in the baseline writes a rendering
-        //       back, so collection is a read of an already-written artifact and no verb that could
-        //       replace one belongs on this address.
+        // WHY : Assumptions: on this third address the refused set includes the verb the other two
+        //       addresses ADMIT. The program named at app/jcl/CREASTMT.JCL L79 writes both renderings
+        //       from that single step -- the datasets its L87 to L91 and its L92 to L96 declare -- and
+        //       nothing in the baseline writes a rendering back, so collection is a read of an
+        //       already-written artifact and no verb that could replace one belongs on this address.
         /**
          * Confirms every verb but retrieval is refused on the artifact collection address.
          *
@@ -1006,18 +1092,20 @@ class StatementControllerTest {
      * to the absence of a case. A class that merely never sends a date range proves nothing about
      * whether one would be honoured.</p>
      *
-     * <p>Of the four content elements the explainability rule enumerates, only Purpose applies to a
-     * type declaration, so this block carries no parameter, return or exception tag.</p>
+     * <p>This type declares no parameter, returns no value and raises nothing, so no parameter,
+     * return or exception tag applies.</p>
      */
     @Nested
     @DisplayName("on the selector contract")
     class OnTheSelectorContract {
 
-        // WHY : Assumptions: SC-02 and SC-03 on this class. app/jcl/CREASTMT.JCL injects no date at all,
-        //       where app/jcl/TRANREPT.jcl L43 injects PARM-START-DATE and its L44 PARM-END-DATE and the
-        //       sort at its L47 filters on them; and app/jcl/CREASTMT.JCL L79 creates BOTH renderings in
-        //       one step, so neither is selectable. The two widths are app/cpy/COSTM01.CPY L22 and
-        //       app/cpy/CVACT01Y.cpy L5.
+        // WHY : Assumptions: the two absences are the baseline's own. app/jcl/CREASTMT.JCL injects no
+        //       date at all, where the report job app/jcl/TRANREPT.jcl L43 injects PARM-START-DATE and
+        //       its L44 PARM-END-DATE and the sort at its L47 filters on them; and app/jcl/CREASTMT.JCL
+        //       L79 creates BOTH renderings in one step, so neither is selectable and a format
+        //       component would name a choice the baseline does not offer. The two admitted components
+        //       carry the copybooks' own widths -- sixteen positions from TRNX-CARD-NUM PIC X(16) at
+        //       app/cpy/COSTM01.CPY L22 and eleven from ACCT-ID PIC 9(11) at app/cpy/CVACT01Y.cpy L5.
         /**
          * Confirms the selector declares two components and neither a date range nor an output format.
          *
@@ -1042,40 +1130,59 @@ class StatementControllerTest {
 
         // WHY : Assumptions: SC-02 on this class, asserted at the BOUNDARY rather than only over the
         //       declaration. A caller that has read app/jcl/TRANREPT.jcl L43 to L44 and expects the same
-        //       two parameters here has to learn that they narrow nothing, and the only way to show that
-        //       is to send them and read what reached the service.
+        //       two parameters here has to learn that this surface does not take them, and the only way
+        //       to show that is to send them and read what came back.
+        // WHY : ⚠️ Refactoring Rationale: this case asserted 200 WITH the composer invoked, and captured
+        //       the request to show the extra members had narrowed nothing. Both the expectation and the
+        //       rationale beneath it were wrong. The schema is CLOSED: StatementRequest declares
+        //       cardNumber and accountId and nothing else, and every deployed service reads its bodies
+        //       with spring.jackson.deserialization.fail-on-unknown-properties set true at L353 of
+        //       services/common-lib/src/main/resources/carddemo-common-defaults.yml, which this module's
+        //       application.yml imports at its L501. A deployment therefore answers 400 and composes
+        //       nothing. The old case passed only because the harness read the wire through a bare
+        //       mapper, so its claim to be showing production behaviour at the boundary was false, and
+        //       what it actually pinned was a leniency no deployment has -- the most expensive shape of
+        //       wrong test, because it would have failed the FIX rather than the defect.
+        // WHY : Assumptions: the body is KEPT exactly as it was rather than deleted with the case. A body
+        //       carrying the two range members and a format selector is precisely the mistake a caller
+        //       reading the report job would make, so it is the input worth pinning; only the answer it
+        //       is held to was wrong.
         /**
-         * Confirms a supplied date range and output format narrow nothing and never reach the service.
+         * Confirms a supplied date range and output format are refused, and compose nothing.
          *
-         * <p>Assumptions: the request that reached the collaborator is CAPTURED and inspected, because
-         * an answer of 200 alone would be equally consistent with the extra members having been honoured
-         * silently.</p>
+         * <p>Assumptions: the composer is asserted NEVER invoked rather than the request being captured
+         * and inspected. Under a closed schema there is no bound request to capture -- the body is
+         * refused while it is being read -- and "no statement was composed" is the stronger property in
+         * any case, since a captured argument would still leave open whether a statement had been
+         * assembled for a selector the caller did not send.</p>
+         *
+         * <p>Assumptions: the reflected member is {@code startDate}, the FIRST undeclared member in
+         * document order, because the reader stops at the first member it cannot bind and the shared
+         * advice reflects that one. The two members after it are equally undeclared and are deliberately
+         * not asserted, since reporting them would mean reading the body a second time with the rule
+         * relaxed.</p>
          *
          * <p>This case takes no parameter and yields no value.</p>
          *
          * @throws Exception if the request cannot be performed
          */
         @Test
-        @DisplayName("a supplied date range and output format narrow nothing")
-        void aSuppliedDateRangeNarrowsNothing() throws Exception {
-            when(statements.describe(any())).thenReturn(heading());
-            ArgumentCaptor<StatementRequest> captured =
-                    ArgumentCaptor.forClass(StatementRequest.class);
-
+        @DisplayName("a supplied date range and output format are refused, and compose nothing")
+        void aSuppliedDateRangeIsRefused() throws Exception {
             mockMvc.perform(post(StatementController.BASE_PATH)
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("{\"cardNumber\":\"" + SAMPLE_CARD + "\","
                                     + "\"startDate\":\"2022-01-01\",\"endDate\":\"2022-07-06\","
                                     + "\"format\":\"html\"}"))
-                    .andExpect(status().isOk());
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION))
+                    .andExpect(jsonPath("$.message")
+                            .value(GlobalExceptionHandler.MESSAGE_UNKNOWN_MEMBER))
+                    .andExpect(jsonPath("$.fieldErrors[0].field").value("startDate"))
+                    .andExpect(jsonPath("$.fieldErrors[0].state")
+                            .value(FieldValidationFlag.NOT_OK.name()));
 
-            verify(statements).describe(captured.capture());
-            assertThat(captured.getValue().cardNumber())
-                    .as("the card selector is the only thing the extra members left standing")
-                    .isEqualTo(SAMPLE_CARD);
-            assertThat(captured.getValue().accountId())
-                    .as("the account selector was not supplied and must not be invented")
-                    .isNull();
+            verify(statements, never()).describe(any(), any());
         }
     }
 
@@ -1086,17 +1193,18 @@ class StatementControllerTest {
      * property under assertion is that they are carried together -- two cases each asserting one would
      * be satisfied by a surface that answered with either.</p>
      *
-     * <p>Of the four content elements the explainability rule enumerates, only Purpose applies to a
-     * type declaration, so this block carries no parameter, return or exception tag.</p>
+     * <p>This type declares no parameter, returns no value and raises nothing, so no parameter,
+     * return or exception tag applies.</p>
      */
     @Nested
     @DisplayName("on the two artifact locations")
     class OnTheTwoArtifactLocations {
 
-        // WHY : Assumptions: SC-03 on this class. app/jcl/CREASTMT.JCL L79 runs one step that creates
-        //       the eighty-position plain text at L87 to L91 and the hundred-position markup at L92 to
-        //       L96, and the step at L66 deletes both first, so the pair is replaced together on every
-        //       run and a response naming one of the two would be naming half a run.
+        // WHY : Assumptions: app/jcl/CREASTMT.JCL L79 runs one step that creates the eighty-position
+        //       plain text at L87 to L91, its width declared at its L89, and the hundred-position markup
+        //       at L92 to L96, its width at its L94; the do-nothing-utility step at its L66 deletes both
+        //       first, so the pair is replaced together on every run and never appended to, and a
+        //       response naming one of the two would be naming half a run.
         /**
          * Confirms one successful description carries both artifact locations, side by side.
          *
@@ -1111,7 +1219,7 @@ class StatementControllerTest {
         @Test
         @DisplayName("one description carries both artifact locations")
         void oneDescriptionCarriesBothArtifactLocations() throws Exception {
-            when(statements.describe(any())).thenReturn(heading());
+            when(statements.describe(any(), any())).thenReturn(heading());
 
             mockMvc.perform(post(StatementController.BASE_PATH)
                             .contentType(MediaType.APPLICATION_JSON)
@@ -1125,11 +1233,13 @@ class StatementControllerTest {
                     .isNotEqualTo(MARKUP_LOCATION);
         }
 
-        // WHY : Alternatives Considered: SC-04 on this class. Returning the eighty-position or the
-        //       hundred-position rendering inline under a negotiated type was the rejected alternative:
-        //       it would put fixed-width emission in this layer, which belongs to
-        //       com.carddemo.reporting.mapper, and would make two renderings that
-        //       app/jcl/CREASTMT.JCL L79 always produces together look mutually exclusive.
+        // WHY : Alternatives Considered: returning the eighty-position or the hundred-position rendering
+        //       inline under a negotiated type, so that one address served both the summary and the
+        //       document. Rejected on two counts: it would put fixed-width byte emission in this layer,
+        //       which belongs to com.carddemo.reporting.mapper and to nothing else, and since one
+        //       response carries one representation it would make two renderings that
+        //       app/jcl/CREASTMT.JCL L79 always produces together look mutually exclusive. The two are
+        //       therefore carried side by side as LOCATIONS in one JSON body.
         /**
          * Confirms naming a renderable type does not switch either describing operation's payload.
          *
@@ -1160,11 +1270,11 @@ class StatementControllerTest {
                     .andExpect(status().isNotAcceptable())
                     .andExpect(jsonPath("$.code").value(GlobalExceptionHandler.CODE_NOT_ACCEPTABLE));
 
-            verify(statements, never()).describe(any());
-            verify(statements, never()).compose(any());
+            verify(statements, never()).describe(any(), any());
+            verify(statements, never()).compose(any(), any());
         }
 
-        // WHY : Assumptions: SC-04 on this class, its admitted half. A case proving only that a
+        // WHY : Assumptions: the admitted half of the same negotiation rule. A case proving only that a
         //       renderable type is refused would be satisfied by a surface that produced nothing at all,
         //       so the type it DOES produce is asserted on the same address.
         // WHY : Assumptions: the two renderings the reference produces are datasets --
@@ -1181,7 +1291,7 @@ class StatementControllerTest {
         @Test
         @DisplayName("the describing operation answers structured data")
         void theDescribingOperationAnswersStructuredData() throws Exception {
-            when(statements.describe(any())).thenReturn(heading());
+            when(statements.describe(any(), any())).thenReturn(heading());
 
             mockMvc.perform(post(StatementController.BASE_PATH)
                             .contentType(MediaType.APPLICATION_JSON)
@@ -1199,17 +1309,18 @@ class StatementControllerTest {
      * whole body against a literal, because a whole-body comparison fails on any change and therefore
      * says nothing about which part of the contract moved.</p>
      *
-     * <p>Of the four content elements the explainability rule enumerates, only Purpose applies to a
-     * type declaration, so this block carries no parameter, return or exception tag.</p>
+     * <p>This type declares no parameter, returns no value and raises nothing, so no parameter,
+     * return or exception tag applies.</p>
      */
     @Nested
     @DisplayName("on the row contract")
     class OnTheRowContract {
 
-        // WHY : Assumptions: SC-09 on this class. app/cpy/COSTM01.CPY declares thirteen elementary named
-        //       items between its L22 and its L35, gathered under the two group items at its L21 and its
-        //       L24, and closes with a twenty-position padding item at its L36 that pads the record to
-        //       350 positions and carries no data. The padding is dropped and the drop is recorded here.
+        // WHY : Assumptions: app/cpy/COSTM01.CPY declares thirteen elementary named items between its
+        //       L22 and its L35, gathered under the two group items at its L21 and its L24, and closes
+        //       with a twenty-position padding item at its L36 that pads the record to 350 positions and
+        //       carries no data. The padding is dropped and the drop is recorded here, which leaves those
+        //       thirteen items as the thirteen components of the response record.
         /**
          * Confirms the row declares the thirteen named record items and no padding component.
          *
@@ -1230,20 +1341,20 @@ class StatementControllerTest {
                     .noneMatch(name -> name.toLowerCase(Locale.ROOT).contains("filler"));
         }
 
-        // WHY : Assumptions: SC-09 on this class, its rendered half. Every one of the thirteen is
-        //       asserted PRESENT in a body, because a declared component that the serialiser withheld
-        //       would still satisfy the declaration assertion above while reaching no caller.
-        // WHY : Assumptions: the thirteen are the elementary named items app/cpy/COSTM01.CPY declares
-        //       between its L22 and its L35, gathered under the group items at its L21 and its L24.
+        // WHY : Assumptions: the same thirteen items of app/cpy/COSTM01.CPY are asserted PRESENT in a
+        //       rendered body as well, because a declared component that the serialiser withheld would
+        //       still satisfy the declaration assertion above while reaching no caller.
         /**
          * Confirms every one of the thirteen components reaches the caller in a rendered row.
+         *
+         * <p>This case takes no parameter and yields no value.</p>
          *
          * @throws Exception if the request cannot be performed
          */
         @Test
         @DisplayName("every one of the thirteen components reaches the caller")
         void everyOneOfTheThirteenComponentsReachesTheCaller() throws Exception {
-            when(statements.compose(any()))
+            when(statements.compose(any(), any()))
                     .thenReturn(new StatementDocument(heading(), List.of(line())));
 
             mockMvc.perform(post(TRANSACTIONS_ROUTE)
@@ -1267,7 +1378,7 @@ class StatementControllerTest {
                     .andExpect(jsonPath("$.items[0].filler").doesNotExist());
         }
 
-        // WHY : Assumptions: SC-05 on this class. app/cpy/COSTM01.CPY declares TRNX-KEY at its L21 as
+        // WHY : Assumptions: app/cpy/COSTM01.CPY declares TRNX-KEY at its L21 as
         //       TRNX-CARD-NUM PIC X(16) at its L22 followed by TRNX-ID PIC X(16) at its L23 -- a
         //       thirty-two-position composite with the card number leading -- and app/jcl/CREASTMT.JCL
         //       L53 sorts FIELDS=(263,16,CH,A,1,16,CH,A), the card number at position 263 then the
@@ -1293,7 +1404,7 @@ class StatementControllerTest {
                     "GROCERIES", PROCESSING_TIMESTAMP);
             StatementTransactionResponse trailing = lineOf(SECOND_MASKED_CARD,
                     SAMPLE_TRANSACTION_ID, "GROCERIES", PROCESSING_TIMESTAMP);
-            when(statements.compose(any())).thenReturn(
+            when(statements.compose(any(), any())).thenReturn(
                     new StatementDocument(headingCounting(2), List.of(leading, trailing)));
 
             mockMvc.perform(post(TRANSACTIONS_ROUTE)
@@ -1315,10 +1426,13 @@ class StatementControllerTest {
                     .isPositive();
         }
 
-        // WHY : Trade-offs: SC-06 on this class. The set is closed by the statement's own period, so the
-        //       body publishes the FACT of its ceiling rather than a boundary token for stepping past
-        //       one; where this migration does walk a sequence it walks it by key, because a scheme
-        //       addressing rows by ordinal position skips and repeats rows under concurrent inserts.
+        // WHY : Trade-offs: the set is closed by the statement's own period, so the body publishes the
+        //       FACT of its ceiling rather than a boundary token for stepping past one; where this
+        //       migration does walk a sequence it walks it by key, because a scheme addressing rows by
+        //       ordinal position skips and repeats rows under concurrent inserts. What is given up is
+        //       retrieving an exceptionally long history through this operation; what is bought is that
+        //       no caller is handed a page boundary this surface cannot honour, and a caller needing
+        //       every row collects the rendered artifact, which carries no ceiling.
         // WHY : Assumptions: the reference reaches its rows by walking the cross-reference inside a
         //       batch job -- app/cbl/CBSTM03A.CBL L319 performing the get-next paragraph at its L345 --
         //       and published no walkable sequence to any caller, so there is no boundary token to carry
@@ -1341,7 +1455,7 @@ class StatementControllerTest {
                     .as("the rows, the card's whole count and whether the window was capped")
                     .containsExactly("items", "transactionCount", "truncated");
 
-            when(statements.compose(any())).thenReturn(
+            when(statements.compose(any(), any())).thenReturn(
                     new StatementDocument(headingCounting(4211), List.of(line(), line())));
 
             mockMvc.perform(post(TRANSACTIONS_ROUTE)
@@ -1357,11 +1471,11 @@ class StatementControllerTest {
                     .andExpect(jsonPath("$.hasNext").doesNotExist());
         }
 
-        // WHY : Assumptions: SC-09 on this class, its truncation half. Only three of the thirteen items
-        //       reach the plain-text detail band -- app/cbl/CBSTM03A.CBL L676 to L678 move the
-        //       identifier, the description and the amount -- and its L677 moves the hundred-position
-        //       description into ST-TRANDT PIC X(49) at its L135. That shortening belongs to
-        //       com.carddemo.reporting.mapper, so this layer must hand the whole value through.
+        // WHY : Assumptions: only three of the thirteen items reach the plain-text detail band --
+        //       app/cbl/CBSTM03A.CBL L676 to L678 move the identifier, the description and the amount --
+        //       and its L677 moves the hundred-position description into ST-TRANDT PIC X(49) at its
+        //       L135. That shortening belongs to com.carddemo.reporting.mapper, so this layer must hand
+        //       the whole value through.
         /**
          * Confirms a description occupying every declared position survives transport unshortened.
          *
@@ -1372,7 +1486,7 @@ class StatementControllerTest {
         @Test
         @DisplayName("a full-width description survives transport unshortened")
         void aFullWidthDescriptionSurvivesTransportUnshortened() throws Exception {
-            when(statements.compose(any())).thenReturn(new StatementDocument(heading(),
+            when(statements.compose(any(), any())).thenReturn(new StatementDocument(heading(),
                     List.of(lineOf(MASKED_CARD, SAMPLE_TRANSACTION_ID, FULL_WIDTH_DESCRIPTION,
                             PROCESSING_TIMESTAMP))));
 
@@ -1392,19 +1506,21 @@ class StatementControllerTest {
      * Groups the cases that hold both timestamps to opaque strings of their declared width.
      *
      * <p>Assumptions: a timestamp is treated as TEXT throughout this surface, so the cases assert its
-     * characters rather than an instant it might denote. Nothing in this class calls a parsing routine
-     * on one, and SC-07 records why.</p>
+     * characters rather than an instant it might denote. Nothing in this class calls
+     * {@link com.carddemo.common.time.TimestampFormatter#parse(String)} on one, because a legitimate
+     * value can arrive two positions short of its declared width or wholly blank and a strict parse of
+     * either would fail; the cases below carry the measured evidence for both shapes.</p>
      *
-     * <p>Of the four content elements the explainability rule enumerates, only Purpose applies to a
-     * type declaration, so this block carries no parameter, return or exception tag.</p>
+     * <p>This type declares no parameter, returns no value and raises nothing, so no parameter,
+     * return or exception tag applies.</p>
      */
     @Nested
     @DisplayName("on the two opaque timestamps")
     class OnTheTwoOpaqueTimestamps {
 
-        // WHY : Assumptions: SC-07 on this class. app/cpy/COSTM01.CPY declares TRNX-ORIG-TS PIC X(26) at
-        //       its L34 and TRNX-PROC-TS PIC X(26) at its L35, both character items, and the shared
-        //       kernel's own declared width agrees at twenty-six.
+        // WHY : Assumptions: app/cpy/COSTM01.CPY declares TRNX-ORIG-TS PIC X(26) at its L34 and
+        //       TRNX-PROC-TS PIC X(26) at its L35, both character items, and the shared kernel's own
+        //       declared width agrees at twenty-six.
         /**
          * Confirms both timestamps arrive as strings at the declared twenty-six positions.
          *
@@ -1420,7 +1536,7 @@ class StatementControllerTest {
         @Test
         @DisplayName("both timestamps arrive as strings at their declared width")
         void bothTimestampsArriveAsStringsAtTheirDeclaredWidth() throws Exception {
-            when(statements.compose(any()))
+            when(statements.compose(any(), any()))
                     .thenReturn(new StatementDocument(heading(), List.of(line())));
 
             mockMvc.perform(post(TRANSACTIONS_ROUTE)
@@ -1437,11 +1553,11 @@ class StatementControllerTest {
             assertThat(PROCESSING_TIMESTAMP).hasSize(TimestampFormatter.TIMESTAMP_LENGTH);
         }
 
-        // WHY : Assumptions: SC-07 on this class, its measured half. app/jcl/CREASTMT.JCL L54 rearranges
-        //       the record with OUTREC FIELDS=(1:263,16,17:1,262,279:279,50), writing 16 plus 262 plus 50
-        //       equals 328 of the 350 positions; the last group copies input 279 to 328, which is all
-        //       twenty-six positions of TRNX-ORIG-TS and only the first twenty-four of the twenty-six of
-        //       TRNX-PROC-TS. A caller therefore legitimately receives a short value.
+        // WHY : Assumptions: app/jcl/CREASTMT.JCL L54 rearranges the record with OUTREC
+        //       FIELDS=(1:263,16,17:1,262,279:279,50), writing 16 plus 262 plus 50 equals 328 of the 350
+        //       positions; the last group copies input 279 to 328, which is all twenty-six positions of
+        //       TRNX-ORIG-TS and only the first twenty-four of the twenty-six of TRNX-PROC-TS. A caller
+        //       therefore legitimately receives a short value.
         /**
          * Confirms a processing timestamp two positions short of its width arrives unchanged.
          *
@@ -1457,7 +1573,7 @@ class StatementControllerTest {
         @Test
         @DisplayName("a short processing timestamp arrives unchanged and unparsed")
         void aShortProcessingTimestampArrivesUnchanged() throws Exception {
-            when(statements.compose(any())).thenReturn(new StatementDocument(heading(),
+            when(statements.compose(any(), any())).thenReturn(new StatementDocument(heading(),
                     List.of(lineOf(MASKED_CARD, SAMPLE_TRANSACTION_ID, "GROCERIES",
                             SHORT_PROCESSING_TIMESTAMP))));
 
@@ -1474,11 +1590,11 @@ class StatementControllerTest {
                     .hasSize(TimestampFormatter.TIMESTAMP_LENGTH - 2);
         }
 
-        // WHY : Assumptions: SC-07 on this class, and the distinction app/cpy/CVCRD01Y.cpy L30 draws. Its
-        //       88 CCARD-RETURN-MSG-OFF VALUE LOW-VALUES attaches to CCARD-RETURN-MSG at its L29 and NOT
-        //       to CCARD-ERROR-MSG at its L28, so the baseline itself holds a never-set field apart from
-        //       a blank one. The target keeps them apart the same way: absent renders as a null member
-        //       and blank renders as a present string of blanks.
+        // WHY : Assumptions: the distinction app/cpy/CVCRD01Y.cpy L30 draws. Its 88
+        //       CCARD-RETURN-MSG-OFF VALUE LOW-VALUES attaches to CCARD-RETURN-MSG at its L29 and NOT to
+        //       CCARD-ERROR-MSG at its L28, so the baseline itself holds a never-set field apart from a
+        //       blank one. The target keeps them apart the same way: absent renders as a null member and
+        //       blank renders as a present string of blanks.
         /**
          * Confirms a blank timestamp and an absent one are rendered differently, never collapsed.
          *
@@ -1498,7 +1614,7 @@ class StatementControllerTest {
             //       consecutive answers on one stubbing keep both shapes visible in one statement, and a
             //       reset additionally clears the interaction record the never-verifications elsewhere in
             //       this class depend on -- a habit that reads harmlessly here and does not stay harmless.
-            when(statements.compose(any())).thenReturn(
+            when(statements.compose(any(), any())).thenReturn(
                     new StatementDocument(heading(), List.of(lineOf(MASKED_CARD,
                             SAMPLE_TRANSACTION_ID, "GROCERIES", BLANK_PROCESSING_TIMESTAMP))),
                     new StatementDocument(heading(), List.of(lineOf(MASKED_CARD,
@@ -1539,16 +1655,20 @@ class StatementControllerTest {
      * rather than of any handler decision, and both are asserted on both describing operations for the
      * same reason -- a rule proved on one body says nothing about the other.</p>
      *
-     * <p>Of the four content elements the explainability rule enumerates, only Purpose applies to a
-     * type declaration, so this block carries no parameter, return or exception tag.</p>
+     * <p>This type declares no parameter, returns no value and raises nothing, so no parameter,
+     * return or exception tag applies.</p>
      */
     @Nested
     @DisplayName("on money rendering and disclosure")
     class OnMoneyRenderingAndDisclosure {
 
-        // WHY : Assumptions: SC-08 on this class. TRNX-AMT PIC S9(09)V99 at app/cpy/COSTM01.CPY L29 is
-        //       exact fixed point, and a JSON number is parsed into IEEE-754 binary floating point by
-        //       most clients, which destroys that exactness at the boundary the user actually sees.
+        // WHY : Assumptions: TRNX-AMT PIC S9(09)V99 at app/cpy/COSTM01.CPY L29 is exact fixed point, and
+        //       a JSON number is parsed into IEEE-754 binary floating point by most clients, which
+        //       destroys that exactness at the boundary the user actually sees. The mechanism is
+        //       MoneyModule: setUp registers it on this pipeline's converter by hand, where a deployment
+        //       receives it as the codec-module bean the shared kernel's auto-configuration contributes
+        //       at com.carddemo.common.CardDemoCommonAutoConfiguration L265 to L276 -- which is why a
+        //       case here can assert the string form at all.
         /**
          * Confirms both monetary members are rendered as quoted text and never as JSON numbers.
          *
@@ -1564,8 +1684,8 @@ class StatementControllerTest {
         @Test
         @DisplayName("both monetary members are rendered as quoted text")
         void bothMonetaryMembersAreRenderedAsQuotedText() throws Exception {
-            when(statements.describe(any())).thenReturn(heading());
-            when(statements.compose(any()))
+            when(statements.describe(any(), any())).thenReturn(heading());
+            when(statements.compose(any(), any()))
                     .thenReturn(new StatementDocument(heading(), List.of(line())));
 
             String summary = mockMvc.perform(post(StatementController.BASE_PATH)
@@ -1615,8 +1735,8 @@ class StatementControllerTest {
         @Test
         @DisplayName("neither body carries a whole card number or an identity number")
         void neitherBodyCarriesAWholeCardNumber() throws Exception {
-            when(statements.describe(any())).thenReturn(heading());
-            when(statements.compose(any()))
+            when(statements.describe(any(), any())).thenReturn(heading());
+            when(statements.compose(any(), any()))
                     .thenReturn(new StatementDocument(heading(), List.of(line())));
 
             String summary = mockMvc.perform(post(StatementController.BASE_PATH)
@@ -1655,8 +1775,8 @@ class StatementControllerTest {
      * there is no remembered turn for a refusal to depend on. Every case here therefore issues ONE
      * request and expects the whole answer from it.</p>
      *
-     * <p>Of the four content elements the explainability rule enumerates, only Purpose applies to a
-     * type declaration, so this block carries no parameter, return or exception tag.</p>
+     * <p>This type declares no parameter, returns no value and raises nothing, so no parameter,
+     * return or exception tag applies.</p>
      */
     @Nested
     @DisplayName("on the shape of a refusal")
@@ -1688,7 +1808,7 @@ class StatementControllerTest {
                     .andExpect(jsonPath("$.fieldErrors[0].field").value("cardNumber"))
                     .andExpect(jsonPath("$.fieldErrors[0].state").value("NOT_OK"));
 
-            verify(statements, never()).describe(any());
+            verify(statements, never()).describe(any(), any());
         }
 
         // WHY : Assumptions: app/cpy/CVCRD01Y.cpy L30 attaches its 88 CCARD-RETURN-MSG-OFF VALUE
@@ -1711,7 +1831,7 @@ class StatementControllerTest {
         @Test
         @DisplayName("a never-supplied selector and a malformed one carry different field states")
         void aNeverSuppliedSelectorAndAMalformedOneDiffer() throws Exception {
-            when(statements.describe(any())).thenThrow(new ClientInputException(
+            when(statements.describe(any(), any())).thenThrow(new ClientInputException(
                     ApiError.CODE_VALIDATION, "cardNumber", FieldValidationFlag.BLANK,
                     "exactly one of cardNumber and accountId must be supplied, not neither"));
 
@@ -1737,7 +1857,7 @@ class StatementControllerTest {
         }
 
         // WHY : Assumptions: the machine-readable code and the human sentence are separate members of the
-        //       published problem shape, and the baseline's own message fields carry no code -- 
+        //       published problem shape, and the baseline's own message fields carry no code --
         //       CCARD-ERROR-MSG PIC X(75) at app/cpy/CVCRD01Y.cpy L28 is seventy-five positions of
         //       sentence. Interpolating the code into the sentence would spend part of that width on a
         //       token no reader of the sentence needs.
@@ -1751,7 +1871,7 @@ class StatementControllerTest {
         @Test
         @DisplayName("the machine code sits in its own member")
         void theMachineCodeSitsInItsOwnMember() throws Exception {
-            when(statements.describe(any()))
+            when(statements.describe(any(), any()))
                     .thenThrow(new NoSuchElementException("no cross-reference row for that card"));
 
             String body = mockMvc.perform(post(StatementController.BASE_PATH)
@@ -1790,7 +1910,7 @@ class StatementControllerTest {
         @Test
         @DisplayName("a not-found refusal discloses no internal detail")
         void aNotFoundRefusalDisclosesNoInternalDetail() throws Exception {
-            when(statements.describe(any()))
+            when(statements.describe(any(), any()))
                     .thenThrow(new NoSuchElementException("no cross-reference row for that card"));
 
             String body = mockMvc.perform(post(StatementController.BASE_PATH)
@@ -1814,6 +1934,167 @@ class StatementControllerTest {
     }
 
     /**
+     * Groups the cases that hold this boundary to the request reader a deployment configures.
+     *
+     * <p>Assumptions: every body here is assembled as RAW TEXT rather than serialised from
+     * {@link StatementRequest}, and that is the mechanism of the group rather than a stylistic choice. A
+     * member the record does not declare, a member written twice and a scalar of the wrong JSON type are
+     * all shapes the writer cannot emit, so a case built by serialising an object would send the
+     * canonical form and assert that the canonical form is accepted.</p>
+     *
+     * <p>Assumptions: each case also asserts the composer was NEVER invoked, because what is under
+     * assertion is that the refusal happens while the body is being READ. A 400 alone would be equally
+     * consistent with a body that bound successfully and was then refused by a constraint on the selector
+     * -- a different control arriving at the same status, and one {@code OnTheShapeOfARefusal} already
+     * covers.</p>
+     *
+     * <p>Assumptions: no case here asserts that a conforming body still reads, because every other case
+     * in this class now does -- all of them bind through the same reader, so a control configured too
+     * broadly would fail them rather than pass unnoticed.</p>
+     *
+     * <p>Of the four content elements the explainability rule enumerates, only Purpose applies to a
+     * type declaration, so this block carries no parameter, return or exception tag.</p>
+     */
+    @Nested
+    @DisplayName("on the deployed request reader")
+    class OnTheDeployedRequestReader {
+
+        // WHY : Assumptions: the undeclared member sent is a MISSPELLING of a declared one rather than an
+        //       obviously foreign member, because that is the shape the leniency was expensive on. Under
+        //       the reader's default `cardNumbers` was discarded and the card number it carried went with
+        //       it, so a body naming exactly one selector arrived naming none -- and the refusal that
+        //       followed complained that no selector had been supplied, which is a true sentence about a
+        //       request the caller never sent. The obviously foreign shape is covered by
+        //       OnTheSelectorContract, whose body carries a date range and a format selector.
+        /**
+         * Confirms a misspelled member is refused and named, rather than discarded.
+         *
+         * <p>Assumptions: the reflected member NAME is asserted, not merely the status, because naming it
+         * is the whole value of separating this arm from the generic parse refusal: a caller whose member
+         * differs from a declared one by a single character has to be told which member to correct.</p>
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("a misspelled member is refused and named")
+        void aMisspelledMemberIsRefusedAndNamed() throws Exception {
+            mockMvc.perform(post(StatementController.BASE_PATH)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"cardNumbers\":\"" + SAMPLE_CARD + "\"}"))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION))
+                    .andExpect(jsonPath("$.message")
+                            .value(GlobalExceptionHandler.MESSAGE_UNKNOWN_MEMBER))
+                    .andExpect(jsonPath("$.fieldErrors[0].field").value("cardNumbers"))
+                    .andExpect(jsonPath("$.fieldErrors[0].state")
+                            .value(FieldValidationFlag.NOT_OK.name()))
+                    .andExpect(jsonPath("$.fieldErrors[0].message")
+                            .value(GlobalExceptionHandler.MESSAGE_UNKNOWN_MEMBER));
+
+            verify(statements, never()).describe(any(), any());
+        }
+
+        // WHY : Assumptions: the two occurrences carry DIFFERENT cards, and that pairing is what makes
+        //       the case meaningful. A reader resolving the ambiguity by keeping the last occurrence would
+        //       answer 200 describing the second card while the caller reading its own request back saw
+        //       the first -- and a statement is a disclosure of one cardholder's transactions, so
+        //       answering about the wrong card is the whole of the harm. A duplicate carrying one value
+        //       twice would be refused identically and would prove nothing about what the leniency costs.
+        /**
+         * Confirms a member named twice is refused rather than resolved by position.
+         *
+         * <p>Assumptions: the generic malformed-request sentence is asserted with an EMPTY field array,
+         * because a duplicate is a streaming failure rather than a binding failure -- the reader stops
+         * before any member is bound, so there is no member to attribute the refusal to and inventing one
+         * would name a field that is present and well formed.</p>
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("a member named twice is refused rather than resolved by position")
+        void aMemberNamedTwiceIsRefused() throws Exception {
+            mockMvc.perform(post(StatementController.BASE_PATH)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"cardNumber\":\"" + SAMPLE_CARD + "\","
+                                    + "\"cardNumber\":\"4111111111112222\"}"))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION))
+                    .andExpect(jsonPath("$.message")
+                            .value(GlobalExceptionHandler.MESSAGE_MALFORMED_REQUEST))
+                    .andExpect(jsonPath("$.fieldErrors", org.hamcrest.Matchers.hasSize(0)));
+
+            verify(statements, never()).describe(any(), any());
+        }
+
+        // WHY : Assumptions: the integer token is the SPECIMEN CARD's own digits, so it converts into a
+        //       value that satisfies both constraints on the member -- the sixteen-position width from
+        //       TRNX-CARD-NUM PIC X(16) at app/cpy/COSTM01.CPY L22 and the digits-only pattern. That is
+        //       what makes the leniency undetectable and the case worth having: a number converting into
+        //       something the constraints refuse would answer 400 either way and would pass against an
+        //       unconfigured reader.
+        // WHY : Assumptions: the three tokens are one per input shape the deployed customiser names --
+        //       integer, floating point and boolean -- rather than a representative one, because the
+        //       three are configured as three separate coercion entries and a refusal could be lost from
+        //       any one of them independently. The malformed-request sentence is what separates the two
+        //       weaker tokens from a validation refusal: a float or a boolean converts into a value the
+        //       constraints reject, so an unconfigured reader would also answer 400 -- but it would answer
+        //       with a per-field entry naming the selector rather than with a body that could not be read.
+        /**
+         * Confirms an integer, a floating-point value and a boolean are each refused for a string member.
+         *
+         * @param scalar the raw JSON token to place where the request declares a character member, of
+         *     type {@link String}; it is written into the body verbatim and unquoted, so it arrives as a
+         *     JSON number or a JSON boolean rather than as text
+         * @throws Exception if the request cannot be performed
+         */
+        @ParameterizedTest(name = "scalar={0}")
+        @ValueSource(strings = {"4111111111111111", "4111111111111111.0", "true"})
+        @DisplayName("a non-textual scalar is refused for a member the contract declares as a string")
+        void aNonTextualScalarIsRefusedForAStringMember(String scalar) throws Exception {
+            mockMvc.perform(post(StatementController.BASE_PATH)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"cardNumber\":" + scalar + "}"))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION))
+                    .andExpect(jsonPath("$.message")
+                            .value(GlobalExceptionHandler.MESSAGE_MALFORMED_REQUEST))
+                    .andExpect(jsonPath("$.fieldErrors", org.hamcrest.Matchers.hasSize(0)));
+
+            verify(statements, never()).describe(any(), any());
+        }
+
+        // WHY : Assumptions: the transactions address is exercised as well as the description address,
+        //       because the two handlers bind the SAME record through the same converter and a reader
+        //       control lost from the pipeline would be lost from both -- but a group that only ever sent
+        //       one address could not tell the difference between a control that is configured and a
+        //       handler that happens to refuse. One refusal on the second address is what closes that.
+        /**
+         * Confirms the second address of this surface reads with the same closed schema.
+         *
+         * <p>Assumptions: the undeclared member is asserted by NAME here too rather than by status alone,
+         * because the two addresses publish the same problem shape and a divergence between them would be
+         * a caller-visible inconsistency in the one member a client acts on.</p>
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("the transactions address reads with the same closed schema")
+        void theTransactionsAddressReadsWithTheSameClosedSchema() throws Exception {
+            mockMvc.perform(post(TRANSACTIONS_ROUTE)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"cardNumber\":\"" + SAMPLE_CARD + "\","
+                                    + "\"pageSize\":\"50\"}"))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.code").value(ApiError.CODE_VALIDATION))
+                    .andExpect(jsonPath("$.message")
+                            .value(GlobalExceptionHandler.MESSAGE_UNKNOWN_MEMBER))
+                    .andExpect(jsonPath("$.fieldErrors[0].field").value("pageSize"));
+
+            verify(statements, never()).compose(any(), any());
+        }
+    }
+
+    /**
      * Assembles a web context carrying the DEPLOYED filter chain in front of this handler.
      *
      * <p>Alternatives Considered: substituting the chain's authorization decision and installing it by
@@ -1823,20 +2104,21 @@ class StatementControllerTest {
      * Registering the deployed configuration means the group answers for the chain a deployment runs
      * rather than for a reconstruction of it.</p>
      *
-     * <p>Alternatives Considered: SC-10 on this class -- registering this module's token-decoder
-     * configuration so the chain resolves a decoder the way a deployment does. Rejected because that
-     * class builds its decoder eagerly from the configured location's discovery document, so registering
-     * it would reach the network from a unit case, and because the location it would read is one this
-     * repository must never carry a credential for. A substituted decoder is supplied instead and no case
-     * here presents a token header at all.</p>
+     * <p>Alternatives Considered: registering this module's token-decoder configuration so the chain
+     * resolves a decoder the way a deployment does. Rejected because that class builds its decoder
+     * eagerly from the configured location's discovery document, so registering it would reach the
+     * network from a unit case, and because the location it would read is one this repository must never
+     * carry a credential for. {@code src/test/resources/application-test.yml} declares that location
+     * EMPTY for the same reason; a substituted decoder is supplied instead and no case here presents a
+     * token header at all.</p>
      *
      * <p>Assumptions: the two group names are passed to the deployed converter factory rather than
      * spelled here. That factory compares what it is given against its own compiled constants and
      * refuses to start on a mismatch, which is what keeps this slice's authority derivation identical to
      * a deployment's rather than merely similar to it.</p>
      *
-     * <p>Of the four content elements the explainability rule enumerates, only Purpose applies to a type
-     * declaration, so this block carries no parameter, return or exception tag.</p>
+     * <p>This type declares no parameter, returns no value and raises nothing, so no parameter,
+     * return or exception tag applies.</p>
      */
     @Configuration(proxyBeanMethods = false)
     @EnableWebMvc
@@ -1939,8 +2221,8 @@ class StatementControllerTest {
      * at all; the payload assertions live in the groups above, where the money-aware converter is
      * registered.</p>
      *
-     * <p>Of the four content elements the explainability rule enumerates, only Purpose applies to a type
-     * declaration, so this block carries no parameter, return or exception tag.</p>
+     * <p>This type declares no parameter, returns no value and raises nothing, so no parameter,
+     * return or exception tag applies.</p>
      */
     @Nested
     @DisplayName("on the group-claim guard")
@@ -2008,7 +2290,7 @@ class StatementControllerTest {
         @ValueSource(strings = {JwtRoleConverter.ADMIN_AUTHORITY, JwtRoleConverter.USER_AUTHORITY})
         @DisplayName("either group authority reaches the rows operation")
         void eitherGroupAuthorityReachesTheRowsOperation(String authority) throws Exception {
-            when(securedStatements.compose(any()))
+            when(securedStatements.compose(any(), any()))
                     .thenReturn(new StatementDocument(headingCounting(0), List.of()));
 
             securedMvc.perform(post(TRANSACTIONS_ROUTE)
@@ -2018,26 +2300,94 @@ class StatementControllerTest {
                     .andExpect(status().isOk());
         }
 
-        // WHY : Assumptions: the artifact collection is exercised as well as the rows, because the chain
-        //       authorises by ADDRESS and the two are two addresses. app/csd/CARDDEMO.CSD grants the
-        //       reporting transactions to every admitted user kind of app/cpy/COCOM01Y.cpy L27 and L28, so
-        //       each address this surface publishes is reachable by an admitted caller.
+        // WHY : Refactoring Rationale: this case USED to admit the ordinary group authority here, and a
+        //       review found what that granted. The object this address streams is the run-wide
+        //       statement artifact -- every cardholder in the portfolio, in one file -- so admitting it
+        //       to the same authority as a per-card read let any caller entitled to one statement
+        //       collect them all. The address is now the one business address of this surface restricted
+        //       to the administrative group, and the case is kept as the grant half of that rule.
+        // WHY : Assumptions: the artifact collection is exercised separately from the rows, because the
+        //       chain authorises by ADDRESS and the two are two addresses. app/csd/CARDDEMO.CSD grants
+        //       the reporting transactions to every admitted user kind of app/cpy/COCOM01Y.cpy L27 and
+        //       L28, and the per-card addresses of this surface still are; this one is not, because the
+        //       reference has no counterpart to a file of every cardholder's statement.
         /**
-         * Confirms an admitted caller reaches the artifact collection as well.
+         * Confirms the administrative authority reaches the artifact collection.
+         *
+         * <p>This case takes no parameter and yields no value.</p>
          *
          * @throws Exception if the request cannot be performed
          */
         @Test
-        @DisplayName("an admitted caller reaches the artifact collection")
-        void anAdmittedCallerReachesTheArtifactCollection() throws Exception {
+        @DisplayName("the administrative authority reaches the artifact collection")
+        void theAdministrativeAuthorityReachesTheArtifactCollection() throws Exception {
             when(securedStatements.collectArtifact(SELECTOR)).thenReturn(
                     new ArtifactStore.OpenArtifact(ARTIFACT_BYTES.length,
                             new ByteArrayInputStream(ARTIFACT_BYTES)));
 
             securedMvc.perform(get(PLAIN_TEXT_LOCATION)
                             .with(jwt().authorities(new SimpleGrantedAuthority(
-                                    JwtRoleConverter.USER_AUTHORITY))))
+                                    JwtRoleConverter.ADMIN_AUTHORITY))))
                     .andExpect(status().isOk());
+        }
+
+        // WHY : Refactoring Rationale: this is the refusal half of the same rule and the case the
+        //       retired chain could not have passed. The caller here is an ADMITTED business caller --
+        //       it holds the ordinary group authority and reaches every per-card address of this
+        //       surface -- so the refusal turns on the address alone, which is the only thing that
+        //       distinguishes a per-card statement from the whole portfolio's.
+        /**
+         * Confirms the ordinary group authority is refused the artifact collection.
+         *
+         * <p>Assumptions: the service is asserted never consulted as well as the answer being a
+         * refusal, because a refusal rendered after the object was opened would have already streamed
+         * the bytes it was supposed to withhold -- and a chain that authorised inside the handler
+         * instead of in front of it would fail exactly here.</p>
+         *
+         * @throws Exception if the request cannot be performed
+         */
+        @Test
+        @DisplayName("the ordinary group authority is refused the artifact collection")
+        void theOrdinaryAuthorityIsRefusedTheArtifactCollection() throws Exception {
+            securedMvc.perform(get(PLAIN_TEXT_LOCATION)
+                            .with(jwt().authorities(new SimpleGrantedAuthority(
+                                    JwtRoleConverter.USER_AUTHORITY))))
+                    .andExpect(status().isForbidden())
+                    .andExpect(jsonPath("$.code").value(GlobalExceptionHandler.CODE_FORBIDDEN));
+
+            verify(securedStatements, never()).collectArtifact(any());
+        }
+
+        // WHY : Refactoring Rationale: the same caller that is refused the run-wide artifact above must
+        //       still reach its OWN statement, and be told nothing of the run while it does. This case
+        //       asserts the second half at the seam the disclosure decision is taken on: what the
+        //       handler passes the service. Asserting the response body instead would pass against a
+        //       handler that asked for everything and happened to render nothing.
+        /**
+         * Confirms the audience each group authority carries into the statement operation.
+         *
+         * @param authority the group authority the request presents, supplied once per invocation
+         * @param expected the audience that authority must produce
+         * @throws Exception if the request cannot be performed
+         */
+        @ParameterizedTest(name = "{0} -> {1}")
+        @CsvSource({JwtRoleConverter.ADMIN_AUTHORITY + ",OPERATOR",
+                JwtRoleConverter.USER_AUTHORITY + ",CARDHOLDER"})
+        @DisplayName("each group authority carries its own audience into the statement operation")
+        void eachGroupAuthorityCarriesItsOwnAudience(
+                String authority, StatementService.ArtifactAudience expected) throws Exception {
+            when(securedStatements.describe(any(), any())).thenReturn(heading());
+            ArgumentCaptor<StatementService.ArtifactAudience> audience =
+                    ArgumentCaptor.forClass(StatementService.ArtifactAudience.class);
+
+            securedMvc.perform(post(StatementController.BASE_PATH)
+                            .with(jwt().authorities(new SimpleGrantedAuthority(authority)))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(SELECTOR_BODY))
+                    .andExpect(status().isOk());
+
+            verify(securedStatements).describe(any(), audience.capture());
+            assertThat(audience.getValue()).isEqualTo(expected);
         }
 
         // WHY : Assumptions: the refused caller is fully AUTHENTICATED and merely holds no recognised
@@ -2078,8 +2428,8 @@ class StatementControllerTest {
                             .with(jwt().authorities(unrecognised)))
                     .andExpect(status().isForbidden());
 
-            verify(securedStatements, never()).describe(any());
-            verify(securedStatements, never()).compose(any());
+            verify(securedStatements, never()).describe(any(), any());
+            verify(securedStatements, never()).compose(any(), any());
             verify(securedStatements, never()).collectArtifact(any());
         }
 
@@ -2109,7 +2459,7 @@ class StatementControllerTest {
                     .andExpect(jsonPath("$.code")
                             .value(ApiErrorSecurityHandlers.CODE_UNAUTHENTICATED));
 
-            verify(securedStatements, never()).describe(any());
+            verify(securedStatements, never()).describe(any(), any());
         }
 
         // WHY : Assumptions: statelessness is asserted on an ADMITTED request, because a refused one never
@@ -2133,7 +2483,7 @@ class StatementControllerTest {
         @Test
         @DisplayName("an admitted request creates no session and advertises no cookie")
         void anAdmittedRequestCreatesNoSession() throws Exception {
-            when(securedStatements.compose(any()))
+            when(securedStatements.compose(any(), any()))
                     .thenReturn(new StatementDocument(headingCounting(0), List.of()));
 
             var result = securedMvc.perform(post(TRANSACTIONS_ROUTE)

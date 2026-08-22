@@ -76,7 +76,7 @@ import { Button, Descriptions, Flex, Form, Input, Spin, Typography, theme } from
 import type { InputRef } from 'antd';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ChangeEvent, ReactElement } from 'react';
-import { useNavigate, useParams } from 'react-router';
+import { useLocation, useNavigate, useParams } from 'react-router';
 
 import { getCard, lookupCard } from '../../api/cards';
 import type { CardDetail } from '../../api/cards';
@@ -95,7 +95,12 @@ import {
 } from '../../messages/messages';
 import { FIELD_ERROR_TOKENS, TYPOGRAPHY_TOKENS } from '../../theme/tokens';
 import { cardDetailPath, cardEditPath, isCardSelector } from '../../routes/cards';
-import { navigateSafely, navigationHandler } from '../../routes/navigation';
+// WHY : Refactoring Rationale: `navigationHandler` is no longer imported here. It builds a handler for
+//       a transition that hands over NOTHING, and this screen's only transferring control now hands
+//       over the caller it was itself entered with, so the factory could not express it. The helper
+//       stays where it is for the screens whose transitions genuinely carry nothing.
+import { inApplicationRoute, navigateSafely, screenTransitionState } from '../../routes/navigation';
+import type { ScreenTransitionState } from '../../routes/navigation';
 import { ScreenTitle } from '../../layout/ScreenTitle';
 
 /** Screen-level messages this screen renders, taken verbatim from the catalog keyed by its program. */
@@ -609,6 +614,7 @@ export function formatCardExpiry(expirationDate: string): string {
  */
 export function CardDetailScreen(): ReactElement {
   const navigate = useNavigate();
+  const location = useLocation();
   /*
    * WHY : Assumptions: the fixed-pitch face is read as a token NAME from ui/src/theme/tokens.ts and
    *       resolved through `cssVar`, never written as a font literal. `cssVar` returns the reference
@@ -668,6 +674,42 @@ export function CardDetailScreen(): ReactElement {
 
   const selector =
     routeIdentifier !== undefined && isCardSelector(routeIdentifier) ? routeIdentifier : null;
+
+  /*
+   * WHY : Assumptions: the origin this screen was entered with is FORWARDED to the update screen
+   *       rather than replaced by this screen's own address. The update screen resolves its exit key
+   *       to the caller it was handed (`app/cbl/COCRDUPC.cbl` L442-L454), and a PER-CARD route cannot
+   *       BE that caller: `ui/src/routes/navigation.ts` admits the parameterless browse and excludes
+   *       both per-card routes from its closed origin set by construction, because each is minted from
+   *       an opaque selector and no enumerable set could hold them. So the choice is between
+   *       forwarding the browse this screen was reached from and handing over nothing at all.
+   * WHY : Alternatives Considered: handing over nothing, which leaves the update screen on its own
+   *       documented fallback -- this same card's detail route, that is, back here. Rejected because
+   *       the operator's return path then depends on how many screens they passed through rather than
+   *       on where they started: browse to update returns to the browse in one key press while browse
+   *       to detail to update takes two, for the same card and the same intent. Forwarding makes the
+   *       exit key mean "back to where this began" on both paths, which is what the reference's
+   *       recorded caller means -- its own list arm transfers straight to the update program, so one
+   *       press is the behaviour being preserved.
+   * WHY : Trade-offs: this screen is therefore skipped on the way back out. It is accepted because
+   *       nothing was edited here -- this screen only displays a record -- so no work is lost, and the
+   *       record remains one press away from the browse the operator lands on.
+   */
+  const forwardedOrigin = inApplicationRoute(screenTransitionState(location.state).from);
+
+  /**
+   * Builds the handover for a transfer out of this screen, carrying an origin only when one arrived.
+   *
+   * Assumptions: `undefined` is returned rather than an empty object when this screen was entered
+   * without a caller, because `navigateSafely` treats an absent state as "hand nothing over" and
+   * publishes no state member at all -- so the destination reads its own first-entry state instead of
+   * a present-but-empty handover it would have to interpret.
+   * @returns {ScreenTransitionState | undefined} The origin to hand on, or `undefined` when this
+   *   screen was entered by a typed address, a bookmark or a reload.
+   */
+  function transferHandover(): ScreenTransitionState | undefined {
+    return forwardedOrigin === undefined ? undefined : { from: forwardedOrigin };
+  }
 
   const openRead = useCallback(
     /**
@@ -1414,10 +1456,24 @@ export function CardDetailScreen(): ReactElement {
        */}
       {selector === null ? null : (
         <Flex gap="small">
+          {/*
+           * WHY : Refactoring Rationale: this control no longer uses `navigationHandler`, which
+           *       performs a transition and hands over nothing. It has to hand over the origin this
+           *       screen was entered with -- see {@link transferHandover} -- and the shared factory
+           *       takes no handover argument, so the transition is composed here instead.
+           */}
           <Button
             type="primary"
             disabled={card === null}
-            onClick={navigationHandler(navigate, cardEditPath(selector))}
+            onClick={
+              /**
+               * Opens the update form for the card on display, forwarding this screen's own caller.
+               * @returns {void} Nothing; the transition is the effect.
+               */
+              (): void => {
+                navigateSafely(navigate, cardEditPath(selector), transferHandover());
+              }
+            }
           >
             {CARD_DETAIL_EDIT_CONTROL_LABEL}
           </Button>

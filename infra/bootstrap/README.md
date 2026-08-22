@@ -55,8 +55,24 @@ other environment also needs and would create a state-ownership conflict.
 
 An operator needs:
 
-* Terraform CLI satisfying `~> 1.15.0`; this root is validated on Terraform
-  1.15.8.
+* Terraform CLI satisfying `>= 1.15.0`, the open floor
+  [`versions.tf`](versions.tf) declares at L58 and the same floor the generated
+  Requirements table in [§8](#8-inputs-and-outputs) reproduces. Terraform 1.15.8
+  is the release this root was reviewed and validated on; that is a statement
+  about the installed toolchain, not a second constraint, and nothing in this
+  root refuses a later CLI.
+
+  Refactoring Rationale: this bullet published `~> 1.15.0`. The pessimistic form
+  accepts 1.15.0 through 1.15.x and refuses 1.16.0, a ceiling no file in the
+  repository declares: `infra/bootstrap/versions.tf` L58,
+  `infra/envs/dev/versions.tf` L87 and `infra/envs/prod/versions.tf` L71 all
+  state `>= 1.15.0`, and specification section 0.6.1.4 states the CLI constraint
+  the same way. Publishing a narrower range than the configuration enforces has
+  two costs an operator pays and this document does not: it sends them to install
+  or hold back a CLI this root would have accepted, and it leaves this section
+  contradicting the machine-generated Requirements table in
+  [§8](#8-inputs-and-outputs) of this same file, which is the row a reader trusts
+  when the two disagree.
 * The `hashicorp/aws` provider satisfying `~> 6.56`. `terraform init` resolves
   the provider using the tracked `.terraform.lock.hcl`.
 * Ambient AWS credentials for the intended account and region. The provider has
@@ -221,14 +237,16 @@ storage even though version control ignores it.
 Read those five patterns as suffix matches, because that is what decides whether
 the artifacts this README tells you to create are actually covered. Every one of
 them is: local state is written as `terraform.tfstate` with backups as
-`terraform.tfstate.*`, and section 3 and section 10 both name the saved plan
-`bootstrap.tfplan`, whose `terraform show -json` rendering is
-`bootstrap.tfplan.json`. Confirm rather than assume, on any path before you create
-it:
+`terraform.tfstate.*`, and every saved plan this document names carries the
+`.tfplan` suffix -- `bootstrap.tfplan` in section 3, and
+`bootstrap-force-destroy.tfplan` and `bootstrap-destroy.tfplan` in
+[§10](#10-teardown), each with a `terraform show -json` rendering under the
+matching `.tfplan.json` name. Confirm rather than assume, on any path before you
+create it:
 
 ```bash
-# WHAT: assert that a saved plan and its JSON rendering are both ignored before
-#       any apply writes them.
+# WHAT: assert that every plan name this document uses, one JSON rendering and
+#       the local state file are all ignored before any command writes them.
 # WHY : Assumptions: a saved plan is not a diff summary. It embeds the resolved
 #       value of every attribute the apply will set. The wider stack is arranged
 #       so that its credentials are NOT among them -- service credentials and the
@@ -249,10 +267,12 @@ it:
 #       content, and removing the artifact after the apply remains the real answer.
 git check-ignore -v infra/bootstrap/bootstrap.tfplan \
                     infra/bootstrap/bootstrap.tfplan.json \
+                    infra/bootstrap/bootstrap-force-destroy.tfplan \
+                    infra/bootstrap/bootstrap-destroy.tfplan \
                     infra/bootstrap/terraform.tfstate
 ```
 
-Each of the three prints the matching rule. A path that prints nothing is
+Each of the five prints the matching rule. A path that prints nothing is
 **tracked** and must be renamed to a covered form rather than trusted, which is
 why no command in this document saves a plan to a bare `tfplan`.
 
@@ -439,20 +459,40 @@ and delete markers, so it is insufficient.
 ### Path A: Terraform purges the state bucket
 
 `state_bucket_force_destroy` exists for deliberate account decommission and
-defaults to `false`. Set it explicitly, apply the reviewed change, stop the
-audit trail, purge the audit bucket, and destroy with the same override:
+defaults to `false`. Set it explicitly, review and apply that change, stop the
+audit trail, purge the audit bucket, and then review and apply a saved destroy
+plan carrying the same override:
 
 ```bash
-# WHAT: authorize Terraform to purge the versioned state bucket during destroy.
+# WHAT: save a reviewable plan that authorizes Terraform to purge the versioned
+#       state bucket during a later destroy, then render it for review.
 # WHY : Trade-offs: this permanently discards every retained state version, so
 #       the destructive behavior requires an explicit variable rather than a
 #       permissive default.
-# WHY : Assumptions: the plan name matches section 3 for the reason section 6
-#       records -- the ignore rules match the `.tfplan` suffix, so a bare `tfplan`
-#       would be trackable. Remove the file once the destroy completes.
-terraform -chdir=infra/bootstrap plan -out=bootstrap.tfplan \
+# WHY : Assumptions: the plan carries the `.tfplan` suffix for the reason section
+#       6 records -- the ignore rules match on that suffix, so a bare `tfplan`
+#       would be trackable -- and it is named apart from section 3's
+#       `bootstrap.tfplan` and from the destroy plan below because all three can
+#       exist in this directory at once and only their names distinguish them.
+#       Remove each file once the operation it describes has completed.
+terraform -chdir=infra/bootstrap plan -out=bootstrap-force-destroy.tfplan \
   -var 'state_bucket_force_destroy=true'
-terraform -chdir=infra/bootstrap apply bootstrap.tfplan
+terraform -chdir=infra/bootstrap show bootstrap-force-destroy.tfplan
+```
+
+Read the rendered plan for one thing: that
+`aws_s3_bucket.state.force_destroy` moves from `false` to `true` and **no other
+resource changes**. This plan removes nothing by itself; it only waives the
+protection the destroy below then acts on, which is why the waiver and the
+removal are two separately reviewed events rather than one.
+
+```bash
+# WHAT: apply exactly the reviewed force-destroy authorization.
+# WHY : Alternatives Considered: passing `-var 'state_bucket_force_destroy=true'`
+#       to a bare `terraform apply`. Rejected because that re-plans at apply
+#       time, so the graph an operator read and the graph that executes are two
+#       different objects; applying the saved file makes them one.
+terraform -chdir=infra/bootstrap apply bootstrap-force-destroy.tfplan
 ```
 
 Assumptions: the variable controls only the state bucket. The audit bucket is
@@ -510,12 +550,12 @@ For Path A, stop new audit delivery, purge only the audit bucket, and let
 Terraform purge the state bucket:
 
 ```bash
-# WHAT: stop audit delivery, empty the audit bucket, and destroy the root with
-#       state-bucket force deletion still explicit.
+# WHAT: stop audit delivery and empty the audit bucket, leaving the state bucket
+#       for Terraform to purge under the authorization applied above.
 # WHY : Assumptions: stopping the trail ends active audit delivery before the
 #       bucket purge. If AWS delivers an already-buffered object, run the purge
-#       again before destroy; destroy then removes the stopped trail and every
-#       remaining bootstrap resource.
+#       again before planning the destroy; the destroy then removes the stopped
+#       trail and every remaining bootstrap resource.
 AUDIT_BUCKET="$(
   terraform -chdir=infra/bootstrap output -raw state_audit_bucket_name
 )"
@@ -529,15 +569,77 @@ aws cloudtrail stop-logging \
   --region "$BOOTSTRAP_REGION" \
   --name "$TRAIL_ARN"
 purge_versioned_bucket "$AUDIT_BUCKET"
-terraform -chdir=infra/bootstrap destroy \
-  -var 'state_bucket_force_destroy=true'
 ```
 
-For Path B, purge both buckets before the normal destroy:
+```bash
+# WHAT: save the bootstrap destroy plan with the same force-destroy override in
+#       force, then render it for review.
+# WHY : Assumptions: the override is repeated here because Terraform re-evaluates
+#       variables on every invocation, so a destroy plan produced without it
+#       describes a still-protected bucket and fails at apply time.
+# WHY : Trade-offs: planned AFTER the trail stop and the audit purge, not before.
+#       Applying a saved plan performs no refresh, so a plan produced before those
+#       two out-of-band steps renders a trail still logging and an audit bucket
+#       still holding objects -- a description of the account as it was, which is
+#       the opposite of what a reviewed artifact is for. The cost is that any
+#       further out-of-band change means planning again.
+# WHY : Trade-offs: `show` renders the plan as text rather than JSON, which is
+#       the form a human reads; `terraform show -json bootstrap-destroy.tfplan`
+#       is the machine form and its output is also ignored, by the `.tfplan.*`
+#       pattern section 6 names.
+terraform -chdir=infra/bootstrap plan -destroy \
+  -out=bootstrap-destroy.tfplan \
+  -var 'state_bucket_force_destroy=true'
+terraform -chdir=infra/bootstrap show bootstrap-destroy.tfplan
+```
+
+Read the rendered destroy plan against three specific things before approving it,
+because each has a different remedy:
+
+* **The resource count and the resource names.** Every bootstrap resource is
+  expected to be destroyed and nothing else is, so a plan naming a resource this
+  root does not own means it was produced against the wrong local state.
+* **The account identifier and the region.** They appear on the bucket and table
+  names the plan removes. If either is not the account being decommissioned,
+  stop: this is the plan that removes the state describing every other root in
+  that account.
+* **The two buckets' disposition.** `aws_s3_bucket.state` is expected to be
+  destroyed with its retained versions, which the authorization above waived
+  protection for, and `aws_s3_bucket.state_audit` is expected to be destroyed
+  empty. An audit bucket that still holds objects fails the destroy rather than
+  losing them, and the remedy is to run the purge again, not to widen the
+  override.
+
+Approval is a human decision recorded outside Terraform -- the reviewer of the
+rendered plan states that this account is being decommissioned and that the state
+history is expendable. Only then apply that exact artifact:
 
 ```bash
-# WHAT: stop audit delivery, purge both versioned buckets, and destroy with the
-#       protective default still in force.
+# WHAT: apply the reviewed bootstrap destroy plan, and nothing else.
+# WHY : Alternatives Considered: an interactive `terraform destroy`, and
+#       `terraform destroy -auto-approve`, were both rejected for this root
+#       specifically. The prompt asks for the word `yes` against a list that has
+#       already scrolled past, which is a confirmation rather than a review, and
+#       it recomputes the plan at that moment; `-auto-approve` leaves no artifact
+#       anyone can inspect afterwards to establish what was removed and on whose
+#       approval. This is the remote-state backend for every environment in the
+#       account, so it is the one destroy whose accidental execution cannot be
+#       undone by re-applying a root.
+# WHY : Assumptions: applying a saved plan accepts no `-var`, because the plan
+#       already carries the resolved value of every variable it was produced
+#       with -- which is exactly why the override reviewed is the override
+#       applied. Terraform refuses a saved plan that has gone stale; that refusal
+#       is the discipline working, and the answer is to re-plan and review again.
+terraform -chdir=infra/bootstrap apply bootstrap-destroy.tfplan
+rm -f infra/bootstrap/bootstrap-force-destroy.tfplan \
+      infra/bootstrap/bootstrap-destroy.tfplan
+```
+
+For Path B, purge both buckets, then review and apply a destroy plan with the
+protective default still in force:
+
+```bash
+# WHAT: stop audit delivery and purge both versioned buckets.
 # WHY : Alternatives Considered: `aws s3 rm --recursive` was rejected because
 #       it leaves noncurrent versions and delete markers behind.
 STATE_BUCKET="$(
@@ -557,7 +659,33 @@ aws cloudtrail stop-logging \
   --name "$TRAIL_ARN"
 purge_versioned_bucket "$STATE_BUCKET"
 purge_versioned_bucket "$AUDIT_BUCKET"
-terraform -chdir=infra/bootstrap destroy
+```
+
+```bash
+# WHAT: save the bootstrap destroy plan with no override, then render it for
+#       review.
+# WHY : Assumptions: no `-var` appears on this path because both buckets are
+#       already empty, so `state_bucket_force_destroy` keeps its protective
+#       `false` default and the destroy needs no waiver. A plan carrying the
+#       waiver here would authorize a data loss this path has already performed
+#       deliberately and visibly with the purge function.
+terraform -chdir=infra/bootstrap plan -destroy -out=bootstrap-destroy.tfplan
+terraform -chdir=infra/bootstrap show bootstrap-destroy.tfplan
+```
+
+Review this plan against the same three things Path A lists, with one difference:
+here both buckets are expected to be destroyed empty. A plan that still shows
+objects under either bucket means the purge loop exited early, and the remedy is
+to run it again and re-plan rather than to add the force-destroy override.
+
+```bash
+# WHAT: apply the reviewed bootstrap destroy plan, and nothing else.
+# WHY : Assumptions: the same saved-plan discipline as Path A, for the same
+#       reason -- this removes the state backend every environment root in the
+#       account depends on, and a saved plan is the only artifact that records
+#       what was approved.
+terraform -chdir=infra/bootstrap apply bootstrap-destroy.tfplan
+rm -f infra/bootstrap/bootstrap-destroy.tfplan
 ```
 
 There is no `lifecycle { prevent_destroy = true }` on the buckets or table and
@@ -780,7 +908,9 @@ Assumptions: no `terraform.tfvars` belongs to this root. Apply-time overrides
 use `-var` with non-secret values. Local `.terraform/`, state files, and plan
 files are excluded by the repository-root `.gitignore` -- state and plan files by
 their `.tfstate` and `.tfplan` **suffixes**, which is why every command in this
-document names the saved plan `bootstrap.tfplan` and section 6 gives the
+document gives its saved plan a `.tfplan` name -- `bootstrap.tfplan`,
+`bootstrap-force-destroy.tfplan` and `bootstrap-destroy.tfplan` -- and section 6
+gives the
 `git check-ignore` invocation that proves a given path is covered rather than
 asking the reader to infer it from the pattern list. `.terraform.lock.hcl`
 remains tracked because it contains provider versions and checksums, not

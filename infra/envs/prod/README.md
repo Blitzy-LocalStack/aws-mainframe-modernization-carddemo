@@ -11,6 +11,20 @@ No live environment is claimed here. The configuration is authored and
 statically validated; a backend-enabled plan or apply requires an operator's
 short-lived federated AWS session and the production approval control.
 
+**How this root fails.** Six failure modes are reachable from the commands below,
+and every one of them is a stop rather than a partial deployment: the bootstrap
+backend is absent, the state lock is held, a saved plan proposes a destroy nobody
+asked for, a destroy is refused while deletion protection is active, a module
+rejects a value against its own invariant, or the generated reference has drifted
+from the HCL. Each is paired with its response in
+[Failure handling](#failure-handling) at the end of this document.
+
+Assumptions: the failure surface belongs in the opening rather than only at the
+end, because an operator reads a header before running anything and the table
+after something has already gone wrong. The fourth mode is the one that
+distinguishes this root from `dev`, and it is a control rather than a defect --
+see [Production posture](#production-posture).
+
 ## Parameters and expected result
 
 | Parameter | Kind | Purpose |
@@ -20,7 +34,23 @@ short-lived federated AWS session and the production approval control.
 | `dynamodb_table` | backend config | Bootstrap lock-table name |
 | `kms_key_id` | backend config | Bootstrap state CMK ARN |
 | `terraform.tfvars` | tracked non-secret file | Production sizing, retention and protection values |
-| deployment variables | runtime inputs | Image digests, IAM boundary, public DNS zone/domain names, the HMAC secret reference and glue Lambda ARNs |
+| deployment variables | runtime inputs | The twelve inputs `variables.tf` declares with no default, none of which appears in the tracked tfvars: `alarm_email_endpoints`, `alb_certificate_arn`, `cloudfront_acm_certificate_arn`, `cloudfront_aliases`, `cloudfront_api_connect_src_origins`, `github_oidc_provider_arn`, `github_repository`, `image_tag`, `internal_service_domain_name`, `mask_hmac_secret_arn`, `mask_hmac_secret_kms_key_arn` and `permissions_boundary_arn`. `image_digests` is the thirteenth: its default `{}` is not usable here, because the service module refuses a mutable tag in production, so a digest must be supplied for every artifact this root deploys |
+
+Refactoring Rationale: the deployment-variables row read "Image digests, IAM
+boundary, public DNS zone/domain names, the HMAC secret reference and glue Lambda
+ARNs", the same wording `dev` carried. Two of those five name inputs neither root
+owns. `aws_route53_zone.internal_service` in `main.tf` is created here and is
+**private**, scoped to this environment's VPC, so no public-DNS-zone input exists;
+the only DNS names supplied from outside are `internal_service_domain_name` and
+`cloudfront_aliases`, which are names the two certificate ARNs must cover rather
+than a zone. The four operational Lambdas -- quiesce, resume, dataset retention
+and database admin -- are **created** by this root and their ARNs are published
+through the `runtime_configuration` output, so listing them as runtime inputs
+reverses the direction they travel. In production the cost of that is higher than
+in `dev`: an operator preparing an approval package assembles exactly the values
+this row names, and two of them cannot be assembled at all. The row is therefore
+restated as a measurement of `variables.tf` -- the inputs with no default,
+enumerated so the list can be compared against the file.
 
 A successful apply publishes the API/SPA entry points, service and queue
 identifiers, database connection facts and the canonical Parameter Store paths
@@ -50,10 +80,23 @@ is partial because its bucket and key contain account-resolved identifiers and
 Terraform evaluates backends before input variables.
 
 ```bash
-# Read the bootstrap outputs used by the partial backend.
+# WHAT: print the bootstrap root's outputs, which carry the four literal values
+#       this root's partial backend needs.
+# WHY : Assumptions: these are identifiers rather than credentials -- a bucket
+#       name, a table name, a Region and a key ARN -- so reading them needs no
+#       secret handling, and access to the resources they name is controlled by
+#       IAM and the bucket and key policies instead. Read them from the account
+#       that hosts production: if dev and prod are separate accounts, the two
+#       roots take two different sets of these four values.
 terraform -chdir=infra/bootstrap output
 
-# Initialize with the four values returned by bootstrap.
+# WHAT: initialize this root against the bootstrapped remote state, supplying the
+#       four backend values on the command line.
+# WHY : Assumptions: all four are supplied together and re-supplied on any fresh
+#       checkout, because the resolved backend configuration is cached under
+#       `.terraform/`, which the repository ignores and therefore never carries
+#       between machines. The note below this block records why none of the four
+#       is committed instead.
 terraform -chdir=infra/envs/prod init \
   -backend-config="bucket=<state-bucket>" \
   -backend-config="region=<region>" \
@@ -68,22 +111,45 @@ variable cannot be used because backend evaluation happens first.
 ## Plan and apply
 
 ```bash
-# Create the review artifact from the tracked non-secret values.
+# WHAT: create the review artifact from the tracked non-secret values.
 # WHY : Assumptions: the artifact is named `prod.tfplan`, matching
-#       [`infra/README.md`](../../README.md), because a saved plan embeds the
-#       resolved value of every attribute the apply will set -- including the
-#       generated Aurora master password and the Cognito seed-user passwords -- and
-#       the repository ignore rules match on the `.tfplan` SUFFIX. A bare `tfplan`
-#       has no suffix to match and stays trackable:
-#       `git check-ignore -v infra/envs/prod/prod.tfplan` resolves, while the same
-#       command on `infra/envs/prod/tfplan` returns nothing. The exposure is
-#       largest here, because this root's plan carries the production credentials.
+#       [`infra/README.md`](../../README.md), because the repository ignore rules
+#       match on the `.tfplan` SUFFIX. A bare `tfplan` has no suffix to match and
+#       stays trackable: `git check-ignore -v infra/envs/prod/prod.tfplan`
+#       resolves, while the same command on `infra/envs/prod/tfplan` returns
+#       nothing.
+# WHY : Assumptions: a saved plan embeds the resolved value of every NON-EPHEMERAL
+#       attribute the apply will set, and no generated credential is among them.
+#       The five purpose secrets below are written through `secret_string_wo` from
+#       `ephemeral` generators; `infra/modules/secrets` generates each service
+#       database credential the same way; the Aurora master password is delegated
+#       to the database service by `manage_master_user_password`, so no password
+#       attribute exists in the configuration at all; and the Cognito seed-user
+#       and app-client credentials are minted by that module's apply-time
+#       bootstrap processes straight into Secrets Manager. What this root's plan
+#       DOES carry is secret ARNs and names, the production account identifier,
+#       every endpoint and the whole resolved topology -- which is the production
+#       estate's shape and addressing, and reason enough to keep the artifact
+#       local, share it only through the approval control, and delete it below.
+# WHY : Refactoring Rationale: this said the plan embeds "the generated Aurora
+#       master password and the Cognito seed-user passwords" and that "this
+#       root's plan carries the production credentials". It carries neither, and
+#       the error mattered most here: an operator who believes the production plan
+#       is a credential store either handles it as a secret and truncates the
+#       review this root's approval control depends on, or finds the claim false
+#       and discounts the real exposure -- the topology -- along with it.
 terraform -chdir=infra/envs/prod plan -out=prod.tfplan -var-file=terraform.tfvars
 
-# Apply exactly the reviewed artifact after production approval.
+# WHAT: apply exactly the reviewed artifact after production approval.
+# WHY : Alternatives Considered: `terraform apply -var-file=terraform.tfvars` with
+#       no saved plan. Rejected because it computes a second plan at apply time,
+#       so what was approved and what executes are two different objects -- and
+#       here the approval is a recorded control rather than a habit. Applying the
+#       artifact makes them one, and Terraform refuses it outright if state or
+#       configuration moved while the approval was being obtained.
 terraform -chdir=infra/envs/prod apply prod.tfplan
 
-# Remove the artifact once the apply completes.
+# WHAT: remove the artifact once the apply completes.
 # WHY : Trade-offs: an ignore rule reduces accidental staging and cannot defeat
 #       `git add -f`, so deleting the plan is the primary local safeguard and the
 #       naming convention above is the cheap backstop.
@@ -109,13 +175,31 @@ destroy needs the state it stores.
 ## Static validation
 
 ```bash
-# Resolve modules/providers without contacting the remote backend.
+# WHAT: resolve modules and providers without contacting the remote backend.
+# WHY : Assumptions: `-backend=false` is what makes this runnable with no AWS
+#       credentials and no bootstrapped state, which is the same form
+#       .github/workflows/infra-ci.yml runs -- so this root is checked on every
+#       pull request without any principal holding production access. Add
+#       `-lockfile=readonly` when the intent is to verify the tracked
+#       `.terraform.lock.hcl` rather than to update it.
 terraform -chdir=infra/envs/prod init -backend=false
 
-# Validate module interfaces and graph expressions.
+# WHAT: validate module interfaces and graph expressions.
+# WHY : Trade-offs: validation resolves types, references and module contracts
+#       without evaluating a data source or contacting AWS, so it catches a
+#       mistyped input or a broken module call and cannot catch a value AWS itself
+#       would refuse -- including a production image reference that is a tag
+#       rather than a digest, which the service module can only reject once
+#       `image_tag` or `image_digests` has actually been supplied, that is in a
+#       plan and not here.
 terraform -chdir=infra/envs/prod validate
 
-# Run the shared infrastructure linter.
+# WHAT: run the shared infrastructure linter over this root.
+# WHY : Assumptions: the config path is absolute -- `--chdir` moves TFLint's
+#       working directory, so a relative `infra/.tflint.hcl` would resolve
+#       against this root and not be found. One shared configuration is used so
+#       both environment roots and all sixteen modules are linted by the same
+#       rule set, which is what keeps production from being held to a weaker one.
 tflint --chdir=infra/envs/prod --config="$(pwd)/infra/.tflint.hcl"
 ```
 
@@ -126,8 +210,8 @@ remote-state plan.
 
 The tracked tfvars file contains no credential. Database and seed-user
 credentials are generated into Secrets Manager; the card-selector signing key, the
-messaging HMAC key, the two internal-identity signing keys, the pagination cursor
-signing key and the reporting artifact-identity key -- six in all -- are generated
+two internal-identity signing keys, the pagination cursor signing key and the
+reporting artifact-identity key -- five in all -- are generated
 by this root itself through `ephemeral` resources written with `secret_string_wo`,
 so none of
 those values is recorded in state or in a plan artifact; the
@@ -147,13 +231,26 @@ Refactoring Rationale: this paragraph singled out a **messaging** HMAC key as th
 generated counterpart to the supplied masking key, and explained that the two were
 separate so that a job reading cardholder extracts could not compute production
 queue group identities. That key is **withdrawn** — see the record in `main.tf`
-under "Messaging HMAC key -- WITHDRAWN" — because nothing injected the one Spring
+above the card-selector resource — because nothing injected the one Spring
 bean it keyed once specification §0.4.1.8 fixed the queue group and deduplication
 identities as the literal card number and transaction identifier. The
 supplied-versus-generated distinction the paragraph was drawing still holds and is
 restated without it.
 
-### The six generated secrets are six, not one
+Refactoring Rationale: the withdrawal was recorded and the COUNT was not. This
+section went on saying **six** and listing `messaging/hmac-key` as a live secret
+with a holder, while the withdrawal note in `main.tf` records that the `ephemeral`
+generator, the secret and its write-only version went together with the injection
+— so five secrets were provisioned against six described. That is the most
+expensive shape this drift takes rather than a cosmetic one: a rotation review
+plans for a key that does not exist and reports one it cannot find, and a reader
+sizing the blast radius of a disclosure counts a holder there is no way to reach.
+Both counts and the table row are corrected below, and the count is now asserted
+by the "Verify hand-written Terraform prose counts against the declarations" gate
+in `.github/workflows/infra-ci.yml`, which reads the `aws_secretsmanager_secret`
+declarations in this root's `main.tf` — the measurement the prose claims to be.
+
+### The five generated secrets are five, not one
 
 Each of the generated values above exists for a different holder, and the
 separation is what bounds the damage a single disclosure does. The Held-by column
@@ -164,18 +261,17 @@ at `terraform plan` rather than at run time:
 | Secret | Held by | What holding it permits |
 | --- | --- | --- |
 | `card/selector-signing-key` | card only | minting or opening the opaque selector every single-card route addresses its row by, so a holder can address a card row it was never listed |
-| `messaging/hmac-key` | authorization only | computing pending-authorization queue group and correlation identities |
 | `internal-identity/authorization-signing-key` | authorization **and** account | minting or verifying the bearer token the AUTHORIZATION service presents to every internal account-context read the chain in `InternalApiSecurityConfig.internalPaths()` claims. Authorization signs with it, account verifies it. A cell describing what a leaked key unlocks is the one place a count must not be short, so it names the enumerating method rather than a number |
 | `internal-identity/transaction-signing-key` | transaction **and** account | the same capability for the TRANSACTION service's account-context client. Transaction signs with it, account verifies it. Splitting the two callers is what lets account attribute a token to a caller it can actually verify: under one shared key either caller could mint a token carrying the other's subject |
 | `pagination/cursor-signing-key` | auth, account, card, transaction, reference, reporting **and** authorization | sealing and opening a keyset page boundary, so a holder can forge a cursor and page into rows no query scoped to it |
 | `reporting/artifact-hmac-key` | reporting only | recomputing the token a stored statement's object key is named under, so a holder can locate a named cardholder's statement objects by listing a prefix — with no read on the object itself, because the disclosure is carried by the key rather than the content |
 
-Refactoring Rationale: this section has now been short twice, and the reason it
-drifted both times is that the count was written as prose. It first named **three**
-secrets and listed an "Internal TLS pair" held by every online service; the count
-was short by two (`pagination/cursor-signing-key` and `card/selector-signing-key`
-were both generated here and neither appeared) and the TLS row named a secret this
-root does not create at all, because each image's
+Refactoring Rationale: this section has now been short three times, and the reason
+it drifted every time is that the count was written as prose. It first named
+**three** secrets and listed an "Internal TLS pair" held by every online service;
+the count was short by two (`pagination/cursor-signing-key` and
+`card/selector-signing-key` were both generated here and neither appeared) and the
+TLS row named a secret this root does not create at all, because each image's
 `config/docker/generate-listener-material.sh` mints that task's own key pair and
 self-signed certificate at start-up. It was then corrected to **five**, which went
 stale in turn when the single `internal-identity/signing-key` was split into the two
@@ -183,14 +279,21 @@ pairwise keys above. Two rows in the table had drifted with it: the
 internal-identity row still described one key shared by three services, and the
 pagination row named five holders where the gate admits seven — it had been widened
 to include auth and card, both of which construct a `CursorToken` unconditionally
-and crash-loop without the key. The count is therefore stated as a measurement —
-six `aws_secretsmanager_secret` resources in this root's `main.tf`, each with an
-`ephemeral` generator, and each table row's holder set copied from the gate in
-`local.secret_sources_by_workload` rather than described — and the holder sets are
-the ones `infra/modules/ecs-service` asserts biconditionally, so a drifted set now
-fails at `terraform plan`.
+and crash-loop without the key. The correction to **six** was then overtaken by the
+withdrawal of `messaging/hmac-key`, and an ADDED entry and a REMOVED one do not
+drift alike: an addition leaves a resource with no row, which a reader of `main.tf`
+notices, while a removal leaves a row with no resource, which reads as
+corroboration of a secret nobody can find. The count is therefore no longer only
+stated as a measurement — five `aws_secretsmanager_secret` resources in this root's
+`main.tf`, each with an `ephemeral` generator, and each table row's holder set
+copied from the gate in `local.secret_sources_by_workload` rather than described —
+it is ASSERTED as one: the prose-count gate in
+`.github/workflows/infra-ci.yml` reads those declarations and fails the build when
+this number disagrees with them, and the holder sets are the ones
+`infra/modules/ecs-service` asserts biconditionally, so a drifted set fails at
+`terraform plan`.
 
-Three of the six are deliberately held by more than one workload, and each is
+Three of the five are deliberately held by more than one workload, and each is
 shared for its own reason. The two internal-identity keys are **pairwise**: they are
 symmetric, so a signer and its verifier must hold the same bytes, and the pairing is
 the narrowest sharing that can work — authorization signs with one and transaction
@@ -207,7 +310,7 @@ together, because account rejects a token signed under a key it has not yet rece
 and the signer cannot sign under a key it has already lost. Rotating one pair does
 not require touching the other.
 
-Rotating any of the six is an **attended** procedure that redeploys its holders
+Rotating any of the five is an **attended** procedure that redeploys its holders
 together, documented in [`docs/runbooks/deploy.md`](../../../docs/runbooks/deploy.md).
 Automatic rotation is deliberately not configured for any of them, and each
 resource carries its own recorded reason: changing either internal-identity value
@@ -329,13 +432,13 @@ was written under.
 | <a name="input_cloudfront_api_connect_src_origins"></a> [cloudfront\_api\_connect\_src\_origins](#input\_cloudfront\_api\_connect\_src\_origins) | Origins the SPA is permitted to reach with fetch or XHR, forwarded unchanged to cloudfront-spa as api\_connect\_src\_origins. Scheme and host only, no path and no trailing slash; normally the single API Gateway origin the SPA was built against. Supply it as TF\_VAR\_cloudfront\_api\_connect\_src\_origins, never in terraform.tfvars, so it tracks the deployed endpoint. | `list(string)` | n/a | yes |
 | <a name="input_github_oidc_provider_arn"></a> [github\_oidc\_provider\_arn](#input\_github\_oidc\_provider\_arn) | ARN of the account-scoped GitHub Actions OIDC provider created by infra/bootstrap. Must name the token.actions.githubusercontent.com issuer specifically; any other provider ARN would federate a different identity provider into this account. | `string` | n/a | yes |
 | <a name="input_github_repository"></a> [github\_repository](#input\_github\_repository) | GitHub repository in owner/name form whose protected prod environment may assume the SPA publication role. Becomes a subject condition in that role's trust policy, so it is what decides which repository can publish to this environment. | `string` | n/a | yes |
-| <a name="input_image_tag"></a> [image\_tag](#input\_image\_tag) | Immutable image tag applied to all ten ECR repositories for this deployment, normally the source commit SHA supplied by the OIDC deployment workflow. The tag latest is rejected: it cannot identify a revision to roll back to. | `string` | n/a | yes |
+| <a name="input_image_tag"></a> [image\_tag](#input\_image\_tag) | Immutable image tag applied to the ten deployable ECR repositories this deployment builds, normally the source commit SHA supplied by the OIDC deployment workflow. The tag latest is rejected: it cannot identify a revision to roll back to. The mirrored telemetry collector is not one of them: it is a cached third-party image and carries its own upstream version tag. | `string` | n/a | yes |
 | <a name="input_internal_service_domain_name"></a> [internal\_service\_domain\_name](#input\_internal\_service\_domain\_name) | Bare DNS name covered by alb\_certificate\_arn, with no scheme, port, path or wildcard. Forwarded to the alb module as its certificate identity and to api-gateway-http as the TLS server name the private integration verifies, which is why it must be a host and not a URL. | `string` | n/a | yes |
 | <a name="input_mask_hmac_secret_arn"></a> [mask\_hmac\_secret\_arn](#input\_mask\_hmac\_secret\_arn) | Secrets Manager ARN of the environment-separated HMAC key the data-migration image uses for protected-field fingerprints. Supplied by the operator; never created or rotated by this configuration. The secret VALUE must be canonical standard base64 decoding to at least 32 bytes, which the image enforces by refusing to run on weaker material; docs/runbooks/deploy.md gives the creation command. | `string` | n/a | yes |
 | <a name="input_mask_hmac_secret_kms_key_arn"></a> [mask\_hmac\_secret\_kms\_key\_arn](#input\_mask\_hmac\_secret\_kms\_key\_arn) | ARN of the customer-managed KMS key that encrypts mask\_hmac\_secret\_arn. Supplied by the operator alongside the secret; never created here. The data-migration task role is granted kms:Decrypt on exactly this key, through Secrets Manager, so a secret protected by a different key fails to decrypt rather than succeeding through a wider key policy. | `string` | n/a | yes |
 | <a name="input_permissions_boundary_arn"></a> [permissions\_boundary\_arn](#input\_permissions\_boundary\_arn) | ARN of the same-account customer-managed IAM policy used as the permissions boundary on every role this deployment creates -- all nine aws\_iam\_role resources under infra/, which is ten effective role instances per environment plus the two per ECS service. Passed into every module that creates a role, each of which asserts the ARN belongs to this account. Supplied by the operator or the deploy workflow; never created here. | `string` | n/a | yes |
 | <a name="input_aurora_backup_retention_period"></a> [aurora\_backup\_retention\_period](#input\_aurora\_backup\_retention\_period) | Days of automated backups the production cluster retains, forwarded to the database module. Aurora cannot disable automated backups, so 1 is the floor and 35 the service maximum; there is no value here meaning none. | `number` | `35` | no |
-| <a name="input_aurora_engine_version"></a> [aurora\_engine\_version](#input\_aurora\_engine\_version) | Aurora PostgreSQL engine version for the production cluster, forwarded to the database module, which requires the value and supplies no default. Must be a numeric version such as 16.8 -- not an engine name and not a parameter-group family -- and its major line must match aurora\_parameter\_group\_family, which that module verifies. | `string` | `"16.6"` | no |
+| <a name="input_aurora_engine_version"></a> [aurora\_engine\_version](#input\_aurora\_engine\_version) | Aurora PostgreSQL engine version for the production cluster, forwarded to the database module, which requires the value and supplies no default. Must be a numeric version such as 16.8 -- not an engine name and not a parameter-group family -- and its major line must match aurora\_parameter\_group\_family, which that module verifies. Defaults to the reviewed long-term-support pin this root's terraform.tfvars sets, so an omitted tfvars cannot select an unsupported release. | `string` | `"16.8"` | no |
 | <a name="input_aurora_max_capacity"></a> [aurora\_max\_capacity](#input\_aurora\_max\_capacity) | Ceiling of the serverless database's capacity range, in Aurora Capacity Units. It has to leave room for the nightly batch chain, which is the heaviest thing this cluster does and which runs against the same writer the online services use. | `number` | `32` | no |
 | <a name="input_aurora_min_capacity"></a> [aurora\_min\_capacity](#input\_aurora\_min\_capacity) | Floor of the serverless database's capacity range, in Aurora Capacity Units. Held above zero in this environment, so the cluster never pauses and no query ever pays a resume delay. | `number` | `2` | no |
 | <a name="input_aurora_parameter_group_family"></a> [aurora\_parameter\_group\_family](#input\_aurora\_parameter\_group\_family) | Aurora PostgreSQL cluster parameter-group family whose trailing major must match aurora\_engine\_version's leading component, for example aurora-postgresql16 against 16.8. Forwarded to the database module, which rejects a mismatched pair. | `string` | `"aurora-postgresql16"` | no |
@@ -354,7 +457,7 @@ was written under.
 | <a name="input_image_digests"></a> [image\_digests](#input\_image\_digests) | Immutable sha256 digests keyed by ECR artifact name, for example { "auth-service" = "sha256:<64 hex>" }. Any artifact named here is deployed by digest instead of by image\_tag. Required in production, where the ECS service module refuses a mutable tag. | `map(string)` | `{}` | no |
 | <a name="input_log_retention_days"></a> [log\_retention\_days](#input\_log\_retention\_days) | Days the log groups this root's modules create retain events. Passed to the observability, service, batch and API modules together, so one value governs the whole environment's retention rather than each module carrying its own. | `number` | `365` | no |
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Prefix concatenated into the name of every resource this root creates, ahead of the component and the environment, giving the whole deployment one greppable identity. Two to twelve characters of lower-case letters, digits and hyphens, beginning with a letter and ending with a letter or digit -- the intersection of the naming rules the sixteen modules this root calls each impose on their own namespace. | `string` | `"carddemo"` | no |
-| <a name="input_secret_recovery_window_in_days"></a> [secret\_recovery\_window\_in\_days](#input\_secret\_recovery\_window\_in\_days) | Secrets Manager recovery window, in days, applied to every secret this deployment generates: the six purpose secrets this root creates -- card-selector, messaging HMAC, the two pairwise internal-identity keys, pagination-cursor and reporting-artifact -- plus the per-service database credentials from the secrets module and the Cognito seed-user secrets. | `number` | `30` | no |
+| <a name="input_secret_recovery_window_in_days"></a> [secret\_recovery\_window\_in\_days](#input\_secret\_recovery\_window\_in\_days) | Secrets Manager recovery window, in days, applied to every secret this deployment generates: the five purpose secrets this root creates -- card-selector, the two pairwise internal-identity keys, pagination-cursor and reporting-artifact -- plus the per-service database credentials from the secrets module and the Cognito seed-user secrets. | `number` | `30` | no |
 | <a name="input_skip_final_snapshot"></a> [skip\_final\_snapshot](#input\_skip\_final\_snapshot) | Whether destroying the database cluster skips taking a final snapshot first. Taking one leaves a snapshot that survives the cluster and continues to bill until it is deleted; skipping it makes the destroy fast and irreversible. | `bool` | `false` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Common tag set merged into every taggable resource in this root, and in every module it calls, through the provider default\_tags block in versions.tf. Values must be non-secret: tags are visible to any principal that can describe the resource and appear in cost-allocation exports. | `map(string)` | <pre>{<br/>  "Environment": "prod",<br/>  "ManagedBy": "terraform",<br/>  "Project": "carddemo"<br/>}</pre> | no |
 | <a name="input_vpc_cidr"></a> [vpc\_cidr](#input\_vpc\_cidr) | IPv4 CIDR allocated to the production VPC. Must use a /16 prefix: the reporting service's trusted-proxy pattern is derived from the first two octets of this block, which is exact only for a /16. | `string` | `"10.1.0.0/16"` | no |

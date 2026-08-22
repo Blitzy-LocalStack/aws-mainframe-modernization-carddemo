@@ -9,7 +9,8 @@ import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.services.sfn.SfnClient;
 
 /**
- * Supplies the orchestration client through which an on-demand report execution is started.
+ * Supplies the orchestration client through which an on-demand report execution is started and its
+ * outcome is read back.
  *
  * <h2>Purpose</h2>
  *
@@ -21,6 +22,17 @@ import software.amazon.awssdk.services.sfn.SfnClient;
  * declares it, so no state definition, no state list and no access policy appears here. The
  * identifier of the machine to start is not read here either; the service that issues the call binds
  * it itself, which keeps this class to the single concern of how the client is built.
+ *
+ * <p>⚠️ Refactoring Rationale: this client is NOT submission-only, and this class described it as
+ * though it were. A review found the deployed task role granting {@code states:StartExecution} alone
+ * while the status half of the lifecycle -- {@code ReportExecutionService.describeExecution}, which
+ * serves the published status operation -- issues {@code states:DescribeExecution} through this same
+ * bean. Two actions therefore have to be granted, and they take DIFFERENT resources: a start names the
+ * state machine ARN while a describe names an EXECUTION ARN, so a policy scoped to the machine alone
+ * refuses every status read at run time and at no earlier point. The service composes that execution
+ * ARN by substituting the execution segment into the configured machine ARN and appending the caller's
+ * name, which is what makes {@code arn:<partition>:states:<region>:<account>:execution:<machine
+ * name>:*} the exact resource the grant needs -- one machine's executions and no other's.
  *
  * <h2>What the client replaces</h2>
  *
@@ -71,12 +83,16 @@ import software.amazon.awssdk.services.sfn.SfnClient;
  * trigger declared in the infrastructure code, while this class serves only the ad-hoc path
  * {@code app/cbl/CORPT00C.cbl} took at L517 to L518.
  *
- * <p>Alternatives Considered: also exposing an object-storage client here, since this module's POM
- * declares that artifact. Rejected on a measured ground: no client type, package reference or
- * put-object request drawn from it has any consumer under {@code services/}, and
- * {@code StatementService} takes its destination bucket and two key prefixes as plain character
- * values rather than through a client. A bean nothing injects would still build a connection pool at
- * start-up.
+ * <p>⚠️ Refactoring Rationale: this class used to record a rejected alternative -- exposing an
+ * object-storage client here too -- on the measured ground that nothing under {@code services/}
+ * consumed one. That ground no longer holds and the alternative is no longer open: the artifact
+ * writers, {@code task/GenerationKeys} and {@code service/ArtifactStore} all take an
+ * {@code S3Client}, and {@code ObjectStoreConfig} beside this file supplies it. The two clients stay
+ * in two classes for a reason that outlives the measurement, so it is recorded here rather than
+ * dropped: they are configured differently on purpose -- this one carries a per-call ceiling because
+ * an orchestration call is a small control-plane request, while the object-store client deliberately
+ * carries none because an upload part's duration is a function of the object and the link. One class
+ * holding both would have to explain why one of its two beans is bounded and the other is not.
  */
 @Configuration(proxyBeanMethods = false)
 public class StepFunctionsConfig {
@@ -179,7 +195,8 @@ public class StepFunctionsConfig {
     }
 
     /**
-     * Builds the client through which a report submission starts a state machine execution.
+     * Builds the client through which a report submission starts a state machine execution and a
+     * status read asks what became of one.
      *
      * <p>Assumptions: one shared instance is correct here. The client is documented as thread-safe
      * and is built to be reused, so a singleton bean is what the library expects, and the context
@@ -208,6 +225,15 @@ public class StepFunctionsConfig {
         //   -- it pulls the image, writes the log stream and resolves the Parameter Store and
         //   Secrets Manager references behind the task definition, so a grant added there does not
         //   reach this client at all.
+        //
+        // Assumptions: the permissions this client needs are exactly TWO, and they are enumerated
+        //   here because the class documentation above explains why they cannot be collapsed into
+        //   one statement: states:StartExecution on the configured state machine ARN, and
+        //   states:DescribeExecution on that machine's execution ARNs. Neither is inferable from
+        //   this file at deploy time -- the policy lives in infra/envs -- so a reader adding a third
+        //   call through this bean has to extend both this list and that policy, and the review that
+        //   prompted this note found what the omission looks like: a status read that fails only in
+        //   a deployed environment and only on the one operation nobody exercised locally.
         //
         // Assumptions: leaving all three unset is what keeps one image deployable in either
         //   environment; naming any of them here would compile one deployment's value into every

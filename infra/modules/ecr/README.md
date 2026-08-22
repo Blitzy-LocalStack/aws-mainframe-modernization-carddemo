@@ -2,7 +2,8 @@
 
 > **Purpose.** This module provisions the ten Amazon ECR repositories used by
 > the CardDemo migration -- one per image it builds, which is the repository count
-> specification section 0.4.1.6 states -- with immutable image tags, server-side
+> specification section 0.4.1.6 states -- plus the one mirror repository described
+> below, with immutable image tags, server-side
 > scan-on-push, customer-managed encryption, and bounded retention. These independently
 > versioned image stores replace the single shared CICS load library used by the
 > online region and part of the batch tier.
@@ -15,8 +16,8 @@
 
 ## Repository inventory
 
-The fixed repository set follows deployable images, not source modules, plus one
-mirror.
+The fixed repository set follows deployable images, not source modules. It is
+exactly ten, and every one of the ten holds an image this repository builds.
 
 | Repository | Image source |
 |---|---|
@@ -31,14 +32,31 @@ mirror.
 | `ui` | `ui/Dockerfile` |
 | `data-migration` | `data-migration/Dockerfile` |
 
-An eleventh repository, `aws-otel-collector`, mirrored a pinned third-party
-telemetry collector image and has been withdrawn. It existed only so that a
-collector sidecar attached to every task could be pulled over the private registry
-endpoints, and that sidecar -- which the frozen specification does not contain --
-has itself been withdrawn from `infra/modules/ecs-service`, which records the
-argument and what is kept for the observability concern in its place. Nothing now
-pulls a mirrored image, so nothing needs a repository to mirror one into, and this
-inventory is the ten the specification states.
+An eleventh repository, `aws-otel-collector`, mirrors a pinned third-party
+telemetry collector image that this repository does not build. It is the single entry
+of `third_party_mirror_repository_names`, which is a separate input from
+`repository_names` precisely so the ten-deployable count above stays an exactly
+asserted set -- `.github/workflows/infra-ci.yml` gates it as one -- while `main.tf`
+unions the two and gives the mirror the same immutable tags, scan-on-push, encryption
+and lifecycle treatment as everything else.
+
+Assumptions: it exists because a private task cannot reach the public registry.
+`infra/modules/ecs-service` attaches a collector sidecar to every workload,
+`infra/modules/network` enumerates the application tier's egress and admits no public
+destination, and Amazon ECR Public is served by neither the `ecr.api` nor the
+`ecr.dkr` interface endpoint -- so a task pulling `public.ecr.aws/...` directly would
+fail to start with no route to fix it. Because the sidecar is `essential`, that is not
+a degraded deployment but one in which no task runs, which is why populating the
+mirror is a required step of `docs/runbooks/deploy.md` rather than an optional one.
+
+Refactoring Rationale: this paragraph recorded both the mirror and the sidecar as
+**withdrawn**, on the ground that the frozen specification's §0.4.1.6 inventory is ten.
+Both are restored, because that withdrawal discharged a count by deleting a
+deliverable: §0.2.1.4 and §0.9.3 make centralised metrics and tracing a cross-cutting
+deliverable, and without the sidecar the estate published meters nothing collected and
+spans nothing exported. The count objection is answered rather than ignored -- the ten
+this module provisions from `repository_names` are exactly the ten §0.4.1.6 enumerates,
+and the mirror is not one of them.
 
 ### `common-lib` is not an image
 
@@ -46,26 +64,45 @@ Alternatives Considered: provisioning a repository for `common-lib` was
 rejected because `services/common-lib` contains a POM, Java sources, and no
 Dockerfile. It is compiled from source inside each service's Maven reactor
 build; no deployment pushes it and no task definition pulls it. Counting nine
-Maven modules as nine service images would therefore create a phantom
-repository whose emptiness would not make `terraform apply` fail.
+Maven modules as nine service images would therefore create an eleventh, phantom
+repository whose emptiness would not make `terraform apply` fail. With the
+inventory at ten, "eleventh" is the number that phantom would take, and it is the
+number `services/common-lib/pom.xml` and `services/common-lib/README.md` use for
+it too.
 
-### Why a third-party image is mirrored here
+### Why no third-party image is mirrored here
 
-`infra/modules/ecs-service` attaches an AWS Distro for OpenTelemetry collector
-sidecar to every workload by default, and `infra/modules/network` enumerates the
-application tier's egress instead of allowing `0.0.0.0/0`. The public registry
-the collector image was previously pulled from has neither an interface endpoint
-nor a managed prefix list, so with that egress enumerated **no task could pull
-its sidecar and therefore no task could start** -- while `terraform plan`
-reported nothing. Mirroring the image into this registry puts the pull on the
-`ecr.api` and `ecr.dkr` endpoints every task already reaches.
+`var.third_party_mirror_repository_names` is still declared, bounded at one entry,
+and defaults to none. It exists so that a cached third-party image, if one is ever
+needed, has somewhere to go **other than** `var.repository_names` -- which is
+asserted as exactly the ten deployables the specification fixes, and would stop
+being assertable the moment something this repository does not build were added to
+it. `main.tf` unions the two, so a mirror would receive identical namespacing,
+encryption, scan-on-push and retention without any consumer changing.
 
-Alternatives Considered: reopening a `0.0.0.0/0` egress rule for the pull, which
-was rejected because it restores the allow-all the enumerated egress replaced.
-Alternatives Considered: pushing the collector into one of the ten deployable
-repositories under a distinct tag, which was rejected because a repository's
-lifecycle policy expires images by count, so ordinary service releases would
-expire the sidecar image out from under running tasks.
+Refactoring Rationale: the mirror that used to sit in that default served an AWS
+Distro for OpenTelemetry collector sidecar. The argument for it was sound as far as
+it went -- `infra/modules/network` enumerates the application tier's egress instead
+of allowing `0.0.0.0/0`, and the public registry the collector shipped from has
+neither an interface endpoint nor a managed prefix list, so without a mirror no
+task could pull its sidecar and therefore no task could start, while `terraform
+plan` reported nothing. It was wrong about the sidecar rather than about the
+mirror: the frozen specification contains no collector, so the component was
+removed instead of its consequence defended, and `infra/modules/ecs-service`
+records what is kept for the observability concern in its place.
+
+Alternatives Considered: deleting the input along with the mirror, which is the
+smaller diff. Rejected because `main.tf` composes the repository set from a union
+that consumes it -- deleting it would edit the mechanism as well as the value and
+give up the separation that makes the ten assertable -- and because
+`.github/workflows/infra-ci.yml` slices `variables.tf` between this input's name
+and the deployable input's to read the deployable default in isolation, so the
+block's removal would break a gate that has nothing to do with mirrors.
+
+Alternatives Considered: pushing a third-party image into one of the ten deployable
+repositories under a distinct tag, which would keep a single list at ten. Rejected
+because a repository's lifecycle policy expires images by count, so ordinary
+service releases would expire a cached image out from under running tasks.
 
 ## Measured baseline
 
@@ -216,7 +253,7 @@ source of runtime endpoints and resource identifiers.
 | <a name="input_repository_names"></a> [repository\_names](#input\_repository\_names) | Trailing name segment of each container image repository to create; main.tf namespaces each entry as `<name_prefix>-<environment>/<entry>`. Exactly the ten deployables of this migration -- the eight Spring Boot services plus the browser SPA and the ETL image -- which is the repository count specification section 0.4.1.6 states. Every entry is built from this repository by .github/workflows/deploy.yml; nothing is mirrored in. | `set(string)` | <pre>[<br/>  "auth-service",<br/>  "account-service",<br/>  "card-service",<br/>  "transaction-service",<br/>  "reference-service",<br/>  "batch-service",<br/>  "authorization-service",<br/>  "reporting-service",<br/>  "ui",<br/>  "data-migration"<br/>]</pre> | no |
 | <a name="input_scan_on_push"></a> [scan\_on\_push](#input\_scan\_on\_push) | Whether the registry scans each image for vulnerabilities server-side as it is pushed. The findings are the input to the deployment workflow's vulnerability gate, which reads them after every push and before the apply and refuses a deployment carrying a CRITICAL or HIGH finding, so disabling this removes that gate's evidence rather than only a scan. | `bool` | `true` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Per-module tags merged onto every repository, additive to whatever the calling root already applies through its provider `default_tags`. | `map(string)` | `{}` | no |
-| <a name="input_third_party_mirror_repository_names"></a> [third\_party\_mirror\_repository\_names](#input\_third\_party\_mirror\_repository\_names) | Trailing name segment of each repository holding a mirrored THIRD-PARTY image rather than one of this migration's deployables; main.tf namespaces these identically to var.repository\_names and gives them the same scan-on-push, encryption and lifecycle treatment. Held separate from the deployable inventory so that the ten-deployable count the frozen plan fixes stays assertable. Defaults to the telemetry sidecar mirror; pass an empty set to provision none. | `set(string)` | <pre>[<br/>  "aws-otel-collector"<br/>]</pre> | no |
+| <a name="input_third_party_mirror_repository_names"></a> [third\_party\_mirror\_repository\_names](#input\_third\_party\_mirror\_repository\_names) | Trailing name segment of each repository holding a mirrored THIRD-PARTY image rather than one of this migration's deployables; main.tf namespaces these identically to var.repository\_names and gives them the same scan-on-push, encryption and lifecycle treatment. Declared separately from the deployable inventory so that the ten-deployable count the frozen plan fixes stays assertable whatever is cached beside it. Defaults to none: this deployment mirrors no third-party image, and every repository it provisions holds an image built from this repository. | `set(string)` | `[]` | no |
 | <a name="input_untagged_image_expiry_days"></a> [untagged\_image\_expiry\_days](#input\_untagged\_image\_expiry\_days) | Age in days at which an untagged image becomes eligible for expiry, reclaiming manifests and layers that no container task definition can reference. | `number` | `14` | no |
 
 ### Outputs

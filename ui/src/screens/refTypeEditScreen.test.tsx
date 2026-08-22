@@ -30,7 +30,7 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactElement } from 'react';
-import { MemoryRouter, Route, Routes } from 'react-router';
+import { matchPath, MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ApiRequestError } from '../api/client';
@@ -49,7 +49,7 @@ import {
   SHARED_MESSAGES,
   STATUS_MESSAGES,
 } from '../messages/messages';
-import { ADMIN_MENU_ROUTE } from '../routes/navigation';
+import { ADMIN_MENU_ROUTE, REFERENCE_TYPE_LIST_ROUTE } from '../routes/navigation';
 import {
   REF_TYPE_EDIT_FIELD_LABELS,
   REF_TYPE_EDIT_KEY_LABELS,
@@ -141,30 +141,67 @@ const STORED: TransactionType = {
 };
 
 /**
- * Renders the screen at a concrete maintenance path with a probe at the exit destination.
+ * Renders the screen at a concrete maintenance path with probes at both exit destinations.
+ *
+ * Assumptions: the caller an entering transition names is optional, because both arms of the exit
+ * resolution are reachable in the delivered tree and each needs one arrival to exercise it. The list
+ * screen's add transfer names this screen's caller (`ui/src/screens/refTypeList/index.tsx`), while
+ * administrative option 6 names none because the menu IS the fallback -- so `undefined` here is not a
+ * degenerate case but the second live entry path.
+ *
+ * Assumptions: omitting the caller produces a router entry with NO state member at all rather than one
+ * carrying an empty object, so the fallback arm is exercised against the arrival it actually answers:
+ * a menu transfer, a typed address, a bookmark or a reload.
  * @param {string} typeCd - Path segment the route parameter receives.
+ * @param {string} [origin] - Route the entering transition named as this screen's caller, if any.
  * @returns {ReactElement} The composed tree under test.
  */
-function renderScreen(typeCd: string): ReactElement {
+function renderScreen(typeCd: string, origin?: string): ReactElement {
+  const pathname = `/reference/transaction-types/${typeCd}`;
+
   return (
-    <MemoryRouter initialEntries={[`/reference/transaction-types/${typeCd}`]}>
+    <MemoryRouter
+      initialEntries={[origin === undefined ? pathname : { pathname, state: { from: origin } }]}
+    >
       {/*
-        WHY : ⚠ Refactoring Rationale: the screen is rendered INSIDE `AppShell`, where it was rendered
-              bare. The screen delegates its title band, its row-23 message line and its row-24 legend to
-              the one shell that `ui/src/router.tsx` mounts as a layout route -- it composes none of the
-              three itself -- so a bare render produced a screen with no legend and no band, and every
-              query for either failed on a screen that is in fact correct. The children form is used
-              rather than a layout route because it is the shape that needs no second route level, and
-              `AppShell` renders `children ?? <Outlet />`, so both forms paint the same frame.
+        WHY : Assumptions: the screen is rendered INSIDE `AppShell`, because it composes none of the
+              three frame zones itself: it delegates its title band, its row-23 message line and its
+              row-24 legend to the one shell `ui/src/router.tsx` mounts as a layout route. Rendered
+              bare it would paint no legend and no band, and every query for either would fail on a
+              screen that is in fact correct. The children form is used rather than a second route
+              level because `AppShell` renders `children ?? <Outlet />`, so both forms paint the same
+              frame and this one needs no extra nesting.
       */}
       <AppShell>
         <Routes>
           <Route path={REF_TYPE_EDIT_ROUTE} element={<RefTypeEditScreen />} />
           <Route path={ADMIN_MENU_ROUTE} element={<div>{`${ARRIVED} ${ADMIN_MENU_ROUTE}`}</div>} />
+          <Route
+            path={REFERENCE_TYPE_LIST_ROUTE}
+            element={<div>{`${ARRIVED} ${REFERENCE_TYPE_LIST_ROUTE}`}</div>}
+          />
         </Routes>
       </AppShell>
     </MemoryRouter>
   );
+}
+
+/**
+ * Asserts the route pattern this screen publishes spells its parameter `cd`.
+ *
+ * Refactoring Rationale: the parameter was spelled `typeCd`, which is the TRANSPORT property name --
+ * `ui/src/api/types.ts` declares `TransactionType.typeCd` -- while `ui/src/api/reference.ts` L62
+ * described the route as `/reference/transaction-types/:cd`. Two names for one value in one URL is what
+ * the correction removes, and the spelling is load-bearing rather than cosmetic: `useParams` resolves an
+ * unmatched name to `undefined` with no diagnostic, so a route and a screen that disagree leave this
+ * screen prompting for a key the address already carried, with nothing failing to say so.
+ * @returns {void} Nothing; failure is reported by the expectation.
+ */
+function theRouteParameterIsSpelledCd(): void {
+  expect(REF_TYPE_EDIT_ROUTE).toBe('/reference/transaction-types/:cd');
+
+  const matched = matchPath(REF_TYPE_EDIT_ROUTE, `/reference/transaction-types/${STORED.typeCd}`);
+  expect(matched?.params.cd).toBe(STORED.typeCd);
 }
 
 /** Answers the read with the stored row. */
@@ -601,11 +638,16 @@ async function reportsTheUnboundSixthKey(): Promise<void> {
 }
 
 /**
- * Asserts the third function key leaves for the administrative menu.
+ * Asserts the third function key leaves for the administrative menu when no caller was named.
  *
  * Assumptions: the destination is the ADMINISTRATIVE menu rather than the main menu, which
  * `COTRTUPC.cbl` L429 fixes: with no calling program recorded it transfers to `LIT-ADMINTRANID` and
  * `LIT-ADMINPGM`.
+ *
+ * Assumptions: this case now states the FALLBACK arm specifically, and its companion below states the
+ * other. It was the only exit case while the list screen handed over no caller, and it would still
+ * pass against a screen that ignored a named caller entirely -- which is why the pair exists rather
+ * than this case alone.
  * @returns {Promise<void>} Resolves once the destination has reported its arrival.
  */
 async function exitsToTheAdministrativeMenu(): Promise<void> {
@@ -615,6 +657,70 @@ async function exitsToTheAdministrativeMenu(): Promise<void> {
   await userEvent.keyboard('{F3}');
 
   expect(await screen.findByText(`${ARRIVED} ${ADMIN_MENU_ROUTE}`)).toBeInTheDocument();
+}
+
+/**
+ * Asserts the third function key returns to the list screen when the list screen entered it.
+ *
+ * ⚠️ Purpose: this arm was unreachable. The exit resolution has always preferred a named caller, but
+ * the list screen's add transfer handed none over, so an operator who pressed F2 there and F3 here
+ * landed on the administrative menu -- losing the grid, the filter and the page position -- while the
+ * reference returns them to the list. `COTRTUPC.cbl` L466-L468 tests `CDEMO-FROM-PROGRAM` against
+ * `LIT-ADMINPGM` (`'COADM01C'`, L209-L210) and `LIT-LISTTPGM` (`'COTRTLIC'`, L217-L218), so the
+ * program recognises both callers by name and this screen now honours both.
+ *
+ * Assumptions: the origin is supplied as router state, which is the carrier the list screen uses, and
+ * it is the constant from `ui/src/routes/navigation.ts` rather than a literal -- an origin outside
+ * that module's closed route set is refused by the screen, so the two have to be the same string.
+ * @returns {Promise<void>} Resolves once the destination has reported its arrival.
+ */
+async function exitsToTheListScreenThatEnteredIt(): Promise<void> {
+  render(renderScreen(REF_TYPE_NEW_SENTINEL, REFERENCE_TYPE_LIST_ROUTE));
+  expect(await screen.findByText(EDIT_STATUS.PROMPT_FOR_SEARCH_KEYS.text)).toBeInTheDocument();
+
+  await userEvent.keyboard('{F3}');
+
+  expect(await screen.findByText(`${ARRIVED} ${REFERENCE_TYPE_LIST_ROUTE}`)).toBeInTheDocument();
+}
+
+/**
+ * Asserts the key this screen reads is the route parameter spelled `cd`.
+ *
+ * ⚠️ Purpose: AAP section 0.4.1.4 fixes this screen's route as
+ * `/reference/transaction-types/:cd`, and the parameter was declared and read as `typeCd`. React
+ * Router resolves a parameter by NAME, and `useParams` returns `undefined` for a name the pattern does
+ * not carry with no diagnostic of any kind -- so under the AAP's pattern the screen would have
+ * prompted for a key its own address already supplied, on every arrival, silently.
+ *
+ * Assumptions: the pattern is written out as a LITERAL here rather than taken from
+ * `REF_TYPE_EDIT_ROUTE`, which every other case in this file mounts. Reusing the exported constant
+ * makes the pattern and the reader agree by construction, so a case built that way stays green under
+ * any spelling and cannot state this property at all; the literal is what pins the spelling to the one
+ * the AAP names.
+ * @returns {Promise<void>} Resolves once the read has been observed.
+ */
+async function readsItsKeyFromTheCdRouteParameter(): Promise<void> {
+  serveStoredRow();
+
+  render(
+    <MemoryRouter initialEntries={[`/reference/transaction-types/${STORED.typeCd}`]}>
+      <AppShell>
+        <Routes>
+          <Route path="/reference/transaction-types/:cd" element={<RefTypeEditScreen />} />
+        </Routes>
+      </AppShell>
+    </MemoryRouter>,
+  );
+
+  await waitFor(
+    /**
+     * Waits for the read the route parameter drives.
+     * @returns {void} Nothing; failure is reported by the expectation.
+     */
+    () => {
+      expect(vi.mocked(getTransactionType)).toHaveBeenCalledWith(STORED.typeCd);
+    },
+  );
 }
 
 /**
@@ -651,6 +757,8 @@ function refTypeEditCases(): void {
   beforeEach(resetSpies);
   afterEach(resetSpies);
 
+  it('reads its key from the cd route parameter', readsItsKeyFromTheCdRouteParameter);
+  it('exits to the list screen that entered it', exitsToTheListScreenThatEnteredIt);
   it('composes every validation sentence from the catalog', composesEveryValidationSentence);
   it('transcribes the key availability paragraph', transcribesTheKeyAvailabilityParagraph);
   it('reports a conflict with the reference sentence', reportsAConflictWithTheReferenceSentence);
@@ -670,6 +778,7 @@ function refTypeEditCases(): void {
   it('reports the unbound sixth key', reportsTheUnboundSixthKey);
   it('exits to the administrative menu', exitsToTheAdministrativeMenu);
   it('marks the refused key control', marksTheRefusedKeyControl);
+  it('spells its route parameter cd', theRouteParameterIsSpelledCd);
 }
 
 describe('transaction-type maintenance screen', refTypeEditCases);

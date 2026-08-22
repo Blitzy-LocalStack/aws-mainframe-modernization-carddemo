@@ -197,6 +197,24 @@
         margin: 0;
       }
 
+      /*
+        WHY : Assumptions: the min-height below is the ONE layout value in this
+        application that no antd token can express, and it is registered as such
+        rather than merely written here - ui/src/theme/tokens.ts records it at
+        ADDITIVE_LAYOUT_VALUES.viewportMinimumHeight and states its evidence under
+        design gap G8, whose resolution names THIS declaration as the owner. The
+        register is documentation and this rule is the mechanism, so the two are
+        held in agreement mechanically: ui/src/layout/appShell.test.tsx reads this
+        file and asserts that the mount point declares exactly the registered value,
+        that the body margin reset above is still present - the other half of the
+        measured 16px scrollbar - and that AppShell declares no competing height.
+
+        Trade-offs: two records of one value can drift, which is the defect that
+        removal of a duplicate registry in tokens.ts corrected. It is accepted here
+        because a stylesheet cannot import a TypeScript constant, and the choice was
+        between an unreferenced literal and a literal with a named owner plus a test
+        that fails when they disagree.
+      */
       #root {
         display: flex;
         flex-direction: column;

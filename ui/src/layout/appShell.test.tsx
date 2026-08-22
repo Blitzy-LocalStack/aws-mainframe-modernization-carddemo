@@ -7,18 +7,21 @@
  * The shell was authored complete and mounted by no route, so none of what it promised had ever run --
  * not the outlet, not the sign-off latch, not the skip link, and not the dispatcher that forwards a
  * delegated key activation back to the screen that published it. `ui/src/routerRoutes.test.tsx` proves the
- * shell is now the authenticated layout route; this file proves the shell itself behaves as documented,
+ * shell is mounted as the outermost layout route; this file proves the shell itself behaves as documented,
  * which is the other half of that finding and the half a route table cannot show.
  *
  * Assumptions: the delegation contract is the property most worth pinning, because it is what makes
  * mounting the shell safe at all. It paints a zone if and only if a screen has published one, so a screen
- * that composes its own bands is unaffected -- and a regression to unconditional painting would give
- * every such screen a second title band and two live regions announcing one message.
+ * that composes its own bands is unaffected -- and a regression to unconditional painting would give the
+ * three screens that do compose their own -- the main menu, the administrative menu and the authorization
+ * detail screen -- a second title band and two live regions announcing one message.
  *
- * Assumptions: the key DISPATCHER is exercised even though no screen currently delegates its legend.
- * Every delivered screen composes its own legend, so the path has no production caller yet; leaving it
- * untested would leave a documented capability unverified, and a capability that has never run is
- * indistinguishable from one that does not work.
+ * ⚠️ Refactoring Rationale: this file previously introduced the key DISPATCHER as a path with no
+ * production caller, on the ground that "every delivered screen composes its own legend". That is no
+ * longer the census: eighteen of the 21 screens delegate their legend through `useShellSlot`, so the
+ * dispatcher is on the live path for all of them and the three local composers are the exception. The
+ * cases are unchanged -- they were exercising the right behaviour for a reason that has since become the
+ * wrong one -- and what they now pin is the ordinary route rather than a dormant capability.
  *
  * Refactoring Rationale: every callback is a named declaration rather than an inline arrow, for the two
  * reasons the card screen tests record -- the lint rule requires a documentation block on a function
@@ -27,6 +30,8 @@
 
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { ReactElement } from 'react';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -35,6 +40,7 @@ import { THANK_YOU_CARDDEMO } from '../messages/messages';
 import { navigateSafely } from '../routes/navigation';
 import { installApiHarness, removeApiHarness } from '../test/apiHarness';
 import { endAnySession, establishSession } from '../test/sessionHarness';
+import { ADDITIVE_LAYOUT_VALUES } from '../theme/tokens';
 import {
   APP_SHELL_TEST_ID,
   AppShell,
@@ -123,6 +129,19 @@ function DelegatingScreen(): ReactElement {
  * @returns {ReactElement} The nested screen's own body.
  */
 function SelfComposingScreen(): ReactElement {
+  return <div>{SCREEN_BODY}</div>;
+}
+
+/**
+ * A nested screen that reports a write in flight, standing for a mutating screen mid-turn.
+ *
+ * Assumptions: it delegates an identity as well as the flag, because a screen that published only
+ * the flag would exercise a slot shape no real screen produces -- every writing screen in the tree
+ * publishes its title band too, and the shell resolves the members independently.
+ * @returns {ReactElement} The nested screen's own body.
+ */
+function WritingScreen(): ReactElement {
+  useShellSlot({ screen: IDENTITY, busy: true });
   return <div>{SCREEN_BODY}</div>;
 }
 
@@ -451,6 +470,74 @@ async function withdrawsTheDelegationAtUnmount(): Promise<void> {
   );
 }
 
+/**
+ * Asserts the document declares the registered viewport height and the shell declares none.
+ *
+ * Purpose: hold the two ends of design gap G8 in agreement. `ADDITIVE_LAYOUT_VALUES` records the one
+ * layout value no antd token can express, and `ui/index.html` is where it is actually declared -- so the
+ * register is documentation and the stylesheet is the mechanism, and nothing but this case makes a
+ * disagreement between them fail. Three claims are checked because all three were measured together:
+ * the mount point is sized to the registered value, the user agent's body margin is reset -- without it
+ * a frame one viewport tall scrolled permanently by 16px -- and the shell itself declares no height, so
+ * the two layers cannot both claim the value.
+ *
+ * Assumptions: the stylesheet is read as TEXT rather than by mounting the document, because jsdom does
+ * not load `ui/index.html` at all -- the test environment renders into a synthetic document, so the only
+ * way to observe what ships is to read the file. `ui/src/api/contracts.test.ts` and
+ * `ui/src/layout/headingOutline.test.tsx` establish the same idiom for the same reason.
+ *
+ * Assumptions: the shell's outermost element is inspected through its inline style rather than through a
+ * computed height, because a computed height in jsdom reflects no layout at all. What is being ruled out
+ * is a DECLARATION -- the `minHeight: '100dvh'` this component used to carry -- and a declaration is
+ * exactly what an inline style shows.
+ * @returns {Promise<void>} Resolves once the document and the shell have both been inspected.
+ */
+async function agreesWithTheDocumentOnTheOneUntokenisedValue(): Promise<void> {
+  const documentSource = readFileSync(join(import.meta.dirname, '..', '..', 'index.html'), 'utf8');
+
+  expect(documentSource).toContain(`min-height: ${ADDITIVE_LAYOUT_VALUES.viewportMinimumHeight};`);
+  expect(documentSource).toMatch(/html,\s*body\s*\{\s*margin:\s*0;\s*\}/u);
+
+  await signOn();
+  render(renderShell(<SelfComposingScreen />));
+
+  const frame = await screen.findByTestId(APP_SHELL_TEST_ID);
+
+  /*
+   * Assumptions: the frame's own surface declaration is asserted FIRST, because two empty strings
+   * below would otherwise pass for an element whose style attribute was never read at all -- a
+   * renamed test id or a moved attribute would make the absences vacuous rather than meaningful.
+   */
+  expect(frame.style.background).not.toBe('');
+  expect(frame.style.minHeight).toBe('');
+  expect(frame.style.height).toBe('');
+}
+
+/**
+ * Asserts the frame's sign-off control is held shut while the mounted screen reports a write.
+ *
+ * Assumptions: BOTH states are asserted in one case, the locked one and the unlocked one, because a
+ * disabled assertion alone would pass for a control that was disabled unconditionally -- which would
+ * take away the only way off a screen rather than lock it for a turn. The reference needs no such
+ * control at all: a 3270 keyboard locks from the moment a turn is transmitted until the region
+ * replies, so nothing on the display accepted input mid-turn. The two writing screens that publish
+ * this flag disable their own keys and inputs for the same window, and this control is the one they
+ * cannot reach -- and the most damaging one, since it discards the session locally while the request
+ * already carrying its token completes at the service.
+ * @returns {Promise<void>} Resolves once both states have been observed.
+ */
+async function holdsTheSignOffControlShutWhileAScreenWrites(): Promise<void> {
+  await signOn();
+  const locked = render(renderShell(<WritingScreen />));
+  expect(await screen.findByText(SCREEN_BODY)).toBeInTheDocument();
+  expect(screen.getByTestId(SHELL_SIGN_OFF_CONTROL_TEST_ID)).toBeDisabled();
+  locked.unmount();
+
+  render(renderShell(<DelegatingScreen />));
+  expect(await screen.findByText(SCREEN_BODY)).toBeInTheDocument();
+  expect(screen.getByTestId(SHELL_SIGN_OFF_CONTROL_TEST_ID)).toBeEnabled();
+}
+
 /** Registers the shell cases. */
 function appShellCases(): void {
   beforeEach(clearSession);
@@ -473,6 +560,14 @@ function appShellCases(): void {
   it('omits the sign-off control without a session', omitsTheSignOffControlWithoutASession);
   it('prefers a prop over a delegated value', prefersAPropOverADelegatedValue);
   it('withdraws the delegation at unmount', withdrawsTheDelegationAtUnmount);
+  it(
+    'agrees with the document on the one untokenised value',
+    agreesWithTheDocumentOnTheOneUntokenisedValue,
+  );
+  it(
+    'holds the sign-off control shut while a screen writes',
+    holdsTheSignOffControlShutWhileAScreenWrites,
+  );
 }
 
 describe('application shell', appShellCases);

@@ -31,12 +31,20 @@
 #   com.carddemo.common.validation.DateEditValidator, transcribed from
 #   app/cbl/CSUTLDTC.cbl, so no key below governs date validation.
 #
-#   This module owns the reference schema and its six tables, and it is the only
-#   module in the migration carrying two migrations -- V1__reference.sql and
-#   V2__seed_reference.sql. The second exists because this is the one context
-#   whose tables are unusable while empty: an unseeded interest rate is not a
-#   missing row, it is a nightly batch run that stops. The consequence for this
-#   file is startup cost, recorded on spring.flyway.
+#   This module owns the reference schema and its six tables, and its migration
+#   history is four scripts: V1__reference.sql, V2__seed_reference.sql,
+#   V3__reference_inquiry_reply_ledger.sql and
+#   V4__drop_reference_inquiry_reply_ledger.sql, the last two being the
+#   create-then-drop pair of a withdrawn inquiry reply ledger. V2 is the one that
+#   matters to this file: it exists because this is the one context whose tables
+#   are unusable while empty -- an unseeded interest rate is not a missing row, it
+#   is a nightly batch run that stops -- and it is the only migration in the whole
+#   reactor holding INSERT statements. The consequence for this file is startup
+#   cost, recorded on spring.flyway.
+#   Refactoring Rationale: this read "the only module in the migration carrying two
+#   migrations", which is now wrong twice over: this module carries four scripts,
+#   and every other schema-owning module carries more than one. The distinguishing
+#   property was never the count but the SEED, so the seed is what is claimed here.
 #
 #   Contracts this file is written against, stated once here rather than repeated
 #   at every key that names one of them. Each is a requirement this configuration
@@ -96,8 +104,9 @@
 #   the resolved Environment the configuration classes then read. That
 #   Environment yields: one HTTPS listener on the port below; one pooled
 #   DataSource whose every connection pins its schema search path to reference
-#   and requires verified TLS; a Flyway run applying both migrations into that
-#   schema before the JPA EntityManagerFactory is built; a JWT resource-server
+#   and requires verified TLS; a Flyway run applying every unapplied script in
+#   db/migration -- V1 through V4 -- into that schema before the JPA
+#   EntityManagerFactory is built; a JWT resource-server
 #   configuration; an actuator surface answering GET /actuator/health,
 #   /actuator/info and the metrics scrape path; the served OpenAPI 3.1 document
 #   openapi/reference-api.yaml, which is delivered beside this file; and the base
@@ -255,11 +264,22 @@ server:
     protocol: TLS
     enabled-protocols: TLSv1.2,TLSv1.3
 
-  # Assumptions: this service consumes an SQS queue, so a task being replaced
-  #   may hold an in-flight message whose reply has not yet been published.
-  #   Graceful shutdown lets the listener finish the message it holds instead of
-  #   the task dying mid-handler, which would leave the request to reappear
-  #   after the visibility timeout and be processed twice.
+  # Assumptions: this service consumes NO queue, so the only work a drain has to
+  #   finish is an in-flight HTTP request. Graceful shutdown lets a request that is
+  #   already inside a handler complete and its response reach the caller, instead
+  #   of the connection being severed mid-write during a rolling replacement --
+  #   which the browser client would surface as a failed reference lookup that a
+  #   retry would have satisfied.
+  # Refactoring Rationale: this rationale read "this service consumes an SQS queue,
+  #   so a task being replaced may hold an in-flight message whose reply has not yet
+  #   been published", and it contradicted both the tree and the note on
+  #   spring.lifecycle.timeout-per-shutdown-phase below. This module declares no
+  #   messaging starter -- its pom.xml records at the dependency block why the SQS
+  #   starter is deliberately absent -- no SqsConfig and no queue listener: the shared inquiry
+  #   request queue admits exactly one owning consumer and that consumer is
+  #   account-service's InquiryMessageListener. Naming a listener drain here sent a
+  #   reader looking for a message flow that is not in this module, and it made the
+  #   two adjacent notes disagree about whether one exists.
   shutdown: graceful
 
 spring:
@@ -325,10 +345,19 @@ spring:
   #   environment variables, which is the mechanism behind the design's
   #   requirement that no service hard-codes an endpoint. This module
   #   declares no parameter-store starter -- see
-  #   services/reference-service/pom.xml -- so there is deliberately no
-  #   spring.config.import here: the values reach this file through Spring's
-  #   relaxed binding of the environment variables named in the header, not
-  #   through a config-data resolver that is not on this classpath.
+  #   services/reference-service/pom.xml -- so no `aws-parameterstore:`
+  #   LOCATION is claimed by any document in this module: the values reach this
+  #   file through Spring's relaxed binding of the environment variables named
+  #   in the header, not through a config-data resolver that is not on this
+  #   classpath.
+  # Refactoring Rationale: that sentence read "there is deliberately no
+  #   spring.config.import here", which the same file contradicts above -- the
+  #   import of classpath:/carddemo-common-defaults.yml is declared and is
+  #   load-bearing, since it carries the console pattern that puts the
+  #   correlation identifier on every log line. What is deliberately absent is a
+  #   parameter-store location, not the import mechanism, and conflating the two
+  #   invited a reader to delete the one import this module cannot start
+  #   correctly without.
   # Trade-offs: none of the three below carries a fallback. An unset
   #   variable aborts startup naming itself, which is preferred to the
   #   alternative -- a localhost default would let a task start, connect to
@@ -549,13 +578,17 @@ spring:
   #   only migration in the reactor holding INSERT statements, six of them --
   #   and that seed dominates startup cost, which is a fact two artifacts
   #   outside this file are sized around. ⚠️ Refactoring Rationale: this read
-  #   "the only module in the reactor applying TWO migrations", which was
-  #   false -- three modules carry two, two carry three, one carries five --
-  #   and it was also the wrong fact to rest the sizing on, since a second
-  #   migration that alters a column costs nothing like one that loads the
-  #   transaction types, the transaction categories, the mandatory DEFAULT
-  #   disclosure group and the three lookup tables. The claim is restated in
-  #   a form a directory listing settles, so it cannot drift as schemas do.
+  #   "the only module in the reactor applying TWO migrations", which was false
+  #   in both halves -- every other schema-owning module carries more than one
+  #   script, and this one now carries four -- and it was also the wrong fact
+  #   to rest the sizing on, since a migration that alters a column costs
+  #   nothing like one that loads the transaction types, the transaction
+  #   categories, the mandatory DEFAULT disclosure group and the three lookup
+  #   tables. The claim is restated as a property of the CONTENT, which a grep
+  #   for INSERT across db/migration settles, rather than as a per-module count
+  #   that has to be re-measured whenever any module adds a table. Its own
+  #   replacement wording carried such a count and had already drifted, which
+  #   is the second reason none is stated here.
   #   -----------------------------------------------------------------------------
   flyway:
 
@@ -589,8 +622,28 @@ spring:
     #   that turns Hibernate's DDL off. The path resolves inside the jar, which
     #   is what makes the migrations travel with the code that maps them: a task
     #   cannot apply a migration from a different build than the one it runs.
-    #   Exactly two files satisfy it, db/migration/V1__reference.sql and
-    #   db/migration/V2__seed_reference.sql, and there is no V3.
+    #   Four files satisfy it, and the last two are a pair rather than two
+    #   independent steps: db/migration/V1__reference.sql creates the six tables,
+    #   V2__seed_reference.sql loads their reference data,
+    #   V3__reference_inquiry_reply_ledger.sql created
+    #   reference.inquiry_reply_ledger, and
+    #   V4__drop_reference_inquiry_reply_ledger.sql withdraws it again -- so the end
+    #   state of a fully migrated schema is the six tables V1 declares.
+    # Assumptions: V3 is retained rather than deleted, which is why the history is
+    #   four scripts and not two. Flyway validates its applied history against the
+    #   scripts it can resolve, this module sets no ignoreMigrationPatterns and
+    #   validate-on-migrate defaults to true, so deleting a released script makes
+    #   every already-migrated database refuse to start. Withdrawing an object is
+    #   therefore forward-only, and V4 is that forward step; V4's own header records
+    #   why the table went -- this module declares no listener and so had no code
+    #   path able to write it, while the guarantee it existed for lives with
+    #   account-service, the single consumer of the shared inquiry request queue.
+    # Refactoring Rationale: this note said "Exactly two files satisfy it ... and
+    #   there is no V3", which the directory contradicts. The claim was written to be
+    #   settled by a directory listing and then stopped agreeing with one, so a
+    #   reader reconciling the two had no way to tell whether the extra scripts were
+    #   accidental; naming all four and the create-then-drop relationship is what
+    #   makes the listing readable instead of suspicious.
     locations: classpath:db/migration
 
     # Assumptions: reference is the only schema this module touches, and the two
@@ -632,8 +685,8 @@ spring:
     # Trade-offs: false is chosen and stated explicitly, because the
     #   failure the alternative permits is silent. Were this true, a
     #   reference schema that already held objects but no Flyway history
-    #   table would be recorded as already-migrated and NEITHER migration
-    #   would run. V1 being skipped would leave the six tables as whatever
+    #   table would be recorded as already-migrated and NONE of the four
+    #   scripts would run. V1 being skipped would leave the six tables as whatever
     #   they already were -- possibly without the ON DELETE RESTRICT foreign
     #   key -- and V2 being skipped is worse still, because it is what seeds
     #   the 'DEFAULT' disclosure-group rows. app/cbl/CBACT04C.cbl L436-L439

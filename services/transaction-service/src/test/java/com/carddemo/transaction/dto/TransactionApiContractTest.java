@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import com.carddemo.common.money.Money;
 import com.carddemo.common.money.MoneyModule;
 import com.carddemo.common.web.CorrelationIdFilter;
+import com.carddemo.common.web.CursorToken;
 import com.carddemo.transaction.api.TransactionController;
 import com.carddemo.transaction.service.TransactionAddService;
 import jakarta.validation.constraints.Pattern;
@@ -120,6 +121,11 @@ class TransactionApiContractTest {
         table.put("TransactionCategoryCode", TransactionAddRequest.CATEGORY_CODE_DIGITS);
         table.put("MerchantId", TransactionAddRequest.MERCHANT_ID_DIGITS);
         table.put("DateOnly10", TransactionAddRequest.ISO_DATE_SHAPE);
+        table.put("TransactionSource", TransactionAddRequest.PRINTABLE_TEXT);
+        table.put("TransactionDescription", TransactionAddRequest.PRINTABLE_TEXT);
+        table.put("MerchantName", TransactionAddRequest.PRINTABLE_TEXT);
+        table.put("MerchantCity", TransactionAddRequest.PRINTABLE_TEXT);
+        table.put("MerchantZip", TransactionAddRequest.PRINTABLE_TEXT);
         return Map.copyOf(table);
     }
 
@@ -136,6 +142,11 @@ class TransactionApiContractTest {
         table.put("TransactionCategoryCode", "categoryCode");
         table.put("MerchantId", "merchantId");
         table.put("DateOnly10", "originDate");
+        table.put("TransactionSource", "source");
+        table.put("TransactionDescription", "description");
+        table.put("MerchantName", "merchantName");
+        table.put("MerchantCity", "merchantCity");
+        table.put("MerchantZip", "merchantZip");
         return Map.copyOf(table);
     }
 
@@ -401,11 +412,18 @@ class TransactionApiContractTest {
     }
 
     /**
-     * Asserts that each published identifier shape is the shape the Java constraint applies, so a
-     * value of the wrong length cannot pass validation and then be refused by a column.
+     * Asserts that each published shape is the shape the Java constraint applies, so a value of the
+     * wrong length cannot pass validation and then be refused by a column.
+     *
+     * <p>Refactoring Rationale: the five free-text schemas are compared here as well, where the table
+     * held only the identifier and date shapes. Those five published a width and no pattern while the
+     * request record constrained neither, so the contract and the runtime AGREED and were both wrong:
+     * each admitted a carriage return that splits a record in the fixed-width statement and report
+     * sinks, and a code point the US-ASCII fixed-width codecs cannot encode at all. Now that both
+     * state a domain, this comparison is what stops one of them from being relaxed alone.</p>
      */
     @Test
-    @DisplayName("each published identifier shape is the one the Java constraint applies")
+    @DisplayName("each published shape is the one the Java constraint applies")
     void publishedShapesAgreeWithTheAppliedConstraints() {
         SCHEMA_TO_JAVA_PATTERN.forEach((schemaName, javaPattern) -> {
             String published = unanchored(String.valueOf(schema(schemaName).get("pattern")));
@@ -1077,6 +1095,77 @@ class TransactionApiContractTest {
                 .as("a list row has no need of a card number at all, and the narrowest disclosure is"
                         + " none")
                 .doesNotContainKey("cardNumber");
+    }
+
+    /**
+     * Asserts that the published free-text domain refuses every character the fixed-width sinks cannot
+     * carry and admits the ordinary punctuation a merchant name holds.
+     *
+     * <p>Refactoring Rationale: this reads the PUBLISHED expression rather than the Java constant, which
+     * the case above already compares. The two are separate assertions because they answer separate
+     * questions: that one asks whether the contract and the runtime agree, and this one asks whether
+     * what they agree on actually closes the hole. A pair of sides could agree on an expression that
+     * still admitted a line feed, and only this case would notice.</p>
+     *
+     * <p>Assumptions: the refused set is the two record separators, the horizontal tab, the null, the
+     * delete and two code points above the seven-bit range -- one from the Latin-1 supplement and one
+     * outside the basic multilingual plane. The first five round-trip through US-ASCII intact and so
+     * reach a fixed-width record verbatim; the last two cannot be encoded by it at all and would be
+     * refused by {@code FixedWidthCodec} on a batch or reporting run long after the request that stored
+     * them.</p>
+     *
+     * <p>Assumptions: the admitted specimen carries every punctuation mark a merchant name legitimately
+     * holds, so this case fails if the domain is ever narrowed to an alphanumeric one. That would be the
+     * more likely mistake than widening it.</p>
+     */
+    @Test
+    @DisplayName("the published free-text domain refuses the characters the fixed-width sinks break on")
+    void publishedTextDomainRefusesUnrepresentableAndStructuralCharacters() {
+        List<String> textSchemas = List.of("TransactionSource", "TransactionDescription",
+                "MerchantName", "MerchantCity", "MerchantZip");
+        List<String> refused = List.of("\r", "\n", "\t", "\u0000", "\u007F", "\u00E9", "\uD83D\uDCB3");
+
+        textSchemas.forEach(schemaName -> {
+            java.util.regex.Pattern published = java.util.regex.Pattern
+                    .compile(String.valueOf(schema(schemaName).get("pattern")));
+
+            refused.forEach(specimen -> assertThat(published.matcher("A" + specimen + "B").matches())
+                    .as("%s must refuse U+%04X, which the fixed-width sinks cannot carry", schemaName,
+                            (int) specimen.charAt(0))
+                    .isFalse());
+
+            assertThat(published.matcher("A&B'C-D.E/F, G 9").matches())
+                    .as("%s must admit the punctuation a merchant name holds", schemaName)
+                    .isTrue();
+            assertThat(published.matcher("").matches())
+                    .as("%s must admit the empty string, leaving presence to its own rule", schemaName)
+                    .isTrue();
+        });
+    }
+
+    /**
+     * Asserts that the published cursor schema is the shape the shared sealed-cursor type produces.
+     *
+     * <p>⚠️ Refactoring Rationale: this case exists because the rationale beside that schema cited the
+     * shared type by LINE NUMBER and every one of the three lines had moved -- so the note asserted the
+     * version was {@code v1} while the pattern three lines beneath it, and the constant itself, both
+     * said {@code v2}. A comment cannot be compiled, and nothing compared it to anything. Comparing the
+     * published keywords with the constants they restate is what makes the citation self-correcting:
+     * the note now names the constants, and this case fails if either constant moves without the schema
+     * following.</p>
+     */
+    @Test
+    @DisplayName("the published cursor shape is the one the shared sealed-cursor type produces")
+    void publishedCursorShapeMatchesTheSharedSealedCursor() {
+        Map<String, Object> cursor = schema("CursorToken");
+
+        assertThat(cursor.get("maxLength")).isEqualTo(CursorToken.MAX_TOKEN_LENGTH);
+        assertThat(unanchored(String.valueOf(cursor.get("pattern"))))
+                .as("the published cursor shape must be the constant the shared type applies")
+                .isEqualTo(CursorToken.SEALED_SHAPE_PATTERN);
+        assertThat(String.valueOf(cursor.get("pattern")))
+                .as("the published shape must carry the current version prefix")
+                .contains(CursorToken.VERSION + "\\.");
     }
 
     /**

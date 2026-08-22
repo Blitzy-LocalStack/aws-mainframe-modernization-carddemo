@@ -33,11 +33,21 @@ import org.springframework.stereotype.Service;
  * idempotent with respect to this table as well as with respect to the ledger.</p>
  *
  * <p>Assumptions: the advance is written INSIDE the caller's transaction and is never given a
- * transaction of its own. The posting pass runs as one tasklet transaction, so the watermark and
- * every posting it accounts for commit together or roll back together. A separate transaction here
- * would break exactly that: a watermark committed ahead of a rolled-back pass would skip a night's
- * transactions permanently, and one committed after would leave a window in which a crash re-posts
- * them.</p>
+ * transaction of its own. That caller is {@code PostTransactionsJob}, whose tasklet body runs in NO
+ * transaction -- the step is built with {@code PROPAGATION_NOT_SUPPORTED} -- and which opens one
+ * transaction PER FEED RECORD through a {@code TransactionTemplate}. So each advance commits with
+ * the three writes, or with the reject row, of the single record it accounts for. A separate
+ * transaction here would break exactly that pairing: an advance committed ahead of a rolled-back
+ * record would skip that record permanently, and one committed after would leave a window in which a
+ * retry posts it a second time.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph said the posting pass "runs as one tasklet transaction",
+ * which was true of the step before its boundary moved and is not true of the code as it stands. The
+ * distinction is not cosmetic: under a pass-long transaction, a reader here could assume an advance
+ * is invisible until the night ends, whereas each advance is now durable as soon as its record
+ * commits -- which is precisely what lets a redriven pass resume above a committed prefix instead of
+ * re-presenting it. A caller that inherited the withdrawn assumption would build a second boundary
+ * around the whole walk to restore it and would reintroduce the pass-long row lock with it.</p>
  *
  * <p>Trade-offs: no HISTORY is kept. Each advance overwrites the previous position, so this table
  * cannot answer which run consumed which range. That is declined because the answer already exists
@@ -91,9 +101,18 @@ public class DailyFeedWatermarkService {
      * Reads the position a consuming pass must walk from, locking the row against a second pass.
      *
      * <p>Assumptions: this is the read for a pass that will CONSUME, which is why it locks. The lock
-     * is held until the caller's transaction ends -- for the posting pass, until the whole night
-     * commits -- so two overlapping passes serialise instead of both reading the same position and
-     * both posting the same rows.</p>
+     * is held until the caller's transaction ends, and the posting pass makes this call inside a
+     * transaction of its OWN rather than inside a night-long one -- so what the lock serialises is two
+     * passes reading the starting position at the same moment, not the whole of their processing.</p>
+     *
+     * <p>Trade-offs: that scope is narrower than the one this paragraph used to claim, and the
+     * narrowing is deliberate rather than a regression. Holding a row lock for a night-long transaction
+     * required the whole pass to be one transaction, which meant one refused record discarded every
+     * accepted record before it; per-record commits give up the night-long lock to keep that from
+     * happening. Two overlapping passes are still kept apart, by the chain's online-write lease, by the
+     * monotonic advance {@link #recordConsumedThrough} enforces under this same lock, and -- for the
+     * very first pass, where there is no row to lock -- by {@code pk_daily_feed_watermark} refusing the
+     * second insert.</p>
      *
      * @param feedName the record-layout name of the feed; must not be {@code null} or blank
      * @return the ingestion ordinal already consumed, as an exclusive lower bound for the walk, or

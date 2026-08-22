@@ -166,6 +166,25 @@ import org.testcontainers.utility.MountableFile;
  * its own preconditions in its own source, so a reader can tell what a case depends on without
  * opening another file, and a failure here cannot be caused by setup another class needed.
  *
+ * <h2>Why no failure message below names a customer identifier</h2>
+ *
+ * <p>Assumptions: a failure message from this class is written to the build log, and a build log is
+ * retained, aggregated and read far more widely than the fixture corpus it describes -- which is what
+ * makes an identifier in one a sensitive-diagnostic exposure rather than a convenience. Every case
+ * below therefore identifies the argument it failed on by its ORDINAL within the ordered set the case
+ * walks -- a published identity, a leading fragment, a nearby absent key, or a row of the committed
+ * cross-reference -- and never by the value itself. The ordinal is exactly as diagnostic here,
+ * because each of those sets is closed and is declared in fixture order in this file, and the case
+ * that walks the cross-reference additionally asserts the published set against the committed
+ * fixture -- so an ordinal locates one argument unambiguously for anyone holding the fixture.
+ *
+ * <p>Alternatives Considered: naming a leading fragment of an identifier, an abbreviation of one, or
+ * a digest of one. All three are rejected on one ground -- over the closed domains this class probes,
+ * each is trivially invertible, so each is still key material. A fragment is additionally the WORST
+ * of the three here, because this class's whole subject is that a fragment is a distinct key with its
+ * own resolution behaviour, so a message naming one would be both a leak and ambiguous about which
+ * argument had failed.
+ *
  * <h2>Parameters, return values, exceptions or errors</h2>
  *
  * <p>This is a test class with no constructor a caller invokes, no value it yields and no exception
@@ -1086,11 +1105,14 @@ class StatementCustomerRepositoryIT {
         //       identifier is the only argument the keyed read at app/cbl/CBSTM03B.CBL L189 and L190
         //       is ever given. A published identity that failed to resolve would mean the projection
         //       or the load, not the key semantics, so this is the control the two negative families
-        //       below are read against.
-        for (Long identity : PUBLISHED_IDENTITIES) {
-            assertThat(customers.findById(identity))
-                    .withFailMessage("the whole identifier %s must resolve; every value reaching this"
-                            + " lookup comes from a cross-reference row that exists", identity)
+        //       below are read against. Trade-offs: each of the three loops is indexed so its failure
+        //       text can name the case by ordinal and carry no key material into the build log, for the
+        //       reason this class's own documentation records.
+        for (int ordinal = 1; ordinal <= PUBLISHED_IDENTITIES.size(); ordinal++) {
+            assertThat(customers.findById(PUBLISHED_IDENTITIES.get(ordinal - 1)))
+                    .withFailMessage("published identity %d of %d must resolve; every value reaching"
+                            + " this lookup comes from a cross-reference row that exists",
+                            ordinal, PUBLISHED_IDENTITIES.size())
                     .isPresent();
         }
 
@@ -1098,12 +1120,14 @@ class StatementCustomerRepositoryIT {
         //       row it prefixes and return it, which is precisely the reading of LK-M03B-KEY-LN --
         //       declared PIC S9(4) at app/cbl/CBSTM03B.CBL L111 -- that this case exists to refute.
         //       Register entry R3 records the finding; this is where the engine confirms it.
-        for (Long fragment : LEADING_FRAGMENTS_OF_PUBLISHED_IDENTITIES) {
-            assertThat(customers.findById(fragment))
-                    .withFailMessage("the leading fragment %s must resolve NOTHING; if it resolves,"
+        for (int ordinal = 1; ordinal <= LEADING_FRAGMENTS_OF_PUBLISHED_IDENTITIES.size(); ordinal++) {
+            assertThat(customers.findById(
+                            LEADING_FRAGMENTS_OF_PUBLISHED_IDENTITIES.get(ordinal - 1)))
+                    .withFailMessage("leading fragment %d of %d must resolve NOTHING; if it resolves,"
                             + " the read is positioning by prefix rather than matching a whole key,"
                             + " and register entry R3 is wrong about %s L%d",
-                            fragment, FILE_ACCESS_PROGRAM, RANDOM_ACCESS_MODE_LINE)
+                            ordinal, LEADING_FRAGMENTS_OF_PUBLISHED_IDENTITIES.size(),
+                            FILE_ACCESS_PROGRAM, RANDOM_ACCESS_MODE_LINE)
                     .isEmpty();
         }
 
@@ -1112,11 +1136,12 @@ class StatementCustomerRepositoryIT {
         //       continue and produce a statement addressed to the wrong person, with nothing raised
         //       anywhere. That silent-wrong-row outcome, rather than a missing row, is what makes this
         //       family the sharper probe of the two.
-        for (Long nearby : KEYS_A_BROWSE_WOULD_ANSWER_WRONGLY) {
-            assertThat(customers.findById(nearby))
-                    .withFailMessage("the absent key %s must resolve NOTHING; a greater-or-equal"
-                            + " browse would answer it with the next published identity, and a"
-                            + " statement would then be built from another cardholder's row", nearby)
+        for (int ordinal = 1; ordinal <= KEYS_A_BROWSE_WOULD_ANSWER_WRONGLY.size(); ordinal++) {
+            assertThat(customers.findById(KEYS_A_BROWSE_WOULD_ANSWER_WRONGLY.get(ordinal - 1)))
+                    .withFailMessage("nearby absent key %d of %d must resolve NOTHING; a"
+                            + " greater-or-equal browse would answer it with the next published"
+                            + " identity, and a statement would then be built from another"
+                            + " cardholder's row", ordinal, KEYS_A_BROWSE_WOULD_ANSWER_WRONGLY.size())
                     .isEmpty();
         }
     }
@@ -1156,16 +1181,24 @@ class StatementCustomerRepositoryIT {
         //       evaluation at app/cbl/CBSTM03A.CBL L379 to L386 has no end-of-file arm and reaches the
         //       abend paragraph at L921. Asserting resolution per ROW rather than per distinct
         //       identifier is what makes this case fail on the same input the run would fail on.
-        for (Map<String, Object> row : crossReferenceRows) {
-            long identity = integral(row, XREF_CUSTOMER_ID_FIELD);
+        //       Trade-offs: the loop is indexed so the failure text can name the offending case by its
+        //       row position in the committed fixture and carry no key material into the build log, for
+        //       the reason this class's own documentation records. The width check reads the key's
+        //       LENGTH rather than the key rendered as text for the same reason -- the property under
+        //       test is the digit count, and asserting on the text would put the key itself into the
+        //       framework's own failure rendering, which is the one place a diagnostic can still carry
+        //       one after the message text has been cleaned.
+        for (int ordinal = 1; ordinal <= crossReferenceRows.size(); ordinal++) {
+            long identity = integral(crossReferenceRows.get(ordinal - 1), XREF_CUSTOMER_ID_FIELD);
             assertThat(customers.findById(identity))
-                    .withFailMessage("the cross-reference names customer %s, which the customer"
-                            + " projection cannot answer; %s treats that as an abort at L921 rather"
-                            + " than as a card to skip", identity, STATEMENT_PROGRAM)
+                    .withFailMessage("the cross-reference names the customer of row %d of %d, which"
+                            + " the customer projection cannot answer; %s treats that as an abort at"
+                            + " L921 rather than as a card to skip",
+                            ordinal, crossReferenceRows.size(), STATEMENT_PROGRAM)
                     .isPresent();
-            assertThat(String.valueOf(identity))
+            assertThat(String.valueOf(identity).length())
                     .as("the supplied key fits its nine declared digits")
-                    .hasSizeLessThanOrEqualTo(CUSTOMER_KEY_DIGITS);
+                    .isLessThanOrEqualTo(CUSTOMER_KEY_DIGITS);
         }
     }
 
@@ -1869,6 +1902,21 @@ class StatementCustomerRepositoryIT {
      * the instance it constructed.</p>
      */
     static final class CapturingStatementInspector implements StatementInspector {
+
+        /**
+         * The serialized form's version, fixed at one.
+         */
+        // WHY : Assumptions: the provider's inspection extension point extends the serialization
+        //       marker, so this type is serializable whether or not anything ever serializes it, and a
+        //       compiler reports the missing version under its full warning set. The value is declared
+        //       explicitly rather than left to the compiler to derive, because a derived value changes
+        //       whenever a member is added and would silently invalidate an already-serialized form.
+        //       Alternatives Considered: suppressing the warning instead, on the ground that this
+        //       instance is constructed by the provider and never written to a stream. Rejected because
+        //       the suppression would have to be revisited the moment the provider's own serialization
+        //       behaviour changed, whereas a fixed version is correct either way -- the same trade the
+        //       shared statement projection's embedded identifier records.
+        private static final long serialVersionUID = 1L;
 
         /**
          * Records one generated statement and returns it unchanged.

@@ -145,9 +145,6 @@ public final class CursorToken {
     public static final int MIN_KEY_LENGTH = 32;
 
     /**
-     * The shape a sealed token has to match before any part of it is decoded, as a regular expression.
-     *
-    /**
      * The published shape a sealed cursor must match, for a request contract to validate against.
      *
      * <p>Assumptions: the expression is published as a constant rather than restated in each request

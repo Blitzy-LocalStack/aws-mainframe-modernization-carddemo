@@ -30,17 +30,25 @@ import jakarta.validation.constraints.Size;
  * in bounded chunks and writes the two run-wide datasets; it is not reachable through this surface.
  * The response shape here is one statement's summary and one pair of artifact locations, so a request
  * selecting the whole portfolio would have no answer to return and the handler would have to hold
- * every card's transactions to compose one. {@code reporting-api.yaml} declares exactly one of the
- * two as required at its {@code StatementRequest} schema, so admitting an empty body here would put
- * this record and the published contract in disagreement.
+ * every card's transactions to compose one. {@code reporting-api.yaml} states the same at its
+ * {@code StatementRequest} schema, as TWO MUTUALLY EXCLUSIVE {@code oneOf} BRANCHES -- one requiring
+ * {@code cardNumber} and forbidding {@code accountId}, the other requiring {@code accountId} and
+ * forbidding {@code cardNumber} -- so a body carrying neither component satisfies neither branch and
+ * is invalid against the published contract. Admitting an empty body as a whole-portfolio request here
+ * would put this record and that contract in disagreement.
  *
- * <p>Assumptions: whether the two components may be supplied TOGETHER is still not settled here. A
- * rule relating one component to another decides how a run is composed, which is business logic, and
- * the charter at {@code com.carddemo.reporting.dto} closes this package to business logic entirely --
- * so exactly-one-of is enforced by {@code com.carddemo.reporting.service.StatementService}, which
- * answers a per-field refusal naming whichever component is at fault. What this record guarantees is
- * narrower and unconditional: each component, taken on its own, is either absent or a value of the
- * exact shape and exact width its copybook field declares.
+ * <p>Assumptions: those same two branches are what makes supplying the two components TOGETHER
+ * invalid, for the symmetric reason: a body carrying both satisfies neither branch either. The rule is
+ * therefore stated in the contract and ENFORCED somewhere else, and the split is deliberate. A rule
+ * relating one component to another decides how a run is composed, which is business logic, and the
+ * charter at {@code com.carddemo.reporting.dto} closes this package to business logic entirely -- so
+ * exactly-one-of is enforced by {@code com.carddemo.reporting.service.StatementService}, which answers
+ * a per-field refusal naming whichever component is at fault. Nothing at runtime reads the published
+ * document: the framework validates an arriving body against the constraints THIS record declares on
+ * its own components, so the branches are what a caller validates against before sending and the
+ * service is what refuses on arrival, and the two have to agree by review rather than by mechanism.
+ * What this record guarantees is narrower and unconditional: each component, taken on its own, is
+ * either absent or a value of the exact shape and exact width its copybook field declares.
  *
  * <h2>Two things this record deliberately does not carry</h2>
  *

@@ -1,6 +1,6 @@
 /**
- * JPA keyed operations, exactly two keyset browse queries and one alternate-key
- * lookup. No offset paging.
+ * JPA keyed operations, exactly four keyset browse queries in two directions and
+ * one alternate-key lookup. No offset paging.
  *
  * <h2>Target contract, not a directory listing</h2>
  *
@@ -19,13 +19,15 @@
  * context. It declares two Spring Data types. The first, {@code UserRepository},
  * reaches the {@code auth.users} table in three ways and in no fourth way.
  * The first is keyed access through the primary key: find by identifier,
- * existence check, save and delete. The second is keyset browsing: exactly three
- * queries -- an opening read bounded only by row count, one reading forward from
- * a key and one reading backward from a key. The third is a single lookup by the
- * table's one alternate key, {@code cognito_sub}, returning at most one row. The
- * exclusions are as much the charter as the inclusions are, because each of them
- * is load bearing rather than an oversight: no offset pagination of any kind, no
- * page number, no total count, and no third browse DIRECTION.</p>
+ * existence check, save and delete. The second is keyset browsing: exactly four
+ * queries -- two that OPEN a browse, one bounded only by row count and one
+ * positioned at or after a supplied identifier, and two that CONTINUE one, one
+ * reading forward from a key and one reading backward from a key. The third is a
+ * single lookup by the table's one alternate key, {@code cognito_sub}, returning
+ * at most one row. The exclusions are as much the charter as the inclusions are,
+ * because each of them is load bearing rather than an oversight: no offset
+ * pagination of any kind, no page number, no total count, and no third browse
+ * DIRECTION.</p>
  *
  * <p>The second type is {@code IdentitySyncTaskRepository}, over
  * {@code auth.identity_sync_task}, and it reaches that table in exactly two ways
@@ -42,19 +44,37 @@
  * that most easily becomes unbounded, so the limit is a required parameter rather than
  * a default -- a caller cannot ask for the whole table by omitting it.</p>
  *
- * <p>Refactoring Rationale: the second way was closed at two queries and is
- * widened here to three, by revising the charter rather than adding a member
- * against it -- the process the ruling above prescribes. What made it necessary
- * is that a browse has to start somewhere: both positioned queries take a key,
- * and the first page has none, so opening the browse was expressible only by
- * passing a value chosen to sort below every key. That works by way of a
- * collation detail rather than by intent -- the column is {@code CHAR(8)} and
- * trailing blanks are ignored in its comparison, so an empty string and a string
- * of blanks compare equal and a blank identifier would be dropped from the first
- * page while appearing on later ones. A query with no lower bound states the
- * intent and cannot be wrong about it. The third query adds no DIRECTION, which
- * is why that exclusion is unchanged and is now capitalised to mark the
- * distinction: three queries, two directions.</p>
+ * <p>Refactoring Rationale: the second way was closed at two queries and has been
+ * widened twice, each time by revising this charter rather than by adding a member
+ * against it -- the process the ruling above prescribes. The first widening added
+ * the unbounded opening read, because a browse has to start somewhere: both
+ * positioned queries take a key, and the first page has none, so opening the
+ * browse was expressible only by passing a value chosen to sort below every key.
+ * That works by way of a collation detail rather than by intent -- the column is
+ * {@code CHAR(8)} and trailing blanks are ignored in its comparison, so an empty
+ * string and a string of blanks compare equal and a blank identifier would be
+ * dropped from the first page while appearing on later ones. A query with no lower
+ * bound states the intent and cannot be wrong about it.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: the second widening added the POSITIONED opening
+ * read, and what made it necessary is a defect rather than a preference. The
+ * baseline's browse takes an identifier typed into a search field and seeks on it
+ * -- {@code app/cbl/COUSR00C.cbl} lines 218 to 221 move a typed value into
+ * {@code SEC-USR-ID} and {@code LOW-VALUES} when the field is blank -- so the
+ * ENTER turn has two branches and this boundary had a query for only one of them.
+ * The browser client compensated by filtering the page it had already been
+ * handed, which returned nothing at all whenever the identifier sorted beyond that
+ * page, and the service could not have served it with either positioned query: the
+ * forward one compares STRICTLY, so it would have hidden the very row whose
+ * identifier was typed, and the baseline shows that row first because its priming
+ * read is skipped on the ENTER turn (the guard at line 288). Hence a fourth member
+ * whose comparison is inclusive.</p>
+ *
+ * <p>Assumptions: neither widening adds a DIRECTION, which is why that exclusion
+ * is unchanged and is capitalised to mark the distinction: four queries, two
+ * directions. Three of the four read ascending -- both opening reads and the
+ * forward continuation -- and one reads descending, so a reader counting orderings
+ * finds two where a reader counting members finds four.</p>
  *
  * <p>Refactoring Rationale: this charter previously closed the set at two ways
  * and named no alternate-key access, and the third way is admitted by revising
@@ -65,8 +85,8 @@
  * a token names a subject, not an eight-character identifier. Admitting it as a
  * NAMED third way rather than widening the charter to "keyed access generally"
  * keeps the boundary enforceable -- one column, at most one row, no predicate
- * beyond equality -- so a proposed fourth query is still something a reviewer can
- * refuse.</p>
+ * beyond equality -- so a proposed fourth WAY of reaching the table is still
+ * something a reviewer can refuse.</p>
  *
  * <p>Assumptions: the third way is bounded by the schema and not merely by
  * intention. {@code cognito_sub} is declared {@code NOT NULL UNIQUE} in
@@ -77,14 +97,25 @@
  *
  * <p>The neighbouring packages are shaped by that charter.
  * {@code com.carddemo.auth.service} composes these operations into the
- * behaviour transcribed from the baseline programs, and the two browse queries
- * fill {@code com.carddemo.common.web.PageResponse}, whose first key, last key,
- * has-next and has-previous members are what a caller navigates by. A caller
- * therefore never supplies a page number, because nothing on this boundary
- * accepts one. Assumptions: both availability members are settled by the service
- * layer from the surplus row each direction reads, not inferred from a boundary
- * key being present; the surplus row is what this package's two browse queries
- * return by asking for one row more than the page.</p>
+ * behaviour transcribed from the baseline programs, and the four browse queries
+ * fill {@code com.carddemo.common.web.PageResponse}, whose FOUR components --
+ * items, first key, last key and has-next -- are what a caller navigates by. A
+ * caller therefore never supplies a page number, because nothing on this boundary
+ * accepts one. Assumptions: forward availability is settled by the service layer
+ * from the surplus row, not inferred from a boundary key being present; the
+ * surplus row is what every one of this package's browse queries returns by
+ * asking for one row more than the page.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: this paragraph used to name a has-previous member
+ * as well, and no such member exists -- the envelope declares exactly the four
+ * components listed above. Backward availability is deliberately absent from it
+ * rather than missing: the reference answers the question from the terminal side,
+ * testing {@code CDEMO-CU00-PAGE-NUM > 1} at app/cbl/COUSR00C.cbl line 247 and
+ * refusing at line 251 without reading the file at all, and that ordinal lived in
+ * the communication area the screen carried between turns, so its migrated home
+ * is the client's own navigation state. This package therefore reads a surplus row
+ * in both directions for the sake of TRIMMING to the page size, but only the
+ * forward walk's surplus reaches a caller as an availability answer.</p>
  *
  * <h2>Design decisions</h2>
  *
@@ -97,28 +128,38 @@
  * neither. AAP transformation rule T5 resolves this by mapping the file verbs
  * by category, collapsing a positioned browse onto a keyset-paginated query, so
  * the position travels in the request as a key instead of being remembered
- * between requests. Four verbs become two queries. {@code STARTBR} at 588-595
- * opens the cursor and {@code ENDBR} at 689-691 releases it, and neither has a
- * counterpart here, because a query carries its own predicate and closes its
- * own result set. {@code READNEXT} at 621-629 and {@code READPREV} at 655-663
- * are the two that do carry across, and they are the reason the count on this
- * boundary is two rather than one.</p>
+ * between requests. Four verbs become four queries in two directions.
+ * {@code STARTBR} at 588-595 is the SEEK, and its counterpart here is one opening
+ * query per value the program seeks on -- {@code LOW-VALUES} for a blank search
+ * field and the typed identifier otherwise, the two branches at 218-221.
+ * {@code ENDBR} at 689-691 releases the cursor and has no counterpart at all,
+ * because a query carries its own predicate and closes its own result set.
+ * {@code READNEXT} at 621-629 and {@code READPREV} at 655-663 become the two
+ * positioned continuations, one per direction.</p>
  *
- * <p>Assumptions: two is transcribed from the source rather than chosen here.
- * The same program drives all four verbs from exactly two paragraphs,
- * {@code PROCESS-PAGE-FORWARD} at 282 and {@code PROCESS-PAGE-BACKWARD} at 336,
- * reached in turn from {@code PROCESS-PF7-KEY} at 237 and
- * {@code PROCESS-PF8-KEY} at 260. Two directions in the baseline is two queries
- * here, so a third query would describe a movement the source does not
- * offer.</p>
+ * <p>⚠️ Refactoring Rationale: {@code STARTBR} was recorded here as having no
+ * counterpart, alongside {@code ENDBR}, and that reading is what left the
+ * positioned opening read unbuilt: it treats the seek as cursor bookkeeping when
+ * the value it seeks ON is the operator's own input. The two verbs are not alike
+ * -- one carries a position and the other carries nothing -- so they are now
+ * accounted for separately.</p>
  *
- * <p>Assumptions: the key both browse queries page by is {@code SEC-USR-ID},
- * the eight-character field at offset zero of the 80-byte {@code SEC-USER-DATA}
- * layout declared at app/cpy/CSUSR01Y.cpy:17-23. It is the whole key rather
- * than the leading part of a compound one, which is what makes a single-column
- * keyset predicate sufficient here: each of the three positioned verbs above
- * passes that same field as both its {@code RIDFLD} and its {@code KEYLENGTH},
- * so ordering by one column reproduces the sequence the baseline reads in.</p>
+ * <p>Assumptions: TWO is transcribed from the source as a count of DIRECTIONS
+ * rather than of queries. The same program drives all four verbs from exactly two
+ * paragraphs, {@code PROCESS-PAGE-FORWARD} at 282 and
+ * {@code PROCESS-PAGE-BACKWARD} at 336, reached in turn from
+ * {@code PROCESS-PF7-KEY} at 237 and {@code PROCESS-PF8-KEY} at 260. Two
+ * directions in the baseline is two directions here, so a query reading a third
+ * way would describe a movement the source does not offer.</p>
+ *
+ * <p>Assumptions: the key every one of the four browse queries pages by is
+ * {@code SEC-USR-ID}, the eight-character field at offset zero of the 80-byte
+ * {@code SEC-USER-DATA} layout declared at app/cpy/CSUSR01Y.cpy:17-23. It is the
+ * whole key rather than the leading part of a compound one, which is what makes a
+ * single-column keyset predicate sufficient here: each of the three positioned
+ * verbs above passes that same field as both its {@code RIDFLD} and its
+ * {@code KEYLENGTH}, so ordering by one column reproduces the sequence the
+ * baseline reads in.</p>
  *
  * <p>Assumptions: a page holds ten rows. app/cbl/COUSR00C.cbl:56-57 declares
  * the screen array as {@code USER-REC OCCURS 10 TIMES}, and the forward
@@ -173,9 +214,9 @@
  * states that the baseline's online programs cannot be exercised end to end
  * without a CICS runtime, and every program this package serves is one of them,
  * so no such comparison exists for the user list screen and none should be
- * claimed for it. The page size, the key ordering, the two directions and the
- * single probe read are all readable straight from the source, and those are
- * the properties asserted exactly.</p>
+ * claimed for it. The page size, the key ordering, the two directions, the
+ * inclusive opening position and the single probe read are all readable straight
+ * from the source, and those are the properties asserted exactly.</p>
  *
  * <p>Trade-offs: keyset paging gives up random access to an arbitrary page. A
  * caller can step to the next page or back to the previous one but cannot jump

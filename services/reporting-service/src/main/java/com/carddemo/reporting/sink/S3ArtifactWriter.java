@@ -5,6 +5,8 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -44,6 +46,31 @@ import software.amazon.awssdk.services.s3.model.UploadPartRequest;
  * {@code docs/architecture/cobol-to-service-traceability.md}, which also records that the SUCCESS path is
  * indistinguishable from the reference's, because a key write is a replacement.</p>
  *
+ * <p>Refactoring Rationale: publication is {@link #complete()} and {@link #close()} ABORTS, where
+ * {@code close()} used to publish. The old shape defeated the atomicity claim the paragraph above makes,
+ * and it defeated it on the one path the claim exists for. Every caller holds this writer in a
+ * try-with-resources, so an exception raised while records were being written unwound through
+ * {@code close()} -- which completed the multipart upload, or put the buffered bytes when the artifact was
+ * still under one part, and thereby REPLACED the last good object with the partial output of a run that
+ * had just failed. A run that failed before its first record replaced it with an empty object. Splitting
+ * the two means an abort is what an unwind reaches: an aborted multipart upload publishes nothing and a
+ * discarded buffer is never put, so a failed generation now leaves the previous generation readable
+ * exactly as the paragraph above says it does.</p>
+ *
+ * <p>Alternatives Considered: keeping publication in {@code close()} and having a caller signal failure by
+ * some other means -- a flag set before the close, or a subclass hook. Rejected because it inverts the
+ * default: a caller who forgets the flag publishes partial output, which is the failure being closed here,
+ * and every future caller would have to know to opt out of it. With completion explicit the default is the
+ * safe one -- a caller that never reaches its completion call publishes NOTHING, which the absent version
+ * identifier and the unchanged destination object both report.</p>
+ *
+ * <p>Trade-offs: a caller now makes two calls where it made one, and forgetting the second produces no
+ * artifact rather than a wrong one. That is the failure this shape prefers, and the cost is real: a run
+ * whose generation succeeded but whose completion call was never written would look like a run that
+ * produced nothing at all. It is not left to discipline -- {@code S3StatementSink} and {@code S3ReportSink}
+ * are the only two callers, each exposes one completion method covering every writer it holds, and the
+ * task that drives each of them completes inside the try block whose resource clause aborts.</p>
+ *
  * <p>Alternatives Considered: appending to the object per record, which no object store supports without
  * rewriting the object. Alternatives Considered: writing each statement as its own object, which would
  * make the run's output a prefix rather than a file and would not match the reference's two output
@@ -51,9 +78,9 @@ import software.amazon.awssdk.services.s3.model.UploadPartRequest;
  * {@code app/cbl/CBSTM03A.CBL} are two datasets holding every statement of the run.</p>
  *
  * <p>Trade-offs: a multipart upload that is never completed and never aborted leaves storage charged for
- * its parts. {@link #close()} aborts a still-open upload on the failure path for that reason, and the
- * dataset bucket's lifecycle configuration expires incomplete uploads as the backstop that covers a
- * process killed outright.</p>
+ * its parts. {@link #close()} aborts a still-open upload whenever completion was not declared, for that
+ * reason, and the dataset bucket's lifecycle configuration expires incomplete uploads as the backstop that
+ * covers a process killed outright.</p>
  *
  * <p>Assumptions: this writer is NOT thread-safe and does not need to be. One artifact is produced by one
  * task on one thread, which is the same discipline the reference's single sequential pass has.</p>
@@ -90,6 +117,13 @@ public final class S3ArtifactWriter implements AutoCloseable {
      */
     private static final byte RECORD_TERMINATOR = (byte) '\n';
 
+    // WHY : Assumptions: this class logs on ONE path only -- an abort that itself failed -- because that
+    //       is the only outcome it knows about that no caller can be told. Every other outcome is
+    //       reported to the caller as a return or as a thrown failure, and the task above it journals
+    //       the run with the business date and the counts this class does not have.
+    /** Journal for an abort that could not be performed, whose consequence is a storage charge. */
+    private static final Logger LOG = LoggerFactory.getLogger(S3ArtifactWriter.class);
+
     /** The destination bucket. */
     private final S3Client s3;
 
@@ -110,6 +144,14 @@ public final class S3ArtifactWriter implements AutoCloseable {
 
     /** Whether {@link #close()} has already run, so that a second call is a no-op. */
     private boolean closed;
+
+    // WHY : Assumptions: completion is recorded as a FLAG rather than inferred from the version
+    //       identifier below, because an unversioned bucket returns no version from a successful
+    //       publication -- so "the version is null" and "nothing was published" are the same state on a
+    //       local or test deployment and cannot be told apart. A flag set only by the completion path
+    //       distinguishes them on every deployment.
+    /** Whether {@link #complete()} published the artifact, which is what stops {@link #close()} aborting. */
+    private boolean completed;
 
     // Assumptions: the version is captured from whichever of the two publication calls completed the
     //     artifact, because BOTH of them return one and a caller cannot know which path a run took.
@@ -150,13 +192,19 @@ public final class S3ArtifactWriter implements AutoCloseable {
      * @throws IOException if a part cannot be uploaded, which the generator treats as the reference's own
      *     write failure and converts into an abend
      * @throws NullPointerException if {@code record} is {@code null}
-     * @throws IllegalStateException if this writer has already been closed
+     * @throws IllegalStateException if this writer has already been completed or closed, either of which
+     *     means the record could not reach the artifact and would be lost silently
      */
     public void write(byte[] record) throws IOException {
         Objects.requireNonNull(record, "record must not be null");
+        if (completed) {
+            throw new IllegalStateException(
+                    "this artifact writer is complete, so the artifact it wrote is published and cannot"
+                            + " receive a further record");
+        }
         if (closed) {
             throw new IllegalStateException(
-                    "this artifact writer is closed, so the artifact it wrote is already complete and"
+                    "this artifact writer is closed, so the artifact it was writing was discarded and"
                             + " cannot receive a further record");
         }
         buffer.write(record, 0, record.length);
@@ -167,7 +215,11 @@ public final class S3ArtifactWriter implements AutoCloseable {
     }
 
     /**
-     * Completes the artifact, publishing it at its key, or aborts an upload that cannot be completed.
+     * Publishes the artifact at its key, making the records written so far visible as one object.
+     *
+     * <p>Purpose: this is the ONE call that makes an artifact readable, and a caller reaches it only on
+     * the path where the whole artifact was produced. Everything about the failure behaviour recorded on
+     * the class follows from that: {@link #close()} cannot publish, so an unwind cannot.</p>
      *
      * <p>Assumptions: an artifact that never grew past one part is published with a single put rather
      * than through a multipart completion. A multipart upload of one small part is admitted by the store
@@ -179,19 +231,32 @@ public final class S3ArtifactWriter implements AutoCloseable {
      * <p>Assumptions: an in-flight multipart upload is ABORTED when completion fails, and the abort's own
      * failure is suppressed onto the original. A failure to abort leaves storage charged for orphaned
      * parts, which the bucket lifecycle expires, whereas losing the original failure would leave the
-     * operator with the wrong diagnosis.</p>
+     * operator with the wrong diagnosis. The subsequent {@link #close()} then has nothing left to abort,
+     * which is why a failed completion does not double-abort.</p>
      *
-     * @throws IOException if the artifact cannot be published
+     * <p>Assumptions: a second call is REFUSED rather than treated as a no-op. Two completions of one
+     * writer means a caller has lost track of which artifact it is publishing, and answering the second
+     * call quietly would let that go unnoticed until a reader found the wrong bytes at the key.</p>
+     *
+     * @throws IOException if the artifact cannot be published, in which case nothing is stored at the key
+     *     and the previous object there is unchanged
+     * @throws IllegalStateException if this writer has already been completed or already been closed
      */
-    @Override
-    public void close() throws IOException {
-        if (closed) {
-            return;
+    public void complete() throws IOException {
+        if (completed) {
+            throw new IllegalStateException(
+                    "this artifact writer has already published its artifact; completing it twice would"
+                            + " leave a caller unable to say which artifact is at the key");
         }
-        closed = true;
+        if (closed) {
+            throw new IllegalStateException(
+                    "this artifact writer was closed without being completed, so the records it held were"
+                            + " discarded and there is nothing left to publish");
+        }
         try {
             if (uploadId == null) {
                 putWholeObject();
+                completed = true;
                 return;
             }
             if (buffer.size() > 0) {
@@ -204,9 +269,68 @@ public final class S3ArtifactWriter implements AutoCloseable {
                     .multipartUpload(CompletedMultipartUpload.builder().parts(uploaded).build())
                     .build())
                     .versionId();
+            completed = true;
         } catch (SdkException failure) {
-            abortQuietly(failure);
-            throw new IOException("the artifact could not be published to object storage", failure);
+            IOException refusal =
+                    new IOException("the artifact could not be published to object storage", failure);
+            abortQuietly(refusal);
+            uploadId = null;
+            throw refusal;
+        }
+    }
+
+    /**
+     * Discards an artifact that was never completed, publishing nothing.
+     *
+     * <p>Purpose: this is the resource-clause half of the completion split recorded on the class. It runs
+     * on every path, including the unwind of a failed generation, and on that path it must leave the
+     * destination key holding whatever it held before -- so it aborts and never publishes.</p>
+     *
+     * <p>Assumptions: this method does NOT throw. An abort failure means some uploaded parts remain
+     * charged until the bucket's incomplete-upload lifecycle rule expires them, which needs no operator
+     * action; raising it here would attach a storage-housekeeping failure to whatever exception was
+     * already unwinding, or -- worse -- would raise one where the caller had merely forgotten to
+     * complete, giving the operator the wrong diagnosis. Alternatives Considered: declaring
+     * {@code IOException} as {@link AutoCloseable} permits. Rejected on exactly that ground: the abort
+     * has no failure a caller can act on, and try-with-resources would suppress it onto an unrelated
+     * primary exception where it would be read as part of the original fault.</p>
+     *
+     * <p>Assumptions: the buffer is reset even when no multipart upload was started, so a writer that
+     * held its whole artifact under one part releases those bytes rather than holding them until it is
+     * collected.</p>
+     */
+    @Override
+    public void close() {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        if (completed) {
+            return;
+        }
+        // WHY : Assumptions: the buffer is cleared BEFORE the abort call rather than after, so the bytes
+        //       are released even if the abort throws something the catch below does not name. There is
+        //       nothing to publish them to at this point either way -- the abort is the decision, and
+        //       holding the bytes for it to fail on would keep a part-sized buffer alive for nothing.
+        buffer.reset();
+        if (uploadId == null) {
+            return;
+        }
+        try {
+            s3.abortMultipartUpload(AbortMultipartUploadRequest.builder()
+                    .bucket(bucket)
+                    .key(key)
+                    .uploadId(uploadId)
+                    .build());
+        } catch (SdkException abortFailure) {
+            // WHY : Trade-offs: the failure is LOGGED at warning rather than raised, for the reason the
+            //       contract above gives. It names the key so an operator can reconcile a charge against
+            //       an artifact, and it is the only place this class logs -- the publication path is
+            //       silent because its caller journals the outcome with the run's own context.
+            LOG.warn("event=reporting.artifact.abort-failed bucket={} key={}", bucket, key,
+                    abortFailure);
+        } finally {
+            uploadId = null;
         }
     }
 
@@ -299,7 +423,7 @@ public final class S3ArtifactWriter implements AutoCloseable {
      * the run wrote as soon as the next run wrote one.</p>
      *
      * <p>Assumptions: {@code null} means one of two things and both are legitimate: the writer has not
-     * been closed yet, so nothing has been published; or the destination bucket carries no versioning,
+     * been completed, so nothing has been published; or the destination bucket carries no versioning,
      * in which case the store returns no version and the key alone identifies the object. A caller
      * therefore treats the version as an OPTIONAL refinement of the locator rather than as a required
      * part of it. The production bucket is versioned -- that is the generation-retention analogue the

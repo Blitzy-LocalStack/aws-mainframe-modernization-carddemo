@@ -18,16 +18,30 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * Proves that every query the five repository roles declare parses against the real metamodel.
+ * Proves that every query the six repository roles declare parses against the real metamodel.
  *
  * <h2>Purpose</h2>
  *
- * <p>Four of the five roles declare their queries by method name and the fifth writes them out, and
- * both forms fail the same way: a property the metamodel does not carry, an entity join on a path that
- * does not exist, or a projection accessor with no matching alias is a defect the compiler cannot see.
- * All of them surface at one moment -- when the repository proxy is created -- because that is when
- * each declared query is handed to the entity manager and parsed. This class provokes that moment and
- * asserts that all five proxies came into being.
+ * <p>The six roles declare their reads in three different forms and every form fails the same way: a
+ * property the metamodel does not carry, an entity join on a path that does not exist, or a
+ * projection accessor with no matching alias is a defect the compiler cannot see. Three roles write
+ * their queries out as text -- the report surface, the card-ordered transaction traversal and the
+ * cross-reference traversal. One declares its whole query by METHOD NAME, the category-balance walk,
+ * whose three ordering components exist only inside an identifier. Three expose a keyed identity read
+ * from the base fragment instead of declaring a query at all -- the account lookup, the customer
+ * lookup and, alongside its written queries, the cross-reference role, which is why the two counts
+ * overlap rather than summing to six. All three forms are resolved at one moment -- when the
+ * repository proxy is created -- because that is when each declared read is matched against the base
+ * fragment or handed to the entity manager and parsed. This class provokes that moment and asserts
+ * that all six proxies came into being.
+ *
+ * <p>Assumptions: the census is a CLOSED set over the package, so a role added to
+ * {@code com.carddemo.reporting.repository} and not added below is a role whose queries no gate here
+ * parses. That is the defect the sixth field was added to remedy: the category-balance role shipped
+ * outside this list, and its derived name is precisely the form that cannot fail any earlier -- a
+ * renamed key member would compile cleanly and fail at bootstrap with nothing here to catch it.
+ * Ordering over real rows for that role is asserted separately, by
+ * {@code CategoryBalanceReportRepositoryIT}, because parsing is not order.
  *
  * <p>Assumptions: the assertion is deliberately that the beans exist and not that a query returned
  * rows. No relation is created in the container at all, so a query cannot be executed here -- and it
@@ -132,38 +146,55 @@ class ReportingQueryBootstrapIT {
     private StatementCustomerRepository customers;
 
     /**
-     * The keyed account lookup, injected so that its derived query is parsed.
+     * The keyed account lookup, injected so that its identity fetch is resolved against the base
+     * fragment. Like the customer lookup beside it, this role declares no query of its own, so
+     * injecting it proves the selectively exposed read resolves at bootstrap rather than being parsed
+     * as a property expression.
      */
     @Autowired
     private StatementAccountRepository accounts;
 
     /**
-     * Asserts that all five repository proxies were created, which means every declared query parsed.
+     * The category-balance walk, injected so that its derived query is parsed. This is the one role
+     * whose query is declared WHOLLY by method name, so injecting it is what proves the three
+     * ordering components in that name -- the account identifier, the type code and the category code
+     * -- each resolve to a member the embedded key really carries. A renamed key member leaves the
+     * name compiling and fails only here.
+     */
+    @Autowired
+    private CategoryBalanceReportRepository categoryBalances;
+
+    /**
+     * Asserts that all six repository proxies were created, which means every declared query parsed.
      *
      * <p>Assumptions: this single assertion is not thin, and the reason is worth stating because it
      * looks thin. The work is done by the context refresh that precedes it: Spring Data creates one
      * proxy per interface and, in doing so, resolves every derived method name against the metamodel
      * and hands every written query to the entity manager to parse. A property that does not exist, a
      * join path that does not resolve or a projection accessor with no matching alias fails the
-     * refresh, so this method never runs. Asserting the five references are present is what makes that
+     * refresh, so this method never runs. Asserting the six references are present is what makes that
      * refresh a test result rather than a silent precondition.</p>
      */
     @Test
-    @DisplayName("every declared query of all five repository roles parses against the metamodel")
+    @DisplayName("every declared query of all six repository roles parses against the metamodel")
     void everyDeclaredQueryParses() {
         assertThat(transactionReports).as("the report-side query surface").isNotNull();
         assertThat(statementTransactions).as("the card-ordered transaction traversal").isNotNull();
         assertThat(cardXrefs).as("the sequential cross-reference traversal").isNotNull();
         assertThat(customers).as("the keyed customer lookup").isNotNull();
         assertThat(accounts).as("the keyed account lookup").isNotNull();
+        assertThat(categoryBalances).as("the category-balance walk").isNotNull();
     }
 
     /**
      * The narrowest context that can create a repository proxy for this package.
      *
      * <p>Assumptions: the configuration is nested rather than declared as a file of its own, which
-     * keeps this directory to the two files it needs. It enables auto-configuration and names the two
-     * packages explicitly rather than component-scanning from the module root, and that narrowness is
+     * keeps a context that serves one class out of the directory's shared surface -- every sibling
+     * integration test here nests its own for the same reason. It enables auto-configuration and names
+     * the two PACKAGES rather than the entity and repository types one by one, so a role added to
+     * either package is picked up without an edit here; what still requires an edit is the census
+     * above, which is a closed list on purpose. That narrowness is
      * load-bearing: scanning the module root would instantiate the orchestration client bean and the
      * filter chain, so a context started to parse a query would additionally need a state machine
      * identifier and an object-store bucket, and a failure to supply either would read as a query

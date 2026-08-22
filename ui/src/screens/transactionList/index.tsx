@@ -30,10 +30,11 @@
  * literally `PageResponse.firstKey` and `PageResponse.lastKey`, which is why no page index is ever
  * sent to the service.
  *
- * Assumptions: this screen owns every sentence it shows. `usePagedQuery` emits no user-visible text
- * and coerces no numbers by design, so all eight of the source's messages, both painted prompts and
- * every formatting decision below belong here. Each sentence is resolved through
- * `ui/src/messages/messages.ts` under transformation rule T8; none is written inline.
+ * Assumptions: this screen decides every sentence it shows. `usePagedQuery` emits no user-visible
+ * text and coerces no numbers by design, so all eight of the source's messages, both painted prompts
+ * and every formatting decision below are this screen's concern rather than the hook's. Deciding is
+ * not spelling: every one of those strings is resolved from `ui/src/messages/messages.ts` under
+ * transformation rule T8, and none of them is written as a literal in this module.
  */
 
 import { Flex, Form, Input, Radio, Space, Table, Typography, theme } from 'antd';
@@ -44,14 +45,37 @@ import { useNavigate } from 'react-router';
 
 import { listTransactions } from '../../api/transactions';
 import type { ApiError, PageResponse, TransactionSummary } from '../../api/types';
+import { useServerInstant } from '../../hooks/useServerInstant';
 import { useShellSlot } from '../../layout/AppShell';
 import { UNIFORM_PF_KEY_LABELS } from '../../layout/PfKeyBar';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
+import { ScreenTitle } from '../../layout/ScreenTitle';
 import { usePfKeys } from '../../layout/usePfKeys';
 import type { PfKeyHandlerMap } from '../../layout/usePfKeys';
 import { usePagedQuery } from '../../hooks/usePagedQuery';
 import type { PagedQueryRequest } from '../../hooks/usePagedQuery';
-import { PROGRAM_MESSAGES, SHARED_MESSAGES } from '../../messages/messages';
+/*
+ * Refactoring Rationale: the painted text of map `COTRN0A` is IMPORTED from the catalog, where this
+ * module used to transcribe it beside the controls that name it. The two spellings were byte-equal on
+ * the day the second was written and nothing kept them so, and the catalog is the one module a
+ * reviewer checks character by character against `app/bms/COTRN00.bms` -- which is what
+ * transformation rule T8 asks of user-visible text. Nothing about the values changes in the move; in
+ * particular the interior padding of the five row-8 headings stays part of each string, because each
+ * is a `DFHMDF INITIAL=` operand filling a declared cell width and that padding is how the mapset
+ * centres a heading over its column.
+ * Assumptions: the catalog's member keys are the ones this screen already used, so the declarations
+ * move and no use site below does.
+ * Alternatives Considered: keeping the local groups and asserting them equal to the catalog's in a
+ * test. Rejected because two copies that agree are still two copies to correct, and such a test
+ * reports that a pair disagrees without saying which side is right.
+ */
+import {
+  PROGRAM_MESSAGES,
+  SHARED_MESSAGES,
+  TRANSACTION_LIST_COLUMN_HEADERS,
+  TRANSACTION_LIST_KEY_LABELS as CATALOG_KEY_LABELS,
+  TRANSACTION_LIST_LABELS,
+} from '../../messages/messages';
 /*
  * Refactoring Rationale: the router transition goes through the shared helper rather than through
  * `navigate` directly, and the two are not interchangeable. `navigate` returns a promise under the
@@ -63,8 +87,16 @@ import { PROGRAM_MESSAGES, SHARED_MESSAGES } from '../../messages/messages';
  * the second forks a sibling contract, so the fallback would then live in two places that can drift.
  * `MAIN_MENU_ROUTE` comes from the same module for the same reason -- this screen's back key and the
  * route table must name one value, not two copies of it.
+ * Refactoring Rationale: `TRANSACTION_LIST_ROUTE` is imported for two jobs that have to agree on one
+ * value. It is the ORIGIN this screen hands the transaction detail screen, which
+ * `inApplicationRoute` admits only because `ui/src/routes/navigation.ts` declares it; and it is the
+ * parent of every transaction's own address, which {@link transactionDetailPath} builds. A local
+ * literal stood here for the second job while the routing module carried no browse route, and it
+ * would now be a copy that cannot fail loudly: an origin that drifted out of the admitted set is not
+ * an error, it is silently discarded, and the operator is returned to the menu instead of to the list
+ * they came from.
  */
-import { MAIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
+import { MAIN_MENU_ROUTE, TRANSACTION_LIST_ROUTE, navigateSafely } from '../../routes/navigation';
 import { BMS_TEXT_COLOR_TOKENS, TYPOGRAPHY_TOKENS } from '../../theme/tokens';
 
 /**
@@ -91,16 +123,6 @@ export const TRANSACTION_LIST_PROGRAM_NAME = 'COTRN00C';
  * contract has to be altered to accommodate 78.
  */
 export const TRANSACTION_LIST_MAPSET = 'COTRN00';
-
-/**
- * Address this browse answers to, and the parent of every transaction's own address.
- *
- * Assumptions: declared here rather than taken from `ui/src/routes/navigation.ts`, because that
- * module carries no transaction-browse entry -- its only transaction route is
- * `TRANSACTION_ADD_ROUTE`, and `PROGRAM_ROUTES` resolves `COTRN02C` alone. So this is a value being
- * authored rather than a sibling constant being duplicated.
- */
-export const TRANSACTION_LIST_PATH = '/transactions';
 
 /**
  * How many rows the page holds.
@@ -157,66 +179,25 @@ export const TRANSACTION_DATE_COLUMN_WIDTH = 8;
 export const TRANSACTION_AMOUNT_COLUMN_WIDTH = 12;
 
 /**
- * Text the source paints on this map, reproduced character for character.
- *
- * Assumptions: these are painted mapset literals rather than emitted messages, so they are declared
- * beside their single use as the sibling screens declare theirs, while every SENTENCE this screen
- * shows is resolved from `ui/src/messages/messages.ts`. The catalog is keyed by originating program
- * and carries transcribed message constants; a `DFHMDF` `INITIAL=` value is not one of those.
- */
-export const TRANSACTION_LIST_LABELS = {
-  /** Row-4 sub-heading, `ATTRB=(ASKIP,BRT) COLOR=NEUTRAL LENGTH=17` at `POS=(4,30)`. */
-  title: 'List Transactions',
-  /** Row-4 page-number label, `ATTRB=(ASKIP,BRT) COLOR=TURQUOISE LENGTH=5` at `POS=(4,65)`. */
-  pageLabel: 'Page:',
-  /** Row-6 entry-field label, `ATTRB=(ASKIP,NORM) COLOR=TURQUOISE LENGTH=15` at `POS=(6,5)`. */
-  filterLabel: 'Search Tran ID:',
-  /**
-   * Row-21 selection prompt, `ATTRB=(ASKIP,BRT) COLOR=NEUTRAL LENGTH=50` at `POS=(21,12)`.
-   *
-   * Assumptions: the mapset writes it with doubled apostrophes as COBOL requires and splits it
-   * across a continuation line; both are source encoding rather than content, so the text is one
-   * sentence with single apostrophes and a single space before `list`.
-   */
-  selectionPrompt: "Type 'S' to View Transaction details from the list",
-} as const;
-
-/**
- * Column headings, taken verbatim from the five row-8 literals including their padding spaces.
- *
- * Assumptions: the leading and trailing spaces are IN the source and are kept. Each literal is
- * declared at the width of the column beneath it -- `' Transaction ID '` is `LENGTH=16` and
- * `'     Description          '` is 26 -- so the padding is how the mapset centres a heading over
- * its column. Trimming them would read as tidier and would silently discard the alignment the
- * terminal had.
- */
-export const TRANSACTION_LIST_COLUMN_HEADERS = {
-  /** `LENGTH=3` at `POS=(8,2)`, over the `SEL000n` selection fields. */
-  selection: 'Sel',
-  /** `LENGTH=16` at `POS=(8,8)`, over the `TRNIDnn` fields. */
-  transactionId: ' Transaction ID ',
-  /** `LENGTH=8` at `POS=(8,27)`, over the `TDATEnn` fields. */
-  date: '  Date  ',
-  /** `LENGTH=26` at `POS=(8,38)`, over the `TDESCnn` fields. */
-  description: '     Description          ',
-  /** `LENGTH=12` at `POS=(8,67)`, over the `TAMT00n` fields. */
-  amount: '   Amount   ',
-} as const;
-
-/**
- * Key legend, split into the four groups the row-24 literal paints.
+ * Key legend, assembled from the two sources that own the four groups the row-24 literal paints.
  *
  * Assumptions: the source paints one 48-character literal, `'ENTER=Continue  F3=Back
- * F7=Backward  F8=Forward'`, with TWO spaces between groups. The legend is assembled by `PfKeyBar`
- * from per-key labels, so it is carried here as its four parts; the two paging parts are taken from
- * `UNIFORM_PF_KEY_LABELS` rather than restated, because those two are painted identically on every
- * mapset that pages and a second copy could drift from the shared one.
+ * F7=Backward  F8=Forward'`, with TWO spaces between groups, and `PfKeyBar` assembles the rendered
+ * legend from per-key labels -- so the screen supplies the parts and never the joined sentence.
+ *
+ * Assumptions: the two paging parts come from `UNIFORM_PF_KEY_LABELS` and the other two from the
+ * message catalog, and that split is the ownership boundary those two modules draw rather than an
+ * inconsistency. `F7=Backward` and `F8=Forward` are painted identically on every mapset that pages,
+ * so `ui/src/layout/PfKeyBar.tsx` owns them and the catalog deliberately carries neither;
+ * `ENTER=Continue` and `F3=Back` are this mapset's own text, so the catalog carries both. Restating
+ * either pair here would put a second spelling of a verbatim constant in the tree with nothing
+ * keeping the two equal.
  */
 export const TRANSACTION_LIST_KEY_LABELS = {
   /** Painted `ENTER=Continue`; submits the entry field and returns to the first page. */
-  ENTER: 'ENTER=Continue',
+  ENTER: CATALOG_KEY_LABELS.ENTER,
   /** Painted `F3=Back`; the source moves `'COMEN01C'` into the transfer target at L123. */
-  PFK03: 'F3=Back',
+  PFK03: CATALOG_KEY_LABELS.PFK03,
   /** Painted `F7=Backward`, shared with every other paging mapset. */
   PFK07: UNIFORM_PF_KEY_LABELS.PFK07,
   /** Painted `F8=Forward`, shared with every other paging mapset. */
@@ -413,10 +394,10 @@ export function truncateDescription(description: string): string {
  * key, because nothing in the record's own declaration excludes a character that would end the path
  * segment early, and a filter the operator typed reaches this function unaltered.
  * @param {string} transactionId - The transaction's sixteen-character identifier.
- * @returns {string} The path of that transaction's screen, below {@link TRANSACTION_LIST_PATH}.
+ * @returns {string} The path of that transaction's screen, below `TRANSACTION_LIST_ROUTE`.
  */
 export function transactionDetailPath(transactionId: string): string {
-  return `${TRANSACTION_LIST_PATH}/${encodeURIComponent(transactionId)}`;
+  return `${TRANSACTION_LIST_ROUTE}/${encodeURIComponent(transactionId)}`;
 }
 
 /**
@@ -915,6 +896,27 @@ export default function TransactionListScreen(): ReactElement {
   const { cssVar } = theme.useToken();
 
   /*
+   * WHY : ⚠️ Assumptions: the paint instant is read from the shared hook and published to the shell,
+   *       because `ScreenHeader` renders the browser's clock for any screen that omits it -- the
+   *       fallback that module registers as divergence D-7 -- and this screen had omitted it. The
+   *       source reads ONE clock for every terminal: `POPULATE-HEADER-INFO` at `COTRN00C.cbl` L567
+   *       moves `FUNCTION CURRENT-DATE` at L569 into the header, and L529 performs it immediately
+   *       before the `SEND MAP` that paints a page. That clock is the CICS region's own, so two
+   *       operators reading one browse could not disagree about the date. A browser reading
+   *       reinstates exactly that disagreement across a midnight boundary, and it does so silently --
+   *       the band still paints a plausible date.
+   * WHY : Assumptions: it is read during render rather than held in state, which is what makes the
+   *       value a PAINT-time instant and not a mount-time one. The source re-read the clock on every
+   *       send, so a value captured once when the browse opened would age visibly across the paging
+   *       keys, which repaint the band without remounting the screen.
+   * WHY : Alternatives Considered: letting the shell read the instant once for the whole frame, which
+   *       would have needed no call here at all. `ui/src/layout/AppShell.tsx` records why it does not:
+   *       a screen knows when it painted and the frame does not, and reading it there would re-render
+   *       the frame on a clock change no mounted screen had asked for.
+   */
+  const paintedAt = useServerInstant();
+
+  /*
    * Assumptions: the entry field is held as TWO values, not one. `draftFilter` is what the operator
    * has typed and `appliedFilter` is what the browse is actually positioned by, and they differ for
    * two reasons the source makes unavoidable. A keystroke must not re-issue a read, because the
@@ -994,7 +996,35 @@ export default function TransactionListScreen(): ReactElement {
 
     if (selection.transactionId !== null && selection.code !== null) {
       if (isViewSelectionCode(selection.code)) {
-        navigateSafely(navigate, transactionDetailPath(selection.transactionId));
+        /*
+         * WHY : Assumptions: the transition HANDS OVER this screen's own route as the origin, because
+         *       the source hands over its own identity on exactly this arm: `COTRN00C.cbl` L190 and
+         *       L191 move `WS-TRANID` into `CDEMO-FROM-TRANID` and `WS-PGMNAME` into
+         *       `CDEMO-FROM-PROGRAM` immediately before the `XCTL` to `COTRN01C`, and the destination
+         *       reads it back -- `COTRN01C.cbl` L115 to L122 returns to `CDEMO-FROM-PROGRAM` on PF3
+         *       and falls back to `'COMEN01C'` only when it is blank. Sending no origin left the
+         *       destination permanently on that fallback arm, so an operator who opened a transaction
+         *       from this browse was returned to the main menu rather than to the page they were on.
+         * WHY : Assumptions: the value is the routing module's own constant and not a literal, so it
+         *       is a member of the closed set `inApplicationRoute` validates against. An origin that
+         *       is not in that set is DISCARDED rather than reported, which is why a hand-written
+         *       string here would reintroduce the same silent fallback while looking correct.
+         * WHY : Trade-offs: nothing else travels -- not the applied filter, not the page ordinal, not
+         *       the chosen row. The source carries no more than the origin and the selected
+         *       identifier on this arm, and the identifier is already in the path, so a wider payload
+         *       would be inventing state the reference does not hand over. The consequence is that
+         *       returning here reopens the browse at its first page, which is what the reference does
+         *       too: `COTRN00C` re-enters with `CDEMO-PGM-REENTER` clear and repositions from the
+         *       entry field.
+         * WHY : Trade-offs: `navigateSafely`'s documented full-navigation fallback drops `state`
+         *       entirely, so on that path the destination's PF3 reverts to the main menu. That is
+         *       accepted rather than worked around -- `ui/src/routes/navigation.ts` records the same
+         *       trade for the message and pre-fill members -- because the alternative is encoding the
+         *       origin into the URL, which is precisely what router state exists to avoid.
+         */
+        navigateSafely(navigate, transactionDetailPath(selection.transactionId), {
+          from: TRANSACTION_LIST_ROUTE,
+        });
         return;
       }
       refusedSelection = true;
@@ -1119,11 +1149,32 @@ export default function TransactionListScreen(): ReactElement {
    */
   const messageSeverity: MessageBandSeverity = 'error';
 
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the paint instant is delegated, where this screen delegated none.
+   *       `app/bms/COTRN00.bms` declares `CURDATE` at L47 and `CURTIME` at L70, and `ScreenHeader`
+   *       degrades to the BROWSER clock for a screen that hands it no instant -- so this one screen
+   *       painted an operator-local date and time where the other nineteen paint the region's. The
+   *       reference read one region clock for every terminal, which is what stops two operators looking
+   *       at one record across midnight from reading two different dates.
+   * WHY : Assumptions: the gap survived because the delegation contract was gated by a hand-written list
+   *       of ten screens in `ui/src/layout/screenHeaderClock.test.tsx`, which this screen was not on.
+   *       That gate now derives its population from the filesystem, so the class of omission is closed
+   *       rather than this instance of it.
+   */
+
   useShellSlot({
     screen: {
       transactionId: TRANSACTION_LIST_TRANSACTION_ID,
       programName: TRANSACTION_LIST_PROGRAM_NAME,
     },
+    // WHY : Assumptions: the instant is published rather than left to the band's own fallback, which is
+    //       the browser clock. The reasoning is at the read above; what is published here is the value
+    //       the hook returned during THIS render, so the band shows the instant the page painted at
+    //       whenever the client has an anchor to paint. The hook yields nothing until a response has
+    //       carried one, and on that one unanchored paint the band's fallback still applies -- a
+    //       publication cannot manufacture an instant the service has not yet stated. The slot member
+    //       admits that absence explicitly, which is why the value is passed rather than guarded here.
+    now: paintedAt,
     // WHY : Assumptions: the mapset key is passed so the band sizes itself to the 78 characters this
     //       screen's own `ERRMSG` field declares, while the band keeps enforcing the 75-character
     //       `CCARD-ERROR-MSG` work area every mapset shares. That is what reconciles the two widths
@@ -1138,19 +1189,37 @@ export default function TransactionListScreen(): ReactElement {
   return (
     <Flex vertical gap="large">
       {/*
-       * Assumptions: `level={4}` matches every sibling screen's sub-heading, which resolves the
-       * measured `fontSizeHeading4` and `lineHeightHeading4` tokens, and `COLOR=NEUTRAL` on the
-       * row-4 literal resolves to the de-emphasis text token rather than to the base text colour.
-       * `ATTRB=BRT` is carried as WEIGHT and not as a brighter colour, which `Typography.Title`
-       * already applies.
+       * WHY : ⚠️ Refactoring Rationale: the caption is rendered through `ScreenTitle`, where this
+       *       screen used a bare `Typography.Title level={4}` -- the one screen CAPTION in this tree
+       *       that still named its own rank. The note that stood here argued for the literal on the
+       *       ground that `level={4}` matches every sibling screen's sub-heading and resolves the two
+       *       measured tokens. Both halves were true and the conclusion was still wrong:
+       *       `ui/src/layout/ScreenTitle.tsx` exists because `level` fuses the SEMANTIC rank with the
+       *       VISUAL size and this application needs different answers for the two -- the shared band
+       *       above every caption ranks third and is still sized at the fourth step -- so a screen that
+       *       writes the rank itself agrees with the outline only until the outline moves, and then
+       *       diverges silently, because a literal matching today's constant renders identically.
+       *       Twenty screens take the rank from that module.
+       * WHY : Assumptions: the two direct `Typography.Title` uses that remain in `ui/src/screens/**`
+       *       are a different role: both are SECTION headings inside a screen, ranked at their own
+       *       `SECTION_HEADING_LEVEL` deliberately below whatever rank a caption carries.
+       * WHY : Assumptions: nothing about the rendering changes. `ScreenTitle` ranks a caption
+       *       `SCREEN_TITLE_HEADING_LEVEL`, which is 4, and additionally names
+       *       `TYPOGRAPHY_TOKENS.screenTitleSize` and `screenTitleLineHeight` -- `fontSizeHeading4`
+       *       and `lineHeightHeading4`, the two tokens `level={4}` resolved on its own -- so the
+       *       caption keeps its measured size and gains only the guarantee that it keeps it.
+       * WHY : Assumptions: the colour and the zeroed margin stay with this screen and are passed
+       *       through the component's `style` prop, which it spreads BEFORE its own size members so
+       *       neither is displaced. `COLOR=NEUTRAL` on the row-4 literal is a per-mapset attribute
+       *       and resolves to the de-emphasis TEXT token rather than to the base text colour, and
+       *       `ATTRB=BRT` is carried as WEIGHT, which the heading already applies. The margin is
+       *       zeroed because this caption is a flex item baseline-aligned against the page ordinal
+       *       beside it, and a heading's default block margin would drop it off that baseline.
        */}
       <Flex align="baseline" gap="middle" justify="space-between" wrap>
-        <Typography.Title
-          level={4}
-          style={{ color: cssVar[BMS_TEXT_COLOR_TOKENS.NEUTRAL], margin: 0 }}
-        >
+        <ScreenTitle style={{ color: cssVar[BMS_TEXT_COLOR_TOKENS.NEUTRAL], margin: 0 }}>
           {TRANSACTION_LIST_LABELS.title}
-        </Typography.Title>
+        </ScreenTitle>
         <Space size="small">
           <Typography.Text
             id={PAGE_NUMBER_LABEL_ID}

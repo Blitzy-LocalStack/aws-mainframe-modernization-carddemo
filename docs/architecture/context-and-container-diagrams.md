@@ -462,14 +462,17 @@ graph TB
         end
     end
 
-    subgraph MSG["Six primary managed queues · each with a dead-letter queue"]
+    subgraph MSG["Five primary managed queues · each with a dead-letter queue"]
         FIFOREQ[["Authorization request<br/>group is the card number itself<br/>quarantine boundary on failure"]]
         FIFOREP[["Authorization reply"]]
-        ACCTREQ[["Account-inquiry request"]]
-        DATEREQ[["Date-inquiry request"]]
+        INQREQ[["Inquiry request<br/>one queue, one consumer<br/>dispatched on the function code"]]
         STDREP[["Inquiry reply"]]
         ERRQ[["Error sink"]]
     end
+%% Five primaries, not six: the account-inquiry and date-conversion requests share
+%% ONE queue. AAP 0.4.1.8 maps five MQ queues onto five target queues, and the
+%% earlier split into two request queues is withdrawn -- infra/modules/sqs/README.md
+%% records why the two-consumer hazard is closed by consumer count instead.
 
     subgraph ORCH["Batch orchestration"]
         SCHED["Schedule<br/>nightly trigger"]
@@ -501,8 +504,7 @@ graph TB
 
     FIFOREQ -.-> SVC
     SVC -.->|"prospective transactional outbox"| FIFOREP
-    ACCTREQ -.-> SVC
-    DATEREQ -.-> SVC
+    INQREQ -.-> SVC
     SVC -.-> STDREP
     SVC -.-> ERRQ
 

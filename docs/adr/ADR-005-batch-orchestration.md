@@ -970,12 +970,33 @@ successfully and fails later, under load, on a night when a step has to run.
 ### Accepted trade-off — a lower practical ceiling on massive parallel fan-out
 
 A purpose-built batch service's array jobs scale fan-out further than a `Map` state
-does in practice. Accepted, because the chain is a fixed eleven-step sequence with
-**two** `Map` states, and each iterates the same small, known list of eleven seed
-datasets rather than an open-ended work queue. Trade-offs: if this pipeline ever grew a
-genuinely wide, variable-width parallel stage, this is the trade-off that would be
-revisited first — and revisiting it would mean a superseding ADR, not a silent
-change here.
+does in practice. Accepted, because the chain is a fixed eleven-step sequence whose
+`Map` states iterate short, bounded lists rather than an open-ended work queue. There
+are **three** of them in
+[`infra/modules/step-functions-batch/main.tf`](../../infra/modules/step-functions-batch/main.tf),
+and they do **not** all do the same thing:
+
+| `Map` state | Iterates | Purpose |
+| --- | --- | --- |
+| `RefreshEachSeedDataset` | `$.seedDatasets` — the known list of **eleven** seed datasets | The fan-out inside state 2, one branch per dataset, each branch fetching, staging, loading and verifying that one dataset |
+| `StopResidualBatchTasks` | `$.residual.taskArns` — the tasks this execution itself started | **Cleanup, not seed work.** Stops the execution-owned Fargate tasks still running after the chain has left its work states |
+| `ConfirmResidualBatchTasksStopped` | the same `$.residual.taskArns` | The confirmation half of that cleanup: polls each task until `LastStatus` is `STOPPED`, so the release does not run while a task can still write |
+
+Assumptions: each list is bounded by something the chain already knows — the seed map by
+the dataset inventory, the two cleanup maps by the number of tasks this one execution
+started — which is why the fan-out ceiling is not a live constraint. Trade-offs: if this
+pipeline ever grew a genuinely wide, variable-width parallel stage, this is the
+trade-off that would be revisited first — and revisiting it would mean a superseding
+ADR, not a silent change here.
+
+⚠️ Refactoring Rationale: this read "**two** `Map` states, and **each** iterates the
+same small, known list of eleven seed datasets". Both the count and the description were
+wrong, and the description was wrong in the way that matters: the two states it had
+merged into the seed map are the residual-task cleanup pair, which iterate task ARNs
+this execution created and have nothing to do with seed data. An operator reading the
+old sentence would look for two seed fan-outs and find one, and would not learn that a
+cleanup fan-out exists at all — which is the state that decides whether a task can still
+be writing when the quiesce bracket is released.
 
 ### Accepted trade-off — two definition surfaces, deliberately
 
@@ -1011,10 +1032,21 @@ after timestamp normalisation.
 
 ### Risk — the quiesce/resume bracket is not transactional
 
-States 1 and 12 set and clear a read-only flag, and **they are not an atomic pair**.
-A failure between them could leave online writes quiesced after the chain has
+States **1** and **11** set and clear a read-only flag, and **they are not an atomic
+pair**. A failure between them could leave online writes quiesced after the chain has
 stopped. This is stated plainly rather than implying the bracket is atomic, because
 an operator woken by it needs to know the shape of the failure.
+
+⚠️ Refactoring Rationale: this sentence numbered the closing state **12**, three lines
+above two sentences in the same section that correctly call it state 11 — a
+contradiction inside one risk statement, about the state an operator would be looking
+for at three in the morning. The chain declares eleven states and `ResumeOnlineWrites`
+is the last, as
+[The nightly chain as eleven states](#the-nightly-chain-as-eleven-states) establishes;
+the same figure appeared as 12 in the retired-artifacts table below and in
+[ADR-002](ADR-002-compute-platform.md), and all three are corrected together rather
+than one at a time, because a number restated in three places is only fixed when it
+agrees in all three.
 
 Three things bound it. The `Catch` path on every work state routes to notification,
 so a failed chain is announced rather than merely stopped. State 11's flag clear is
@@ -1023,8 +1055,11 @@ freely. And the flag release does not depend solely on the chain reaching state 
 [ADR-002](ADR-002-compute-platform.md) records that the same `resume` function is
 also the target of a bracket-finalizer rule
 (`aws_cloudwatch_event_rule.daily_finalizer`) which releases the flag when an
-execution ends `FAILED`, `TIMED_OUT` or `ABORTED` without reaching state 11 —
-including the abort case, which no in-execution `Catch` can observe.
+execution ends `FAILED`, `TIMED_OUT` or `ABORTED` without the in-graph release —
+either state 11 on the success path or the separate `ResumeOnlineWritesOnFailure`
+state on a caught failure — having run. That covers the abort and timeout cases, which
+TERMINATE the execution so that no further state runs at all and no in-execution
+`Catch` can observe them.
 
 ### Risk — a resumed step re-runs work that already committed
 
@@ -1089,7 +1124,7 @@ facility, not a defect claim:
 
 | Retired | Reason |
 |---|---|
-| The **SDSF operator-command mechanism** in `CLOSEFIL.jcl` and `OPENFIL.jcl` — `EXEC PGM=SDSF` at L22 issuing `CEMT SET FIL(...) CLO`/`OPE` at L26–L30 | It drives a CICS region through an operator console. There is no console and no region in the target. **The behaviour is preserved** as states 1 and 12 setting and clearing a read-only flag; only the mechanism retires |
+| The **SDSF operator-command mechanism** in `CLOSEFIL.jcl` and `OPENFIL.jcl` — `EXEC PGM=SDSF` at L22 issuing `CEMT SET FIL(...) CLO`/`OPE` at L26–L30 | It drives a CICS region through an operator console. There is no console and no region in the target. **The behaviour is preserved** as states **1** and **11** setting and clearing a read-only flag; only the mechanism retires |
 | **DFHCSDUP CSD deployment** (`app/jcl/CBADMCDJ.jcl`) | It installs CICS resource definitions. The target has no CSD; the equivalent is container images and infrastructure-as-code, per [ADR-009](ADR-009-iac-tool.md) |
 | The **FTP-to-JES submission tunnel** (`app/jcl/FTPJCL.JCL`) | It submits JCL to a job entry subsystem over FTP. There is no JES in the target; an execution is started by an API call |
 | The **TSO text-to-PDF utility** (`app/jcl/TXT2PDF1.JCL`) | It runs a TSO-hosted utility under `PGM=IKJEFT1B`. **This one retires with no target at all** — it is not replaced by anything, and its `COND=(0,NE)` at L26 is the eighth gate listed in the inversion inventory |

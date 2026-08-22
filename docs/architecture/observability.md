@@ -1418,25 +1418,65 @@ that could not be given both is not listed.
   alongside `health` and `info`. Moving the base path or renaming the health
   endpoint would break target-group registration and container liveness in the same
   change.
-- Refactoring Rationale: **the collection path is no longer composed end to end, and
-  saying so is the point of this entry.** It previously read that
-  `infra/modules/ecs-service` runs an OpenTelemetry collector sidecar whose
-  `prometheus` receiver scrapes `/actuator/prometheus` and whose `awsemf` exporter
-  publishes the scraped meters to the `CardDemo` namespace. That sidecar has been
-  **withdrawn**: it is not in the frozen AAP, and it was forcing two topology changes
-  that are not in the AAP either — an eleventh ECR repository to mirror its image
-  into, against the ten of AAP §0.4.1.6, because Amazon ECR Public is not served by
-  the `ecr.api`/`ecr.dkr` endpoints, and a ninth interface endpoint for `xray`,
-  against the eight of AAP §0.4.1.9. What remains is the producer half and the
-  consumer half with no scraper between them: each service exposes
-  `/actuator/prometheus` and applies `common-lib`'s `MetricsConfig` common tags, and
-  `infra/modules/observability` declares `aws_cloudwatch_dashboard.operations` with a
-  widget reading the `CardDemo` namespace. Trade-offs: until a scraper is introduced
+- Assumptions: **the collection path is composed end to end, and it has two
+  channels because the two workload shapes cannot share one.**
+  [`infra/modules/ecs-service`](../../infra/modules/ecs-service/main.tf) adds an AWS
+  Distro for OpenTelemetry collector as a sidecar to every task it registers, and
+  that sidecar is what turns a published meter into a stored series. A **long-running
+  service** is scraped: the collector's `prometheus` receiver reads
+  `https://127.0.0.1:<container-port>/actuator/prometheus` every sixty seconds over
+  task loopback. A **one-shot task** — `batch-service`, `data-migration`, and
+  `reporting-service` when the nightly state machine starts it as a task rather than
+  serving — has no listener to scrape for the few minutes it exists, so it **pushes**
+  instead, over OTLP to the same sidecar on `127.0.0.1:4318`. Both channels leave the
+  collector through one `awsemf` exporter into the `CardDemo` namespace, which is the
+  namespace `infra/modules/observability`'s dashboard reads.
+- Assumptions: **the mode is decided by the module, not by the caller**, from whether
+  it is creating a service. `OTEL_METRICS_EXPORTER` is `none` for a serving workload
+  and `otlp` for a task-only one, so no meter is both scraped and pushed. The one
+  exception is deliberate and temporary:
+  [`infra/modules/step-functions-batch`](../../infra/modules/step-functions-batch/main.tf)
+  overrides that variable to `otlp` for the reporting runs it starts, because
+  `reporting-service` is a serving workload whose task definition therefore says
+  `none`, and an override lasts exactly as long as that run.
+- Trade-offs: **the two channels name the same meter differently, so the dashboard
+  needs two panels rather than one.** Micrometer's Prometheus convention replaces the
+  dots — `jvm_memory_used_bytes` — and its OTLP convention keeps them —
+  `jvm.memory.used`. A single search expression matches one convention or the other,
+  so `infra/modules/observability` declares `application_meter_widget` over the
+  scraped names and `batch_meter_widget` over the pushed ones, with the dotted terms
+  quoted because CloudWatch metric search treats a period as a token delimiter. One
+  panel would have shown the online estate and silently omitted the nightly chain.
+- Trade-offs: **a scrape presents no credential, so it is authorised by network
+  position instead.** Each service's `SecurityConfig` grants `/actuator/prometheus`
+  only from `127.0.0.1/32` and `::1/128`, which is reachable from a sidecar in the
+  same task and from nothing else — the task has no published port for it and the
+  load balancer's target group does not route it. The alternative, issuing the
+  collector a token, would put a credential in a task definition to read a metrics
+  page that carries no business data.
+- Assumptions: **the collector image is mirrored rather than pulled from Amazon ECR
+  Public**, because the private subnets reach ECR through the `ecr.api` and `ecr.dkr`
+  interface endpoints and those do not serve the public registry. It is the single
+  entry of `third_party_mirror_repository_names` in
+  [`infra/modules/ecr`](../../infra/modules/ecr/main.tf), so the eleven repositories
+  that module provisions are the ten deployables of AAP §0.4.1.6 plus one mirror of
+  an image this repository does not build. Populating it is a documented step of
+  [`deploy.md`](../runbooks/deploy.md), and it has to precede the first task roll,
+  because the sidecar is `essential` and a task whose sidecar cannot be pulled never
+  reaches `RUNNING`.
+- Refactoring Rationale: this entry twice recorded the pipeline as broken — first
+  that the sidecar had been **withdrawn**, then that "until a scraper is introduced
   that fits the AAP's endpoint and repository counts, that dashboard widget has no
-  publisher, and this document states that rather than implying meters arrive.
-  Container logs, which are the signal every operational procedure in this repository
-  actually reads, are unaffected — they travel through the `awslogs` driver to each
-  workload's own group.
+  publisher". AAP §0.2.1.4 and §0.9.3 make centralised metrics a deliverable rather
+  than a documented gap, so the resolution is the pipeline and not a better-worded
+  note. The two objections the withdrawal rested on are answered rather than
+  ignored: the mirror is one repository beside the ten AAP §0.4.1.6 enumerates and is
+  not one of them, and `xray` is one of the ten interface endpoints
+  `infra/modules/network` validates rather than a ninth beside eight — see
+  [Traces](#traces) for what consumes it. Container logs are unchanged and remain the
+  signal every operational procedure here reads: they travel through the `awslogs`
+  driver to each workload's own group, and the collector writes its own diagnostics
+  to that same group under its own stream prefix.
 
 ---
 
@@ -1446,7 +1486,7 @@ The target tracing contract spans the edge, the eight services and the datastore
 and carries the **trace identifier and correlation identifier together** so that a
 log line can be pivoted to its trace and a trace back to its log lines.
 
-The four pieces the contract rests on, and where each lives:
+The five pieces the contract rests on, and where each lives:
 
 - **Library and bridge.** `services/common-lib/pom.xml` L341 declares
   `spring-boot-starter-opentelemetry`, which supplies the OpenTelemetry SDK, the
@@ -1454,25 +1494,34 @@ The four pieces the contract rests on, and where each lives:
   shared kernel on its path.
 - **Service configuration.** `carddemo-common-defaults.yml` defaults OTLP trace
   export to `false`, so a local run or a test does not attempt to reach a
-  collector that is not listening.
+  collector that is not listening. That default is a **local** default: every
+  deployed task overrides it, and the override is described in the next entry.
 - **Correlation.** `common-lib`'s `CorrelationIdFilter` puts one identifier into the
   diagnostic context for the whole handling of a request and returns it on the
   response, so a unit of work is followable across services in the logs
   independently of whether any span was exported.
-- **No span export path in the deployed topology.** Refactoring Rationale: two
-  entries stood here — a `Collector` entry naming an `aws-otel-collector` sidecar in
-  `infra/modules/ecs-service` with an `awsxray` exporter, and a `Producer wiring`
-  entry describing the `OTEL_*` environment variables the task definition set to
-  point the application at it. Both are **withdrawn with the sidecar**, which is not
-  in the frozen AAP and which was forcing an eleventh ECR repository against the ten
-  of AAP §0.4.1.6 and a ninth interface endpoint against the eight of AAP §0.4.1.9.
-  The consequence is stated plainly rather than left implied: **spans are produced by
-  the library and are not exported anywhere from an ECS task.** Trade-offs:
-  re-introducing export has to argue for its own interface endpoint or its own
-  egress, and neither is available inside the AAP's stated counts and the network
-  module's enumerated egress — which is exactly the argument that was skipped when
-  the sidecar was added. What is not lost is cross-service followability, which the
-  correlation identifier above provides through the logs.
+- **Collector.** `infra/modules/ecs-service` runs an AWS Distro for OpenTelemetry
+  collector as an `essential` sidecar in every task it registers. Its `otlp`
+  receiver listens on task loopback only — `127.0.0.1:4317` for gRPC and
+  `127.0.0.1:4318` for HTTP, with no port published from the task — and its
+  `awsxray` exporter submits what it receives to AWS X-Ray through the `xray`
+  interface endpoint `infra/modules/network` provisions, so a span reaches a managed
+  store without the task tier holding any route to the internet.
+- **Producer wiring.** The same module sets `OTEL_TRACES_EXPORTER=otlp`,
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:4318/v1/traces`,
+  `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` carrying the environment and the
+  release, and `OTEL_TRACES_SAMPLER=always_on` on every task definition.
+  `spring-boot-starter-opentelemetry` maps those variables onto the Spring
+  properties `carddemo-common-defaults.yml` declares and installs the result as the
+  **first** property source, which is why the deployed value wins over the local
+  default without either side restating the other's spelling.
+  - Assumptions: the sampler value is `always_on` with an **underscore**, the
+    OpenTelemetry specification's spelling. The hyphenated form is rejected with a
+    warn line and no mapping, which silently leaves the framework's default
+    probability of `0.1` in force — nine traces in ten discarded in the application,
+    before the collector could apply a policy to them. That is not a hypothetical:
+    the hyphenated spelling was present and is corrected, and the module's own note
+    records it beside the value.
 
 What is still outstanding is instrumentation of this project's own code — no
 custom span is created anywhere — and execution: nothing is deployed, so no trace
@@ -1496,9 +1545,11 @@ else.
 > steps that actually quiesce online writes, bootstrap the database and scratch
 > generations were blank. The steps most likely to need explaining after a failed
 > batch window were the ones with no segment. Assumptions: these functions carry no
-> `vpc_config`, so they reach the X-Ray endpoint over the public service path and no
-> `xray` interface endpoint is required — which matters because AAP §0.4.1.9 fixes
-> the VPC endpoint inventory and does not include one. Trade-offs: the X-Ray write
+> `vpc_config`, so they reach X-Ray over the public service path and do not consume
+> the `xray` interface endpoint at all — that endpoint exists for the in-VPC
+> collector sidecar, which is the only X-Ray client with no route to the internet, so
+> the two X-Ray producers in this estate reach the same service by two different
+> paths for two different reasons. Trade-offs: the X-Ray write
 > statement's resource is `*`, which is not a narrowing failure but the only form the
 > service accepts — segment ingestion has no ARN to name, because the segment does
 > not exist until the call that submits it. The narrowing that is available is
@@ -1527,13 +1578,21 @@ else.
   traces that both look complete, so the gap is invisible rather than reported. The
   attribute mapping is the one specified in
   [`messaging-contracts.md`](messaging-contracts.md#message-descriptor-to-message-attribute).
-- Trade-offs: **a sampling policy remains an implementation decision, not an
-  authored default.** Full production sampling would multiply trace volume by
-  request volume; aggressive head sampling could discard the one failed request an
-  operator needs. The implementation must choose and test an explicit policy,
-  including how failures are retained, before this document can quote a rate. The
-  correlation identifier remains useful independently because it names a unit of
-  work even when no trace was selected.
+- Trade-offs: **the sampling policy is authored, and it is a tail policy rather
+  than a head one.** The application samples everything and the collector's
+  `tail_sampling` processor decides after the fact, on two policies evaluated
+  together: every trace containing a span with an error status is kept, and a stated
+  percentage of the rest is kept — twenty-five in development,
+  `telemetry_success_sample_percentage` defaulting to five in production, each stated
+  at its own root so the two are visible side by side. A **head** sampler was
+  rejected for a specific reason rather than a general one: it decides before the
+  outcome of the request is known, so the one failed request an operator needs can
+  already have been discarded in the application, and no downstream policy can
+  recover it. The accepted costs are that the collector buffers a trace for its
+  decision window before exporting, and that a comparison of *rates* between
+  environments has to divide by the sampled proportion. The correlation identifier
+  remains useful independently because it names a unit of work even when its trace
+  was not selected.
 - Assumptions: **the external point-of-sale authorizer is not supplied by the
   baseline**, so a trace cannot extend past the queue into the requester. Only a
   test stub exists. The consequence is that end-to-end tracing across the
@@ -1581,7 +1640,7 @@ applied**, so no alarm has evaluated a datapoint or fired.
 | Batch catch path entered — **no alarm resource** | Any state routed to its catch handler, including the states whose outcome is warn-level | — | Which state failed, and did the chain continue past it | Read that state's step ledger row and decide between redrive and investigation. No alarm resource exists for this row: the catch transition is not itself a CloudWatch metric, so alarming on it requires either a metric filter over the state-machine log group or an explicit metric published by the failure-notification state |
 | Datastore capacity ceiling | Cluster processor utilisation (`main.tf` L1642) and capacity against its configured maximum (`main.tf` L1679) | `database_cpu_threshold_percent` = **80** (L590) | Is the workload pressed against its configured maximum capacity | Raise the maximum capacity. On a serverless cluster this is a scaling signal as much as a saturation one |
 | **Cluster connection saturation** | Cluster connection count against the total every configured pool could open at full autoscale (`main.tf` L1734) | `database_connection_threshold` = **derived at the root**, not defaulted | Is the cluster running out of connections before it runs out of capacity | Reduce a service's pool size or bound its maximum task count. This row can breach while both datastore-capacity rows above stay OK, which is exactly the risk [`ADR-003`](../adr/ADR-003-datastore-targets.md#risk--connection-count-grows-with-task-count) names: connection count grows with task count, multiplicatively. The threshold is derived rather than chosen — each environment root multiplies every service's configured pool size by that workload's task ceiling, the autoscaling maximum for a service and one for the batch task, then sums the products — so no number in it originates here |
-| Connection-**pool acquisition** failure — **no alarm resource** | Acquisition failures or sustained wait inside a task's own pool | — | Is the pool the constraint rather than the cluster | Change the pool size, which is a service configuration change. No alarm resource exists for this row because the series it needs is an application meter: HikariCP publishes it through Micrometer under the pool name each service sets, so the alarm is authorable only against a namespace those meters actually reach, and the dashboard's application-meter widget is the first consumer of that series. Refactoring Rationale: this row and the one above it were **one row** until the two were separated. They are different saturations reported in different places, and merging them let the application-meter argument — true here — stand as the reason the cluster metric above was also unalarmed, which it never explained |
+| Connection-**pool acquisition** failure — **no alarm resource** | Acquisition failures or sustained wait inside a task's own pool | — | Is the pool the constraint rather than the cluster | Change the pool size, which is a service configuration change. No alarm resource exists for this row, and the reason is now the dimension rather than the pipeline: HikariCP publishes the series through Micrometer under the pool name each service sets, so an alarm on it has to name one pool per service and would be eight resources whose thresholds are per-service tuning, where the dashboard's application-meter widget reads all eight from one search. The series itself reaches the `CardDemo` namespace through the collector sidecar's scrape, so an operator who wants the alarm can author it against a published series rather than against a namespace nothing writes to. Refactoring Rationale: this row and the one above it were **one row** until the two were separated. They are different saturations reported in different places, and merging them let the application-meter argument — true here — stand as the reason the cluster metric above was also unalarmed, which it never explained |
 | **Distribution server errors** | Server-error rate at the CloudFront distribution (`main.tf` L1786) | `cloudfront_5xx_error_rate_threshold_percent` = **5** (L621) | Is the static delivery path failing, as distinct from the API path | Compare the origin bucket's access log before redeploying the built assets. Created only when a distribution identifier is supplied **and** the provider region is us-east-1, because CloudFront publishes distribution metrics to us-east-1 alone; both environment roots pass `module.cloudfront_spa.distribution_id` and both set that region, so both create it. A rate rather than a count because a static application's request volume varies by orders of magnitude across the day |
 | Rotation failure — **no alarm instance in either shipped root** | Invocation errors reported by a credential-rotation function (`main.tf` L1533) | — | Did a scheduled rotation fail and leave the secret on its previous version | Inspect that function's log stream and re-run the rotation before a task placement presents a credential the database no longer accepts. This family is iterated over `rotation_lambda_function_names`, and both environment roots leave that input at its empty default because **no credential-rotation function is provisioned anywhere in this package** — `infra/modules/secrets` implements none and neither root supplies one, so the family creates zero alarms as delivered. It is authored so that a root which later brings a function alarms on it by extending a list rather than by editing a module; naming a function that does not exist would instead leave an alarm permanently in `INSUFFICIENT_DATA`. Database-credential replacement is operator-initiated and scripted — see the procedure in [`../runbooks/deploy.md`](../runbooks/deploy.md) |
 

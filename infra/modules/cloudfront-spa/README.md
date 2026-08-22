@@ -64,9 +64,22 @@ alternative is safe here.
 A browser route and an S3 object key are different namespaces. AAP section
 0.4.1.4 maps the 21 BMS mapsets to a 21-route SPA target, and
 [`ui/src/router.tsx`](../../../ui/src/router.tsx) owns client-side route
-resolution. The checked-in router declares four concrete route patterns and a
-catch-all; the CloudFront mechanism is deliberately independent of that list
-so adding a route does not require an infrastructure allow-list.
+resolution. The checked-in router mounts **every authored screen** — all 21
+directories under [`ui/src/screens`](../../../ui/src/screens), reached through 22
+path patterns because the user-update screen is mounted both bare and with a
+selected user id — beside a root redirect and a `*` catch-all. The CloudFront
+mechanism is deliberately independent of that list, so adding a route changes the
+SPA alone and requires no infrastructure allow-list.
+
+Refactoring Rationale: this paragraph said the router "declares four concrete
+route patterns and a catch-all", which was a count taken while the SPA was
+partially authored and never revisited. It understated the delivered surface by
+seventeen screens and, worse, invited the reader to conclude that the other
+seventeen mapsets were unmigrated — a conclusion the router refutes. The
+replacement names the source of truth rather than a number that only a reader
+comparing two trees could falsify: "every authored screen" is checkable by
+listing one directory, and the two counts beside it are stated as measurements of
+that directory and of the router's own route table.
 
 The failure chain without the viewer-request function is:
 

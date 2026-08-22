@@ -19,8 +19,10 @@
 > consumed by the typed client [`ui/src/api/authorization.ts`](../../ui/src/api/authorization.ts);
 > a reply message on the ordered reply queue; and the `authorization` PostgreSQL schema
 > this context alone owns. The screen routes this context is assigned are
-> `/authorizations` and `/authorizations/:key` — see the note below on their current
-> state.
+> `/authorizations` and `/authorizations/:key`, both authored as
+> `ui/src/screens/authSummary` and `ui/src/screens/authDetail` and mounted by
+> `ui/src/router.tsx` — see [§13](#13-honest-boundaries--what-this-modules-tests-do-not-prove)
+> for what a declared route does and does not assert.
 >
 > **Exceptions or errors.** The honest limits are stated rather than implied. **No
 > golden master exists for any path in this context** — the caveat is set out in full in
@@ -937,9 +939,9 @@ accepted one.
 
 ## 9. Build, test, and the documentation gate
 
-<!-- test-inventory: 72 tests + 10 integration tests -->
-**82** test classes across ten subpackages: **72** matching `*Test`, run by Surefire, and
-**10** matching `*IT`, run by Failsafe against Testcontainers-backed PostgreSQL. Every test
+<!-- test-inventory: 72 tests + 11 integration tests -->
+**83** test classes across ten subpackages: **72** matching `*Test`, run by Surefire, and
+**11** matching `*IT`, run by Failsafe against Testcontainers-backed PostgreSQL. Every test
 package carries a `package-info.java`, because the documentation gate audits test sources
 too.
 
@@ -951,10 +953,10 @@ which is the point: a census a reader trusts has to be one a test maintains.
 
 | Package | `*Test` | `*IT` | What the integration tier proves here |
 |---|---|---|---|
-| `service` | 15 | 4 | The decision unit of work, the fraud-marking boundary, the outbox drain's publication lifecycle, and that a purge window rolls back as one |
+| `service` | 15 | 5 | The decision unit of work, the fraud-marking boundary, the outbox drain's publication lifecycle, that an extract load leaves no row behind when it is refused, and that a purge window rolls back as one |
 | `fixtures` | 11 | 1 | The fraud-domain fixtures against real columns |
 | `mapper` | 10 | — | |
-| `config` | 13 | — | |
+| `config` | 12 | — | |
 | `dto` | 9 | — | |
 | `domain` | 8 | — | |
 | `repository` | — | 5 | Composite keys, key and reply-code domains, parentage, keyset paging, the fraud index order, and the outbox claim |
@@ -966,11 +968,11 @@ which is the point: a census a reader trusts has to be one a test maintains.
 # WHAT: run every test in this module, unit and integration alike.
 # WHY : Assumptions: `verify` rather than `test`, because Failsafe binds to
 #       `integration-test` and `verify`. Refactoring Rationale: this page used to
-#       document `test` alone, which exercises 73 of the 83 classes and silently
-#       skips all TEN Testcontainers-backed classes — every assertion about the
-#       single-transaction decision, the outbox drain and the purge rollback, which
-#       are precisely the properties D-5 and D-6 exist for. A container runtime is
-#       required.
+#       document `test` alone, which exercises 72 of the 83 classes and silently
+#       skips all ELEVEN Testcontainers-backed classes — every assertion about the
+#       single-transaction decision, the outbox drain, the atomic extract load and the
+#       purge rollback, which are precisely the properties D-5 and D-6 exist for. A
+#       container runtime is required.
 mvn -B -f services/pom.xml -pl authorization-service -am verify
 ```
 
@@ -1426,16 +1428,38 @@ restated independently at `.github/workflows/tests.yml` L28–L38), where a soft
 meaningful outcome. A Java gate is **binary**: a test passes or it fails. Teaching Surefire or
 Failsafe to tolerate a return code of 4 would convert a real failure into a silent one.
 
-⚠ Assumptions: **the two screen routes this context is assigned are not yet declared in the
-single-page application.** The typed client
-[`ui/src/api/authorization.ts`](../../ui/src/api/authorization.ts) exists and is exercised
-by `ui/src/api/contracts.test.ts` against all five published operations, but
-`ui/src/router.tsx` declares — in its own words — every route *"currently backed by an
-authored screen module"*, and no authorization screen module is among them. So the contract
-in [§3](#3-api-surface) is consumed programmatically today and is not yet reachable from a
-browser. That is a user-interface gap rather than a defect in this module, it belongs to the
-user-interface tree rather than here, and it is recorded because a reader who takes
-`/authorizations` for a working route will not find one.
+⚠️ Refactoring Rationale: **this page previously recorded the two screen routes for
+this context as not yet declared, and that limitation is withdrawn — both are authored and
+mounted.** `ui/src/screens/authSummary/index.tsx` and `ui/src/screens/authDetail/index.tsx`
+exist, and `ui/src/router.tsx` declares `AUTH_SUMMARY_PATH = '/authorizations'` and
+`AUTH_DETAIL_PATH = '/authorizations/:key'` and mounts them inside the guarded subtree as
+`AuthSummaryScreen` and `AuthDetailScreen`. Between them the two screens call every one of
+the five published operations: the summary calls `listPendingAuthorizations`, and the detail
+calls `getPendingAuthorization`, `getPendingAuthorizationScreen`, `getNextPendingAuthorization` and
+`setAuthorizationFraudState`. The withdrawal is stated rather than the paragraph simply
+deleted, because a reader who met the old limitation needs to know it no longer holds.
+
+Assumptions: the browser surface is covered by
+`ui/src/screens/authSummary/authSummary.test.tsx`, `ui/src/screens/authDetailScreen.test.tsx`,
+`ui/src/screens/authSummaryEntry.test.tsx` and `ui/src/screens/referenceAndAuthScreens.test.tsx`,
+and the typed client [`ui/src/api/authorization.ts`](../../ui/src/api/authorization.ts)
+remains exercised by `ui/src/api/contracts.test.ts` against all five operations. Those suites
+belong to the user-interface tree and are named here only so a reader can see where the
+route-level evidence lives; nothing in this module asserts them. `ui/src/api/authorization.test.ts` covers
+that client directly, and `ui/src/routerRoutes.test.tsx` asserts the registration itself —
+it fails if either path constant resolves to no mounted route. Trade-offs: those files are
+cited by NAME and by constant rather than by line. `ui/src/router.tsx` is edited far more
+often than this page, so a line citation into it goes stale in exactly the way the
+withdrawn paragraph above did; the cost is that a reader searches rather than jumps.
+
+Assumptions: what remains true is the narrower point the old paragraph was reaching for —
+the route existing is **not** a claim that this extension is deployed. `ui/src/router.tsx`
+declares `/authorizations` unconditionally and records why: `app/cbl/COMEN01C.cbl`
+L147–L168 probes for the extension with `EXEC CICS INQUIRE PROGRAM ... NOHANDLE` and paints
+`'This option '` + the option name + `' is not installed...'` when it is absent, and no
+client-side equivalent of that probe was invented. In the migrated system this service's
+availability surfaces where every other service outage does — as an ordinary API error the
+screen reports.
 
 Assumptions: one reference behaviour is **intentionally dropped** rather than migrated.
 `cbl/COPAUS1C.cbl` L523 contains `DISPLAY 'RPT DT: ' PA-FRAUD-RPT-DATE`, a leftover debugging

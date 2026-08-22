@@ -167,12 +167,17 @@
  * <p>Assumptions: one genuine semantic gap is resolved here rather than ignored. The
  * baseline sets a five-second expiry on its reply message and the target queue service has
  * no per-message time to live, so the expiry travels as a message attribute instead: the
- * listener DROPS and logs a request whose expiry has already passed, and the publisher
- * retires a reply whose expiry passed before it could be sent. Deciding a stale request
- * would reserve funds against an authorization whose requester has stopped waiting, and
- * sending a stale reply would consume the deduplication identifier so that a legitimate
- * retry would then be suppressed as a duplicate of an answer nobody read. The resolution is
- * recorded in {@code docs/adr/ADR-004-messaging.md}.</p>
+ * listener DROPS and logs a request whose expiry has already passed, and expiry on the REPLY
+ * side is enforced by the consumer that reads it. Deciding a stale request would reserve funds
+ * against an authorization whose requester has stopped waiting, which is why the inbound drop
+ * is here. ⚠️ Refactoring Rationale: this paragraph said the publisher "retires a reply whose
+ * expiry passed before it could be sent", and it must not: that producer-side check marked the
+ * row published without sending anything, so the retention sweep then deleted a reply the
+ * committed decision says was owed -- and because the stamped window and the first retry
+ * backoff are both five seconds, every reply that failed one attempt was discarded that way.
+ * The publisher now reports the lateness under {@code event=auth.reply.late} and SENDS, leaving
+ * the drop to the one end ADR-004 assigns it to. The resolution is recorded in
+ * {@code docs/adr/ADR-004-messaging.md}.</p>
  *
  * <p><strong>Row protection.</strong> Classes here declare transaction boundaries; not one of
  * them declares a lock mode itself, because a lock mode belongs to the query that takes it and
@@ -318,11 +323,12 @@
  * <p>Assumptions: one genuine semantic gap is resolved here rather than ignored. The baseline
  * sets a five-second expiry on its reply message and the target queue service has no
  * per-message time to live, so the expiry travels as a message attribute instead: the
- * listener DROPS and logs a request whose expiry has already passed, and the publisher
- * retires a reply whose expiry passed before it could be sent. Deciding a stale request would
- * reserve funds against an authorization whose requester has stopped waiting, and sending a
- * stale reply would consume the deduplication identifier so that a legitimate retry would
- * then be suppressed as a duplicate of an answer nobody read. The resolution is recorded in
+ * listener DROPS and logs a request whose expiry has already passed, and expiry on the REPLY
+ * side is enforced by the consumer that reads it rather than by the publisher that sends it.
+ * ⚠️ Refactoring Rationale: this paragraph said the publisher "retires a reply whose expiry
+ * passed before it could be sent". That check existed, marked the row published without
+ * sending, and therefore let the retention sweep delete a reply that was owed; the publisher
+ * now reports {@code event=auth.reply.late} and sends. The resolution is recorded in
  * {@code docs/adr/ADR-004-messaging.md}.</p>
  *
  * <p>Assumptions: nothing in this package logs a value that came off the wire. A failure

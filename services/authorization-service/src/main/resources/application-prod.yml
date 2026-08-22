@@ -2,15 +2,40 @@
 # services/authorization-service/src/main/resources/application-prod.yml
 # -----------------------------------------------------------------------------
 # WHAT: the production profile overlay for the pending-authorization bounded
-#       context. It sets NINE leaf values, and every one of them is a key that
+#       context. It sets TEN leaf values, and every one of them is a key that
 #       application.yml beside it already declares, so this document introduces
-#       no key absent there. Eight sit on the three axes a profile is permitted
-#       to vary -- connection-pool sizing including the acquisition timeout,
-#       diagnostic verbosity, and actuator health detail breadth. The ninth,
-#       spring.config.import, is not an axis at all: a profile's import list
-#       REPLACES the base document's rather than extending it, so every overlay
-#       has to name the shared defaults document again, and that is argued at
-#       the key itself.
+#       no key absent there. NINE sit on the three axes a profile is permitted
+#       to vary -- connection-pool sizing including the acquisition timeout, which
+#       is three of them; diagnostic verbosity, which is the statement echo flag
+#       and the four pinned loggers; and actuator health detail breadth, which is
+#       one. The tenth, spring.config.import, is not an axis at all: it is named
+#       here so this overlay's own list holds the shared defaults document, and
+#       that is argued at the key itself.
+#
+# WHY : Assumptions: naming it again is a GUARD this module's own topology test
+#       makes mandatory, not a framework requirement. The base document's import is
+#       not discarded when a profile activates -- auth-service depends on exactly
+#       that, since its two overlays declare no import at all and
+#       repository/UserRepositoryIT proves a carddemo-common-defaults.yml value is
+#       in force under an active profile. What the restatement buys is that an
+#       overlay which later adds a location cannot narrow its own list to that one
+#       entry by accident, and
+#       config/ProfileConfigurationTopologyTest.eachOverlayImportsTheSharedDefaultsAlone
+#       fails the build if this list is ever anything but the shared defaults.
+#       Refactoring Rationale: this sentence said the profile's list "REPLACES the
+#       base document's rather than extending it, so every overlay has to name the
+#       shared defaults document again". The conclusion does not follow from the
+#       premise and is contradicted inside this reactor by auth-service, so a reader
+#       taking it literally would add the line to that module's overlays to fix a
+#       problem they do not have.
+#
+# WHY : Assumptions: ten is the number of LEAF paths this document declares,
+#       counted the way config/ProfileConfigurationTopologyTest flattens a document
+#       into dotted keys: spring.config.import; three under
+#       spring.datasource.hikari; spring.jpa.show-sql; four under logging.level; and
+#       management.endpoint.health.show-details. The enumeration is written out so a
+#       reader can check the figure against the payload below by hand, which is how
+#       the previous count of one fewer was found to be short.
 #
 # WHY : Assumptions: this document differs from application-dev.yml in SIZING,
 #       RETENTION and DIAGNOSTIC VERBOSITY only, never in topology, protocol or
@@ -22,19 +47,40 @@
 #       from the base document unchanged -- so each of them is decided in exactly
 #       one place, and none of them appears below.
 #
-# WHY : Trade-offs: FIVE of the nine values repeat what the base document already
-#       says -- the statement echo flag, the two statement loggers, this context's
-#       own log level, and the health detail breadth. The cost is that a reader
-#       meets five keys that change no effective value and has to ask why they are
-#       here, which is answered at each of them. What the repetition buys is that
-#       the base document stays the one a developer edits to make a local run
-#       legible, without such an edit widening the deployed surface in the same
-#       commit. Alternatives Considered: setting only the four values that
-#       genuinely differ from the base and leaving the rest to it. Rejected
-#       because those four are the import list and pool sizing, so the overlay
-#       would then say nothing whatever about the diagnostics that decide whether
-#       cardholder data reaches log storage -- the one question about this profile
-#       worth being able to answer without reading the base document end to end.
+# WHY : Trade-offs: SIX of the nine axis values repeat what the base document
+#       already says -- the statement echo flag, the two statement loggers, the
+#       driver-error logger, this context's own log level, and the health detail
+#       breadth. The cost is that a reader meets six keys that change no effective
+#       value and has to ask why they are here, which is answered at each of them.
+#       What the repetition buys is that the base document stays the one a
+#       developer edits to make a local run legible, without such an edit widening
+#       the deployed surface in the same commit. Alternatives Considered: setting
+#       only the four keys whose presence changes something -- the import list,
+#       which this module's topology test requires of this overlay, and the three
+#       pool values that genuinely
+#       differ from the base -- and leaving the other six to it. Rejected because
+#       those four are the import list and pool sizing, so the overlay would then
+#       say nothing whatever about the diagnostics that decide whether cardholder
+#       data reaches log storage -- the one question about this profile worth being
+#       able to answer without reading the base document end to end.
+#
+# WHY : Refactoring Rationale: the two censuses above read NINE leaf values, EIGHT
+#       of them on the axes, and FIVE repeating the base. All three figures were
+#       correct when they were written and went stale together when
+#       logging.level.org.hibernate.orm.jdbc.error was pinned here -- the tenth
+#       leaf, the ninth axis value and the sixth repeat -- after which the header
+#       undercounted the file it describes and its list of repeats omitted the one
+#       key whose pinning is argued at greatest length below. The figures are now
+#       DERIVED rather than restated: ProfileConfigurationTopologyTest's case
+#       theHeaderCensusIsThisDocumentsOwnArithmetic flattens this document to its
+#       leaves, counts those whose value equals the base document's, and fails
+#       when either count disagrees with the words above -- so the next key added
+#       here cannot leave the header stale.
+#       Alternatives Considered: dropping the figures so that nothing can go
+#       stale. Rejected because the whole argument of this header is that the
+#       overlay is SMALL and varies three axes only, and a census stating no
+#       magnitude gives a reader no way to check that claim against the file --
+#       which is how a reader came to count the leaves by hand and find ten.
 # -----------------------------------------------------------------------------
 # Documentation convention: docs/CODE_DOCUMENTATION_STANDARD.md, whose YAML
 #   section supplies the analogous obligation for a language with no docstring
@@ -45,14 +91,37 @@
 #   so every comment below the header is a bare labelled rationale line instead.
 #   The four category labels appear in the one permitted plural form.
 #
-# WHY : Assumptions: NO MECHANICAL GATE READS THIS FILE. config/checkstyle/
-#       checkstyle.xml narrows its Checker to fileExtensions="java" at L178, and
-#       no linter in this repository parses YAML comments, so no rationale missing
-#       below would fail a build. The discipline is applied at the rigour it is
-#       applied where a build would fail without it, because the sentence this
-#       tree is audited against -- the validation gate at line 43 of the project's
-#       single user-specified rule, Rule 1 "Explainability" -- places the
-#       enforcement in review rather than in tooling.
+# WHY : Assumptions: NO GATE CAN DECIDE THAT A RATIONALE BELOW IS MISSING.
+#       config/checkstyle/checkstyle.xml narrows its Checker to
+#       fileExtensions="java" at L178, so the Javadoc presence rules never see a
+#       YAML document at all, and an unexplained key here would fail no build. The
+#       discipline is therefore applied at the rigour it is applied where a build
+#       would fail without it, because the sentence this tree is audited against
+#       -- the validation gate at line 43 of the project's single user-specified
+#       rule, Rule 1 "Explainability" -- places that enforcement in review rather
+#       than in tooling.
+#       Refactoring Rationale: this paragraph opened "NO MECHANICAL GATE READS
+#       THIS FILE" and rested that on "no linter in this repository parses YAML
+#       comments", and both statements were false when written.
+#       config/rule1/rule1_gate.py governs .yml among its LABEL_SUFFIXES and
+#       blanks YAML comment lines through _active_yaml precisely in order to read
+#       them, so the FORM of every rationale below is already machine-checked: a
+#       parenthesised or singular label, or a statement-level WHAT outside this
+#       header, fails that gate. What no gate decides is PRESENCE or truth, which
+#       is the narrower claim now made -- and the header's own census figures are
+#       asserted by name, as the block above records, so this file is read
+#       mechanically twice over.
+# WHY : Assumptions: that lexical gate is FAIL-CLOSED and exposes no tolerance
+#       flag, and it runs as a required step named "Run the Rule 1 lexical and
+#       consistency gate" in all three authored pipelines --
+#       .github/workflows/services-ci.yml job rule1-documentation-gate,
+#       .github/workflows/ui-ci.yml job ui, and .github/workflows/infra-ci.yml job
+#       terraform-static -- so the FORM half is decided three times before review
+#       sees the file. The direction of the earlier error was the harmful one: a
+#       reader who believed no linter parsed YAML comments would treat the label
+#       form as a house style to approximate, and a singular or parenthesised label
+#       written on that belief reddens three pipelines rather than reaching the
+#       review it was aimed at.
 # =============================================================================
 
 spring:

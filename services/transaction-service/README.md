@@ -478,12 +478,15 @@ whose misuse moves money:
 | everything else, including all five business operations | business authority | **yes** |
 
 Assumptions: what protects the two metric and management surfaces is **network
-position rather than authentication**, and stating that plainly is the point. The
-collector scrapes the metric endpoint from inside the task over loopback, so nothing
-off the box can reach either path — but a reader auditing exposure who was told "a
-token is required everywhere except health" would not go on to check that the
+position rather than authentication**, and stating that plainly is the point. Any
+scraper of the metric endpoint reads it from inside the task over loopback, so
+nothing off the box can reach either path — but a reader auditing exposure who was
+told "a token is required everywhere except health" would not go on to check that the
 loopback restriction is actually in place. Understating an exposed surface is the
-dangerous direction to be wrong in.
+dangerous direction to be wrong in. Refactoring Rationale: this sentence said a
+collector scrapes that endpoint. None does — the collector sidecar is withdrawn from
+`infra/modules/ecs-service`, so the surface is published with nothing collecting from
+it, and the loopback restriction is what makes publishing it safe either way.
 
 ---
 
@@ -649,22 +652,45 @@ docker build -f services/transaction-service/Dockerfile \
 
 Both references are additionally digest-pinned in the Dockerfile.
 
-Assumptions: **no Alpine variant of the Corretto image exists.** The repository
-publishes only `-al2` and `-al2023` tags with `headful`, `headless`, `generic` and
-`jdk` suffixes, and 21.0.12 is the highest published 21.x; the intuitive
-`21-alpine` *"does not exist and would have failed every image build."* The headless
-suffix is selected because an HTTP service needs no AWT or graphics stack. The build
-and runtime stages are matched on JDK vendor and major version so neither the
-class-file major version nor the trust-store contents can diverge between compile
-time and run time.
+Assumptions: **the ECR Public Corretto repository publishes no Alpine tag.**
+`public.ecr.aws/amazoncorretto/amazoncorretto` carries `-al2` and `-al2023`
+families only, with `headful`, `headless`, `generic`, `jdk` and per-architecture
+suffixes, and 21.0.12 is the highest published 21.x — so within the registry this
+reference comes from, `21-alpine` names nothing and a build attempting it fails on
+the pull. The statement is scoped to that repository deliberately, because the
+unqualified form of it is wrong.
+
+Alternatives Considered: an Alpine Corretto runtime **is** available — Docker Hub's
+official `amazoncorretto` repository publishes `21.0.12-alpine` and
+`21.0.12-alpine3.24` from the same `corretto/corretto-docker` project — so it is
+declined rather than unavailable, and the reason it is declined is not the one a
+reader expects. **It is not smaller.** Compressed amd64 layers measured from the two
+registries are 143.9 MB for the pinned `21.0.12-al2023-headless` against 166.1 MB
+for `21.0.12-alpine`, because the pin is a HEADLESS image and Docker Hub publishes
+no headless Alpine variant — its 21.x Alpine tags are `-alpine`, `-alpine-jdk` and
+`-alpine-full` only. Dropping the AWT and graphics stack saves more here than
+changing the base distribution does, which removes the size argument before any
+other consideration is reached.
+
+Trade-offs: had it been smaller, it would still have been declined, and cheaply.
+This module's build stage is `maven:3.9.16-amazoncorretto-21-al2023`, so an Alpine
+runtime would put a musl runtime under a glibc-compiled build; the two libc
+implementations differ in allocator behaviour and in thread-stack defaults under
+the many-connection JDBC and HTTP pools this service holds open. The money path
+itself is indifferent — `BigDecimal` arithmetic is libc-independent — but the JVM's
+runtime characteristics measured at build time would no longer describe what runs.
+Keeping the stages matched on JDK vendor, libc and major version also means neither
+the class-file major version nor the trust-store contents can diverge between
+compile time and run time. The headless suffix is selected because an HTTP service
+needs no AWT or graphics stack.
 
 The image build runs with `-DskipTests`, and section 12.5 explains why that does not
 weaken the documentation gate.
 
 ### 9.3 Test topology
 
-<!-- test-inventory: 29 tests + 8 integration tests -->
-**37** test classes across nine subpackages: **29** matching `*Test`, run by
+<!-- test-inventory: 30 tests + 8 integration tests -->
+**38** test classes across nine subpackages: **30** matching `*Test`, run by
 Surefire, and **8** matching `*IT`, run by Failsafe. The `*RepositoryIT` naming
 already matches Failsafe's default include pattern, so neither plugin needs an
 include list. That census is machine-checked — `ServiceReadmeInventoryTest` in
@@ -680,7 +706,7 @@ a reader.
 | `mapper` | `TransactionMapperTest`, `BillPaymentMapperTest`, `BillPaymentMappingTest` |
 | `domain` | `MoneyColumnInvariantTest`, `FixedWidthMappingTest`, `FeedRowIdentityTest`, `OccurrenceIdentityTest` |
 | `architecture` | `TransactionLayeringRulesTest`, `MoneyPathGateProofTest`, `KeysetPaginationGateProofTest` |
-| `dto` | `TransactionApiContractTest`, `TransactionAddRequestTest` |
+| `dto` | `TransactionApiContractTest`, `TransactionAddRequestTest`, `PrintableTextSinkContractTest` |
 | `config` | `SecurityConfigTest`, `SecurityChainDispatchTest`, `OpenApiConfigTest`, `DevProfileContractTest`, `DevProfileStartupIT` |
 | `fixtures` | `TransactionFixtureContractTest` |
 
@@ -718,6 +744,12 @@ What the tiers assert:
 - **Money tests** assert scale-2 `BigDecimal` and JSON-**string** serialisation, and
   the two architecture proof tests assert that the money-path and keyset gates
   actually fire by presenting them with a deliberate violation.
+- **`PrintableTextSinkContractTest`** is why the census moved from 29 to 30. It proves the
+  printable-text domain the externally authored `PIC X` fields now declare is exactly the set
+  the fixed-width encoder can carry: every admitted code point round-trips, none of them
+  encodes to a record terminator, and a character outside the domain fails at the encoder far
+  downstream — which is what makes the boundary check the defence rather than the codec. It is
+  a Surefire class because it needs the codec and the layout descriptor and no engine.
 
 Fixtures live at `src/test/resources/fixtures/<scenario>/` and are byte-exact at the
 verified record lengths — `transact.txt` 350, `dailytran.txt` 350, `tcatbal.txt` 50.
@@ -1183,7 +1215,7 @@ justifies it. The labels are quoted in their one permitted written form.
 | Both Flyway artifacts declared | `Assumptions:` | Flyway 10 and later moved PostgreSQL support out of the core artifact, so core alone resolves and compiles and then fails at run time with no database implementation for the URL. `flyway-database-postgresql` is the required companion. |
 | Absence of Lombok and MapStruct | `Alternatives Considered:` | Lombok's generated accessors cannot carry the required Javadoc, so it would breach the very gate that enforces the rule; MapStruct's newest release is a beta and the copybook-to-DTO mapping is not mechanical, so each mapping decision needs an inline justification a generated mapper cannot hold. Java 21 records with explicit constructors give the brevity without either cost. |
 | No resilience library and no circuit breaker | `Alternatives Considered:` | Spring Framework 7 core already carries retry, with `maxRetries` and `@EnableResilientMethods`, so an external library would be a second mechanism for one need. A breaker is omitted because the only synchronous hop is in-VPC behind an internal load balancer with bounded timeouts, so it would add a failure mode without removing one. |
-| The Corretto runtime tag `21.0.12-al2023-headless` | `Assumptions:` | No Alpine variant of that image exists — the publisher ships only `-al2` and `-al2023` tags — so `21-alpine` is not a smaller alternative but a tag that does not resolve and fails every build. 21.0.12 is the highest published 21.x, and headless is chosen because an HTTP service needs no graphics stack. |
+| The Corretto runtime tag `21.0.12-al2023-headless` | `Alternatives Considered:` | The ECR Public Corretto repository this tag comes from ships `-al2` and `-al2023` families only, so `21-alpine` does not resolve there; Docker Hub's official `amazoncorretto` repository does publish `21.0.12-alpine`, and it is declined because it is not smaller — 166.1 MB against 143.9 MB compressed, since no headless Alpine variant is published — and because it would run a musl runtime under this module's glibc `maven:...-amazoncorretto-21-al2023` build stage. 21.0.12 is the highest published 21.x, and headless is chosen because an HTTP service needs no graphics stack. See §9.2. |
 | The repository root as the container build context | `Alternatives Considered:` | A module-scoped context was rejected three times over: it cannot reach the unpublished `common-lib` sibling, it does not contain the parent POM this module declares at `../pom.xml`, and it cannot reach `config/checkstyle`. It produces no image rather than a smaller one. |
 | A real PostgreSQL for the integration tier | `Trade-offs:` | A container runtime is required and the tier is slower, which is accepted because an in-memory database reproduces neither PostgreSQL's index semantics nor its `CHAR` padding, so a green in-memory run would prove nothing about the three access paths this schema exists to provide. |
 | Report directories left at their defaults | `Assumptions:` | The continuous-integration workflow collects from `services/*/target/surefire-reports/` and `services/*/target/failsafe-reports/`. Relocating either makes the build green while the workflow publishes nothing. |

@@ -18,25 +18,25 @@
 #   closed health detail, the acquisition and lifetime ceilings, and the console
 #   layout carrying the correlation identifier.
 #
-#   Who consumes this document, established by reading the module's own test tree
-#   rather than assumed:
-#     - the THREE integration tests under repository/ are the only tests in this
-#       module that load a Spring context, and each is annotated
-#       @ActiveProfiles("test"), so what follows is the effective configuration of
-#       all three. ReportingQueryBootstrapIT and StatementHeadingChunkIT reach their
-#       databases through a @Container @ServiceConnection PostgreSQLContainer, the
-#       second of them additionally applying a harness init script.
-#       ReportingDeployedRelationIT does NOT use @ServiceConnection: it starts its
-#       container from a static initialiser and supplies the three connection
-#       coordinates through @DynamicPropertySource, because it authenticates as the
-#       SELECT-only login role rather than as the container owner and because the
-#       shipped DDL it applies has to be in place before the pool opens its first
-#       connection. Everything else below reaches it unchanged, which is the point:
-#       it asserts the DEPLOYED pool posture, including the search-path pin.
-#       Refactoring Rationale: this entry previously named one class as the only
-#       context-loading test in the module. Two more have since been added, and a
-#       consumer list that undercounts its consumers is what lets somebody change a
-#       value here believing only one class reads it.
+#   Who consumes this document, stated as properties a reader can check against the
+#   tree rather than as a headcount that goes stale the next time a class is added:
+#     - EVERY class in this module that loads a Spring context is an *IT under
+#       repository/ and declares @ActiveProfiles("test"), and no class outside that
+#       package declares either annotation. Both halves are one grep each over
+#       src/test/java, and together they say that what follows is the effective
+#       configuration of the integration tests and of nothing else. Within that set
+#       the container mechanism is not uniform, and the split matters to what each
+#       proves: every one of them EXCEPT ReportingDeployedRelationIT reaches its
+#       database through a @Container @ServiceConnection PostgreSQLContainer, with
+#       StatementHeadingChunkIT additionally applying a harness init script. That one
+#       exception does NOT use
+#       @ServiceConnection -- it starts its container from a static initialiser and
+#       supplies the three connection coordinates through @DynamicPropertySource,
+#       because it authenticates as the SELECT-only login role rather than as the
+#       container owner and because the shipped DDL it applies has to be in place
+#       before the pool opens its first connection. Everything else below reaches it
+#       unchanged, which is the point: it asserts the DEPLOYED pool posture,
+#       including the search-path pin.
 #     - config/DataSourceConfigTest PARSES this document and reads
 #       spring.datasource.hikari.connection-init-sql out of it, then requires the
 #       startup guard to accept that exact statement. That value is therefore
@@ -44,14 +44,19 @@
 #     - config/JwtDecoderConfigTest PARSES this document too, and requires that no
 #       audience key appear under the resource-server subtree under any spelling.
 #       It tolerates the subtree being absent, which is what it is below.
-#     The other 31 of the 33 classes matching *Test load no application context and
-#     carry no @ActiveProfiles annotation -- measured, not assumed: the three *IT
-#     classes are the only annotated ones in the tree -- so they never read this
-#     document at all. Surefire runs the 33; Failsafe runs the three *IT after
-#     packaging and asserts their results in `verify`.
-#     Refactoring Rationale: this said "the other 27" and "the single *IT". Both
-#     figures had drifted as classes were added. They are restated as a total and a
-#     remainder so the two can be checked against each other and against the tree.
+#     Those two are the only *Test classes that read this file at all, and they read
+#     it as TEXT rather than as configuration: neither loads a context, so neither is
+#     configured by it. Every other *Test class in the module loads no context and
+#     carries no @ActiveProfiles annotation, so this document reaches none of them.
+#     Refactoring Rationale: this register previously fixed its consumers at "the
+#     THREE integration tests", "the other 31 of the 33 classes matching *Test" and
+#     "the three *IT", and every one of those figures was behind the tree by the time
+#     it was read -- the same drift had already been corrected once, from 27 and one.
+#     A count cannot be maintained from inside this file, and its only real job was to
+#     tell a reader whether some class they had not thought of might depend on a value
+#     here. The two properties above answer that question and stay answerable: any
+#     *Test that starts reading this document must PARSE it, which is a visible act in
+#     that class's own source.
 #
 #   NO CREDENTIAL, NO NETWORK LOCATION, NO RESOURCE IDENTIFIER AND NO ACCOUNT
 #   IDENTIFIER APPEARS ANYWHERE BELOW, and no stand-in for one either. The register
@@ -482,9 +487,10 @@ spring:
           #       by class name would hard-code an internal name that has already
           #       moved once between framework versions, and would apply to every
           #       context that activates this profile rather than to the one key at
-          #       fault. Supplying the value from the one context-loading test would
-          #       work but would put the remedy far from the cause, leaving the next
-          #       context to rediscover the same failure.
+          #       fault. Supplying the value from each context-loading test instead
+          #       would work but would put the remedy far from the cause, and would
+          #       have to be repeated in every such class, leaving the next one to
+          #       rediscover the same failure.
           #       (4) Trade-offs: what this profile gives up is stated plainly so a
           #       test author is not surprised by it. There is no key material here,
           #       so nothing proves signature validation -- that belongs to an
@@ -573,14 +579,18 @@ logging:
 #      prefix and no artifact-signing key material, all of which this module's classes
 #      read at runtime.
 # WHY : (1) Assumptions: no test in this module loads a context that instantiates the
-#       classes reading them. The single context-loading test names only the entity
-#       and repository packages rather than scanning the module root, and its own
-#       documentation gives that narrowness as load-bearing for exactly this reason:
-#       scanning the root would demand an execution identifier and a bucket from a
-#       context started only to parse queries, and a failure to supply either would
-#       read as a query defect. The orchestration call is proven instead by a unit
-#       test that verifies the request the service builds against a mocked client,
-#       with no Spring context at all.
+#       classes reading them. Every context-loading test declares a narrow nested
+#       configuration naming only the entity and repository packages rather than
+#       scanning the module root, and each one's own documentation gives that
+#       narrowness as load-bearing for exactly this reason: scanning the root would
+#       demand an execution identifier and a bucket from a context started to parse
+#       queries or to read a projection, and a failure to supply either would read as
+#       a query defect. The orchestration call is proven instead by a unit test that
+#       verifies the request the service builds against a mocked client, with no
+#       Spring context at all. Refactoring Rationale: this entry said "the single
+#       context-loading test", which was a count rather than the property it needed --
+#       what makes the omission safe is that NO such context scans the module root,
+#       and that holds however many of them there are.
 #       (2) Alternatives Considered: stubbing them anyway for symmetry. Rejected
 #       because these are network locations and resource identifiers rather than
 #       selectors: a fabricated identifier of that shape in a committed test resource

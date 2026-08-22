@@ -55,6 +55,30 @@ import com.carddemo.reference.dto.TransactionTypeUpdateRequest;
  * unemphasised form that {@code docs/CODE_DOCUMENTATION_STANDARD.md} fixes at its L218 to L245, and no
  * other spelling of any of them appears in this file. A label is found by literal search before it is
  * read by a person, so a second spelling of one category would leave that search silently partial.</p>
+ *
+ * <p>Refactoring Rationale: this class carries NO batch renderer -- no
+ * {@code toResponseList(List<TransactionType>)} -- and the absence is a decision recorded here rather
+ * than an omission. Such a member was declared and nothing ever called it, and it could not be called,
+ * because the browse it was written for renders row by row: {@code ReferencePaging.page} takes a
+ * {@code Function<E, R>} and applies it per row so that it can drop the surplus probe row and seal the
+ * two boundary keys in one place, and {@code TransactionTypeService} L401 passes
+ * {@code TransactionTypeMapper::toResponse} as that function. A batch renderer had no position in the
+ * call chain at all, and its own documentation described an envelope -- first key, last key,
+ * more-pages -- that it explicitly did not assemble.</p>
+ *
+ * <p>Alternatives Considered: widening {@code ReferencePaging.page} to accept a batch renderer so the
+ * member became the used path. Rejected: the five browses that share that helper -- three in
+ * {@code AddressLookupService} and one each in {@code TransactionTypeService} and
+ * {@code TransactionCategoryService} -- would each have to move where a {@code map} happens, and it
+ * would move the surplus-row drop
+ * further from the query that produced it -- which is the one place the drop has to stay, because only
+ * that layer knows a probe row was requested. Removing two lines that nothing can reach is the smaller
+ * change and leaves one convention rather than two. Assumptions: the note is kept because the three
+ * seeded-lookup mappers in this package DO publish a {@code toResponseList} -- {@code UsStateMapper}
+ * L203, {@code UsPhoneAreaCodeMapper} L168 and {@code UsStateZipPrefixMapper} L232 -- so a reader
+ * comparing this class against them finds the reason here instead of reading the difference as an
+ * oversight, which is the same convention {@code UsPhoneAreaCodeMapper} follows for its own missing
+ * inbound member.</p>
  */
 public final class TransactionTypeMapper {
 
@@ -119,29 +143,6 @@ public final class TransactionTypeMapper {
         //       to retry against the revision that exists.
         return new TransactionTypeResponse(publishedCode, publishedDescription, entity.getVersion());
     }
-
-    /**
-     * {@code toResponseList} is deliberately absent.
-     *
-     * <p>Refactoring Rationale: a {@code toResponseList(List<TransactionType>)} member was declared here and
-     * nothing ever called it. It was not merely unused: it could not be used, because the browse it was
-     * written for renders row by row. {@code ReferencePaging.page} takes a {@code Function<E, R>} and
-     * applies it per row so that it can drop the surplus probe row and seal the two boundary keys in one
-     * place, and every one of its call sites passes {@code TransactionTypeMapper::toResponse} as that function. A
-     * batch renderer therefore had no position in the call chain at all, and its own Javadoc described
-     * an envelope -- first key, last key, more-pages -- that it explicitly did not assemble.</p>
-     *
-     * <p>Alternatives Considered: widening {@code ReferencePaging.page} to accept a batch renderer so the
-     * member became the used path. Rejected: five browses share that helper, so the change would touch
-     * every one of them to move where a {@code map} happens, and it would move the surplus-row drop
-     * further from the query that produced it -- which is the one place the drop has to stay, because
-     * only that layer knows a probe row was requested. Removing two lines that nothing can reach is the
-     * smaller change and leaves one convention rather than two.</p>
-     *
-     * <p>Assumptions: this note is recorded rather than the member simply deleted, because the sibling
-     * mapper's own comments cited this one by name and line. A reader who follows such a citation and
-     * finds nothing cannot tell an intentional removal from a bad merge.</p>
-     */
 
     /**
      * Builds a new entity from a create request.

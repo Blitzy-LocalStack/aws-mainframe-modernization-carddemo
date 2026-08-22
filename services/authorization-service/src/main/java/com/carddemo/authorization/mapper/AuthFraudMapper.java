@@ -125,6 +125,36 @@ import java.util.Objects;
  * their structure and is not a verdict on it. The two other renames the migration makes belong to the
  * account and card contexts and are not claimed here.
  *
+ * <h2>The three column boundaries this class no longer publishes</h2>
+ *
+ * <p>Refactoring Rationale: this class used to publish {@code fraudFlagColumn},
+ * {@code processingCodeColumn} and {@code merchantNameColumn}, three per-column boundary methods that
+ * NO production path called -- {@code FraudMarkingService} reaches only
+ * {@link #toFraudRow(PendingAuthDetail, FraudMarkRequest, Long, LocalDate)} and
+ * {@link #markResponse(boolean)}, and the twenty-four snapshot columns are copied by
+ * {@code AuthFraud.from} without passing through any of the three. Each therefore stood as a SECOND
+ * normalisation of a value whose single authority is elsewhere, which is the arrangement the package
+ * charter exists to forbid: the fraud marker on a stored record is normalised once, at decode, by
+ * {@code PendingAuthDetailMapper.toEntity} -- it applies the mark only for the two admitted characters
+ * and refuses anything else through its own domain guard -- the character form of the processing code
+ * is produced once by that class's {@code renderProcessingCode}, and the merchant name is carried
+ * untrimmed at both boundaries with the reason recorded at each. Keeping a parallel copy of all three
+ * invited a future caller to normalise an already-normalised value, or to reach for
+ * {@code fraudFlagColumn} on the way to {@code auth_fraud} -- a column this context writes from the
+ * REQUESTED ACTION and never from the stored marker, so that call would have produced a well-formed
+ * row recording the wrong thing.
+ *
+ * <p>Alternatives Considered: keeping the three and routing the production projection through them.
+ * Rejected on two grounds. It is not expressible for the processing code, whose boundary took the
+ * DECODED number while the detail entity already holds the rendered characters, so the value reaching
+ * this class has passed the regime change already; and for the other two it would mean composing the
+ * row from twenty-six individual values rather than from the authorization being marked, which is the
+ * shape argued against at the projection itself because it lets a caller supply a value that disagrees
+ * with the authorization it claims to describe. What the deletion gives up is a width refusal on the
+ * merchant name; that guard was unreachable in the shipped paths, since the decode reads a fixed
+ * twenty-two-byte span and both the entity's {@code length = 22} and the column's {@code VARCHAR(22)}
+ * refuse a wider value at the write.
+ *
  * <h2>Two libraries deliberately not adopted</h2>
  *
  * <p>Alternatives Considered: MapStruct, or any generated mapping framework, for this class. Rejected:
@@ -147,7 +177,8 @@ import java.util.Objects;
  *
  * <p>Trade-offs: this class calls package-private helpers on {@link PendingAuthDetailMapper} rather
  * than holding its own copies -- the timestamp composition, the month-first date parse, the
- * zero-filled processing code and the account-number mask. Package-private coupling between two
+ * account-number mask, the money integer-digit bound and the two complement bases the key guard
+ * checks against. Package-private coupling between two
  * classes is accepted deliberately in exchange for exactly one definition of each representation
  * concern in the package. The alternative, a private copy in each class, is what the charter's whole
  * purpose forecloses: a width or a pivot expressed twice can disagree, and the disagreement surfaces
@@ -208,6 +239,13 @@ public final class AuthFraudMapper {
      * {@code dcl/AUTHFRDS.dcl} L73 to L77, and it is the same width the segment field carries at
      * {@code cpy/CIPAUDTY.cpy} L40. One number with three agreeing sources is a contract rather than
      * a reading.</p>
+     *
+     * <p>Refactoring Rationale: this constant is now read by the row-shape assertions alone, the
+     * boundary method that used to compare against it having been withdrawn for the reason recorded in
+     * the class documentation. It is kept rather than inlined because those assertions hold the shipped
+     * migration and the entity's declared length to the same figure, and expressing that figure once
+     * is what makes the two readings comparable at all; inlining it would put a literal twenty-two in
+     * six places, which is precisely the drift the three agreeing sources were cited against.</p>
      */
     static final int MERCHANT_NAME_COLUMN_WIDTH = 22;
 
@@ -288,12 +326,18 @@ public final class AuthFraudMapper {
 
         // WHY : Assumptions: the twenty-four snapshot columns are copied by the entity's own factory
         //       and are deliberately NOT transformed on the way through. Two of them look as though
-        //       they should be and must not be: the merchant name keeps its trailing spaces and the
-        //       processing code keeps its zero filling, each for the reason recorded on the dedicated
-        //       boundary method below. Alternatives Considered: passing the twenty-six values
-        //       individually from here. Rejected because a per-value call lets a caller supply a value
-        //       that disagrees with the authorization it claims to describe, which the factory's shape
-        //       makes unrepresentable.
+        //       they should be and must not be. The merchant name keeps its trailing spaces: the
+        //       reference program writes LENGTH OF PA-MERCHANT-NAME at cbl/COPAUS2C.cbl L130 into the
+        //       varying-length prefix, and because that operand is PIC X(22) at cpy/CIPAUDTY.cpy L40
+        //       the length is ALWAYS twenty-two, so trimming would store a shorter value than every
+        //       row the baseline wrote and silently stop matching them. The processing code keeps its
+        //       zero filling: PA-PROCESSING-CODE is PIC 9(06) at cpy/CIPAUDTY.cpy L33 while
+        //       PROCESSING_CODE is CHAR(6) at ddl/AUTHFRDS.ddl L11, and a fixed-width character column
+        //       compares on its whole width, so a code reaching it as `1` rather than `000001` would
+        //       join to nothing rather than report a mismatch.
+        //       Alternatives Considered: passing the twenty-six values individually from here.
+        //       Rejected because a per-value call lets a caller supply a value that disagrees with the
+        //       authorization it claims to describe, which the factory's shape makes unrepresentable.
         return AuthFraud.from(detail, authTs, accountId, custId, action, databaseCurrentDate);
     }
 
@@ -473,119 +517,6 @@ public final class AuthFraudMapper {
     }
 
     /**
-     * Normalises a stored fraud marker for a nullable column, emitting SQL NULL for a blank one.
-     *
-     * <p>Assumptions: this mapper emits {@code NULL} for a blank marker and never a space, and the
-     * choice is recorded here because neither the schema nor the segment reveals it. The package
-     * charter settles it: a declared-width character field that arrives blank becomes SQL
-     * {@code NULL} rather than a string of spaces. The blank-tolerant check constraint in
-     * {@code db/migration/V1__authorization.sql} admits a space only on
-     * {@code pending_auth_detail}, which mirrors the segment where the reference application's own
-     * spaces land, and it is named for that table alone. Alternatives Considered: emitting a single
-     * space to match the segment byte for byte. Rejected because two absent states would then exist in
-     * one nullable column, and a predicate written for one of them would silently miss rows holding the
-     * other.</p>
-     *
-     * <p>Assumptions: a marker that is present is checked against the closed domain even though no
-     * database constraint will check it again. The fraud table's own column is a bare
-     * {@code CHAR(1)} at {@code ddl/AUTHFRDS.ddl} L24 and that file declares no check anywhere, so the
-     * two condition names at {@code cpy/CIPAUDTY.cpy} L51 and L52 are the whole domain and this is the
-     * only place on the path that asserts it.</p>
-     *
-     * @param storedMarker the marker as the segment holds it, which may be null or all spaces
-     * @return the single marker character, or null when {@code storedMarker} is null or holds nothing
-     *     but spaces
-     * @throws IllegalArgumentException if a non-blank marker is outside the closed two-value domain
-     */
-    public static String fraudFlagColumn(String storedMarker) {
-        if (isAllBlank(storedMarker)) {
-            return null;
-        }
-        if (!PendingAuthDetail.FRAUD_REPORTED.equals(storedMarker)
-                && !PendingAuthDetail.FRAUD_REMOVED.equals(storedMarker)) {
-            throw new IllegalArgumentException("a fraud marker must be either "
-                    + PendingAuthDetail.FRAUD_REPORTED + " or " + PendingAuthDetail.FRAUD_REMOVED
-                    + ", but was " + quoted(storedMarker));
-        }
-        return storedMarker;
-    }
-
-    /**
-     * Renders a decoded processing code as the six zero-filled characters its column declares.
-     *
-     * <p>Assumptions: the same value is NUMERIC on one side and CHARACTER on the other, and this
-     * method is the regime change between them. {@code PA-PROCESSING-CODE} is {@code PIC 9(06)} at
-     * {@code cpy/CIPAUDTY.cpy} L33, an unsigned display numeric, while
-     * {@code PROCESSING_CODE CHAR(6)} at {@code ddl/AUTHFRDS.ddl} L11 is a character column -- and the
-     * target keeps it as {@code CHAR(6)}, so the obligation is permanent rather than transitional.
-     * A code of one therefore has to reach the column as {@code 000001}.</p>
-     *
-     * <p>Alternatives Considered: rendering the integral value unpadded, which yields {@code 1}, or
-     * padding it with spaces, which yields five spaces and a digit. Both are rejected, and the
-     * consequence of either is the same and is silent: a fixed-width character column compares on its
-     * whole width, so neither form would compare equal to a row the baseline wrote, and every query or
-     * join on the column would simply return nothing rather than report a mismatch.</p>
-     *
-     * @param decodedProcessingCode the integral value a decode produced for the field, or null when the
-     *     authorization carries none
-     * @return exactly six digit characters, or null when {@code decodedProcessingCode} is null
-     * @throws IllegalArgumentException if the value is negative or needs more than the six digit
-     *     positions its picture declares
-     */
-    public static String processingCodeColumn(Long decodedProcessingCode) {
-        return PendingAuthDetailMapper.renderProcessingCode(decodedProcessingCode);
-    }
-
-    /**
-     * Carries a merchant name to its column with its trailing spaces intact.
-     *
-     * <p>Assumptions: the column always holds twenty-two characters INCLUDING trailing spaces, and
-     * that is the contract even though it reads like an oversight. {@code MERCHANT_NAME} is
-     * {@code VARCHAR(22)} at {@code ddl/AUTHFRDS.ddl} L18 -- the only variable-length column in the
-     * table -- and the host structure at {@code dcl/AUTHFRDS.dcl} L73 to L77 is the usual pair of a
-     * length field and a twenty-two-character text field. The reference program fills that length field
-     * at {@code cbl/COPAUS2C.cbl} L130 from {@code LENGTH OF PA-MERCHANT-NAME}, and because that
-     * operand is declared {@code PIC X(22)} at {@code cpy/CIPAUDTY.cpy} L40, the expression is
-     * ALWAYS twenty-two regardless of what the field contains; L131 then moves the text. So the
-     * variable-length column is written at its full declared width on every row.</p>
-     *
-     * <p>Alternatives Considered: trimming the trailing spaces, which is what a generated mapper and
-     * most hand-written ones do, and what makes this the one method in the class most likely to be
-     * quietly changed. Rejected: it is a behavioural change. A value stored at twenty-two characters
-     * would become variable-length, and any consumer comparing against the stored form -- a predicate,
-     * a join, a checksum taken over the column -- would stop matching, while every row would still look
-     * correct on inspection.</p>
-     *
-     * <p>Assumptions: the contrast with the rest of the table is deliberate and is noted so nobody
-     * generalises from it. Every other character column here is {@code CHAR(n)}, where trailing-blank
-     * behaviour belongs to the column type itself and is not the mapper's to preserve or discard.</p>
-     *
-     * @param storedMerchantName the merchant name as the segment holds it, space-filled to its declared
-     *     width, or null when the authorization carries none
-     * @return the same characters unchanged, trailing spaces included, or null when
-     *     {@code storedMerchantName} is null
-     * @throws IllegalArgumentException if the value is longer than the twenty-two characters the column
-     *     declares, which the column could not store
-     */
-    public static String merchantNameColumn(String storedMerchantName) {
-        if (storedMerchantName == null) {
-            return null;
-        }
-        if (storedMerchantName.length() > MERCHANT_NAME_COLUMN_WIDTH) {
-            throw new IllegalArgumentException("a merchant name must fit the "
-                    + MERCHANT_NAME_COLUMN_WIDTH + " characters its column declares, but was of length "
-                    + storedMerchantName.length());
-        }
-
-        // WHY : Assumptions: the value is returned as it arrived, and the absence of a trim here is the
-        //       whole point of the method existing rather than callers assigning the field directly. A
-        //       named boundary gives the no-trim decision one place to be read and one place to be
-        //       tested; an inline assignment would leave a future reader with nothing to distinguish a
-        //       deliberate omission from a forgotten call.
-        return storedMerchantName;
-    }
-
-    /**
      * Selects the outcome body for a write, distinguishing a created row from a restated one.
      *
      * <p>Assumptions: the reference application reports these two outcomes with two different
@@ -634,8 +565,9 @@ public final class AuthFraudMapper {
      * and has no place here, because this bounded context performs no interest arithmetic.</p>
      *
      * <p>Assumptions: the merchant name is published exactly as stored, trailing spaces included, for
-     * the same reason {@link #merchantNameColumn(String)} does not trim it -- a consumer comparing a
-     * published value against the stored one has to be able to match it.</p>
+     * the same reason {@link #toFraudRow(PendingAuthDetail, FraudMarkRequest, Long, LocalDate)} carries
+     * it into the row untrimmed -- a consumer comparing a published value against the stored one has to
+     * be able to match it, and the stored length is twenty-two on every row by construction.</p>
      *
      * @param row the stored fraud row to publish; must not be null and must carry its key
      * @return a rendered carrier holding the masked account number and the row's published values,
@@ -719,33 +651,6 @@ public final class AuthFraudMapper {
                     + PendingAuthDetail.FRAUD_REMOVED + " for remove, but was " + quoted(action));
         }
         return action;
-    }
-
-    /**
-     * Reports whether a stored character field holds nothing but spaces.
-     *
-     * <p>Assumptions: a null and a run of spaces are treated alike because the two arise from
-     * different sources that mean the same thing on this path -- a null is a column an extract left
-     * unset, and spaces are what the reference insert writes at {@code cbl/COPAUA0C.cbl} L908 to L909.
-     * Trade-offs: the detail mapper keeps an equivalent predicate private to itself, so this one is
-     * declared here rather than shared. Widening that member's visibility to reuse it was the
-     * alternative, and it is declined because a blank test is a two-line predicate over a string
-     * whereas the helpers this class does borrow carry widths, pivots and separator conventions that
-     * genuinely must exist once.</p>
-     *
-     * @param value the stored characters to inspect, which may be null
-     * @return true when {@code value} is null, empty, or made up entirely of spaces
-     */
-    private static boolean isAllBlank(String value) {
-        if (value == null) {
-            return true;
-        }
-        for (int index = 0; index < value.length(); index++) {
-            if (value.charAt(index) != ' ') {
-                return false;
-            }
-        }
-        return true;
     }
 
     /**

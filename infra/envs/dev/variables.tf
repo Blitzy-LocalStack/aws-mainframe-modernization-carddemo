@@ -9,32 +9,47 @@
 #   missing main.tf or terraform.tfvars file an authority for this contract.
 #
 #   The set of names declared here is deliberately CLOSED, and that closure is
-#   the point of the file. The prod root is completed in a later implementation
-#   index and must mirror this same surface; until then, this file is the
-#   authoritative environment-facing contract. The two environments remain
-#   identical in topology and differ only in sizing and retention.
+#   the point of the file. BOTH roots exist: infra/envs/prod declares the same
+#   thirty-six names with the same twelve required, and
+#   .github/workflows/infra-ci.yml compares the two declaration sets and the two
+#   required sets on every run, so a name added to one root and not the other
+#   fails the build. The two environments remain identical in topology and differ
+#   only in sizing and retention.
+#   Refactoring Rationale: this paragraph said prod was "completed in a later
+#   implementation index" and that this file was the authoritative contract
+#   "until then". Prod has been authored since, so the sentence directed a reader
+#   to treat one root as provisional and to look here for the other's contract --
+#   while the machine check that actually holds the two together went unmentioned.
 #
 # Parameters:
-#   Thirty-four inputs, ELEVEN of them required, in eight groups -- the two values
+#   Thirty-six inputs, TWELVE of them required, in eight groups -- the two values
 #   the provider reads; naming and environment identity; the VPC address space;
 #   the serverless database's version, capacity, backup and durability settings;
 #   container task sizing; log retention, edge footprint and the batch schedule;
-#   the TLS identities and imported service key material the load balancer,
-#   distribution and tasks each need; and the deployment artifact and the OIDC
-#   identity permitted to publish it. The eleven with no default are
+#   the TLS and edge identities and the masking-key identifiers the load
+#   balancer, distribution and tasks each need; and the deployment artifact and
+#   the OIDC identity permitted to publish it. The twelve with no default are
 #   `alb_certificate_arn`, `internal_service_domain_name`,
 #   `cloudfront_acm_certificate_arn`, `cloudfront_aliases`,
 #   `cloudfront_api_connect_src_origins`, `image_tag`, `github_repository`,
 #   `github_oidc_provider_arn`, `mask_hmac_secret_arn`,
-#   `permissions_boundary_arn` and `alarm_email_endpoints`: a certificate, a key,
-#   a deployable artifact, a privilege ceiling or an alarm destination has no
-#   defensible default, and defaulting one would make a root that cannot serve
-#   TLS -- or cannot tell anyone it has failed -- look complete.
-#   Assumptions: the eleven names above are the complete required set, and the
+#   `mask_hmac_secret_kms_key_arn`, `permissions_boundary_arn` and
+#   `alarm_email_endpoints`: a certificate, a key identifier, a deployable
+#   artifact, a privilege ceiling or an alarm destination has no defensible
+#   default, and defaulting one would make a root that cannot serve TLS -- or
+#   cannot tell anyone it has failed -- look complete.
+#   Assumptions: the twelve names above are the complete required set, and the
 #   count is what a reader treats as the checklist for a first apply. An input
 #   omitted from it is not discovered until a plan fails, so the list is
 #   maintained against the `variable` blocks below rather than described in
-#   round numbers.
+#   round numbers, and the prose-count gate in .github/workflows/infra-ci.yml
+#   asserts both spelled numbers against the declarations.
+#   Refactoring Rationale: this read thirty-four inputs and eleven required and
+#   omitted `mask_hmac_secret_kms_key_arn`. Both figures had been overtaken and
+#   the omission was the one that costs an operator a failed plan: the key
+#   identifier is required with no default, so a first apply following this
+#   checklist stopped at "No value for required variable" on an input the
+#   checklist claimed to enumerate.
 #
 #   Each `variable` block below carries its own authoritative `type` and
 #   `description`. The contract for an input lives on the input rather than in a
@@ -79,17 +94,32 @@
 #     Cost is reduced instead along the axes where reducing it changes nothing
 #     structural: database capacity, task count and task size, retention, and
 #     edge footprint.
-#   - Assumptions: sizing and retention inputs are defaulted, while the six TLS
-#     inputs are deliberately required. Certificate ARNs, DNS names and imported
-#     PEM material are deployment identities that cannot be guessed without
-#     creating a stack that either fails TLS validation or presents the wrong
-#     identity. `terraform validate` remains non-interactive with required
-#     variables; a plan or apply must receive them explicitly.
+#   - Assumptions: sizing and retention inputs are defaulted, while the five TLS
+#     and edge-identity inputs -- `alb_certificate_arn`,
+#     `internal_service_domain_name`, `cloudfront_acm_certificate_arn`,
+#     `cloudfront_aliases` and `cloudfront_api_connect_src_origins` -- are
+#     deliberately required. Certificate ARNs and DNS names are deployment
+#     identities that cannot be guessed without creating a stack that either
+#     fails TLS validation or presents the wrong identity. `terraform validate`
+#     remains non-interactive with required variables; a plan or apply must
+#     receive them explicitly.
+#     Refactoring Rationale: this said SIX, counting two PEM scalars --
+#     `service_tls_certificate` and `service_tls_private_key` -- that were
+#     withdrawn when each task began minting its own listener material. A count
+#     that includes a withdrawn input sends a reader looking for an input the
+#     file does not declare.
 #   - Assumptions: no default here holds a credential, an account identifier, an
-#     ARN, a bucket name or a table name. Identifiers reach this root only as
-#     module outputs or required operator inputs wired together in main.tf. The
-#     two sensitive PEM inputs have no defaults and must arrive through an
-#     operator secret channel, never the tracked terraform.tfvars.
+#     ARN, a bucket name or a table name, and NO input of any kind accepts key
+#     material. Identifiers reach this root only as module outputs or required
+#     operator inputs wired together in main.tf. The two required masking inputs
+#     name a secret and the key that encrypts it -- `mask_hmac_secret_arn` and
+#     `mask_hmac_secret_kms_key_arn` -- rather than carrying either value, so the
+#     material itself never reaches a variable, a tfvars file or state.
+#     Refactoring Rationale: this named "two sensitive PEM inputs" that must
+#     arrive through an operator secret channel. Those two inputs are withdrawn,
+#     and describing a live channel for key material contradicted the no-secrets
+#     property the rest of this header rests on -- there is no input to carry it
+#     through, which is the stronger guarantee.
 #   - Where a comment below reasons about `terraform apply` or `terraform
 #     destroy`, it describes what an input MEANS at that point; it is not a
 #     report on a provisioned stack. This tree is authored and statically
@@ -344,9 +374,9 @@ variable "vpc_cidr" {
 #       authoritative ruling stays with the owner.
 
 variable "aurora_engine_version" {
-  description = "Aurora PostgreSQL engine version for this environment's cluster, forwarded to the database module, which requires the value and supplies no default of its own. Must be a numeric version such as \"16.6\", not an engine name or a parameter-group family. While aurora_min_capacity is 0, the release named here must be one that supports scaling to zero capacity."
+  description = "Aurora PostgreSQL engine version for this environment's cluster, forwarded to the database module, which requires the value and supplies no default of its own. Must be a numeric version such as \"16.8\", not an engine name or a parameter-group family. Defaults to the reviewed long-term-support pin this root's terraform.tfvars sets, so an omitted tfvars cannot select an unsupported release. While aurora_min_capacity is 0, the release named here must be one that supports scaling to zero capacity."
   type        = string
-  default     = "16.6"
+  default     = "16.8"
 
   # Assumptions: the two are not the same decision. A default in the MODULE would
   # let any caller omit the version, so dev and prod would both silently pin to
@@ -357,18 +387,39 @@ variable "aurora_engine_version" {
   # description asks for when it says the version is supplied by the environment
   # root so that an engine upgrade is an explicit change to one file.
   #
+  # WHY : ⚠️ Refactoring Rationale: this default was "16.6" while terraform.tfvars
+  #   pinned "16.8", and the description offered "16.6" as its example. The tfvars
+  #   value wins whenever it is passed, so the divergence was invisible in every
+  #   ordinary plan -- and 16.6's Aurora STANDARD SUPPORT ended on 2026-05-31, so
+  #   the one path that reached the default reached an unsupported release. That
+  #   path is not hypothetical: a `-var-file` omission, a plan run from a
+  #   scratch copy of the root, or a `terraform console` session all resolve the
+  #   default, and the outcome is a cluster force-upgraded on Aurora's schedule or
+  #   attracting Extended Support charges. Both values now name the reviewed pin,
+  #   and .github/workflows/infra-ci.yml's "Verify the Aurora engine pin against
+  #   its support review horizon" gate asserts the DEFAULT against the tfvars pin
+  #   as well as the marker date, so the two cannot part again without failing the
+  #   build.
+  # WHY : Alternatives Considered: removing the default so the value is required
+  #   from the caller, which makes divergence structurally impossible. Rejected
+  #   because the module's own description assigns this decision to the
+  #   environment root, and every other input in this file carries a reviewed
+  #   default for the same reason -- a required input here would make the root
+  #   unplannable without a var-file, which the documentation-generation and
+  #   lint gates exercise.
+  #
   # Assumptions: this release supports scaling to zero; that capability is
   # available only from Aurora PostgreSQL 13.15,
   # 14.12, 15.7 and 16.3 onward, and this environment sets its capacity floor to
   # zero below. An older release in the 16.x line would have the capacity
   # argument rejected during apply, with the error attributed to the capacity
-  # input rather than to this one; 16.6 clears that floor.
+  # input rather than to this one; 16.8 clears that floor.
   # Trade-offs: pinning a minor release means an engine upgrade is an explicit
   # edit that shows up in review, at the cost of not picking newer minors up
   # automatically. For a database engine that is the trade worth making.
   validation {
     condition     = can(regex("^[0-9]+(\\.[0-9]+)*$", var.aurora_engine_version))
-    error_message = "aurora_engine_version must be a numeric PostgreSQL version such as \"16.6\" or \"17\", not an engine name and not a parameter-group family such as \"aurora-postgresql16\"."
+    error_message = "aurora_engine_version must be a numeric PostgreSQL version such as \"16.8\" or \"17\", not an engine name and not a parameter-group family such as \"aurora-postgresql16\"."
   }
 }
 
@@ -889,7 +940,7 @@ variable "skip_final_snapshot" {
 # -----------------------------------------------------------------------------
 
 variable "image_tag" {
-  description = "Immutable image tag applied to all ten ECR repositories for this deployment, normally the source commit SHA supplied by the OIDC deployment workflow."
+  description = "Immutable image tag applied to the ten deployable ECR repositories this deployment builds, normally the source commit SHA supplied by the OIDC deployment workflow. The mirrored telemetry collector is not one of them: it is a cached third-party image and carries its own upstream version tag."
   type        = string
   nullable    = false
 
@@ -938,18 +989,28 @@ variable "aurora_preferred_maintenance_window" {
 
 # WHY : Assumptions: this one window governs EVERY secret the deployment generates, and
 #       the inventory is stated because "generated credentials" is too vague to check.
-#       It reaches the six purpose secrets this root creates directly -- the card
-#       selector key, the messaging HMAC key, the TWO pairwise internal-identity keys
-#       (authorization and transaction), the pagination-cursor key and the
-#       reporting-artifact key -- plus the per-service database credentials the secrets
-#       module creates and the Cognito seed-user secrets.
+#       It reaches the FIVE purpose secrets this root creates directly -- the card
+#       selector key, the TWO pairwise internal-identity keys (authorization and
+#       transaction), the pagination-cursor key and the reporting-artifact key -- plus
+#       the per-service database credentials the secrets module creates and the Cognito
+#       seed-user secrets.
+# WHY : ⚠️ Refactoring Rationale: this inventory said SIX and led with a messaging HMAC
+#       key. No such resource exists in this root: the withdrawal note in main.tf above
+#       the card-selector resource records that the ephemeral generator, the secret and
+#       its write-only version went together with the injection when the one Spring bean
+#       that read the property was deleted. Five aws_secretsmanager_secret resources are
+#       declared. An inventory stated to be checkable and then not checked is worse than
+#       a vague one, because the reader who does check it finds a credential this window
+#       supposedly governs and cannot locate the resource -- so the count is now asserted
+#       by the "Verify hand-written Terraform prose counts against the declarations" gate
+#       in .github/workflows/infra-ci.yml against those declarations.
 # WHY : ⚠️ Refactoring Rationale: this description named "database, TLS and Cognito
 #       credentials". There is NO TLS secret: the service-certificate feature it referred
 #       to is withdrawn, and neither root creates a secret for listener material. The
 #       word survived the feature, which is the kind of leftover that has a reader
 #       looking for a resource that does not exist.
 variable "secret_recovery_window_in_days" {
-  description = "Secrets Manager recovery window, in days, applied to every secret this deployment generates: the six purpose secrets this root creates -- card-selector, messaging HMAC, the two pairwise internal-identity keys, pagination-cursor and reporting-artifact -- plus the per-service database credentials from the secrets module and the Cognito seed-user secrets. Set to the same value production uses, because a recovery window is not one of the axes specification section 0.4.1.6 permits the two roots to differ on."
+  description = "Secrets Manager recovery window, in days, applied to every secret this deployment generates: the five purpose secrets this root creates -- card-selector, the two pairwise internal-identity keys, pagination-cursor and reporting-artifact -- plus the per-service database credentials from the secrets module and the Cognito seed-user secrets. Set to the same value production uses, because a recovery window is not one of the axes specification section 0.4.1.6 permits the two roots to differ on."
   type        = number
   default     = 30
 
@@ -1217,18 +1278,23 @@ variable "image_digests" {
         "authorization-service",
         "reporting-service",
         "data-migration",
+        "aws-otel-collector",
       ], artifact)
     ])
-    error_message = "Every image_digests key must name one of the nine ECR artifacts this deployment runs as a task: the eight services and data-migration. A key that names no repository would be silently ignored."
+    error_message = "Every image_digests key must name one of the ten ECR artifacts this deployment runs inside a task: the eight services, data-migration, and the mirrored telemetry collector every task runs as a sidecar. A key that names no repository would be silently ignored."
   }
 
-  # WHY : Refactoring Rationale: `aws-otel-collector` was an admissible key, and it is
-  #       WITHDRAWN. It named a mirror of a pinned third-party telemetry image, pushed
-  #       rather than built, whose digest this root resolved for a collector sidecar
-  #       that infra/modules/ecs-service no longer composes -- so the key now names no
-  #       repository, and specification section 0.4.1.6 states ten repositories rather
-  #       than the eleven the mirror made. `ui` is absent for a different and unchanged
-  #       reason: the browser bundle is published to S3 and its image runs no ECS task,
-  #       so a digest for it would configure nothing. That leaves nine admissible keys
-  #       against ten repositories, and the two numbers differ for that one reason.
+  # WHY : Refactoring Rationale: `aws-otel-collector` is an admissible key again,
+  #       restored with the collector sidecar infra/modules/ecs-service composes. It
+  #       names the mirror repository infra/modules/ecr provisions from
+  #       third_party_mirror_repository_names -- a third-party image this deployment
+  #       caches rather than builds -- so recording its digest here is what makes the
+  #       task definition state WHICH collector bytes ran, which its mirror tag alone
+  #       cannot answer after the fact. It is optional like every other key: with it
+  #       absent the root resolves the mirror's immutable tag instead.
+  # WHY : Assumptions: `ui` is absent for a different and unchanged reason -- the
+  #       browser bundle is published to S3 and its image runs no ECS task, so a
+  #       digest for it would configure nothing. That is why ten admissible keys sit
+  #       against the eleven repositories the ecr module provisions, ten deployables
+  #       plus the one mirror.
 }

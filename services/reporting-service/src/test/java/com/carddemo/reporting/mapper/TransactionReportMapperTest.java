@@ -111,20 +111,43 @@ import org.junit.jupiter.params.provider.MethodSource;
  * reaching the codec with a short value. Stripping first would test a different input than the
  * report is built from.</p>
  *
- * <h2>Alternatives Considered: the fixture inventory is closed, so two named fixtures are not read
- * here</h2>
+ * <h2>Alternatives Considered: two values are literals because the committed fixtures do not reach
+ * the boundary each of them exists to reach</h2>
  *
- * <p>Reading a three-hundred-and-fifty-byte transaction record and a fifty-byte cross-reference
- * record from committed fixtures was evaluated and rejected, because no such fixture exists and
- * neither may be added. {@code ReportingFixtureContractTest} declares the complete permitted
- * contents of {@code src/test/resources/fixtures/} as a closed list and asserts the directory
- * matches it exactly, precisely so that an unreviewed addition cannot slip in; the inventory is
- * also documented in that directory's own {@code README.md}. Adding either file would turn a
- * passing sibling test red to satisfy this one. The two values those fixtures would have supplied
- * -- a card number and an account identifier -- are therefore supplied as literals declared below,
- * each obviously synthetic and each documented at its declaration. Nothing is lost: the card number
- * exists in this class only to be searched for and NOT found, and the account identifier is an
- * eleven-digit number whose rendering is the property under test.</p>
+ * <p>Driving the card number and the account identifier from committed fixtures was evaluated and
+ * rejected on measurement. Both record types are now committed --
+ * {@code fixtures/tranfile.txt} is the 350-byte {@code TRAN} extract and
+ * {@code fixtures/cardxref.txt} and {@code fixtures/xreffile.txt} are 50-byte {@code XREF}
+ * extracts, all three bound by {@code ReportingFixtureContractTest} -- so the reason is not
+ * absence. It is that neither committed column reaches what the two negative cases below need, and
+ * that a value chosen for those boundaries cannot be added: that sibling test declares the complete
+ * permitted contents of {@code src/test/resources/fixtures/} and asserts the directory matches the
+ * list in both directions, so a file added for this class alone would turn a passing sibling red to
+ * satisfy this one.</p>
+ *
+ * <p>Assumptions: the card number here exists only to be searched for and NOT found, which makes
+ * its requirements the opposite of a fixture card number's. It must be provably unissuable -- this
+ * class asserts its Luhn total is {@value #SYNTHETIC_CARD_LUHN_TOTAL}, which is not a multiple of
+ * ten -- and its four-digit tail must be a run no other column of a band can produce, because the
+ * absence assertions search for that tail as well as for the whole number. Two committed card
+ * numbers fail that outright, and they are named by VALUE rather than by the files that hold them,
+ * because the disqualification is a property of the number and not of its membership:
+ * {@code 9900001010000001} and {@code 9900001020000001} both end {@code 0001}, which is a substring
+ * of the sixteen-character transaction identifier every detail case below encodes, so a tail search
+ * driven from either would fail against a CORRECT mapper wherever it was read from. Every other
+ * committed card number is there to be FOUND -- they carry the cross-reference relationships that
+ * sibling test asserts and the distinct-card margin the statement fixtures rest on -- so borrowing
+ * one for a not-found search would tie this class's absence assertion to another test's presence
+ * assertions.</p>
+ *
+ * <p>Assumptions: the account identifier is an eleven-digit value whose full-width rendering is the
+ * property under test, and the committed identifiers cannot show it. All four rows of
+ * {@code fixtures/acctfile.txt} carry {@code 00000000007}, {@code 00000000050},
+ * {@code 00000000101} and {@code 00000000102} -- every significant digit inside the last four
+ * positions -- so an implementation that kept only the last four digits and zero-filled the rest
+ * would emit bytes identical to the correct rendering, and the case asserting that nothing is masked
+ * would pass either way. The literal {@code 12345678901} below differs from its own last-four-masked
+ * form in seven of eleven positions, which is what makes the assertion able to fail.</p>
  *
  * <p>Assumptions: a transaction extract named for the report and one named for the statement are two
  * DIFFERENT record types and are never aliases of one another. The report's transaction record is

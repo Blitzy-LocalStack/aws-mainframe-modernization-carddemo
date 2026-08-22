@@ -76,28 +76,29 @@ import org.testcontainers.utility.MountableFile;
  * dispatcher branch at L206 to L229 implements an open arm at L208, a KEYED read arm at L213 and a
  * close arm at L220 with no plain-sequential arm at all. The caller reaches it once per
  * cross-reference row through {@code 3000-ACCTFILE-GET.} at L392 of {@code app/cbl/CBSTM03A.CBL}.
- * Four properties of that read are invisible to every cheaper gate in this module and are asserted
- * here against a real engine carrying the shipped definitions: the surface is one keyed lookup and
- * nothing else, the key is a whole eleven-digit identifier supplied by the driving cross-reference,
- * the money it carries is exact at twelve digits and scale two, and an identifier the account master
- * does not hold yields nothing that a caller can consume by accident.</p>
+ * The properties of that read which no cheaper gate in this module can see are asserted here against
+ * a real engine carrying the shipped definitions, and the section below states them.</p>
  *
- * <h2>What this class asserts that no sibling does</h2>
+ * <h2>The repository contract this class pins</h2>
  *
- * <p>Assumptions: the four classes already in this directory divide the module's engine-backed
- * properties between them, and this one takes the properties none of them reaches rather than
- * restating any of theirs. {@code ReportingQueryBootstrapIT} establishes no relation and proves the
- * declared queries parse; {@code StatementHeadingChunkIT} seeds stand-in tables and proves the
- * heading walk's keyset predicate reproduces its own ordering; {@code ReportingDeployedRelationIT}
- * applies the shipped definitions and proves the projections narrow a card number, that a card joins
- * to a customer and an account, and that the login role cannot write a relation it can read;
- * {@code StatementCardXrefRepositoryIT} owns the driving cursor, the two-level write refusal against
- * a base table in another context's schema, and the fifty-byte cross-reference geometry. The
- * overlap with the third of those is deliberately narrow and is worth naming: it establishes only
- * that a joined heading's account RESOLVES, by an existence check at its L459 to L464 and a relative
- * comparison of the joined balance against the projection's own at its L478 to L480. It asserts no
- * absolute value, no precision, no scale, no column name, no key width and no absence. Every
- * property below is one of those.</p>
+ * <p>Assumptions: the contract is stated as properties of {@code StatementAccountRepository} and of
+ * the relation it reads, so it stays checkable against this file alone. The declared surface is one
+ * keyed lookup and nothing else, with neither a traversal nor a write anywhere on its method
+ * surface. The key is a whole eleven-digit identifier the driving cross-reference supplies per row,
+ * never a prefix and never the customer identifier's nine. The published money is exact at twelve
+ * digits and scale two and is asserted UNEQUAL to the statement transaction projection's eleven, so
+ * the two contracts cannot be unified in either direction. The expiration date is read under the
+ * target column name {@code expiration_date} while the baseline field name is asserted absent from
+ * the relation. The owning table's optimistic-locking column is neither mapped, published nor named
+ * in any statement the provider emits. And an identifier the account master does not hold yields an
+ * empty result the caller converts into a refusal rather than a value it can consume.</p>
+ *
+ * <p>Assumptions: two hand-offs are named, because a reader looking for those properties would
+ * otherwise look for them here. The DATABASE half of the write refusal -- a privilege refusal against
+ * a base table in another context's schema -- belongs to {@code StatementCardXrefRepositoryIT}, which
+ * also drives the statement path's cross-reference cursor. The provenance of keyset positioning
+ * belongs to {@code TransactionReportRepositoryIT}, and it must not be justified from the keyed-read
+ * opcode this class asserts about, because that opcode addresses one row by a whole key.</p>
  *
  * <h2>Why the shipped definitions are applied rather than reproduced</h2>
  *
@@ -113,8 +114,8 @@ import org.testcontainers.utility.MountableFile;
  * The charter beside this file draws the same boundary on DEFINITIONS rather than on verbs: inserting
  * rows is permitted because a fixture has to be loaded before anything can be read.</p>
  *
- * <p>Alternatives Considered: a hand-written stand-in relation, which is what the sibling ordering
- * class uses. Rejected here because three of the properties below live entirely outside Java -- the
+ * <p>Alternatives Considered: a hand-written stand-in relation carrying the same column names.
+ * Rejected here because three of the properties below live entirely outside Java -- the
  * declared precision and scale of the two published money columns, the projected column name that
  * differs from the baseline field name, and the ABSENCE of the owning table's optimistic-locking
  * column from the projection. A stand-in would assert all three of the stand-in and nothing about
@@ -125,13 +126,33 @@ import org.testcontainers.utility.MountableFile;
  * <p>Assumptions: the account master's money is one digit WIDER than the statement transaction's,
  * and the two are never unified in either direction. {@code ACCT-CURR-BAL PIC S9(10)V99} at L7 of
  * {@code app/cpy/CVACT01Y.cpy} is twelve significant digits over twelve bytes of zoned decimal, and
- * L8, L9, L13 and L14 declare the same picture for four siblings; the statement transaction amount is
- * {@code PIC S9(09)V99}, eleven digits over eleven bytes. Widening or aliasing either to match the
+ * L8, L9, L13 and L14 declare the same picture for four further money fields of that same record;
+ * the statement transaction amount is {@code PIC S9(09)V99}, eleven digits over eleven bytes.
+ * Widening or aliasing either to match the
  * other shifts every field after it in the record by one byte and moves the implied decimal point,
  * so a balance would read as ten times or a tenth of itself while every row still decoded without
  * complaint. {@code com.carddemo.reporting.domain.AccountView} keeps them apart structurally by
  * writing its precision and scale as literals on each column and by nesting its own attribute
  * converter rather than sharing one, and the cases below assert the outcome of that choice.</p>
+ *
+ * <h2>Why no failure message below names an account identifier</h2>
+ *
+ * <p>Assumptions: a failure message from this class is written to the build log, and a build log is
+ * retained, aggregated and read far more widely than the fixture corpus it describes -- which is
+ * what makes an identifier in one a sensitive-diagnostic exposure rather than a convenience. Every
+ * case below therefore identifies the row it failed on by its ORDINAL within the ordered fixture
+ * set, and never by the identifier itself. The ordinal is exactly as diagnostic here, because that
+ * set is closed and ordered ascending, and two cases below assert it against the committed fixture
+ * rather than leaving it a claim -- so an ordinal locates one row for anyone holding the fixture.</p>
+ *
+ * <p>Alternatives Considered: naming a leading fragment of the identifier, an abbreviation of it, or
+ * a digest of it. All three are rejected on one ground -- over a closed four-element domain each is
+ * trivially invertible, so each is still key material, and none of them tells a reader anything the
+ * ordinal does not already tell them.</p>
+ * <p>The property set this class supplies is the narrowest that lets a context in this module start
+ * at all: a static region, two switches that turn the remote configuration importers off, and the
+ * recorder every statement the persistence provider emits passes through. Each key carries its own
+ * rationale at its own line.</p>
  *
  * <h2>Parameters, return values, exceptions or errors</h2>
  *
@@ -146,8 +167,6 @@ import org.testcontainers.utility.MountableFile;
         webEnvironment = SpringBootTest.WebEnvironment.NONE)
 @ActiveProfiles("test")
 @TestPropertySource(properties = {
-    // WHAT:
-    //       The narrowest property set that lets a context in this module start at all.
     // WHY : Assumptions: this module carries cloud starters as compile dependencies, so a context
     //       that enables auto-configuration builds their beans, the region provider resolves eagerly
     //       and raises when it finds none, and both remote configuration importers otherwise read a
@@ -156,20 +175,18 @@ import org.testcontainers.utility.MountableFile;
     //       here rather than in application-test.yml because that document's own register of
     //       deliberate omissions rules that a cloud-service value belongs to the test that needs it.
     "spring.cloud.aws.region.static=us-east-1",
-    // WHAT:
-    //       Two switches that turn the remote configuration importers off.
-    // WHY : Alternatives Considered: the five-property form two siblings use, which leaves both
-    //       importers enabled and supplies fabricated access-key and signing strings to satisfy their
-    //       eager credential resolution. Rejected here in favour of the three-property form the
-    //       driving-cursor sibling uses, because switching the importers off removes the need for
-    //       either string, so this class commits no credential-shaped value of any kind. Assumptions:
-    //       the second key's NAME references a remote store while its VALUE is precisely what stops
-    //       one from being read, so neither key is a credential, an endpoint, a location or an
-    //       identifier -- this class makes no cloud call for a credential to sign.
+    // WHY : Alternatives Considered: the five-property form THREE siblings use --
+    //       StatementHeadingChunkIT, ReportingDeployedRelationIT and ReportingQueryBootstrapIT -- which
+    //       carries these same two switches AND fabricated access-key and signing strings beside them.
+    //       Rejected here in favour of the three-property form the driving-cursor sibling uses, because
+    //       with both importers off nothing in this class's own context resolves a credential -- its
+    //       cases pass with no access key and no signing material present at all -- so the two extra
+    //       strings buy nothing and this class commits no credential-shaped value of any kind.
+    //       Assumptions: the second key's NAME references a remote store while its VALUE is precisely
+    //       what stops one from being read, so neither key is a credential, an endpoint, a location or
+    //       an identifier -- this class makes no cloud call for a credential to sign.
     "spring.cloud.aws.parameterstore.enabled=false",
     "spring.cloud.aws.secretsmanager.enabled=false",
-    // WHAT:
-    //       The recorder every statement the persistence provider emits passes through.
     // WHY : Alternatives Considered: proving the optimistic-locking column is never named by reading
     //       the projection's column list alone, which shows the column is not even available to be
     //       named. Kept as one of the three proofs below rather than as the only one, because it
@@ -224,9 +241,9 @@ class StatementAccountRepositoryIT {
      * pass none of them does. The projections run with their owner's rights, so a privilege missing
      * at creation surfaces on the first READ rather than at creation -- which is exactly the failure
      * the second pass removes. Applying the files in the order an operator applies them is therefore
-     * part of what this class establishes, and the list is identical to the one both sibling classes
-     * that apply the shipped definitions use, so a moved migration breaks all three together rather
-     * than leaving one silently reading a stale arrangement.</p>
+     * part of what this class establishes, and each entry names the path the owning service ships
+     * rather than a copy of its text, so a migration that is moved or renamed fails this class
+     * outright instead of leaving it silently reading a stale arrangement.</p>
      */
     private static final List<String> DEPLOYED_SCHEMA_SCRIPTS = List.of(
             "data-migration/sql/V0__schemas_and_roles.sql",
@@ -244,14 +261,8 @@ class StatementAccountRepositoryIT {
             "data-migration/sql/V0__schemas_and_roles.sql",
             "data-migration/sql/V1__reporting_views.sql");
 
-    /**
-     * The classpath directory holding the fixture corpus this class loads.
-     */
     private static final String FIXTURE_DIRECTORY = "fixtures";
 
-    /**
-     * The account master fixture, bound by exact name.
-     */
     private static final String ACCOUNT_FIXTURE = "acctfile.txt";
 
     /**
@@ -262,20 +273,13 @@ class StatementAccountRepositoryIT {
      * assertion on the wrong path. This one is named for the {@code XREFFILE} definition at
      * {@code app/jcl/CREASTMT.JCL} L84, which the statement generator reads and which supplies the
      * account identifier this class looks up; the other is named for the {@code CARDXREF} definition
-     * at {@code app/jcl/TRANREPT.jcl} L67 and L68, which the report writer reads and which the
-     * sibling deployed-relation class loads. This class binds the statement-path file because the
-     * account master is a statement-path input only.</p>
+     * at {@code app/jcl/TRANREPT.jcl} L67 and L68, which the report writer reads. This class binds
+     * the statement-path file because the account master is a statement-path input only.</p>
      */
     private static final String STATEMENT_PATH_XREF_FIXTURE = "xreffile.txt";
 
-    /**
-     * The registered copybook descriptor the account fixture decodes against.
-     */
     private static final String ACCOUNT_DESCRIPTOR = "ACCOUNT";
 
-    /**
-     * The registered copybook descriptor the cross-reference fixture decodes against.
-     */
     private static final String XREF_DESCRIPTOR = "XREF";
 
     /**
@@ -290,9 +294,6 @@ class StatementAccountRepositoryIT {
      */
     private static final int ACCOUNT_RECORD_LENGTH = 300;
 
-    /**
-     * The key width the account file description declares, eleven digits.
-     */
     private static final int FILE_DESCRIPTION_KEY_DIGITS = 11;
 
     /**
@@ -336,51 +337,22 @@ class StatementAccountRepositoryIT {
      */
     private static final int CUSTOMER_KEY_DIGITS = 9;
 
-    /**
-     * The one-based first byte of the account identifier within the cross-reference record,
-     * twenty-six.
-     */
     private static final int XREF_ACCOUNT_ID_FIRST_BYTE = 26;
 
-    /**
-     * The one-based last byte of the account identifier within the cross-reference record,
-     * thirty-six.
-     */
     private static final int XREF_ACCOUNT_ID_LAST_BYTE = 36;
 
-    /**
-     * The copybook field name of the account identifier inside the cross-reference record.
-     */
     private static final String XREF_ACCOUNT_ID_FIELD = "XREF-ACCT-ID";
 
-    /**
-     * The copybook field name of the card number inside the cross-reference record.
-     */
     private static final String XREF_CARD_NUMBER_FIELD = "XREF-CARD-NUM";
 
-    /**
-     * The copybook field name of the customer identifier inside the cross-reference record.
-     */
     private static final String XREF_CUSTOMER_ID_FIELD = "XREF-CUST-ID";
 
-    /**
-     * The copybook field name of the account identifier inside the account record.
-     */
     private static final String ACCOUNT_ID_FIELD = "ACCT-ID";
 
-    /**
-     * The copybook name of the trailing pad that carries the account record to its declared length.
-     */
     private static final String PADDING_FIELD = "FILLER";
 
-    /**
-     * The one-based first byte of the account record's trailing pad, one hundred and twenty-three.
-     */
     private static final int PADDING_FIRST_BYTE = 123;
 
-    /**
-     * The physical width of the account record's trailing pad, one hundred and seventy-eight bytes.
-     */
     private static final int PADDING_WIDTH = 178;
 
     /**
@@ -398,14 +370,8 @@ class StatementAccountRepositoryIT {
      */
     private static final int MONEY_FIELD_WIDTH = 12;
 
-    /**
-     * The integer digit positions one account money field declares, ten.
-     */
     private static final int MONEY_INTEGER_DIGITS = 10;
 
-    /**
-     * The fractional digit positions one account money field declares, two.
-     */
     private static final int MONEY_FRACTION_DIGITS = 2;
 
     /**
@@ -420,9 +386,6 @@ class StatementAccountRepositoryIT {
      */
     private static final int PUBLISHED_MONEY_PRECISION = 12;
 
-    /**
-     * The declared numeric scale of a published account money column, two.
-     */
     private static final int PUBLISHED_MONEY_SCALE = 2;
 
     /**
@@ -452,24 +415,12 @@ class StatementAccountRepositoryIT {
             "ACCT-CURR-CYC-CREDIT",
             "ACCT-CURR-CYC-DEBIT");
 
-    /**
-     * The copybook field name of the balance the statement prints.
-     */
     private static final String BALANCE_FIELD = "ACCT-CURR-BAL";
 
-    /**
-     * The copybook field name of the credit limit the projection publishes beside the balance.
-     */
     private static final String CREDIT_LIMIT_FIELD = "ACCT-CREDIT-LIMIT";
 
-    /**
-     * The copybook field name of the account status flag.
-     */
     private static final String ACTIVE_STATUS_FIELD = "ACCT-ACTIVE-STATUS";
 
-    /**
-     * The copybook field name of the disclosure group identifier.
-     */
     private static final String GROUP_ID_FIELD = "ACCT-GROUP-ID";
 
     /**
@@ -487,49 +438,22 @@ class StatementAccountRepositoryIT {
      */
     private static final String BASELINE_EXPIRATION_FIELD = "ACCT-EXPIRAION-DATE";
 
-    /**
-     * The one-based first byte the expiration date occupies in the account record, fifty-nine.
-     */
     private static final int EXPIRATION_FIRST_BYTE = 59;
 
-    /**
-     * The one-based last byte the expiration date occupies in the account record, sixty-eight.
-     */
     private static final int EXPIRATION_LAST_BYTE = 68;
 
-    /**
-     * The projected column name of the expiration date.
-     */
     private static final String EXPIRATION_COLUMN = "expiration_date";
 
-    /**
-     * The optimistic-locking column name this projection must never publish or read.
-     */
     private static final String VERSION_COLUMN = "version";
 
-    /**
-     * The schema holding the projection this module reads.
-     */
     private static final String PROJECTION_SCHEMA = "reporting";
 
-    /**
-     * The projection this module reads, by relation name.
-     */
     private static final String PROJECTION_RELATION = "v_accounts";
 
-    /**
-     * The schema holding the base table the projection is derived from.
-     */
     private static final String OWNING_SCHEMA = "account";
 
-    /**
-     * The base table the projection is derived from, by relation name.
-     */
     private static final String OWNING_RELATION = "accounts";
 
-    /**
-     * The relation the driving cross-reference cursor reads, by qualified name.
-     */
     private static final String CROSS_REFERENCE_RELATION = "account.card_xref";
 
     /**
@@ -560,9 +484,6 @@ class StatementAccountRepositoryIT {
      */
     private static final List<Long> PUBLISHED_ACCOUNT_IDS = List.of(7L, 50L, 101L, 102L);
 
-    /**
-     * The number of distinct cards the statement-path cross-reference fixture publishes.
-     */
     private static final int PUBLISHED_CARD_COUNT = 88;
 
     /**
@@ -629,9 +550,6 @@ class StatementAccountRepositoryIT {
     private static final List<String> STATEMENT_PATH_DEFINITIONS = List.of(
             "TRNXFILE", "XREFFILE", "ACCTFILE", "CUSTFILE");
 
-    /**
-     * The data-definition name of the account master.
-     */
     private static final String ACCOUNT_DEFINITION = "ACCTFILE";
 
     /**
@@ -644,29 +562,14 @@ class StatementAccountRepositoryIT {
      */
     private static final String STATEMENT_JOB = "app/jcl/CREASTMT.JCL";
 
-    /**
-     * The report job, repository-relative, with its lowercase extension.
-     */
     private static final String REPORT_JOB = "app/jcl/TRANREPT.jcl";
 
-    /**
-     * The one-based first line of the statement job's input data-definition block, eighty-three.
-     */
     private static final int STATEMENT_DEFINITION_FIRST_LINE = 83;
 
-    /**
-     * The one-based last line of the statement job's input data-definition block, eighty-six.
-     */
     private static final int STATEMENT_DEFINITION_LAST_LINE = 86;
 
-    /**
-     * The one-based line of the statement job carrying the account data definition, eighty-five.
-     */
     private static final int ACCOUNT_DEFINITION_LINE = 85;
 
-    /**
-     * The classpath location of the profile document this class activates.
-     */
     private static final String TEST_PROFILE_RESOURCE = "application-test.yml";
 
     /**
@@ -676,13 +579,42 @@ class StatementAccountRepositoryIT {
      * assumed -- an earlier form of the case below asserted the schema carried no index at all and
      * failed against the shipped arrangement. {@code data-migration/sql/V1__reporting_views.sql}
      * creates one single-row table here, holding the key a card-grouping digest is computed with, whose
-     * primary key on a column fixed to one value is what makes a second row unrepresentable. That
-     * primary key is the schema's only index. The same file then withdraws every privilege on that
-     * table from this module's login role, because the digest would be invertible by anyone able to
-     * read both the token and the key -- so it is a relation in the schema this module resolves names
-     * in, and not a relation this module reads.</p>
+     * primary key on a column fixed to one value is what makes a second row unrepresentable. The same
+     * file then withdraws every privilege on that table from this module's login role, because the
+     * digest would be invertible by anyone able to read both the token and the key -- so it is a
+     * relation in the schema this module resolves names in, and not a relation this module reads.</p>
      */
     private static final String KEY_TABLE_RELATION = "card_grouping_key";
+
+    /**
+     * The per-card identity relation the shipped definition creates beside the key table.
+     *
+     * <p>Assumptions: this is the second and last indexed relation in the schema, and it is an ACCESS
+     * PATH rather than a copy of rows another context owns. The card-grouping digest is computed over a
+     * value read from the key table, so the expression is not {@code IMMUTABLE} and no index can ever
+     * be declared over it; persisting the digest once per card, keyed and indexed, is what lets a
+     * statement read start from an index rather than from a scan of every transaction row. Its
+     * cardinality is one row per cross-reference row and its column list is closed at three, which is
+     * what distinguishes an access structure from a second truth -- and both properties are asserted
+     * below rather than assumed.</p>
+     *
+     * <p>Assumptions: this module reads neither relation. The identity relation carries a column-level
+     * grant covering the digest and the narrowed rendering only, so the whole card number it is keyed
+     * against stays unreadable by this module's login role exactly as it was before the relation
+     * existed.</p>
+     */
+    private static final String IDENTITY_TABLE_RELATION = "card_identity";
+
+    /**
+     * Every column the identity relation is permitted to carry, in catalogue order.
+     *
+     * <p>Assumptions: the set is closed at three deliberately. A relation of the right cardinality can
+     * still carry the wrong column, so bounding the column list is what makes "an access path" a
+     * checkable claim rather than a description: an amount, a timestamp or a customer attribute
+     * appearing here would make it a projection of rows the owning contexts hold.</p>
+     */
+    private static final List<String> IDENTITY_TABLE_COLUMNS =
+            List.of("card_fingerprint", "card_num", "card_num_masked");
 
     /**
      * The one schema the profile document permits a session to resolve.
@@ -714,15 +646,9 @@ class StatementAccountRepositoryIT {
     @ServiceConnection
     static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer(POSTGRES_IMAGE);
 
-    /**
-     * The lookup under test, injected so every read goes through the declared query.
-     */
     @Autowired
     private StatementAccountRepository accounts;
 
-    /**
-     * The entity manager, used only to read the persistence provider's own model of the projection.
-     */
     @Autowired
     private EntityManager entityManager;
 
@@ -771,13 +697,16 @@ class StatementAccountRepositoryIT {
      * they would appear in every completion list, and the refusal would arrive from the database at
      * run time instead of from the compiler.</p>
      *
+     * <p>What the case establishes, in order: the declared surface, compared as a closed set
+     * against the reference's single read arm; the whole method surface, screened for a traversal
+     * return and for a paged return; and that same surface, screened for the persistence
+     * framework's write vocabulary.</p>
+     *
      * <p>This method takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("the interface declares one keyed lookup and neither a traversal nor a write")
     void theInterfaceDeclaresOneKeyedLookupAndNothingElse() {
-        // WHAT:
-        //       The declared surface, compared as a closed set against the reference's single read arm.
         // WHY : Assumptions: the reference's account branch at app/cbl/CBSTM03B.CBL L206 to L229
         //       implements exactly one read, and it is the keyed one at L213 -- there is no
         //       plain-sequential arm for a traversal method to stand in for. A method added here would
@@ -795,8 +724,6 @@ class StatementAccountRepositoryIT {
                 .as("the base is the marker interface, which declares nothing")
                 .containsExactly(Repository.class);
 
-        // WHAT:
-        //       The whole method surface, screened for a traversal return and for a paged return.
         // WHY : Assumptions: an absent traversal cannot be asserted by NAME, because a cursor method
         //       may be called anything; it is the RETURN TYPE that makes one. Screening for a lazily
         //       consumed sequence and for the keyset envelope catches both shapes the sibling roles
@@ -814,8 +741,6 @@ class StatementAccountRepositoryIT {
                     .isNotEqualTo(PAGED_RETURN_TYPE_NAME);
         }
 
-        // WHAT:
-        //       The whole method surface, screened for the persistence framework's write vocabulary.
         // WHY : Assumptions: the reference DECLARES a write opcode and a rewrite opcode and references
         //       neither. app/cbl/CBSTM03B.CBL L107 and L108 declare them and app/cbl/CBSTM03A.CBL L78
         //       and L79 mirror them, a census of those two condition names across the whole baseline
@@ -852,6 +777,10 @@ class StatementAccountRepositoryIT {
      * its L7, so taking one branch's width for the other's would read the wrong number of bytes out of
      * that buffer.</p>
      *
+     * <p>What the case establishes, in order: the key width and its position, converted from the
+     * descriptor's frame to the copybook's; and each published identifier read back, with the row
+     * it addresses identified by its own key.</p>
+     *
      * <p>This method takes no parameter and returns no value.</p>
      */
     @Test
@@ -860,8 +789,6 @@ class StatementAccountRepositoryIT {
         CopybookLayout.RecordSpec crossReference = CopybookLayout.layout(XREF_DESCRIPTOR);
         CopybookLayout.FieldSpec accountKey = crossReference.field(XREF_ACCOUNT_ID_FIELD);
 
-        // WHAT:
-        //       The key width and its position, converted from the descriptor's frame to the copybook's.
         // WHY : Assumptions: the descriptor records a zero-based start while the copybook and every
         //       citation in this repository count bytes from one, so the two differ by exactly one and
         //       an assertion written in the descriptor's frame would read as though it disagreed with
@@ -883,20 +810,24 @@ class StatementAccountRepositoryIT {
                 .as("the account master is keyed on the same eleven digits")
                 .isEqualTo(ACCOUNT_KEY_DIGITS);
 
-        // WHAT:
-        //       Each published identifier read back, and the row it addresses identified by its own key.
         // WHY : Assumptions: a read that yielded the WRONG row would satisfy a bare presence check, so
         //       each result is identified by the identifier it carries rather than merely counted. That
         //       is the property a full-key read has and a prefix read does not: seven and fifty share
         //       no whole key, but a prefix read for seven over a zero-padded key domain could reach
-        //       either, and the assertion below fails in that case rather than passing.
-        for (Long published : PUBLISHED_ACCOUNT_IDS) {
+        //       either, and the assertion below fails in that case rather than passing. Trade-offs: the
+        //       loop is indexed rather than written over the elements, so the failure text can name the
+        //       case by ordinal and carry no identifier into the build log, for the reason this class's
+        //       own documentation records. The identifier is still what the lookup is given -- only the
+        //       diagnostic changes.
+        for (int ordinal = 1; ordinal <= PUBLISHED_ACCOUNT_IDS.size(); ordinal++) {
+            Long published = PUBLISHED_ACCOUNT_IDS.get(ordinal - 1);
             Optional<AccountView> found = accounts.findById(published);
 
             assertThat(found)
-                    .withFailMessage("the account master publishes %d, so the keyed lookup must"
-                            + " resolve it; it did not, so either the projection is not reading the"
-                            + " loaded rows or the key is not being matched whole", published)
+                    .withFailMessage("the account master publishes fixture account %d of %d, so the"
+                            + " keyed lookup must resolve it; it did not, so either the projection is"
+                            + " not reading the loaded rows or the key is not being matched whole",
+                            ordinal, PUBLISHED_ACCOUNT_IDS.size())
                     .isPresent();
             assertThat(found.orElseThrow().getAccountId())
                     .as("the row addressed carries the identifier that addressed it")
@@ -921,6 +852,9 @@ class StatementAccountRepositoryIT {
      * eight cards over four accounts, with one account carrying the large majority. A corpus of
      * eighty-eight cards over eighty-eight accounts would satisfy the resolution assertion while
      * exercising none of the sharing the statement path actually meets.</p>
+     *
+     * <p>What the case establishes: every identifier the cursor supplies, resolved one at a time
+     * through the keyed lookup.</p>
      *
      * <p>This method takes no parameter and returns no value.</p>
      *
@@ -949,18 +883,20 @@ class StatementAccountRepositoryIT {
                 .as("the loaded cross-reference names exactly the accounts the master publishes")
                 .containsExactlyElementsOf(PUBLISHED_ACCOUNT_IDS);
 
-        // WHAT:
-        //       Every identifier the cursor supplies, resolved one at a time through the keyed lookup.
         // WHY : Assumptions: resolving them one at a time is the shape the reference uses and the shape
         //       that matters here. app/cbl/CBSTM03A.CBL performs 3000-ACCTFILE-GET once per
         //       cross-reference row, so a chain that resolved three of four accounts and abended on the
-        //       fourth is exactly what a single representative lookup would miss.
-        for (Long supplied : suppliedByTheCursor) {
-            assertThat(accounts.findById(supplied))
-                    .withFailMessage("the cross-reference names account %d, so the account projection"
-                            + " must hold it; it does not, so the referential chain the statement run"
-                            + " walks is broken and the run would abend rather than skip the row",
-                            supplied)
+        //       fourth is exactly what a single representative lookup would miss. Trade-offs: the loop
+        //       is indexed so the failure text can name the unresolved case by its position in the
+        //       cursor's own ascending order and carry no identifier into the build log, for the reason
+        //       this class's own documentation records. The position is unambiguous because the
+        //       assertion immediately above pins that order to the closed published set.
+        for (int ordinal = 1; ordinal <= suppliedByTheCursor.size(); ordinal++) {
+            assertThat(accounts.findById(suppliedByTheCursor.get(ordinal - 1)))
+                    .withFailMessage("the cross-reference names cursor row %d of %d, so the account"
+                            + " projection must hold it; it does not, so the referential chain the"
+                            + " statement run walks is broken and the run would abend rather than skip"
+                            + " the row", ordinal, suppliedByTheCursor.size())
                     .isPresent();
         }
     }
@@ -981,6 +917,9 @@ class StatementAccountRepositoryIT {
      * cross-reference, so the account master is a statement-path input ONLY -- which is why this class
      * binds the statement-path cross-reference fixture and not the report-path one.</p>
      *
+     * <p>What the case establishes: the whole report job, screened for any mention of the account
+     * definition name.</p>
+     *
      * <p>This method takes no parameter and returns no value.</p>
      */
     @Test
@@ -997,8 +936,6 @@ class StatementAccountRepositoryIT {
                 .as("the account definition sits on the line this class cites throughout")
                 .isEqualTo(ACCOUNT_DEFINITION_LINE);
 
-        // WHAT:
-        //       The whole report job, screened for any mention of the account definition name.
         // WHY : Assumptions: the whole file is screened rather than the input block alone, because the
         //       claim being made is that the report path never reaches the account master at all --
         //       not merely that it does not name it among its inputs. A mention anywhere, including in
@@ -1025,6 +962,9 @@ class StatementAccountRepositoryIT {
      * begins immediately after the disclosure group identifier, which is asserted rather than assumed
      * because a pad that began earlier would mean a named field had been dropped from the middle of
      * the record.</p>
+     *
+     * <p>What the case establishes: the projection's declared members, screened for a member named
+     * after the pad.</p>
      *
      * <p>This method takes no parameter and returns no value.</p>
      */
@@ -1060,8 +1000,6 @@ class StatementAccountRepositoryIT {
                 .as("the trailing pad closes the record exactly")
                 .isEqualTo(ACCOUNT_RECORD_LENGTH);
 
-        // WHAT:
-        //       The projection's declared members, screened for a member named after the pad.
         // WHY : Assumptions: the pad exists only to reach the declared length, so a member for it would
         //       publish padding as data and would widen the reporting role's reach to bytes that carry
         //       nothing. The comparison lowercases the copybook name because the projection names its
@@ -1085,6 +1023,9 @@ class StatementAccountRepositoryIT {
      * scale is asserted at exactly two because a scale of anything else moves the implied decimal
      * point without changing the byte count.</p>
      *
+     * <p>What the case establishes: one money field's storage regime, width, digit split, sign and
+     * one-based span.</p>
+     *
      * @param expected the declared geometry of one account money field
      */
     @ParameterizedTest(name = "{0}")
@@ -1094,8 +1035,6 @@ class StatementAccountRepositoryIT {
         CopybookLayout.FieldSpec field =
                 CopybookLayout.layout(ACCOUNT_DESCRIPTOR).field(expected.fieldName());
 
-        // WHAT:
-        //       One money field's storage regime, width, digit split, sign and one-based span.
         // WHY : Assumptions: the regime is zoned decimal and NOT packed, and the distinction decides
         //       how many bytes a value occupies. Twelve digits packed would occupy seven bytes rather
         //       than twelve, so a regime read wrongly here would mis-align every field after it. The
@@ -1196,6 +1135,12 @@ class StatementAccountRepositoryIT {
      * corpus holds, a literal here would be a second transcription of them, and the two would then be
      * free to disagree -- with the literal winning, since it is what the assertion reads.</p>
      *
+     * <p>What the case establishes, in order: the declared precision and scale of both published
+     * money columns, at the mapping; the same precision and scale as the engine's own catalogue
+     * reports them for the view; the read balance compared to the decoded bytes, with its scale
+     * asserted separately; that the corpus genuinely covers a negative and a zero balance; and that
+     * the zero balance is carried unstripped.</p>
+     *
      * <p>This method takes no parameter and returns no value.</p>
      *
      * @throws SQLException if the catalogue cannot be read, which is an arrangement failure rather
@@ -1207,8 +1152,6 @@ class StatementAccountRepositoryIT {
         Column balanceColumn = mappedColumn("currentBalance");
         Column limitColumn = mappedColumn("creditLimit");
 
-        // WHAT:
-        //       The declared precision and scale of both published money columns, at the mapping.
         // WHY : Assumptions: the mapping writes these as literals on each column rather than taking
         //       them from a shared constant, and it nests its own attribute converter rather than
         //       sharing one, precisely so an eleven-digit attribute cannot reach either. Asserting the
@@ -1233,8 +1176,6 @@ class StatementAccountRepositoryIT {
                         + " narrowed to match the other and every amount is out by a factor of ten")
                 .isNotEqualTo(TRANSACTION_MONEY_PRECISION);
 
-        // WHAT:
-        //       The same precision and scale as the engine's own catalogue reports them for the view.
         // WHY : Assumptions: the mapping and the relation are separate declarations and either can move
         //       without the other, so agreement between them is a property worth asserting rather than
         //       assuming. The type name is asserted positively as the exact numeric type rather than by
@@ -1251,21 +1192,23 @@ class StatementAccountRepositoryIT {
         boolean sawNegative = false;
         boolean sawZero = false;
 
-        for (Long published : PUBLISHED_ACCOUNT_IDS) {
+        for (int ordinal = 1; ordinal <= PUBLISHED_ACCOUNT_IDS.size(); ordinal++) {
+            Long published = PUBLISHED_ACCOUNT_IDS.get(ordinal - 1);
             Money balance = accounts.findById(published).orElseThrow().getCurrentBalance();
             BigDecimal expected = money(committed.get(published), BALANCE_FIELD);
 
-            // WHAT:
-            //       The read balance compared to the decoded bytes, with its scale asserted separately.
             // WHY : Assumptions: the shared money type's own equality compares by VALUE and ignores
             //       scale, so comparing two instances of it could not detect a stripped scale at all.
             //       The comparison is therefore made on the exact decimal the instance carries, whose
             //       equality does compare scale, and the scale is asserted a second time on its own so
-            //       a failure says which of the two properties broke.
+            //       a failure says which of the two properties broke. Trade-offs: the loop is indexed
+            //       so the failure text names the case by ordinal and carries no identifier into the
+            //       build log, for the reason this class's own documentation records.
             assertThat(balance.amount())
-                    .withFailMessage("account %d must read back the balance its committed bytes"
-                            + " encode; it did not, so a value has been lost or rescaled between the"
-                            + " zoned bytes and the numeric column", published)
+                    .withFailMessage("fixture account %d of %d must read back the balance its"
+                            + " committed bytes encode; it did not, so a value has been lost or"
+                            + " rescaled between the zoned bytes and the numeric column",
+                            ordinal, PUBLISHED_ACCOUNT_IDS.size())
                     .isEqualTo(expected);
             assertThat(balance.amount().scale())
                     .as("the balance is carried at exactly two decimal places")
@@ -1278,8 +1221,6 @@ class StatementAccountRepositoryIT {
             sawZero = sawZero || balance.isZero();
         }
 
-        // WHAT:
-        //       That the corpus genuinely covers a negative and a zero balance.
         // WHY : Assumptions: the sign is OVERPUNCHED into the final byte rather than carried
         //       separately, so a negative value and a positive one differ in that byte alone and a
         //       corpus of positives would exercise only half the decode. Zero has its own overpunch
@@ -1292,8 +1233,6 @@ class StatementAccountRepositoryIT {
                 .as("the corpus carries a zero balance, whose overpunch differs from both signs")
                 .isTrue();
 
-        // WHAT:
-        //       That the zero balance is carried unstripped.
         // WHY : Assumptions: reducing a value to its shortest form would make two amounts that encode
         //       to DIFFERENT bytes compare equal, which is what breaks a byte-reproducible comparison
         //       of two runs. Zero is the value where the difference is largest -- reduced, it loses both
@@ -1330,6 +1269,9 @@ class StatementAccountRepositoryIT {
      * the target carries a real date column rather than text, and why the decoded characters can be
      * compared against the read date directly.</p>
      *
+     * <p>What the case establishes: the relation's own column list, screened for the target name
+     * and the baseline name.</p>
+     *
      * <p>This method takes no parameter and returns no value.</p>
      *
      * @throws SQLException if the catalogue cannot be read, which is an arrangement failure rather
@@ -1351,8 +1293,6 @@ class StatementAccountRepositoryIT {
                 .as("the mapping reads the target column name")
                 .isEqualTo(EXPIRATION_COLUMN);
 
-        // WHAT:
-        //       The relation's own column list, screened for the target name and the baseline name.
         // WHY : Assumptions: the baseline name is asserted ABSENT from the relation as well as the
         //       target name present, because a relation carrying both would mean the divergence had been
         //       resolved by duplication rather than by a rename -- and a projection with two spellings
@@ -1369,11 +1309,18 @@ class StatementAccountRepositoryIT {
                         .equalsIgnoreCase(BASELINE_EXPIRATION_FIELD.replace("-", "")));
 
         Map<Long, Map<String, Object>> committed = committedAccountRows();
-        for (Long account : PUBLISHED_ACCOUNT_IDS) {
+
+        // WHY : Trade-offs: the loop is indexed rather than written over the elements so the failure
+        //       text can name the case by ordinal and carry no identifier into the build log, for the
+        //       reason this class's own documentation records. The two byte positions stay in the text
+        //       because they are the copybook geometry the case is about and carry no key material.
+        for (int ordinal = 1; ordinal <= PUBLISHED_ACCOUNT_IDS.size(); ordinal++) {
+            Long account = PUBLISHED_ACCOUNT_IDS.get(ordinal - 1);
             assertThat(accounts.findById(account).orElseThrow().getExpirationDate())
-                    .withFailMessage("account %d must read back the expiration date its committed"
-                            + " bytes carry at positions %d to %d; it did not, so the projection is"
-                            + " reading a different field or a different relation", account,
+                    .withFailMessage("fixture account %d of %d must read back the expiration date its"
+                            + " committed bytes carry at positions %d to %d; it did not, so the"
+                            + " projection is reading a different field or a different relation",
+                            ordinal, PUBLISHED_ACCOUNT_IDS.size(),
                             EXPIRATION_FIRST_BYTE, EXPIRATION_LAST_BYTE)
                     .isEqualTo(date(committed.get(account), BASELINE_EXPIRATION_FIELD));
         }
@@ -1398,6 +1345,10 @@ class StatementAccountRepositoryIT {
      * located in the projection rather than mistaken for the column not existing; and the recorded
      * statements show the read the lookup actually issues names it nowhere.</p>
      *
+     * <p>What the case establishes, in order: the column present on the owning table and absent
+     * from the projection; and a read issued from inside this case, then the statements it
+     * caused.</p>
+     *
      * <p>This method takes no parameter and returns no value.</p>
      *
      * @throws SQLException if the catalogue cannot be read, which is an arrangement failure rather
@@ -1421,8 +1372,6 @@ class StatementAccountRepositoryIT {
                 .as("the persistence provider recognises no version attribute on this projection")
                 .isFalse();
 
-        // WHAT:
-        //       The column present on the owning table and absent from the projection.
         // WHY : Assumptions: the contrast is what locates the omission. Asserting only that the
         //       projection lacks the column would hold just as well if the column had never been
         //       created upstream, and the reader would learn nothing about whether this module was
@@ -1436,8 +1385,6 @@ class StatementAccountRepositoryIT {
                         + " use for, under a role that can never write")
                 .doesNotContain(VERSION_COLUMN);
 
-        // WHAT:
-        //       A read issued from inside this case, then the statements it caused.
         // WHY : Assumptions: the read is issued HERE rather than relied upon from another case, because
         //       the test engine gives no ordering guarantee between cases and a recorder consulted
         //       before any read had happened would be empty -- which would make this the one assertion
@@ -1484,6 +1431,9 @@ class StatementAccountRepositoryIT {
      * refused, and the privilege one cannot show that the application fails before one is generated --
      * so neither is redundant, but neither needs asserting twice either.</p>
      *
+     * <p>What the case establishes: the provider's own account of whether this projection reaches
+     * another entity.</p>
+     *
      * <p>This method takes no parameter and returns no value.</p>
      */
     @Test
@@ -1513,8 +1463,6 @@ class StatementAccountRepositoryIT {
             }
         }
 
-        // WHAT:
-        //       The provider's own account of whether this projection reaches another entity.
         // WHY : Assumptions: a cascade cannot be declared without an association to declare it on, so
         //       asserting the absence of every association is the complete form of asserting the
         //       absence of every cascade -- and it does not have to be kept current against the list of
@@ -1566,13 +1514,14 @@ class StatementAccountRepositoryIT {
      * introduced without being documented, and a defaulted row in particular would print a statement
      * carrying a balance no account ever held.</p>
      *
+     * <p>What the case establishes, in order: that the identifier under test is absent from both
+     * committed fixtures; and the caller's own policy applied to the empty result.</p>
+     *
      * <p>This method takes no parameter and returns no value.</p>
      */
     @Test
     @DisplayName("an absent identifier yields an empty result the caller converts into a refusal")
     void anAbsentIdentifierYieldsAnEmptyResultTheCallerRefuses() {
-        // WHAT:
-        //       That the identifier under test is absent from both committed fixtures.
         // WHY : Assumptions: the case is constructed FROM DATA and never by discarding a row or altering
         //       a relation, because either would leave this class defining what it reads and would put
         //       the corpus every other case here depends on into a state that depends on execution
@@ -1596,8 +1545,6 @@ class StatementAccountRepositoryIT {
                         + " something other than the whole key it was given")
                 .isEmpty();
 
-        // WHAT:
-        //       The caller's own policy applied to the empty result.
         // WHY : Assumptions: asserting the emptiness alone would leave the dangerous half unproven. An
         //       empty optional that a caller could unwrap to a usable value is exactly the shape in
         //       which a broken referential chain becomes a printed statement, so the case applies the
@@ -1623,13 +1570,22 @@ class StatementAccountRepositoryIT {
      * in this schema carries an index, because a view cannot carry one and this module creates
      * nothing.</p>
      *
-     * <p>Assumptions: the schema does hold ONE index and the case names it rather than asserting the
-     * schema is empty, because that was measured. The shipped definition creates a single-row table here
-     * to hold the card-grouping digest key, and its primary key is that index; the same file then
-     * withdraws every privilege on the table from this module's login role, so it is a relation in the
-     * schema rather than a relation this module reads. Asserting the indexed set is CLOSED is the
-     * stronger form in any case: it fails on an index added over a projection, which asserting the
-     * absence of one particular index would not.</p>
+     * <p>Assumptions: the schema does hold indexes and the case names exactly which relations carry
+     * them rather than asserting the schema is empty, because that was measured. The shipped definition
+     * creates two tables here: a single-row table holding the card-grouping digest key, whose privileges
+     * that file withdraws from this module's login role outright, and a per-card identity relation whose
+     * grant is narrowed to the digest and the narrowed rendering. Neither is a relation this module
+     * reads. Asserting the indexed set is CLOSED is the stronger form in any case: it fails on an index
+     * added over a projection, which asserting the absence of one particular index would not.</p>
+     *
+     * <p>Refactoring Rationale: the permitted set was ONE relation and is now two, and the second was
+     * admitted rather than accommodated. The digest is computed from a value read out of the key table,
+     * which makes the expression non-{@code IMMUTABLE} and therefore impossible to index, so a statement
+     * read could only ever start from a scan of every transaction row. Persisting the digest once per
+     * card is what turns that scan into an index seek. The single-entry form would have forbidden that
+     * access path, which is not what it was written to forbid -- it exists to forbid a second physical
+     * copy of rows another context owns, and the case now establishes the difference by bounding the new
+     * relation's column list instead of trusting its name.</p>
      *
      * <p>Assumptions: nothing is materialised, and that is a refusal rather than an omission. A
      * materialised projection would answer from a snapshot taken at some earlier instant, which is the
@@ -1644,6 +1600,9 @@ class StatementAccountRepositoryIT {
      * whose schema the role may not use is ignored in silence, and were that reach ever conveyed,
      * unqualified names would begin resolving to base tables rather than to the projections, so the
      * narrowing the projections carry would be bypassed by queries nobody had changed.</p>
+     *
+     * <p>What the case establishes: the catalogue's own classification of the relation the lookup
+     * reads.</p>
      *
      * <p>This method takes no parameter and returns no value.</p>
      *
@@ -1666,24 +1625,53 @@ class StatementAccountRepositoryIT {
                 }
             }
 
+            // WHY : Refactoring Rationale: the permitted set is TWO relations rather than one, and the
+            //       second is admitted on evidence gathered below rather than on its name. The earlier
+            //       single-entry form rested on the reading that this schema holds views plus one
+            //       withdrawn key table, so any further index meant a physical copy of rows another
+            //       context owns had appeared. That inference no longer holds: the card-grouping digest
+            //       is computed from a value read out of the key table, which makes the expression
+            //       non-IMMUTABLE and therefore unindexable, so the only way a statement read can start
+            //       from an index at all is for the digest to be persisted once per card. Keeping the
+            //       assertion at one entry would have forbidden the access path rather than the copy it
+            //       was written to forbid.
+            // WHY : Assumptions: the entry is admitted with an unordered comparison because the
+            //       catalogue query orders by relation name, and pinning the order would make this
+            //       assertion fail on a rename that changes nothing about what the schema holds.
             assertThat(indexedRelations)
-                    .withFailMessage("the only indexed relation in this schema must be the single-row"
-                            + " key table the shipped definition creates, whose privileges that file"
-                            + " withdraws from this module's role; the indexed set is %s instead, so"
-                            + " an index has arrived over something this module reads",
-                            indexedRelations)
-                    .containsExactly(KEY_TABLE_RELATION);
+                    .withFailMessage("the indexed relations in this schema must be exactly the"
+                            + " single-row key table and the per-card identity relation the shipped"
+                            + " definition creates, whose privileges that file narrows or withdraws"
+                            + " from this module's role; the indexed set is %s instead, so an index has"
+                            + " arrived over something this module reads", indexedRelations)
+                    .containsExactlyInAnyOrder(KEY_TABLE_RELATION, IDENTITY_TABLE_RELATION);
             assertThat(indexedRelations)
                     .as("the projection the lookup reads carries no index, because a view cannot")
                     .doesNotContain(PROJECTION_RELATION);
+
+            // WHY : Assumptions: the identity relation earns its index by being an access path, and its
+            //       CLOSED column list is what establishes that here rather than restates it. Three
+            //       columns -- a keyed digest, the card number it is keyed against and the narrowed
+            //       rendering -- cannot carry an amount, a timestamp or a customer attribute, so no
+            //       figure this class reads can be answered from it. Alternatives Considered: asserting
+            //       its cardinality against the cross-reference here as well, which is the other half
+            //       of the same claim. Rejected in THIS class: its fixture loads accounts and says
+            //       nothing about the cross-reference, so the comparison would depend on the order two
+            //       unrelated fixtures happened to run in. StatementTransactionRepositoryIT asserts the
+            //       cardinality where the cross-reference rows it compares against are the ones under
+            //       test.
+            assertThat(catalogueColumnsOf(PROJECTION_SCHEMA, IDENTITY_TABLE_RELATION))
+                    .withFailMessage("the identity relation must carry exactly the keyed digest, the"
+                            + " card number it is keyed against and the narrowed rendering; a further"
+                            + " column there would make it a projection of rows another context owns"
+                            + " rather than a way of reaching them")
+                    .containsExactlyElementsOf(IDENTITY_TABLE_COLUMNS);
             assertThat(singleValue(connection,
                     "select count(*) from pg_matviews where schemaname = '"
                             + PROJECTION_SCHEMA + "'"))
                     .as("nothing in that schema is materialised, so no read answers from a snapshot")
                     .isEqualTo("0");
 
-            // WHAT:
-            //       The catalogue's own classification of the relation the lookup reads.
             // WHY : Assumptions: the classification is asserted rather than inferred from the name,
             //       because a materialised relation and an ordinary view are addressed identically in a
             //       query and differ only in when their rows were computed. A name beginning with the
@@ -2253,6 +2241,21 @@ class StatementAccountRepositoryIT {
     public static final class EmittedStatements implements StatementInspector {
 
         /**
+         * The serialized form's version, fixed at one.
+         */
+        // WHY : Assumptions: the provider's inspector interface extends the serialization marker, so
+        //       this type is serializable whether or not anything ever serializes it, and a compiler
+        //       reports the missing version under its full warning set. The value is declared
+        //       explicitly rather than left to the compiler to derive, because a derived value changes
+        //       whenever a member is added and would silently invalidate an already-serialized form.
+        //       Alternatives Considered: suppressing the warning instead, on the ground that nothing
+        //       here is ever written to a stream. Rejected because the suppression would have to be
+        //       revisited the moment the provider's own serialization behaviour changed, whereas a
+        //       fixed version is correct either way -- the same trade the shared statement projection's
+        //       embedded identifier records.
+        private static final long serialVersionUID = 1L;
+
+        /**
          * Every statement seen, in emission order, safe for concurrent appends and reads.
          */
         private static final List<String> SEEN = new CopyOnWriteArrayList<>();
@@ -2290,9 +2293,10 @@ class StatementAccountRepositoryIT {
      * The narrowest context that can create the lookup's repository proxy.
      *
      * <p>Assumptions: the configuration is nested and names the two persistence packages explicitly
-     * rather than component-scanning from the module root, for the reason all four sibling integration
-     * tests record: scanning the root would instantiate the orchestration client and the filter chain,
-     * so a context started to read one row would additionally need an execution identifier and an
+     * rather than component-scanning from the module root, and
+     * {@code services/reporting-service/src/test/resources/application-test.yml} is the authority for
+     * why: scanning the root would instantiate the orchestration client and the filter chain, so a
+     * context started to read one row would additionally need an execution identifier and an
      * object-store location, and a failure to supply either would read as a lookup defect.
      * Alternatives Considered: a data-access test slice, which would restrict auto-configuration to
      * persistence and remove the cloud values supplied above entirely. It is not available -- the

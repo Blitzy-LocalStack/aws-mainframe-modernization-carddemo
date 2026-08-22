@@ -8,17 +8,22 @@
 #   migrations carry a reference-DATA SEED rather than schema alone.
 #
 #   ⚠️ Refactoring Rationale: that clause read "the only module in the migration
-#   that carries two migrations", and it was false in the plainest way -- three
-#   modules carry two, two carry three, one carries five and one carries one. The
-#   count was never the distinguishing fact anyway; the CONTENT is.
+#   that carries two migrations", and it was false in the plainest way. Its
+#   replacement then rested on a per-module distribution -- "three modules carry
+#   two, two carry three, one carries five and one carries one" -- which drifted in
+#   turn, because this module's own history is now four scripts: V1__reference.sql,
+#   V2__seed_reference.sql, and the create-then-drop pair
+#   V3__reference_inquiry_reply_ledger.sql and
+#   V4__drop_reference_inquiry_reply_ledger.sql. No count is stated here for that
+#   reason. The distinguishing fact was never the count; the CONTENT is.
 #   V2__seed_reference.sql in this module's db/migration directory is the only
 #   migration in the whole reactor holding INSERT statements -- six of them, loading
 #   the transaction types, the transaction categories, the mandatory DEFAULT
 #   disclosure group and the three lookup tables -- and that is why this module's
-#   second migration dominates its startup cost, which is the fact the sizing below
-#   and in application.yml is actually reasoning from. Assumptions: the inventory
-#   moves as schemas evolve, so it is deliberately NOT restated here; the claim
-#   above is stated in a form that a directory listing settles.
+#   seed dominates its startup cost, which is the fact the sizing below and in
+#   application.yml is actually reasoning from. Assumptions: the reactor's migration
+#   inventory moves as schemas evolve, so the claim above is stated in a form a grep
+#   for INSERT across db/migration settles rather than as a tally to re-measure.
 #
 #   It is the paired half of
 #   application-dev.yml in this same directory: the two files record ONE
@@ -40,13 +45,20 @@
 #   a third key, and the closest candidate is one of the seven absences the closing
 #   block deliberately explains. The payload is and always was exactly
 #   spring.datasource.hikari.minimum-idle, which the base sets to 2 at
-#   application.yml:499 and this file raises to 5, and springdoc.swagger-ui.enabled,
+#   application.yml:416 and this file raises to 5, and springdoc.swagger-ui.enabled,
 #   which the base does not set at all and this file switches off. That is the whole of it,
 #   and the smallness is the design rather than an omission: application.yml
 #   beside it already states the deployed posture -- statement echo off, health
-#   detail withheld, the actuator surface at three endpoints, both migrations
-#   applied, the bind-parameter logger at WARN -- so this profile has almost
-#   nothing left to close. What it varies is one pool dimension and one
+#   detail withheld, the actuator surface at three endpoints, every script in
+#   db/migration applied, the bind-parameter logger at WARN -- so this profile has
+#   almost nothing left to close.
+#   Refactoring Rationale: two claims in that sentence are corrected rather than
+#   reworded. It cited application.yml:499 for the base pool floor, which is a blank
+#   line -- the key is at 416 -- and a citation that lands on nothing is worse than
+#   none, because a reader concludes the value moved rather than that the number was
+#   wrong. And it said "both migrations applied", which counts two where the history
+#   holds four; naming the directory instead of a count is what keeps the sentence
+#   true as V3 and V4 are joined by whatever a later schema change needs. What it varies is one pool dimension and one
 #   endpoint's reachability. Every key below carries a value the base does not; a key that
 #   merely repeated a base value would be noise and is absent rather than left
 #   to read as a decision.

@@ -199,8 +199,9 @@
 #      ui/src/api/cards.ts now describe ONE wire contract, and an earlier
 #      revision of this file described a different one and recorded the
 #      disagreement instead of ending it. That revision put the sixteen-digit
-#      card number in the path where the client sent a twenty-two-character
-#      opaque selector, and declared two cursor parameters where the client sent
+#      card number in the path where the client sent an opaque selector - the
+#      shape CardSelector now declares, whose width is stated in one place and
+#      not restated here - and declared two cursor parameters where the client sent
 #      one, then argued that the client was owned elsewhere and so the
 #      difference could only be noted. The argument was wrong on both counts.
 #      Nothing in this repository forbids editing that client - it is an
@@ -740,13 +741,31 @@ paths:
           The three editable fields together with the version token last read
           for this card. All four are required: a partial body would leave the
           service unable to distinguish a field the caller intends to clear
-          from one it did not intend to send. A request carrying no body at all
-          is refused with 'No input received', from
-          app/cbl/COCRDUPC.cbl:185-186, which is the sentence the baseline
-          raised when an operator submitted a screen having entered nothing. A
-          body every field of which already equals the stored value is refused
-          with 'No change detected with respect to values fetched.', from
-          :187-188, retaining that sentence's closing full stop.
+          from one it did not intend to send. A request carrying no body at all is
+          refused 400 by the shared unreadable-body handler, which answers a
+          structured error and NOT the baseline's 'No input received' sentence from
+          app/cbl/COCRDUPC.cbl:185-186 -- that sentence describes an operator
+          submitting an empty screen, a turn an HTTP request has no equivalent of,
+          and the service retains it as a constant with no production caller. A body
+          every field of which already equals the stored value is ACCEPTED, answered
+          200 with the stored card and no write performed; the baseline's 'No change
+          detected with respect to values fetched.' from :187-188 travels in the
+          service's log line for that outcome rather than in the response, because
+          the success body declares no message component.
+      # WHY : Refactoring Rationale: this description said an empty body is refused
+      #   WITH the baseline sentence and that a no-change body is REFUSED. Neither
+      #   holds. com.carddemo.common.error.GlobalExceptionHandler answers an
+      #   unreadable body before any handler runs, so no card-specific sentence is
+      #   reachable there; and CardUpdateService returns the stored detail with a
+      #   logged sentence when nothing would change, which is a 200. A contract that
+      #   promises a refusal a caller never receives is worse than one that says
+      #   nothing, because a client writes an error branch that cannot execute and
+      #   omits the success branch that does.
+      # WHY : Assumptions: the no-change turn is stated as accepted rather than made
+      #   to refuse. The reference re-displayed the screen with a message and wrote
+      #   nothing, which is a non-failing turn; answering 400 would invent a failure
+      #   the baseline does not have, and AAP rule T9 admits a behavioural change only
+      #   as a registered divergence.
         content:
           application/json:
             schema:
@@ -1136,19 +1155,46 @@ components:
   #       not modelled at all.
   responses:
 
+    # WHY : Refactoring Rationale: four clauses of the sentence below named refusals
+    #       this service does not make, and the first of them was reported against it.
+    #       It said a selector is refused unless it is "twenty-two URL-safe
+    #       characters", where CardSelector declares an exact 59 -- the figure that
+    #       schema's own rationale derives from SealedSelector.sealedLengthFor(16) and
+    #       SealedSelectorTest pins -- and CardKeyPath validates against that schema
+    #       rather than against any figure written here; it said twenty-two was what a
+    #       caller placing "a sixteen-digit account number" in the path receives,
+    #       conflating the eleven-digit account identifier with the sixteen-digit card
+    #       number when either earns the same refusal; it listed an all-zero account
+    #       filter, which CardListService.accountFilterState reads as NOT SUPPLIED for
+    #       the reference reason recorded on that method, so the listing answers it with
+    #       the unnarrowed page; and it listed a direction whose cursor is missing,
+    #       which the browse answers with the opening page for the reference reason
+    #       recorded on the direction member of CardPageQuery. A published refusal a
+    #       service does not make is worse than an unpublished one, because a client
+    #       written against it either never sends the request or reports an error for a
+    #       response that never arrives.
+    # WHY : Assumptions: the selector bound is REFERENCED by schema name rather than
+    #       restated as a figure, which is what stops this sentence drifting again: the
+    #       length is arithmetic on the sealed layout rather than a chosen constant, so
+    #       a second copy of it here would be a second thing to change and the one most
+    #       easily missed. The clause keeps its place at the head of the sentence
+    #       because it is the refusal a caller meets by putting a card number or an
+    #       account identifier in the path -- decided on the path parameter's own shape,
+    #       before any handler runs, so the value reaches neither this service's log
+    #       lines nor its error bodies.
     BadRequest:
       description: >-
-        The request could not be accepted as presented. Raised for a selector
-        that is not twenty-two URL-safe characters - which is what a caller
-        placing a sixteen-digit account number in the path receives, before any
-        handler runs and before the value reaches a log - for a card-number or
-        account filter of the wrong width or carrying a non-digit, an all-zero
-        account filter, a cursor that is unreadable, was not issued for this
-        query, was issued to a different caller, was issued under a different
-        account filter or was sealed for the other direction, a direction whose
-        cursor is missing, a correlation identity longer than the published bound or
-        carrying a character outside the published set, a request body that is
-        absent, a body that would change nothing, or a body failing field
+        The request could not be accepted as presented. Raised for a path selector
+        outside the exact shape the CardSelector schema declares - which is what a
+        caller placing a card number or an account identifier in the path receives,
+        before any handler runs and before the value reaches a log - for a lookup
+        card number or an account filter of the wrong width or carrying a non-digit,
+        a cursor that is unreadable, was not issued for this query, was issued to a
+        different caller, was issued under a different account filter or was sealed
+        for the other direction, a paging direction outside the published
+        enumeration, a correlation identity longer than the published bound or
+        carrying a character outside the published set, a request body that is absent
+        where the operation declares one required, or a body failing field
         validation. The fieldErrors array names each offending field; the message
         carries the first failure only.
       headers:
@@ -1265,12 +1311,32 @@ components:
           schema:
             $ref: '#/components/schemas/ApiError'
 
+    # WHY : Refactoring Rationale: this described the address it answers as "the card
+    #       number supplied in the path", and no operation of this contract has one. The
+    #       three single-card routes are keyed by the opaque cardKey selector, and the
+    #       fourth operation that refers to this response -- the lookup -- takes its
+    #       number in a request BODY. That is the whole point of the shape recorded on
+    #       CardKeyPath and CardLookupRequest,
+    #       since a path segment is written verbatim into the load balancer's access log
+    #       and the browser's history before any application code runs. Leaving the
+    #       sentence as it stood invited a reader to build the very request target the
+    #       contract exists to refuse.
+    # WHY : Assumptions: one description serves both addressing forms rather than the
+    #       response being split in two, because the property it publishes is the same
+    #       for both and is the reason this refusal carries no detail: a well-formed
+    #       address that names no VISIBLE row answers identically whether no such card
+    #       was ever held, it was removed, or it exists and this caller may not see it.
+    #       Splitting it would invite one half to acquire a distinguishing sentence.
     NotFound:
       description: >-
-        No card exists for the card number supplied in the path. A well-formed
-        number that stands for no row is reported the same way whatever the reason,
-        so that a caller cannot distinguish a number this deployment has never held
-        from one it holds but the caller may not see.
+        No card is visible for the address the request carried: the opaque selector in
+        the path for the three single-card operations, or the number in the body for
+        the lookup. No primary account number ever appears in a request target of this
+        contract, so what a path names here is a sealed selector and never a card
+        number. A well-formed selector, or a well-formed number, that stands for no
+        visible row is reported the same way whatever the reason, so that a caller
+        cannot distinguish a card this deployment has never held from one it holds but
+        the caller may not see.
       headers:
         X-Correlation-Id:
           $ref: '#/components/headers/XCorrelationId'
@@ -1748,15 +1814,48 @@ components:
             WS-CA-FIRST-CARDKEY at :233-235, the latter being what the baseline
             moves into its browse positioning field at :1268.
           $ref: '#/components/schemas/CursorToken'
+        # WHY : Refactoring Rationale: this member promised a 400 for a direction sent
+        #       with NO cursor, and the browse does not refuse that pair -- it reads
+        #       forward from the start of the ordered set and answers with the opening
+        #       page. The disagreement was reported against this service, and it is
+        #       settled in favour of the RUNTIME because the runtime is the reference's
+        #       own behaviour: the backward paging key pressed while the page ordinal
+        #       says the opening page is answered at app/cbl/COCRDLIC.cbl:444-454, which
+        #       moves the page's own leading card number into the record identifier and
+        #       performs 9000-READ-FORWARD -- the FORWARD paragraph -- before sending the
+        #       map, adding only the sentence at :901-904. So the operator keeps a page
+        #       of rows, and refusing the request instead would be a behavioural
+        #       divergence with nothing in the baseline behind it. AAP section 0.7.4
+        #       makes that browse the authority for this operation's paging, and Rule T9
+        #       admits no unregistered divergence from it.
+        # WHY : Assumptions: the fallback is stated here as behaviour a caller can rely
+        #       on rather than left unsaid, because it is the answer to a request a
+        #       client can genuinely make -- a screen whose paging control is pressed
+        #       before it holds a position. CardListService.list composes it as
+        #       backward AND a position being present, and CardListServiceTest asserts
+        #       that a positionless backward request never reaches the backward query,
+        #       so the sentence below and the running service are held together by a
+        #       test rather than by agreement.
+        # WHY : Trade-offs: a client may still refuse the pair locally, and the browser
+        #       client of this migration does -- ui/src/api/client.ts assembles the two
+        #       members in one place and raises before dispatch, because the seven
+        #       published contracts of this migration do NOT answer that pair alike and
+        #       a screen calling several of them would otherwise see one mistake behave
+        #       three ways. That guard is a client decision about a request it declines
+        #       to send; it is not this contract's behaviour, and nothing here should be
+        #       read as promising the refusal it makes.
         direction:
           description: >-
-            Which way to move from the supplied cursor. It is meaningful only
-            alongside a cursor, and the two are sent together or not at all. Reading
-            next seeks keys strictly greater than the cursor in ascending order and
-            is the default, which with no cursor supplied returns the opening page;
-            reading previous seeks keys strictly less than it, returned in the same
-            ascending order as every other page. Supplying a direction with no
-            cursor, or a cursor sealed for the other direction, is a 400.
+            Which way to move from the supplied cursor. Reading next seeks keys
+            strictly greater than the cursor in ascending order and is the default,
+            which with no cursor supplied returns the opening page; reading previous
+            seeks keys strictly less than it, returned in the same
+            ascending order as every other page. A direction supplied with NO cursor
+            is not refused: a backward step is expressible only from a page already
+            held, so previous without a cursor is answered with the opening page,
+            exactly as next without one is, which is what the baseline does when its
+            backward paging key is pressed on the first page. A cursor sealed for the
+            other direction IS a 400.
           $ref: '#/components/schemas/PageDirection'
 
 
@@ -1858,14 +1957,24 @@ components:
     #       deliberately withheld it, arguing that publishing the layout would
     #       couple this contract to an internal representation and make a change
     #       of sealing scheme a breaking contract change. That argument does not
-    #       survive the version prefix: the token's first component is the
-    #       literal v1, declared at CursorToken.java:81, and it exists precisely
-    #       so that a second scheme can be introduced beside the first rather
-    #       than in place of it. Withholding the pattern also cost more than it
-    #       saved - a caller could not tell a truncated or re-encoded token from
-    #       a valid one until the service refused it, and the sibling contracts
-    #       of this migration publish the same pattern, so the omission made one
-    #       shared token look like three different types.
+    #       survive the version prefix: the token's first component is the literal
+    #       the VERSION constant of CursorToken declares, published in the pattern
+    #       below as v2, and it exists precisely so that a second scheme can be
+    #       introduced beside the first rather than in place of it. That is not a
+    #       hypothetical: the marker has already moved once, from v1 to v2 when the
+    #       payload stopped being signed plaintext and became authenticated
+    #       ciphertext, and a running fleet rejected the older tokens on their shape
+    #       instead of deciphering them as though their plaintext were ciphertext.
+    #       This sentence cites the constant by NAME and carries no line number at all,
+    #       which is the correction the review asked for: it used to name v1 and pin
+    #       that claim to a line, and by the time the claim was read the marker was v2
+    #       and the declaration had moved -- a citation that drifts is exactly how a
+    #       sentence like this comes to be false, so the drifting part is gone rather
+    #       than updated. Withholding the pattern also cost more than it
+    #       saved - a caller could not tell a truncated or re-encoded token from a valid
+    #       one until the service refused it, and the sibling contracts of this
+    #       migration publish the same pattern, so the omission made one shared token
+    #       look like three different types.
     # WHY : Assumptions: the three constants below are read from
     #       services/common-lib/src/main/java/com/carddemo/common/web/CursorToken.java
     #       and not chosen here - the version prefix, the maximum length of 256 and

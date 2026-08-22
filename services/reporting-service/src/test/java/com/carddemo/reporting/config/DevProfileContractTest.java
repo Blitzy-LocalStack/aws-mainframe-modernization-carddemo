@@ -10,6 +10,9 @@ import java.util.Set;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.env.YamlPropertySourceLoader;
+import org.springframework.core.env.EnumerablePropertySource;
+import org.springframework.core.io.ByteArrayResource;
 
 /**
  * Executes the {@code dev} profile of this service and holds every value it declares to the reasoning
@@ -76,6 +79,31 @@ final class DevProfileContractTest {
 
 
   /**
+   * The framework property a service would declare if it pinned its own region.
+   *
+   * <p>Assumptions: this service deliberately declares it NOWHERE, and the case below asserts that absence.
+   * The constant exists so the spelling asserted here is the spelling a future document would have to use.
+   *
+   * <p>Refactoring Rationale: this is declared ahead of the seed map below and is read by BOTH -- the map
+   * seeds this key and the absence case asserts this key -- because the two were previously the same string
+   * written twice. A test that seeds one spelling and asserts the absence of another passes while proving
+   * nothing, and nothing in the build compares two literals.
+   */
+  private static final String REGION_PROPERTY = "spring.cloud.aws.region.static";
+
+  /**
+   * The whole property family the region lives in, so a sibling key cannot slip past the exact-key check.
+   *
+   * <p>Assumptions: this is DERIVED from {@link #REGION_PROPERTY} rather than written out, so the two cannot
+   * disagree about the family. The family matters because the case below claims the documents declare no
+   * region at all, and the framework offers more than one way to declare one -- an instance-profile source
+   * and a default-chain switch sit beside the static value under the same parent. Asserting only the static
+   * key would leave that claim true of one spelling and untested for the others.
+   */
+  private static final String REGION_PROPERTY_FAMILY =
+      REGION_PROPERTY.substring(0, REGION_PROPERTY.lastIndexOf('.') + 1);
+
+  /**
    * The values configuration RESOLUTION itself needs, as distinct from those a bean reads later.
    *
    * <p>Assumptions: a static region is seeded here rather than listed among the platform-supplied variables
@@ -89,18 +117,12 @@ final class DevProfileContractTest {
    * its own, so the resolver falls back to the SDK's provider chain -- which reads an operating-system
    * environment variable or a system property, neither of which a Spring property source can supply. Seeding
    * the framework property is what a deployment does when it pins a region, and it is the only form reachable
-   * from here. {@link #resolutionFailsWithoutARegion()} pins the coupling either way.
+   * from here. {@link #theRemoteImportLocationsNeedARegionThisServiceDoesNotDeclare()} pins the coupling
+   * either way: it reads the shipped documents to show this service declares no region of its own, and it
+   * shows that seeding one is sufficient for resolution to complete.
    */
   private static final Map<String, String> RESOLUTION_TIME_VALUES =
-      Map.of("spring.cloud.aws.region.static", "us-east-1");
-
-  /**
-   * The framework property a service would declare if it pinned its own region.
-   *
-   * <p>Assumptions: this service deliberately declares it NOWHERE, and the case below asserts that absence.
-   * The constant exists so the spelling asserted here is the spelling a future document would have to use.
-   */
-  private static final String REGION_PROPERTY = "spring.cloud.aws.region.static";
+      Map.of(REGION_PROPERTY, "us-east-1");
 
   /** The property whose list names the remote configuration locations a region is needed for. */
   private static final String CONFIG_IMPORT_PROPERTY = "spring.config.import";
@@ -371,17 +393,87 @@ final class DevProfileContractTest {
     //   declares the key too. The second reads like a real assertion and has no teeth at all -- verified
     //   by adding the property to application.yml and watching it still pass. The shipped documents are
     //   therefore read directly, which is the only form of this fact that can fail.
+    // WHY : Refactoring Rationale: the direct read stays, and what changed is WHAT is read out of it. This
+    //   was a text search for a bare `region:` line, which recognised exactly one of the five legal ways
+    //   the key can be written: the nested block form. `spring.cloud.aws.region.static: us-east-1` written
+    //   flat, `region: {static: us-east-1}` written inline, a quoted segment and an anchored alias all
+    //   passed it, so the case could report that no region is declared against a document declaring one.
+    //   Each document is now loaded by the framework's own YAML loader and its BOUND property names are
+    //   inspected, which collapses every spelling to one name before the assertion sees it.
     for (String document : SHIPPED_DOCUMENTS) {
-      assertThat(documentText(document))
+      final Set<String> declared = declaredPropertyNames(document, documentText(document));
+
+      assertThat(declared)
           .as("%s must declare NO region block: this service leaves the region to the platform, which is"
               + " precisely why the AWS provider chain is consulted and why a region-less deployment"
               + " fails with a message naming nothing of ours", document)
-          .doesNotContainPattern("(?m)^\\s*region:\\s*$");
+          .doesNotContain(REGION_PROPERTY);
+      assertThat(declared.stream().filter(name -> name.startsWith(REGION_PROPERTY_FAMILY)).toList())
+          .as("%s must declare no key at all under %s: an instance-profile source or a default-chain"
+              + " switch pins the region just as effectively as the static value, so the claim this case"
+              + " makes is only true if the whole family is absent", document, REGION_PROPERTY_FAMILY)
+          .isEmpty();
     }
 
     assertThatCode(() -> ProfileConfiguration.resolveWith(RESOLUTION_TIME_VALUES, DEV))
         .as("supplying the region is sufficient for resolution to complete")
         .doesNotThrowAnyException();
+  }
+
+  /**
+   * The absence check above reads every legal spelling of the region key, and the text search did not.
+   *
+   * <p>Purpose: hold the check that guards an ABSENCE to its own sensitivity. An absence assertion passes
+   * both when the key is genuinely undeclared and when the check cannot see the form it was written in, and
+   * those two outcomes are indistinguishable from the report. The only way to tell them apart is to feed the
+   * check documents that DO declare the key and require it to say so.
+   *
+   * <p>Refactoring Rationale: the withdrawn pattern is exercised here as well, on the flattened form, so the
+   * blind spot is recorded as a failing expression rather than as a claim in a comment. It matched a bare
+   * {@code region:} line only, which is one spelling out of five; the same defect returning would have to
+   * survive this case as well as review.
+   *
+   * <p>Assumptions: five spellings are covered because each is legal YAML that the framework binds to one
+   * name -- the flat dotted key, the fully nested block, the inline flow mapping, a quoted final segment and
+   * an anchored value reached through an alias. A sixth form is asserted NOT to declare it: a sibling key
+   * whose name merely starts with the same characters, which must not be read as the region key.
+   *
+   * <p>This case takes no parameter and returns no value.
+   */
+  @Test
+  @DisplayName("the region-absence check reads every legal spelling of the key alike")
+  void theRegionAbsenceCheckReadsEverySpellingAlike() {
+    assertThat(declaredPropertyNames("flattened.yml", "spring.cloud.aws.region.static: us-east-1\n"))
+        .as("a flat dotted key is the form a hand-written override most often takes")
+        .contains(REGION_PROPERTY);
+    assertThat(declaredPropertyNames(
+            "nested.yml", "spring:\n  cloud:\n    aws:\n      region:\n        static: us-east-1\n"))
+        .as("the fully nested block is the only form the withdrawn text search recognised")
+        .contains(REGION_PROPERTY);
+    assertThat(declaredPropertyNames(
+            "inline.yml", "spring:\n  cloud:\n    aws:\n      region: {static: us-east-1}\n"))
+        .as("an inline flow mapping keeps the key on the same line as its parent")
+        .contains(REGION_PROPERTY);
+    assertThat(declaredPropertyNames(
+            "quoted.yml", "spring:\n  cloud:\n    aws:\n      region:\n        \"static\": us-east-1\n"))
+        .as("a quoted segment binds to the same name as an unquoted one")
+        .contains(REGION_PROPERTY);
+    assertThat(declaredPropertyNames(
+            "aliased.yml",
+            "pinned: &pinned us-east-1\nspring:\n  cloud:\n    aws:\n      region:\n        static: *pinned\n"))
+        .as("an alias resolves to its anchor's value, so the key is declared as surely as if inlined")
+        .contains(REGION_PROPERTY);
+    assertThat(declaredPropertyNames("sibling.yml", "spring.cloud.aws.region.statics: us-east-1\n"))
+        .as("a name that merely starts with the key's characters is a different property")
+        .doesNotContain(REGION_PROPERTY);
+
+    // WHY : Refactoring Rationale: this is the withdrawn check, held to the input it could not see. It is
+    //   asserted here rather than described in prose because a comment claiming a check was blind cannot
+    //   fail if the check is ever reinstated, whereas this expression can.
+    assertThat("spring.cloud.aws.region.static: us-east-1")
+        .as("the withdrawn text search matched a bare block key only, so a flattened declaration was"
+            + " invisible to it and the absence it reported was its own blindness")
+        .doesNotContainPattern("(?m)^\\s*region:\\s*$");
   }
 
   /**
@@ -418,6 +510,53 @@ final class DevProfileContractTest {
         .hasValueSatisfying(name -> assertThat(name).doesNotContain(DEV_DOCUMENT));
     assertThat(dev.unresolvablePlaceholders())
         .containsEntry("server.ssl.key-store-password", "CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD");
+  }
+
+  /**
+   * Reads one configuration document's text as the property names the framework would bind from it.
+   *
+   * <p>Assumptions: the framework's own YAML loader does the parsing, so the names this returns are the names
+   * a running service would bind rather than names a bespoke walk happened to compose. A key's spelling in a
+   * document is not its bound name -- flat, nested, inline, quoted and aliased forms all bind to one name --
+   * so collapsing every spelling through the loader is what makes a single exact-key assertion sufficient.
+   *
+   * <p>Alternatives Considered: parsing with a plain YAML library and flattening the tree here. Rejected
+   * because the flattening convention IS the contract under test: the loader decides how a list index, a
+   * quoted segment and an empty mapping are named, and reimplementing that decision would make this method
+   * agree with the framework only by coincidence.
+   *
+   * <p>Alternatives Considered: keeping the text search this replaced. Rejected on measurement -- it reads
+   * one spelling out of five, and {@link #theRegionAbsenceCheckReadsEverySpellingAlike()} exercises the
+   * other four against it.
+   *
+   * @param documentName name the parsed source is reported under, used only in diagnostics, never
+   *     {@code null}
+   * @param yamlText the document's full text, never {@code null}
+   * @return every property name the document declares, in the loader's own order; empty when the document
+   *     declares nothing, never {@code null}
+   * @throws java.io.UncheckedIOException when the text cannot be loaded as YAML
+   */
+  private static Set<String> declaredPropertyNames(final String documentName, final String yamlText) {
+    final ByteArrayResource resource =
+        new ByteArrayResource(yamlText.getBytes(java.nio.charset.StandardCharsets.UTF_8), documentName);
+    final Set<String> names = new java.util.LinkedHashSet<>();
+    try {
+      /*
+       * Assumptions: the loader returns ONE property source per YAML document, so a file separated by
+       * `---` is read as several and every one of them is walked. Taking only the first would silently
+       * stop reading at the first separator, and a key declared in a later document would then be
+       * reported as absent -- the same class of false absence this method was written to remove.
+       */
+      for (final org.springframework.core.env.PropertySource<?> source :
+          new YamlPropertySourceLoader().load(documentName, resource)) {
+        if (source instanceof EnumerablePropertySource<?> enumerable) {
+          names.addAll(List.of(enumerable.getPropertyNames()));
+        }
+      }
+    } catch (java.io.IOException failure) {
+      throw new java.io.UncheckedIOException("could not parse " + documentName + " as YAML", failure);
+    }
+    return names;
   }
 
   /**

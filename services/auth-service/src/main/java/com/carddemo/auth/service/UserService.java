@@ -270,11 +270,17 @@ public class UserService {
      *
      * <p>Refactoring Rationale: the text is character-for-character the sentence
      * {@link com.carddemo.auth.dto.CreateUserRequest} publishes for a submitted identifier that is too
-     * long, and that is deliberate rather than incidental. A caller cannot be expected to distinguish "the
-     * value you sent is too long" from "the value you sent is eight characters and becomes sixteen when
-     * folded", and telling it two different things for one unusable value would be worse than telling it
-     * the one thing that is true of both: the identifier this operation can store is at most eight
-     * characters. The width is interpolated so the two sentences cannot come to state different numbers.
+     * long, and that is deliberate rather than incidental. One fault reported by two different sentences
+     * would make a client that matched on text handle the two entry points differently, where the caller's
+     * mistake -- an identifier too wide to store -- is the same at both. The width is interpolated so the
+     * two sentences cannot come to state different numbers.
+     *
+     * <p>Assumptions: this sentence no longer answers a folded EXPANSION, and the change is recorded
+     * because the paragraph above used to argue for the shared wording on exactly that case. The
+     * addressable domain admits only ASCII letters and digits, whose case fold is length-preserving, so a
+     * value that grows when folded is refused for its alphabet by {@link #MESSAGE_USER_ID_DOMAIN} before
+     * any width is measured. What reaches this sentence is a value that was simply too long to begin
+     * with.
      *
      * <p>Assumptions: it ends in an ellipsis with no space before it, like every other sentence this class
      * raises, because the shared advice carries a service's own sentence onto a response only when it
@@ -284,7 +290,7 @@ public class UserService {
             "User ID must be at most " + USER_ID_MAX_LENGTH + " characters...";
 
     /**
-     * The sentence reported when a canonical identifier falls outside the invariant character domain.
+     * The sentence reported when an identifier falls outside the addressable character domain.
      *
      * <p>Assumptions: authored, because the reference has no counterpart -- it validates the
      * identifier's characters nowhere, so there is no literal to carry across. It is worded as a
@@ -292,9 +298,38 @@ public class UserService {
      * reading it on a 3270-shaped screen learns the rule rather than only that they broke one, and it
      * quotes NOTHING of the submitted value: the identifier is a logon name and the message band is
      * rendered to a screen the reference shares between users.</p>
+     *
+     * <p>Refactoring Rationale: the sentence named the printable single-byte range while the published
+     * contract named an unsupported character, so the runtime and the document stated two different rules
+     * for one refusal and a client matching on text could match neither. It now states the ONE domain both
+     * artifacts publish -- letters and digits -- and the contract carries this literal character for
+     * character on the create body, the update path and the three single-user routes.</p>
      */
-    static final String MESSAGE_USER_ID_DOMAIN =
-            "User ID must be printable characters without spaces...";
+    static final String MESSAGE_USER_ID_DOMAIN = "User ID must be letters and digits only...";
+
+    /**
+     * The sentence reported when an opening position and a continuation cursor arrive together.
+     *
+     * <p>Assumptions: authored, because the reference cannot reach this state and so has no literal to
+     * carry across. Its browse reads the search field only on the ENTER turn -- {@code app/cbl/COUSR00C.cbl}
+     * lines 218 to 221 move either the typed value or {@code LOW-VALUES} into the seek field -- while a
+     * page turn positions from the key pair the program saved at lines 435 and 389. One 3270 turn is
+     * therefore either a seek or a page move and never both; one HTTP request can carry both because it
+     * has no turn.
+     *
+     * <p>Assumptions: worded in the idiom of the sibling ledger browse, which authored the same refusal
+     * for the same pair of inputs -- "Tran ID can NOT be combined with paging. Clear one and try
+     * again..." in {@code com.carddemo.transaction.service.TransactionListService} -- so one migration
+     * states one rule one way and a client written against either browse recognises the other. The
+     * capitalised "can NOT" is the reference's own, as in {@link #MESSAGE_USER_ID_REQUIRED}.
+     *
+     * <p>Assumptions: it names neither of the two values, only the two inputs, because the message band
+     * is rendered to a screen the reference shares between users and one of the two inputs is a logon
+     * name. It ends in an ellipsis with no space before it, which the shared advice's provenance gate
+     * requires before it will carry a service's own sentence onto a response.
+     */
+    static final String MESSAGE_START_USER_ID_AND_CURSOR =
+            "User ID can NOT be combined with paging. Clear one and try again...";
 
     /**
      * The sentence the reference writes when the submitted identifier already has a row.
@@ -445,6 +480,22 @@ public class UserService {
     /** The key an unopenable cursor refusal is attributed to. */
     private static final String FIELD_CURSOR = "cursor";
 
+    /**
+     * The key a refusal blamed on the opening browse position carries.
+     *
+     * <p>Assumptions: the name is {@code startUserId} and not {@code startKey}, because the value is an
+     * identifier a caller TYPES and not one of the sealed cursors this listing issues. The envelope's own
+     * {@code firstKey} and {@code lastKey} members are those cursors, so a request member named
+     * {@code ...Key} would invite a client to send one of them here -- and the committed contract already
+     * rejects a pair of parameters named after those two members for exactly that reason.</p>
+     *
+     * <p>Assumptions: the sentences a refusal on this field carries still say "User ID", because the
+     * value IS a user identifier and is held to the identifier domain unchanged. Only the FIELD key
+     * differs, which is what lets a form mark the search control the operator typed into rather than the
+     * identifier column of a row.</p>
+     */
+    private static final String FIELD_START_USER_ID = "startUserId";
+
     // WHY : Assumptions: each key below is the request-body or path property name that corresponds to the
     //       field the reference homed its cursor to beside the message, which is what makes the mapping
     //       auditable rather than chosen. The create chain homes to FNAMEL, LNAMEL, USERIDL and USRTYPEL at
@@ -460,22 +511,29 @@ public class UserService {
     private static final String FIELD_USER_ID = "userId";
 
     /**
-     * The character domain a canonical identifier is held to.
+     * The character domain an identifier is held to, in the case-insensitive form it is submitted in.
      *
-     * <p>Assumptions: the domain is the printable INVARIANT set with the space excluded -- code points
-     * 0x21 through 0x7E. Two properties make it the right boundary and both are argued at the point of
-     * use in {@link #canonicalKey(String)}: inside this set Java's root-locale fold and the engine's
-     * {@code upper()} agree under every collation, so the service's definition of the key and the
-     * column's guard cannot disagree; and the space is excluded because three reference programs render
-     * the identifier {@code DELIMITED BY SPACE}, so an interior blank makes the confirmed identifier
-     * differ from the stored one.</p>
+     * <p>Assumptions: the domain is the ASCII letters and digits, and the canonical key this class
+     * derives is therefore always drawn from {@code [A-Z0-9]}. ONE alphabet governs both forms: the fold
+     * changes case and nothing else, so a value admitted here and the key it folds to are the same
+     * characters in a different case. The derivation is argued at the point of use in
+     * {@link #canonicalKey(String)}; the domain itself is derived from the reference, where
+     * {@code SEC-USR-ID} is {@code PIC X(08)} at {@code app/cpy/CSUSR01Y.cpy} line 18 and all ten
+     * identifiers the seed security file carries -- {@code ADMIN001} through {@code USER0005} in
+     * {@code app/data/EBCDIC/AWS.M2.CARDDEMO.USRSEC.PS} -- draw on that alphabet alone.</p>
+     *
+     * <p>Assumptions: the pattern is applied to the TRIMMED SUBMITTED value rather than to the folded
+     * one, which is what lets the committed contract publish it as a facet a caller can evaluate before
+     * sending. A pattern applied after the fold could only be published as prose, because a caller cannot
+     * see the folded form of what it is about to send.</p>
      *
      * <p>Assumptions: the pattern is anchored by {@code matches} rather than by explicit anchors, and the
      * quantifier is left unbounded here because the WIDTH is a separate check with its own sentence. A
      * single pattern carrying both would report one failure for two distinct faults and could not say
-     * which.</p>
+     * which. The published facet DOES carry both bounds, because a JSON Schema pattern is unanchored and
+     * one expression is the only thing a generated client evaluates.</p>
      */
-    private static final Pattern CANONICAL_USER_ID = Pattern.compile("[\\x21-\\x7E]+");
+    private static final Pattern ADDRESSABLE_USER_ID = Pattern.compile("[A-Za-z0-9]+");
 
     /** The key a refusal blamed on the first name carries. */
     private static final String FIELD_FIRST_NAME = "firstName";
@@ -639,6 +697,23 @@ public class UserService {
      * read at line 289 and the mirrored backward read at line 343, each stepping past the cursor record
      * itself.
      *
+     * <p>Assumptions: the opening POSITION is the other way round -- INCLUSIVE, at or after the
+     * identifier supplied -- and the reference draws the same distinction with the same device. The
+     * forward read at line 289 is guarded at line 288 by
+     * {@code IF EIBAID NOT = DFHENTER AND DFHPF7 AND DFHPF3}, so on the ENTER turn, which is the turn
+     * that establishes a position, no stepping read happens and the fill loop at lines 300 to 306 puts
+     * the row the seek landed on at the TOP of the screen. An operator who types an identifier that
+     * exists sees that identifier first, which a strict comparison would not show them. A key no row
+     * carries positions on the next identifier after it, so the page is answered rather than refused:
+     * the reference's own not-found arm at line 600 sets end-of-file and writes a boundary sentence
+     * instead of a not-found one, which is coherent only if an unmatched key positions forward.
+     *
+     * <p>Assumptions: an opening position and a continuation cursor are mutually exclusive and sending
+     * both is refused rather than resolved, because the request alone cannot say which the caller meant
+     * and either choice would silently discard a stated intent. The reference cannot express the pair at
+     * all -- one turn is a seek or a page move -- so there is nothing to preserve, and the sibling ledger
+     * browse refuses the same combination.
+     *
      * <p>Assumptions: reaching an end of the file is a SUCCESS and never a failure, which is what the
      * reference's five boundary messages amount to. A page that lands on the last row returns with no
      * further page available; a move that could not happen at all returns the boundary page. Neither is
@@ -646,25 +721,39 @@ public class UserService {
      * client composes them from the envelope, which is where every user-visible string of this migration
      * lives.
      *
-     * <p>Assumptions: those five sentences fall into TWO classes and the client needs both, which is why
-     * the envelope reports each direction's availability rather than a single exhausted flag. Two are
-     * GUARDS, written when the caller asked to move past a boundary already known to have been reached,
-     * without touching the file; three are ARRIVALS, written when the browse itself struck a boundary while
-     * walking. All five are distinct strings and are carried separately by whatever renders them, and every
-     * one accompanied a rendered screen rather than an abend, so every one is a success here. The five
-     * originating line numbers are listed in {@code docs/architecture/cobol-to-service-traceability.md}.
+     * <p>Assumptions: those five sentences fall into TWO classes and the client needs both, and the
+     * envelope carries only what the server alone can know. Two are GUARDS, written when the caller asked
+     * to move past a boundary already known to have been reached, without touching the file; three are
+     * ARRIVALS, written when the browse itself struck a boundary while walking. All five are distinct
+     * strings and are carried separately by whatever renders them, and every one accompanied a rendered
+     * screen rather than an abend, so every one is a success here. The five originating line numbers are
+     * listed in {@code docs/architecture/cobol-to-service-traceability.md}.
+     *
+     * <p>⚠️ Assumptions: the envelope therefore reports FORWARD availability only -- {@code hasNext} --
+     * and not a per-direction pair, because a backward boundary is not a fact about the store. The
+     * reference does not read backwards to discover one either: it refuses a backward step by comparing
+     * its own page counter, at {@code app/cbl/COUSR00C.cbl} line 248, so backward availability is the
+     * caller's ordinal and belongs to the caller. A second envelope member would have to be computed by
+     * an extra read whose answer the client already holds.
      *
      * <p>Assumptions: a cursor naming a row that has since been deleted is repositioned rather than
      * refused, and the reference behaves the same way. Its start-browse arm at line 600 keys on the
      * not-found response specifically -- the response for a key that is not there -- and still writes a
      * sentence and sends the screen. A strict inequality against a key no row carries positions the window
      * at the next surviving key in the direction asked for, so the caller receives a page rather than a
-     * refusal, and an opening sentinel that no row can match returns the first page rather than nothing.
+     * refusal. The same holds of an opening position naming a row that never existed or has since gone:
+     * the inclusive comparison positions at the next identifier and the page is answered, and an opening
+     * request with no position at all reads from the start of the set with no comparison to make.
      *
      * <p>Assumptions: one row more than a page is read, and the surplus is what settles whether a
      * further page follows. That is the reference's own device -- it discovered a further row rather
      * than counting the file -- and it is why the query limit is the page size plus one.
      *
+     * @param startUserId the identifier to open the browse AT OR AFTER, as the caller typed it, or
+     *     {@code null} or blank to open at the start of the set -- which is what the reference's blank
+     *     search field means, tested at line 218 and seeding its seek with {@code LOW-VALUES} at line
+     *     219; held to the same character domain and width as a stored identifier, and refused alongside
+     *     a cursor
      * @param cursor the sealed position to continue from, or {@code null} for the opening page
      * @param direction {@code previous} to read backwards, or {@code null} or {@code next} to read
      *     forwards; meaningful only alongside a cursor
@@ -674,7 +763,9 @@ public class UserService {
      *     cursors and the forward availability indicator; never {@code null}
      * @throws NullPointerException if {@code subject} is {@code null}
      * @throws ClientInputException if the supplied cursor cannot be opened -- malformed, altered,
-     *     expired, or issued for a different query, subject or direction -- carrying the cursor's own key
+     *     expired, or issued for a different query, subject or direction -- carrying the cursor's own
+     *     key; if the opening position falls outside the identifier domain or the stored width, carrying
+     *     that parameter's key; or if a position and a cursor arrive together, carrying both keys
      * @throws IllegalStateException if the store could not be read, carrying the reference sentence for a
      *     failed lookup
      */
@@ -696,9 +787,49 @@ public class UserService {
     //       not a rule about users -- so removing it changes how many requests run at once and changes no
     //       request's answer.
     @Transactional(readOnly = true)
-    public PageResponse<UserSummary> list(String cursor, String direction, String subject) {
+    public PageResponse<UserSummary> list(String startUserId, String cursor, String direction,
+            String subject) {
 
         Objects.requireNonNull(subject, "subject must not be null");
+
+        // WHY : Assumptions: a BLANK opening position is absence and not a value, which is the reference's
+        //       own reading of its search field: app/cbl/COUSR00C.cbl tests USRIDINI for SPACES or
+        //       LOW-VALUES at line 218 and seeds the seek with LOW-VALUES at line 219 when it holds
+        //       neither -- the start of the file. So a blank is not put through the identifier domain,
+        //       where it would be refused as an empty submission, and an operator who clears the field
+        //       returns to the first page exactly as they did on the terminal.
+        boolean positionSupplied = startUserId != null && !startUserId.isBlank();
+        boolean cursorSupplied = cursor != null && !cursor.isBlank();
+
+        // WHY : Assumptions: the pair is refused on PRESENCE, before either value is validated or opened,
+        //       because the fault is that two positions were stated and neither value's own soundness
+        //       changes that. Validating first would answer a request carrying both with a complaint
+        //       about one of them, which invites a client to correct the input it should have dropped.
+        // WHY : Assumptions: BOTH members are named rather than one, matching the sibling ledger browse
+        //       that authored this refusal for the same pair. The whole content of the refusal is that
+        //       two inputs disagree and the request cannot say which the caller meant, so naming one
+        //       would ask a client to correct a field that may be the one it should keep. The position is
+        //       named first, which is the order the adapter declares the two parameters in and the order
+        //       the shared advice therefore treats as the declared check order. The state is the
+        //       not-acceptable-value one rather than the blank one, because both members carry values and
+        //       a blank state would draw the reference's asterisk against a populated control.
+        if (positionSupplied && cursorSupplied) {
+            LOG.info("event=auth.user.rejected reason=position-and-cursor field={}",
+                    FIELD_START_USER_ID);
+            throw new ClientInputException(ApiError.CODE_VALIDATION,
+                    List.of(FIELD_START_USER_ID, FIELD_CURSOR),
+                    FieldValidationFlag.NOT_OK, MESSAGE_START_USER_ID_AND_CURSOR);
+        }
+
+        // WHY : Assumptions: the position is held to the identifier domain unchanged rather than to a
+        //       looser one of its own. It is compared against the stored key, so a value the column could
+        //       never hold cannot name a row and admitting it would only defer the disagreement to the
+        //       comparison -- where a value of the wrong width would silently position by blank padding.
+        //       The fold is what makes a lower-case entry find the row an operator can see, since the
+        //       column stores the folded form.
+        String position = positionSupplied
+                ? canonicalKey(startUserId, FIELD_START_USER_ID)
+                : null;
 
         boolean requestedBackward = DIRECTION_PREVIOUS.equals(direction);
         String binding = cursorBinding(subject, requestedBackward);
@@ -706,7 +837,7 @@ public class UserService {
         // WHY : Assumptions: a direction supplied WITHOUT a cursor is not refused here, and the contract
         //       says why: the direction defaults to forward and "with no cursor supplied returns the
         //       first page".
-        String cursorKey = cursor == null || cursor.isBlank() ? null : openCursor(binding, cursor);
+        String cursorKey = cursorSupplied ? openCursor(binding, cursor) : null;
 
         // WHY : Refactoring Rationale: a cursorless request is CANONICALISED to the first ascending page,
         //       whichever direction it named, and the previous arrangement is what makes this necessary
@@ -732,7 +863,7 @@ public class UserService {
         boolean backward = requestedBackward && cursorKey != null;
 
         List<User> window = cursorKey == null
-                ? readOpeningWindow()
+                ? readOpeningWindow(position)
                 : readWindow(cursorKey, backward);
 
         return page(window, backward, subject);
@@ -988,8 +1119,19 @@ public class UserService {
             //       nor this schema can answer with it -- the pool holds it only as a verifier and
             //       auth.users has no column for it -- so the value returned here is the same object the
             //       provider call was made with, and this response is the last point at which it exists.
+            // WHY : Assumptions: the credential is taken from the provisioning result rather than being
+            //       re-derived or re-read, because there is nowhere to re-read it FROM. Neither the pool
+            //       nor this schema can answer with it -- the pool holds it only as a verifier and
+            //       auth.users has no column for it -- so the value returned here is the same object the
+            //       provider call was made with, and this response is the last point at which it exists.
+            // WHY : Assumptions: BOTH the credential and its archive locator are carried through. They
+            //       are not alternatives: the value is what the administrator holding this response
+            //       hands over, and the locator is what an operator whose response was lost -- a closed
+            //       tab, a dropped connection after this commit -- recovers it from, with the secret
+            //       store's own audit trail behind that recovery. Returning one without the other
+            //       reinstates one of the two failure modes this create path has already shipped.
             return CreatedUserResponse.of(this.mapper.toResponse(candidate),
-                    identity.credentialSecretName());
+                    identity.credentialSecretName(), identity.oneTimeCredential());
 
             // WHY : Assumptions: the integrity violation is caught SEPARATELY from other store failures
             //       because it is the race the probe above cannot close, and its answer is a conflict
@@ -1578,33 +1720,39 @@ public class UserService {
     }
 
     /**
-     * The value that orders below every stored identifier, opening a forward page.
+     * Reads one row more than a page from the start of the set, or from a stated position, ascending.
      *
-     * <p>Assumptions: the empty string is used rather than a null, because the repository's forward query
-     * takes a strict inequality and a null would make the predicate unknown for every row -- returning
-     * nothing where the whole point is to return the first page. The reference achieves the same with low
-     * values in a fixed-width field.
-     */
-    private static final String FORWARD_OPENING_SENTINEL = "";
-
-    /**
-     * Reads one row more than a page from the start of the set, ascending.
+     * <p>Purpose: this is the ENTER turn of the reference browse, whose two branches at
+     * {@code app/cbl/COUSR00C.cbl} lines 218 to 222 are exactly the two arms below -- open at the start
+     * of the file, or open at the identifier the operator typed.
      *
-     * <p>Refactoring Rationale: the opening page is read by a query with NO position predicate rather
-     * than by seeking above a low sentinel, and the difference is not cosmetic. A sentinel is only correct
-     * while nothing stored can collide with it or sort below it, which is an assumption about the
+     * <p>Refactoring Rationale: the unpositioned page is read by a query with NO position predicate
+     * rather than by seeking above a low sentinel, and the difference is not cosmetic. A sentinel is only
+     * correct while nothing stored can collide with it or sort below it, which is an assumption about the
      * identifier domain that the column does not enforce; an unpositioned read carries no such
-     * assumption. The forward sentinel that remains is the empty string, used only where the repository's
-     * strict-inequality predicate needs a value, and its own declaration records why a null cannot serve.
+     * assumption. The sentinel this class used to hold for that purpose is withdrawn with the last
+     * caller that needed it -- it had already stopped having one, and a constant no caller reads is a
+     * statement about the code that nothing keeps true.
      *
+     * <p>Assumptions: the positioned arm compares INCLUSIVELY, which is why it is a different repository
+     * member from the one the forward cursor uses rather than the same one with a different value. The
+     * cursor's member compares strictly because a page turn must not repeat the row it came from; this
+     * one must return the row whose identifier was typed, because that is the row the reference puts at
+     * the top of the screen.
+     *
+     * @param position the identifier to open at or after, or {@code null} to open at the start of the
+     *     set; when supplied it is the canonical folded form, since it is compared against the stored key
      * @return the first page's rows plus at most one surplus row, ascending by identifier, never
-     *     {@code null}
+     *     {@code null}, and empty when the position lies past every stored identifier
      * @throws IllegalStateException if the read fails, carrying the reference sentence for a failed
      *     lookup
      */
-    private List<User> readOpeningWindow() {
+    private List<User> readOpeningWindow(String position) {
         try {
-            return this.users.findAllByOrderByUserIdAsc(Limit.of(PAGE_SIZE + 1));
+            Limit limit = Limit.of(PAGE_SIZE + 1);
+            return position == null
+                    ? this.users.findAllByOrderByUserIdAsc(limit)
+                    : this.users.findByUserIdGreaterThanEqualOrderByUserIdAsc(position, limit);
         } catch (DataAccessException unreadable) {
             throw unableTo(MESSAGE_UNABLE_TO_LOOKUP,
                     "list-" + unreadable.getClass().getSimpleName());
@@ -2082,15 +2230,32 @@ public class UserService {
      * alone. Deriving a key that the storage column cannot hold, and discovering that only after the
      * identity provider has been called, is the defect recorded on the width check below.
      *
+     * <p>Assumptions: the character domain the trimmed value is held to is the ASCII letters and digits,
+     * and the key this method returns is therefore always a legal single URI path segment. That is what
+     * makes it addressable: the three single-user routes carry the key in the path and the create
+     * response's location header names it, so a key that had to be percent-encoded to be spoken -- or
+     * that could contain a slash, a question mark, a hash, a percent or a backslash -- would be a key
+     * some of those requests could not reliably reach. The column-level counterpart is
+     * {@code ck_users_user_id_addressable} in {@code V8__auth_addressable_user_id.sql}, which asserts the
+     * same alphabet for a writer that bypasses this class.
+     *
+     * <p>Assumptions: the FIELD a refusal is attributed to is a parameter rather than a constant, because
+     * one identifier domain is submitted through two different inputs: the row's own identifier, on the
+     * create body and the three single-user paths, and the browse's opening position. The sentences are
+     * the same at both, since the fault is the same, but the key must differ so a form marks the control
+     * the operator actually filled in.</p>
+     *
      * @param submitted the identifier as the caller supplied it; must not be {@code null}
-     * @return the canonical key the primary key stores -- folded, trimmed, within the declared width and
-     *     inside the invariant character domain -- never {@code null}
-     * @throws ClientInputException naming {@code userId} when the canonical value is empty, wider than
-     *     the column, or outside the invariant character domain
+     * @param field the request member a refusal is attributed to, one of {@link #FIELD_USER_ID} or
+     *     {@link #FIELD_START_USER_ID}; must not be {@code null}
+     * @return the canonical key the primary key stores -- trimmed, folded, inside the addressable
+     *     character domain and within the declared width -- never {@code null}
+     * @throws ClientInputException naming {@code field} when the trimmed value is empty, outside the
+     *     addressable character domain, or wider than the column
      */
-    private String canonicalKey(String submitted) {
+    private String canonicalKey(String submitted, String field) {
 
-        String canonical = submitted.trim().toUpperCase(Locale.ROOT);
+        String canonical = submitted.trim();
 
         // WHY : Assumptions: the EMPTY result is refused with the reference's own absence sentence and
         //       the blank marker, not with the domain sentence below. A submission of nothing but
@@ -2101,57 +2266,87 @@ public class UserService {
         //       primitive reproduces the reference's SPACES-or-LOW-VALUES comparison exactly, and a tab
         //       equals neither.
         if (canonical.isEmpty()) {
-            LOG.info("event=auth.user.rejected reason=user-id-blank-after-trim field={}", FIELD_USER_ID);
-            throw new ClientInputException(ApiError.CODE_VALIDATION, FIELD_USER_ID,
+            LOG.info("event=auth.user.rejected reason=user-id-blank-after-trim field={}", field);
+            throw new ClientInputException(ApiError.CODE_VALIDATION, field,
                     FieldValidationFlag.BLANK, MESSAGE_USER_ID_REQUIRED);
         }
 
-        // WHY : ⚠️ Refactoring Rationale: the width is re-checked HERE, on the canonical value, and it
-        //       used to be checked only on the submitted one. That was a genuine defect rather than a
-        //       redundancy: the record and the path variable both bound the SUBMITTED value at eight
-        //       characters, and Java's upper-case mapping can EXPAND -- the sharp s folds to two
-        //       characters, so an admitted eight-character submission can canonicalise to sixteen. The
-        //       expanded value was then probed for, sent to the identity provider, and only refused by
-        //       the CHAR(8) column afterwards; the compensation that unwound the provider account
-        //       reported the integrity failure as a duplicate-key conflict, so a caller was told an
-        //       identifier already existed when nothing of the sort had happened. Checking the canonical
-        //       width before the first side effect is what makes the refusal truthful and free.
-        if (canonical.length() > USER_ID_MAX_LENGTH) {
-            LOG.info("event=auth.user.rejected reason=user-id-expanded-past-width field={} width={}",
-                    FIELD_USER_ID, canonical.length());
-            throw new ClientInputException(ApiError.CODE_VALIDATION, FIELD_USER_ID,
-                    FieldValidationFlag.NOT_OK, MESSAGE_USER_ID_TOO_LONG);
-        }
-
-        // WHY : ⚠️ Assumptions: the canonical value is additionally held to the INVARIANT character
-        //       domain, and this is a NARROWING of the reference stated as one. The reference validates
-        //       the identifier's characters nowhere -- COUSR01C L142 and COUSR02C L204 test only for
-        //       absence -- so it would store any byte a terminal could send. Two independent facts make
-        //       the narrowing necessary rather than tidy. First, the fold has to mean the same thing in
-        //       two places: Java folds under the root locale while the column's guard folds through the
-        //       engine's upper(), which is collation-dependent, and the two are only guaranteed to agree
-        //       inside the invariant set -- outside it a value can satisfy one definition and violate
-        //       the other, which is the single-definition property the guard exists to provide. Second,
-        //       a blank INSIDE the identifier makes it unusable as one in the reference itself: three
-        //       programs render it with STRING ... DELIMITED BY SPACE -- COUSR01C L256, COUSR02C L373
-        //       and COUSR03C L319 -- so the user-visible confirmation truncates at the blank and names a
-        //       different identifier than the one stored.
-        //       Alternatives Considered: restricting to the letters and digits the committed extract
-        //       actually uses. Every one of the ten identifiers in
-        //       app/data/EBCDIC/AWS.M2.CARDDEMO.USRSEC.PS draws on [A-Z0-9] alone, so that domain would
-        //       fit the oracle exactly -- and it was rejected as narrower than necessary: it would
-        //       refuse punctuation the reference terminal can send and the two fold definitions already
-        //       agree on, which is a behavioural loss this correction has no reason to take.
-        //       Trade-offs: the divergence is registered as D-USER-ID-CANONICAL-DOMAIN, and it is a
-        //       refusal the reference does not make. It is accepted because the values it refuses are
-        //       exactly those for which "the row this key names" has no single answer.
-        if (!CANONICAL_USER_ID.matcher(canonical).matches()) {
-            LOG.info("event=auth.user.rejected reason=user-id-domain field={}", FIELD_USER_ID);
-            throw new ClientInputException(ApiError.CODE_VALIDATION, FIELD_USER_ID,
+        // WHY : ⚠️ Assumptions: the trimmed value is held to the ADDRESSABLE character domain -- the
+        //       ASCII letters and digits -- and this is a NARROWING of the reference stated as one. The
+        //       reference validates the identifier's characters nowhere: COUSR01C L142 and COUSR02C L204
+        //       test only for absence, so it would store any byte a terminal could send.
+        //       ⚠️ Refactoring Rationale: this check admitted the whole printable single-byte range
+        //       0x21-0x7E, which is where the addressability defect lived. That range contains the slash,
+        //       question mark, hash, percent and backslash, and the key it produced is spoken in a URI
+        //       PATH SEGMENT on three routes -- get, put and delete on /{userId} -- and named in the
+        //       create response's location header. An identifier of A/B was accepted, stored and then
+        //       unreachable: the slash made it two segments, so the read matched no route; a percent
+        //       began an escape the container decoded before this class ever saw it; and a hash was never
+        //       transmitted at all. The narrowing removes the whole class rather than escaping around it,
+        //       because a key that needs escaping to be spoken is a key two encoders have to agree about.
+        //       Alternatives Considered: keeping the wide domain and percent-encoding the segment on the
+        //       way out while decoding it on the way in. Rejected: it makes every identifier's spelling
+        //       depend on a codec at both ends, it cannot recover the hash at all, and it leaves the
+        //       stored value ambiguous whenever a caller sends an already-encoded form. Also considered:
+        //       an opaque surrogate selector in the path with the identifier in the body. Rejected as a
+        //       larger interface change for a value the reference's own extract never needs -- and it
+        //       would have hidden the identifier a 3270 operator reads off the screen.
+        //       Trade-offs: two properties the wide domain was chosen for still hold, and one is given
+        //       up. The fold still means one thing in two places -- Java folds under the root locale
+        //       while the column's guard folds through the engine's upper(), and inside this alphabet
+        //       both are the ASCII case fold -- and an interior blank is still refused, which matters
+        //       because three programs render the identifier with STRING ... DELIMITED BY SPACE at
+        //       COUSR01C L256, COUSR02C L373 and COUSR03C L319, so a blank would truncate the confirmed
+        //       identifier. What is given up is punctuation the reference terminal could send; every one
+        //       of the ten identifiers in app/data/EBCDIC/AWS.M2.CARDDEMO.USRSEC.PS is [A-Z0-9] alone,
+        //       so the oracle loses nothing. The divergence is registered as
+        //       D-USER-ID-CANONICAL-DOMAIN.
+        if (!ADDRESSABLE_USER_ID.matcher(canonical).matches()) {
+            LOG.info("event=auth.user.rejected reason=user-id-domain field={}", field);
+            throw new ClientInputException(ApiError.CODE_VALIDATION, field,
                     FieldValidationFlag.NOT_OK, MESSAGE_USER_ID_DOMAIN);
         }
 
+        canonical = canonical.toUpperCase(Locale.ROOT);
+
+        // WHY : Assumptions: the width is checked on the FOLDED value, after the domain check, and the
+        //       two numbers are the same one -- inside the admitted alphabet the ASCII case fold is
+        //       length-preserving, so a trimmed value of eight characters folds to eight. It is measured
+        //       here rather than on the submitted value because the column stores this string, and an
+        //       invariant about what is stored is best asserted against what is stored.
+        //       ⚠️ Refactoring Rationale: the width used to be checked BEFORE the domain, for a reason
+        //       the domain narrowing has since removed. Java's upper-case mapping can EXPAND -- the sharp
+        //       s folds to two capital S -- so an admitted eight-character submission could canonicalise
+        //       to sixteen, be probed for, be provisioned in the pool and only then be refused by the
+        //       CHAR(8) column, with the compensation reporting the integrity failure as a duplicate key
+        //       so the caller was told an identifier already existed when nothing of the sort had
+        //       happened. Every value that could expand is now outside the alphabet and is refused by the
+        //       check above, which is why the sharp-s submission answers the domain sentence rather than
+        //       the width one: its alphabet is the accurate fault, and its width never was.
+        if (canonical.length() > USER_ID_MAX_LENGTH) {
+            LOG.info("event=auth.user.rejected reason=user-id-past-width field={} width={}",
+                    field, canonical.length());
+            throw new ClientInputException(ApiError.CODE_VALIDATION, field,
+                    FieldValidationFlag.NOT_OK, MESSAGE_USER_ID_TOO_LONG);
+        }
+
         return canonical;
+    }
+
+    /**
+     * Derives the canonical key of an identifier submitted as the identifier of a row.
+     *
+     * <p>Purpose: this is {@link #canonicalKey(String, String)} for the three places that submit the
+     * row's OWN identifier -- the create body and the update and delete paths -- so those call sites do
+     * not each repeat which field a refusal belongs to.</p>
+     *
+     * @param submitted the identifier as the caller supplied it; must not be {@code null}
+     * @return the canonical key the primary key stores; never {@code null}
+     * @throws ClientInputException naming {@code userId} when the trimmed value is empty, outside the
+     *     addressable character domain, or wider than the column
+     */
+    private String canonicalKey(String submitted) {
+        return canonicalKey(submitted, FIELD_USER_ID);
     }
 
     /**

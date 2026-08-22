@@ -730,10 +730,23 @@ baseline features, not as gaps.
   so the Java half needs no scheduled action inside any plausible horizon for this
   work. Spring Boot carries no long-term-support designation of that kind: its
   minor line advances on a roughly six-month cadence and each minor carries a
-  stated minimum of twelve months of open-source support from its own release, so
-  the pinned 4.1.0 — a June 2026 release — leaves open-source support around the
+  stated minimum of **thirteen** months of open-source support from its own release,
+  so the pinned 4.1.0 — a June 2026 release — leaves open-source support around the
   middle of 2027, and a minor upgrade is a recurring obligation rather than a
-  one-off. Staying put past that point is possible only under a paid extended
+  one-off.
+  ⚠️ Refactoring Rationale: this read **twelve** months. The figure the vendor's own
+  support policy publishes is thirteen, and the extra month is not arbitrary — it exists
+  so the whole portfolio can align its open-source support on one date rather than
+  expiring module by module. Assumptions: the twelve-month figure is not invented, which
+  is why it is worth naming rather than silently replacing: the project wiki still
+  carries "at least 12 months", so a reader who checks the wiki rather than the policy
+  page will find the old number and think this record wrong. The policy page is the
+  authority and thirteen is the figure, and the discrepancy is recorded here so the next
+  reader who meets it knows which source governs. The conclusion the paragraph draws is
+  unchanged — one extra month does not turn a recurring obligation into a one-off — which
+  is precisely why the correction is worth making rather than waving through: an
+  inaccuracy that changes no conclusion is the kind that survives review.
+  Staying put past that point is possible only under a paid extended
   support arrangement, so the standing choice is an upgrade cadence or a
   subscription and not a third option. Two consequences follow and belong to
   whoever operates the system. A minor upgrade must be treated as a first-class

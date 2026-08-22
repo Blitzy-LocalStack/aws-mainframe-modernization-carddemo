@@ -363,6 +363,42 @@ const BLANK_VALUES: TransactionAddValues = {
 /** Matches a run of ASCII digits and nothing else, used for the COBOL numeric class test. */
 const DIGITS_ONLY = /^[0-9]+$/u;
 
+/**
+ * Matches one character the free-text fields may NOT carry, for stripping as an operator keys.
+ *
+ * Assumptions: the admitted domain is printable US-ASCII, code points `0x20` to `0x7E` inclusive, and
+ * this expression is its complement so that a filter can be written as one replacement. It is the same
+ * domain the service publishes as the `^[\x20-\x7E]*$` pattern on `TransactionSource`,
+ * `TransactionDescription`, `MerchantName`, `MerchantCity` and `MerchantZip` in
+ * `services/transaction-service/src/main/resources/openapi/transaction-api.yaml`, so the control admits
+ * exactly what the operation admits.
+ *
+ * Assumptions: the domain is derived from the migration's own fixed-width codecs rather than chosen.
+ * Anything above `0x7E` cannot be encoded US-ASCII, so it is stored and then refused by a later batch or
+ * reporting run; anything below `0x20`, and `0x7F`, encodes cleanly and is copied verbatim into the
+ * plain-text statement's 80-column bands and the transaction report's 133-column records, where a
+ * carriage return or line feed becomes a second record no reader can tell from a real one. The space is
+ * inside the domain, which these fields need: the reference's own source value is `POS TERM`.
+ */
+const NON_PRINTABLE_TEXT = /[^\x20-\x7E]/gu;
+
+/**
+ * The fields whose characters an operator authors freely, and which are therefore filtered.
+ *
+ * Assumptions: these five are the screen's `PIC X` fields with no other composition rule. Every other
+ * editable field already has one -- the two keys, the type, category and merchant identifier are numeric,
+ * the amount carries the edited picture, the two dates carry the `YYYY-MM-DD` mask and the confirmation
+ * is a single letter -- so a filter on those would be a second authority on a value one rule already
+ * decides.
+ */
+const FREE_TEXT_FIELDS: readonly TransactionAddField[] = [
+  'source',
+  'description',
+  'merchantName',
+  'merchantCity',
+  'merchantZip',
+];
+
 /** Matches a monetary amount the service may return: an optional sign, integral digits and two decimals. */
 const SERVICE_MONEY = /^-?[0-9]+\.[0-9]{2}$/u;
 
@@ -419,6 +455,31 @@ export function isNumericField(value: string, declaredWidth: number): boolean {
  */
 export function isBlankField(value: string): boolean {
   return value.trim() === '';
+}
+
+/**
+ * Drops every character a free-text field may not carry, leaving printable US-ASCII.
+ *
+ * Assumptions: this mirrors what the terminal did PHYSICALLY. `TRNSRC` at `app/bms/COTRN02.bms` L148 and
+ * its four siblings are unprotected 3270 fields on a single-byte code page, so a keyboard could not
+ * transmit a control character or a supplementary code point into them at all -- an operator pressing a
+ * key the field could not hold simply saw nothing appear. A browser input accepts anything, so the
+ * equivalent of "nothing appears" is to strip it here.
+ *
+ * Trade-offs: an inadmissible character is DROPPED rather than reported, which is deliberate and is the
+ * same treatment the control already gives an over-long paste: `maxLength` truncates it silently. The
+ * alternative -- accepting the character and marking the field -- was rejected because it teaches the
+ * operator nothing the terminal would have taught them and defers a refusal they can see immediately to
+ * a round trip. The service refuses the same domain regardless, so a value that reaches it another way
+ * still draws a field-level refusal; this only makes the control agree with the operation.
+ *
+ * Assumptions: only the five free-text fields are routed through this. A digit, date or amount field has
+ * its own composition rule, and filtering those here would put two authorities on one value.
+ * @param {string} edited - Characters the control now holds, as the operator keyed or pasted them.
+ * @returns {string} The same characters with every code point outside `0x20` to `0x7E` removed.
+ */
+export function retainPrintableText(edited: string): string {
+  return edited.replace(NON_PRINTABLE_TEXT, '');
 }
 
 /**
@@ -955,6 +1016,14 @@ export function buildCopyRequest(
  * Assumptions: each input is applied independently and an absent one suppresses nothing else. A preview
  * whose amount the screen's mask cannot express leaves the amount as it stands rather than blanking it, and
  * an ordinary capture's preview carries no copied record at all.
+ *
+ * Assumptions: the copied text is painted VERBATIM and is NOT put through `retainPrintableText`, unlike a
+ * value the operator keys. The two cases differ in what a change would mean: filtering a keystroke
+ * reproduces what the terminal did to a key it could not transmit, whereas filtering a STORED value would
+ * silently show the operator a record that differs from the row they asked to copy. The service refuses
+ * such a row by name -- its copy path applies the same domain to a capture assembled in-process -- so the
+ * turn answers with a field-level refusal this screen already renders, and the operator sees which field
+ * to re-key rather than an altered value they did not author.
  * @param {TransactionAddValues} previous - Values as they stand, whose untouched fields survive.
  * @param {CopiedTransactionData | null} copied - The ten values the service read from the stored row,
  *   or `null` on a turn that copied nothing.
@@ -2095,7 +2164,18 @@ export function TransactionAddScreen(): ReactElement {
      * @returns {void} Completion is represented by the screen's own state.
      */
     return (event: ChangeEvent<HTMLInputElement>): void => {
-      const edited = event.target.value;
+      /*
+       * WHY : Assumptions: a free-text field's characters are filtered on the way IN, and only that
+       *       field's are. The five fields this covers are the ones whose characters an operator authors
+       *       with no other composition rule, and the terminal enforced their domain physically -- a
+       *       single-byte 3270 keyboard could not transmit a control character or a supplementary code
+       *       point into them. Filtering here is that same "nothing appears", and it is done at the
+       *       handler rather than at submission so the operator learns at the control instead of from a
+       *       400. `retainPrintableText` carries the derivation of the domain.
+       */
+      const edited = FREE_TEXT_FIELDS.includes(field)
+        ? retainPrintableText(event.target.value)
+        : event.target.value;
       /*
        * WHY : Assumptions: editing either KEY field discards the resolved pair, and only a key field does.
        *       The pair states what the service resolved FROM those two values, so once one of them changes

@@ -162,8 +162,29 @@ class UserServiceTest {
     //   on the floor again. The credential text is a literal rather than a generated draw, because a
     //   substituted collaborator is not the generator and a per-run value would make the comparison
     //   unreproducible from the source.
-    private static final ProvisionedIdentity PROVISIONED =
-            new ProvisionedIdentity(SUBJECT_MINTED, "Aa1!aaaaaaaaaaaaaaaaaaaa");
+    /**
+     * The name of the archive entry every substituted provisioning call reports.
+     *
+     * <p>Assumptions: the shape mirrors the real derivation -- a configured prefix, the fixed infix and
+     * a truncated digest of the identifier -- so a case asserting the published locator is not passing
+     * on a string the service could never produce.</p>
+     */
+    private static final String PROVISIONED_SECRET_NAME =
+            "carddemo/dev/auth/runtime-user/9f2c4a7b1e6d05384c9a1b2d3e4f5061";
+
+    /** The one-time credential every substituted provisioning call reports. */
+    private static final String PROVISIONED_CREDENTIAL = "Aa1!aaaaaaaaaaaaaaaaaaaa";
+
+    // Assumptions: one shared provisioned identity, carrying ALL THREE components the provisioning
+    //   collaborator answers with -- the subject the row binds to, the name of the entry the credential
+    //   was archived to, and the one-time credential itself. Stating it once here rather than per case
+    //   is what makes the create assertions below able to compare the credential the service returns
+    //   against the credential provisioning supplied, which is the property that would regress silently
+    //   if the service dropped the value on the floor again. The credential text is a literal rather
+    //   than a generated draw, because a substituted collaborator is not the generator and a per-run
+    //   value would make the comparison unreproducible from the source.
+    private static final ProvisionedIdentity PROVISIONED = new ProvisionedIdentity(
+            SUBJECT_MINTED, PROVISIONED_SECRET_NAME, PROVISIONED_CREDENTIAL);
 
     private UserRepository users;
 
@@ -514,10 +535,18 @@ class UserServiceTest {
      * ever been written -- and a provider account had been created and withdrawn along the way.</p>
      *
      * <p>⚠️ Assumptions: the value source is chosen so that every case is admitted by the record and
-     * refused by the service. Four sharp characters submit as four and canonicalise to eight, which is at
-     * the bound and must be ADMITTED -- so that case is deliberately absent from this source and covered
-     * by the case below; five submit as five and canonicalise to ten, which is the narrowest failing case
-     * and the one an off-by-one width check would let through.</p>
+     * refused by the service. Each value is at most eight characters, so the record's own bound passes it,
+     * and each one EXPANDS under the fold -- five sharp characters submit as five and canonicalise to ten
+     * -- which is the shape that used to reach the storage column.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the sentence asserted below is the DOMAIN one where it used to be
+     * the width one, and that change is the point of the case rather than an incidental edit. Every value
+     * that can expand under the root-locale fold lies outside the addressable alphabet, because the ASCII
+     * letters and digits fold one-to-one; so the domain check refuses these values first and the width is
+     * never measured. The case is kept rather than deleted because the class of input is real and must
+     * still be refused before any side effect -- what changed is which rule catches it and therefore which
+     * sentence the caller is told, and a case still asserting the width sentence would be asserting a path
+     * no input can reach.</p>
      *
      * <p>⚠️ Assumptions: the two stores are asserted to have NO interaction, which is the whole substance
      * of the correction. The refusal existed before, at the column; what did not exist was a refusal that
@@ -526,8 +555,8 @@ class UserServiceTest {
      *
      * @param submitted an identifier of at most eight characters whose canonical form is wider, supplied
      *     by the value source
-     * @throws ClientInputException always, raised by the service's canonical width check and captured by
-     *     the assertion below
+     * @throws ClientInputException always, raised by the service's domain check and captured by the
+     *     assertion below
      */
     @ParameterizedTest
     @ValueSource(strings = {"\u00df\u00df\u00df\u00df\u00df", "A\u00df\u00df\u00df\u00df",
@@ -539,13 +568,13 @@ class UserServiceTest {
                         + "asserting the record rather than the service")
                 .isLessThanOrEqualTo(8);
         assertThat(submitted.toUpperCase(java.util.Locale.ROOT).length())
-                .as("and must expand past it, which is the condition the service now detects")
+                .as("and must expand past it, which is the condition that made the value unstorable")
                 .isGreaterThan(8);
 
         assertThatThrownBy(() -> service.create(
                         new CreateUserRequest("Ada", "Lovelace", submitted, "A")))
                 .isInstanceOf(ClientInputException.class)
-                .hasMessage("User ID must be at most 8 characters...")
+                .hasMessage("User ID must be letters and digits only...")
                 .extracting(raised -> ((ClientInputException) raised).field())
                 .as("the refusal names the identifier, so a caller rendering the baseline's screen "
                         + "homes the cursor to the field that was wrong")
@@ -558,11 +587,24 @@ class UserServiceTest {
     /**
      * An identifier whose canonical form lands exactly ON the width bound is admitted.
      *
-     * <p>Assumptions: this case exists so the width check cannot be satisfied by refusing everything that
-     * folds to a different length. Four sharp characters submit as four and canonicalise to eight, which
-     * is the declared width of {@code SEC-USR-ID PIC X(08)} -- so the value is storable and must be
-     * stored. A check written with {@code >=} rather than {@code >} would refuse it, which is the
-     * off-by-one an assertion on failing inputs alone cannot detect.</p>
+     * <p>Assumptions: this case exists so the width check cannot be satisfied by refusing everything at
+     * the bound. Eight characters is the declared width of {@code SEC-USR-ID PIC X(08)} at
+     * {@code app/cpy/CSUSR01Y.cpy} L18, so a value of exactly eight is storable and must be stored. A
+     * check written with {@code >=} rather than {@code >} would refuse it, which is the off-by-one an
+     * assertion on failing inputs alone cannot detect.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the value used to be four sharp-s characters, submitted as four and
+     * folding to eight capital S, chosen so that one case covered the bound AND the fold's ability to
+     * expand. Both halves have moved. The addressable domain admits ASCII letters and digits only, so the
+     * sharp s is now refused for its alphabet, and inside the admitted alphabet the fold is
+     * length-preserving -- which means the submitted length and the canonical length are the same number
+     * and eight of the admitted characters is the whole of the on-the-bound case. The expansion the old
+     * value probed for cannot occur, and the case that pins the refusal of a value which WOULD have
+     * expanded is the domain case below.</p>
+     *
+     * <p>Assumptions: the value is submitted in lower case so this case still covers the fold as well as
+     * the bound -- the provider is reached with the upper-case form, which is what the row is keyed
+     * under.</p>
      *
      * <p>Assumptions: the provider IS reached in this case, and that is the property asserted rather than
      * the returned row. Reaching the provider is what distinguishes "admitted" from "refused later"; a
@@ -574,28 +616,32 @@ class UserServiceTest {
     @Test
     @DisplayName("an identifier whose canonical form is exactly eight characters is admitted")
     void anIdentifierCanonicalisingToExactlyTheWidthIsAdmitted() {
-        String submitted = "\u00df\u00df\u00df\u00df";
+        String submitted = "user0042";
         assertThat(submitted.toUpperCase(java.util.Locale.ROOT))
                 .as("the canonical form is at the bound, not past it")
                 .hasSize(8)
-                .isEqualTo("SSSSSSSS");
+                .isEqualTo("USER0042");
 
-        when(provisioning.provision("SSSSSSSS", "Ada", "Lovelace", "A")).thenReturn(PROVISIONED);
+        when(provisioning.provision("USER0042", "Ada", "Lovelace", "A")).thenReturn(PROVISIONED);
 
         service.create(new CreateUserRequest("Ada", "Lovelace", submitted, "A"));
 
-        verify(provisioning).provision("SSSSSSSS", "Ada", "Lovelace", "A");
+        verify(provisioning).provision("USER0042", "Ada", "Lovelace", "A");
     }
 
     /**
      * An identifier carrying a character outside the invariant domain is refused before any side effect.
      *
-     * <p>⚠️ Purpose: the domain check is what makes the service's definition of the key and the column's
-     * guard the SAME definition, and it is asserted here from the service side. The two folds -- Java's
-     * root locale and the engine's {@code upper()} -- agree only inside the invariant set, so a value
-     * outside it can satisfy one and violate the other; and a blank inside the identifier makes it
-     * unusable as one in the reference itself, which renders it {@code DELIMITED BY SPACE} at
-     * {@code app/cbl/COUSR01C.cbl} L256, {@code COUSR02C.cbl} L373 and {@code COUSR03C.cbl} L319.</p>
+     * <p>⚠️ Purpose: the domain check is what makes the stored key ADDRESSABLE, and it is asserted here
+     * from the service side. The key is spoken in a URI path segment on the read, update and delete routes
+     * and returned in the created row's location header, so a character with a meaning in a URI makes the
+     * row unreachable rather than merely awkward: a slash splits the segment, a percent opens an escape the
+     * container decodes first, a hash is never transmitted, and a question mark opens a query. The check
+     * carries two further obligations it already had: the two folds -- Java's root locale and the engine's
+     * {@code upper()} -- agree only inside the invariant set, so a value outside it can satisfy one guard
+     * and violate the other; and a blank inside the identifier makes it unusable as one in the reference
+     * itself, which renders it {@code DELIMITED BY SPACE} at {@code app/cbl/COUSR01C.cbl} L256,
+     * {@code COUSR02C.cbl} L373 and {@code COUSR03C.cbl} L319.</p>
      *
      * <p>⚠️ Assumptions: this is a NARROWING of the reference, which validates the identifier's characters
      * nowhere, and it is registered as {@code D-USER-ID-CANONICAL-DOMAIN}. The committed extract
@@ -608,19 +654,29 @@ class UserServiceTest {
      * asterisk marker for the blank state only. A supplied-but-inadmissible identifier is not an unfilled
      * field.</p>
      *
-     * @param submitted an identifier carrying one character outside the invariant printable domain,
-     *     supplied by the value source
+     * <p>⚠️ Assumptions: the value source names the five characters that make a path segment mean
+     * something else -- the slash, the question mark, the hash, the percent and the backslash -- beside
+     * the three shapes the earlier printable-range check already refused. The five were ADMITTED until
+     * the domain was narrowed, which is the defect this case is the service-side half of; the repository
+     * integration case asserts the column guard's half. The sharp-s value is here for a second reason:
+     * it is the value that used to be refused for its WIDTH, because its fold expands, and it is now
+     * refused for its alphabet before any width is measured.</p>
+     *
+     * @param submitted an identifier carrying one character outside the addressable domain, supplied by
+     *     the value source
      * @throws ClientInputException always, raised by the service's domain check and captured by the
      *     assertion below
      */
     @ParameterizedTest
-    @ValueSource(strings = {"US ER01", "USER\t01", "\u00c4SER001", "USER\u00a001"})
-    @DisplayName("an identifier outside the invariant character domain is refused before any side effect")
+    @ValueSource(strings = {"US ER01", "USER\t01", "\u00c4SER001", "USER\u00a001",
+            "US/ER01", "US?ER01", "US#ER01", "US%ER01", "US\\ER01", "USER.01", "..",
+            "\u00df\u00df\u00df\u00df"})
+    @DisplayName("an identifier outside the addressable character domain is refused before any side effect")
     void anIdentifierOutsideTheInvariantDomainIsRefused(String submitted) {
         assertThatThrownBy(() -> service.create(
                         new CreateUserRequest("Ada", "Lovelace", submitted, "A")))
                 .isInstanceOf(ClientInputException.class)
-                .hasMessage("User ID must be printable characters without spaces...")
+                .hasMessage("User ID must be letters and digits only...")
                 .extracting(raised -> ((ClientInputException) raised).state())
                 .as("a supplied-but-inadmissible identifier is a refused value, not an unfilled field")
                 .isEqualTo(FieldValidationFlag.NOT_OK);
@@ -681,7 +737,8 @@ class UserServiceTest {
         UUID subject = UUID.fromString("11111111-2222-3333-4444-555555555555");
         when(users.existsById("USER0042")).thenReturn(false);
         when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
-                .thenReturn(new ProvisionedIdentity(subject, PROVISIONED.credentialSecretName()));
+                .thenReturn(new ProvisionedIdentity(subject, PROVISIONED.credentialSecretName(),
+                        PROVISIONED.oneTimeCredential()));
         when(users.insertUser(any(), any(), any(), any(), any())).thenReturn(1);
 
         CreatedUserResponse created = service.create(
@@ -702,6 +759,112 @@ class UserServiceTest {
         InOrder ordered = inOrder(provisioning, users);
         ordered.verify(provisioning).provision("USER0042", "Ada", "Lovelace", "A");
         ordered.verify(users).insertUser(any(), any(), any(), any(), any());
+    }
+
+    /**
+     * Asserts no line this service logs during a create carries the one-time credential.
+     *
+     * <p>⚠️ Purpose: this is a different property from the identifier absence asserted further down and
+     * needs its own case. An identifier in a log line is a privacy problem; a credential in a log line is
+     * a live authentication factor sitting in whatever aggregates the logs, for as long as that retains
+     * anything, when its intended lifetime is one sign-on.</p>
+     *
+     * <p>Assumptions: the appender is attached to this service's own logger at {@code TRACE}, so a
+     * statement added later at any level is covered without this case being revisited, and the level is
+     * restored in a {@code finally} because the logger is a process-wide singleton.</p>
+     *
+     * <p>Assumptions: both the message and every argument are inspected. An argument carrying the value is
+     * a leak even when the pattern that consumed it happens to drop it, because a later edit to the
+     * pattern turns a latent leak into an emitted one with nothing to catch it.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("no logged line carries the one-time credential a create returns")
+    void noLoggedLineCarriesTheOneTimeCredential() {
+        Logger serviceLogger = (Logger) LoggerFactory.getLogger(UserService.class);
+        ListAppender<ILoggingEvent> captured = new ListAppender<>();
+        captured.start();
+        serviceLogger.addAppender(captured);
+        Level restored = serviceLogger.getLevel();
+        serviceLogger.setLevel(Level.TRACE);
+        try {
+            when(users.existsById("USER0042")).thenReturn(false);
+            when(provisioning.provision("USER0042", "Ada", "Lovelace", "A")).thenReturn(PROVISIONED);
+            when(users.insertUser(any(), any(), any(), any(), any())).thenReturn(1);
+
+            CreatedUserResponse created = service.create(
+                    new CreateUserRequest("Ada", "Lovelace", "USER0042", "A"));
+            assertThat(created.oneTimeCredential()).isEqualTo(PROVISIONED_CREDENTIAL);
+
+            assertThat(captured.list)
+                    .as("the create must have logged, or the absence below proves nothing")
+                    .isNotEmpty();
+            for (ILoggingEvent event : captured.list) {
+                assertThat(event.getFormattedMessage())
+                        .as("a rendered line carrying the credential outlives its one intended use for"
+                                + " the whole log retention period")
+                        .doesNotContain(PROVISIONED_CREDENTIAL);
+                if (event.getArgumentArray() != null) {
+                    for (Object argument : event.getArgumentArray()) {
+                        assertThat(String.valueOf(argument))
+                                .as("an argument carrying the credential is a leak even when the"
+                                        + " pattern that consumed it happens to drop it")
+                                .doesNotContain(PROVISIONED_CREDENTIAL);
+                    }
+                }
+            }
+        } finally {
+            serviceLogger.setLevel(restored);
+            serviceLogger.detachAppender(captured);
+        }
+    }
+
+    /**
+     * Asserts the created body carries the provisioning result's own credential and locator, unaltered.
+     *
+     * <p>⚠️ Purpose: the credential exists in exactly one place after a create -- the response -- because
+     * this schema has no column for it and no operation re-issues it. So the only thing standing between
+     * a working account and an unreachable one is that this service passes THROUGH what provisioning
+     * returned. Two shipped revisions failed at precisely this seam: the first returned the read
+     * projection and dropped the value, the second returned only the archive locator, which a browser
+     * session cannot read.</p>
+     *
+     * <p>Assumptions: the assertions are EQUALITIES against the provisioning result's own components
+     * rather than non-blank checks. A non-blank check passes against any value at all, including a value
+     * derived here or read back from somewhere else, and a derived credential signs nobody on -- which is
+     * the same outcome as no credential, reached invisibly.</p>
+     *
+     * <p>Assumptions: the diagnostic rendering is asserted to withhold both, even though the record
+     * carries them. A value returned once to one caller is bounded; the same value in a log line is
+     * retained by whatever aggregates the logs, and a record logged as {@code {}} renders every
+     * component, so the overridden rendering is the only thing between the two.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("a create returns the provisioned credential and its locator, and renders neither")
+    void aCreateReturnsTheProvisionedCredentialAndItsLocator() {
+        when(users.existsById("USER0042")).thenReturn(false);
+        when(provisioning.provision("USER0042", "Ada", "Lovelace", "A")).thenReturn(PROVISIONED);
+        when(users.insertUser(any(), any(), any(), any(), any())).thenReturn(1);
+
+        CreatedUserResponse created = service.create(
+                new CreateUserRequest("Ada", "Lovelace", "USER0042", "A"));
+
+        assertThat(created.oneTimeCredential())
+                .as("the caller must receive the credential the pool account was created with; any"
+                        + " other value leaves an account nobody can sign on to")
+                .isEqualTo(PROVISIONED_CREDENTIAL);
+        assertThat(created.credentialSecretName())
+                .as("the archive locator must be carried too, because a response is delivered once and"
+                        + " an operator who loses it has no other recovery")
+                .isEqualTo(PROVISIONED_SECRET_NAME);
+        assertThat(created.toString())
+                .as("neither the credential nor its locator may be reachable through the body's own"
+                        + " diagnostic rendering")
+                .doesNotContain(PROVISIONED_CREDENTIAL)
+                .doesNotContain(PROVISIONED_SECRET_NAME);
     }
 
     /**
@@ -940,11 +1103,20 @@ class UserServiceTest {
     }
 
     /**
-     * Asserts an identifier whose folded form outgrows the key column is refused before either store.
+     * Asserts an identifier wider than the key column is refused before either store is touched.
      *
-     * <p>The submitted value is eight characters of the German sharp s, which the root locale folds to
-     * sixteen characters of capital S. It therefore satisfies every constraint declared on the request
-     * body -- it is non-blank and eight characters long -- and cannot be stored in a CHAR(8) key.</p>
+     * <p>The submitted value is nine characters of the admitted alphabet. It reaches the service because
+     * the request record's width constraint is evaluated at the adapter and this case calls the service
+     * directly, which is the entry point a non-HTTP caller uses, so the derivation has to hold the bound
+     * itself.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the value used to be eight characters of the German sharp s, chosen
+     * because the root locale folds it to sixteen characters of capital S -- a submission the record's
+     * width constraint admitted and the CHAR(8) column could not hold. That input no longer reaches the
+     * width check: the addressable domain admits ASCII letters and digits only, so the sharp s is refused
+     * for its alphabet first, and the domain case above asserts it there. Inside the admitted alphabet the
+     * fold is length-preserving, so the only way past this bound is to submit a value that was too wide to
+     * begin with, which is what the value below is.</p>
      *
      * <p>This case takes no parameter and yields no value.</p>
      *
@@ -952,17 +1124,16 @@ class UserServiceTest {
      *     the assertion below
      */
     @Test
-    @DisplayName("an identifier that folds past the key width is refused before anything is provisioned")
+    @DisplayName("an identifier wider than the key column is refused before anything is provisioned")
     void anIdentifierThatFoldsPastTheKeyWidthIsRefused() {
-        // Refactoring Rationale: this case exists because case folding is NOT length-preserving and
-        //   nothing checked the length of what the fold produced. The request record's width constraint
-        //   measures the SUBMITTED value while the column stores the FOLDED one, so this body passed the
-        //   coarse gate, passed the ordered chain, folded to sixteen characters, PROVISIONED a pool
-        //   account under that sixteen-character username, and was then refused by the insert -- and
-        //   reported to the caller as "User ID already exist..." because one arm answered every integrity
-        //   violation. The three assertions below pin the three steps that must not be reached.
+        // Refactoring Rationale: this case exists because nothing measured the width of the value the
+        //   column would actually store. A body that passed the coarse gate and the ordered chain was
+        //   probed for, PROVISIONED a pool account under a username the column could not hold, and was
+        //   then refused by the insert -- and reported to the caller as "User ID already exist..." because
+        //   one arm answered every integrity violation. The three assertions below pin the three steps
+        //   that must not be reached.
         assertThatThrownBy(() -> service.create(
-                        new CreateUserRequest("Ada", "Lovelace", "ßßßßßßßß", "A")))
+                        new CreateUserRequest("Ada", "Lovelace", "USER00042", "A")))
                 .isInstanceOf(ClientInputException.class)
                 .hasMessage("User ID must be at most 8 characters...");
 
@@ -975,12 +1146,17 @@ class UserServiceTest {
     }
 
     /**
-     * Asserts the refusal of an over-long folded identifier is attributed to the identifier and rejected.
+     * Asserts the refusal of an over-wide identifier is attributed to the identifier and marked rejected.
+     *
+     * <p>Refactoring Rationale: the value is nine characters of the admitted alphabet where it used to be
+     * eight sharp-s characters, for the reason recorded on the case above: a value whose fold expands is
+     * now refused for its alphabet, so the width branch is reached only by a value that was already too
+     * wide.</p>
      *
      * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
-    @DisplayName("the over-long folded identifier is attributed to the identifier as a rejected value")
+    @DisplayName("the over-wide identifier is attributed to the identifier as a rejected value")
     void theOverLongFoldedIdentifierIsAttributedToTheIdentifier() {
         // Assumptions: the flag is the supplied-and-rejected one rather than the blank one, and the
         //   published contract turns that distinction into presentation -- a caller rendering the
@@ -988,7 +1164,7 @@ class UserServiceTest {
         //   caller did supply something. The absent-identifier case beside it asserts the other flag, so
         //   the two together pin that the derivation reports its two refusals differently.
         assertThatThrownBy(() -> service.create(
-                        new CreateUserRequest("Ada", "Lovelace", "ßßßßßßßß", "A")))
+                        new CreateUserRequest("Ada", "Lovelace", "USER00042", "A")))
                 .isInstanceOf(ClientInputException.class)
                 .satisfies(raised -> {
                     ClientInputException refusal = (ClientInputException) raised;
@@ -1038,7 +1214,11 @@ class UserServiceTest {
     }
 
     /**
-     * Asserts a read whose folded identifier cannot be a key is refused rather than reported absent.
+     * Asserts a read whose identifier cannot be a key is refused rather than reported absent.
+     *
+     * <p>Refactoring Rationale: the value is nine characters of the admitted alphabet where it used to be
+     * eight sharp-s characters, for the reason recorded two cases above: a value whose fold expands is now
+     * refused for its alphabet before any width is measured.</p>
      *
      * <p>This case takes no parameter and yields no value.</p>
      *
@@ -1046,13 +1226,13 @@ class UserServiceTest {
      *     the assertion below
      */
     @Test
-    @DisplayName("a read of an identifier that folds past the key width is refused, not reported absent")
+    @DisplayName("a read of an identifier wider than the key is refused, not reported absent")
     void aReadOfAnIdentifierThatFoldsPastTheKeyWidthIsRefused() {
         // Refactoring Rationale: this path used to fold and read with whatever came out, so a folded form
         //   wider than the column matched no row and the read answered the reference's not-found sentence
         //   with a 404. That answer asserts a well-formed identifier had no row, and invites a caller to
         //   look for something the schema cannot hold; no row can ever carry this value.
-        assertThatThrownBy(() -> service.read("ßßßßßßßß"))
+        assertThatThrownBy(() -> service.read("USER00042"))
                 .isInstanceOf(ClientInputException.class)
                 .hasMessage("User ID must be at most 8 characters...");
 
@@ -2200,7 +2380,7 @@ class UserServiceTest {
         when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(rows(PAGE_SIZE + 1));
 
-        PageResponse<UserSummary> page = service.list(null, null, SUBJECT);
+        PageResponse<UserSummary> page = service.list(null, null, null, SUBJECT);
 
         // Assumptions: ten rows to a page and eleven read, both taken from the reference. Its screen
         //   holds ten, declared at app/cbl/COUSR00C.cbl line 57, and it discovers a further page by
@@ -2229,7 +2409,7 @@ class UserServiceTest {
         when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(rows(4));
 
-        PageResponse<UserSummary> page = service.list(null, null, SUBJECT);
+        PageResponse<UserSummary> page = service.list(null, null, null, SUBJECT);
 
         // Assumptions: BOTH cursors are derived from the rows actually returned, and on a partial page
         //   that is a documented divergence rather than an incidental detail. The reference wrote its
@@ -2258,7 +2438,7 @@ class UserServiceTest {
         when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(List.of());
 
-        PageResponse<UserSummary> page = service.list(null, null, SUBJECT);
+        PageResponse<UserSummary> page = service.list(null, null, null, SUBJECT);
 
         // Assumptions: a page with no rows has no boundary to name, so both cursors are absent rather
         //   than carried over from anywhere. Reaching the end of the walk is a successful read of an
@@ -2281,12 +2461,12 @@ class UserServiceTest {
         when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(rows(PAGE_SIZE + 1));
 
-        PageResponse<UserSummary> first = service.list(null, null, SUBJECT);
+        PageResponse<UserSummary> first = service.list(null, null, null, SUBJECT);
 
         when(users.findByUserIdGreaterThanOrderByUserIdAsc(eq("USER0010"), any(Limit.class)))
                 .thenReturn(rows(11, 3));
 
-        PageResponse<UserSummary> second = service.list(first.lastKey(), "next", SUBJECT);
+        PageResponse<UserSummary> second = service.list(null, first.lastKey(), "next", SUBJECT);
 
         // Alternatives Considered: positioning a page by counting rows to skip rather than by naming the
         //   key to resume after. Rejected because a count is measured against a range that other requests
@@ -2312,12 +2492,12 @@ class UserServiceTest {
         when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(rows(PAGE_SIZE + 1));
 
-        PageResponse<UserSummary> first = service.list(null, null, SUBJECT);
+        PageResponse<UserSummary> first = service.list(null, null, null, SUBJECT);
 
         when(users.findByUserIdLessThanOrderByUserIdDesc(eq("USER0001"), any(Limit.class)))
                 .thenReturn(descending(rows(1, 3)));
 
-        PageResponse<UserSummary> back = service.list(first.firstKey(), "previous", SUBJECT);
+        PageResponse<UserSummary> back = service.list(null, first.firstKey(), "previous", SUBJECT);
 
         // Assumptions: the backward query must return DESCENDING and the ordering into display order is
         //   the service's own work, because a key-bounded window that reads backwards can only bound
@@ -2342,12 +2522,12 @@ class UserServiceTest {
         when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(rows(PAGE_SIZE + 1));
 
-        PageResponse<UserSummary> first = service.list(null, null, SUBJECT);
+        PageResponse<UserSummary> first = service.list(null, null, null, SUBJECT);
 
         when(users.findByUserIdLessThanOrderByUserIdDesc(eq("USER0001"), any(Limit.class)))
                 .thenReturn(descending(rows(1, 2)));
 
-        PageResponse<UserSummary> back = service.list(first.firstKey(), "previous", SUBJECT);
+        PageResponse<UserSummary> back = service.list(null, first.firstKey(), "previous", SUBJECT);
 
         // Assumptions: the envelope reports forward availability only, and there is no backward
         //   counterpart to report -- the reference has no previous-page indicator anywhere. Its paging
@@ -2372,7 +2552,7 @@ class UserServiceTest {
         when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(rows(PAGE_SIZE + 1));
 
-        PageResponse<UserSummary> first = service.list(null, null, SUBJECT);
+        PageResponse<UserSummary> first = service.list(null, null, null, SUBJECT);
 
         // Assumptions: no page ordinal reaches a query on any path, which is why one opaque position
         //   parameter is as safe as two named ones. The reference carries an ordinal -- an eight-digit
@@ -2381,9 +2561,9 @@ class UserServiceTest {
         //   app/cpy-bms/COUSR00.CPY line 60 -- but it uses it to LABEL the page and to gate its
         //   backward guard, never to locate a record. It has no target counterpart, so a caller cannot
         //   ask for a page by number and no arithmetic on a number can position a read.
-        assertThatThrownBy(() -> service.list(first.lastKey(), "previous", SUBJECT))
+        assertThatThrownBy(() -> service.list(null, first.lastKey(), "previous", SUBJECT))
                 .isInstanceOf(ClientInputException.class);
-        assertThatThrownBy(() -> service.list(first.firstKey(), "next", SUBJECT))
+        assertThatThrownBy(() -> service.list(null, first.firstKey(), "next", SUBJECT))
                 .isInstanceOf(ClientInputException.class);
     }
 
@@ -2401,9 +2581,9 @@ class UserServiceTest {
         when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(rows(PAGE_SIZE + 1));
 
-        PageResponse<UserSummary> first = service.list(null, null, SUBJECT);
+        PageResponse<UserSummary> first = service.list(null, null, null, SUBJECT);
 
-        assertThatThrownBy(() -> service.list(first.lastKey(), "next", "operator-2"))
+        assertThatThrownBy(() -> service.list(null, first.lastKey(), "next", "operator-2"))
                 .isInstanceOf(ClientInputException.class)
                 .extracting(raised -> ((ClientInputException) raised).field())
                 .as("a refused position is attributed to the position parameter, which is the sixth and"
@@ -2422,7 +2602,7 @@ class UserServiceTest {
         when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(rows(PAGE_SIZE + 1));
 
-        PageResponse<UserSummary> first = service.list(null, null, SUBJECT);
+        PageResponse<UserSummary> first = service.list(null, null, null, SUBJECT);
 
         when(users.findByUserIdGreaterThanOrderByUserIdAsc(eq("USER0010"), any(Limit.class)))
                 .thenReturn(List.of());
@@ -2433,7 +2613,7 @@ class UserServiceTest {
         //   given is absent, at app/cbl/COUSR00C.cbl line 600, is keyed on the NOT-FOUND response and it
         //   still writes a sentence at line 603 and renders a screen at line 606 rather than abending.
         //   A row deleted between two page requests therefore costs the caller nothing.
-        PageResponse<UserSummary> after = service.list(first.lastKey(), "next", SUBJECT);
+        PageResponse<UserSummary> after = service.list(null, first.lastKey(), "next", SUBJECT);
 
         assertThat(after.items()).isEmpty();
         assertThat(after.hasNext()).isFalse();
@@ -2458,7 +2638,7 @@ class UserServiceTest {
         //   reverse walk at line 678 -- each attributing it to the identifier field at lines 612, 646
         //   and 680. All three collapse onto one target query pair, so one sentence answers for all
         //   three arms and there is nothing to keep apart.
-        assertThatThrownBy(() -> service.list(null, null, SUBJECT))
+        assertThatThrownBy(() -> service.list(null, null, null, SUBJECT))
                 .isExactlyInstanceOf(IllegalStateException.class)
                 .hasMessage("Unable to lookup User...");
     }
@@ -2477,7 +2657,7 @@ class UserServiceTest {
         when(users.findByUserIdLessThanOrderByUserIdDesc(any(String.class), any(Limit.class)))
                 .thenReturn(descending(rows(3)));
 
-        PageResponse<UserSummary> page = service.list(null, "previous", SUBJECT);
+        PageResponse<UserSummary> page = service.list(null, null, "previous", SUBJECT);
 
         // Assumptions: a direction supplied without a position is not refused, and the published contract
         //   is what settles it -- the position is optional and its absence means the first page. The
@@ -2486,6 +2666,201 @@ class UserServiceTest {
         //   than failing.
         assertThat(page.items()).extracting(UserSummary::userId)
                 .containsExactly("USER0001", "USER0002", "USER0003");
+    }
+
+    /**
+     * Asserts an opening position reads the inclusive at-or-after window and returns the row named.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("an opening position reads at-or-after the identifier and shows it first")
+    void anOpeningPositionReadsAtOrAfterTheIdentifier() {
+        when(users.findByUserIdGreaterThanEqualOrderByUserIdAsc(eq("USER0005"), any(Limit.class)))
+                .thenReturn(rows(5, 3));
+
+        PageResponse<UserSummary> page = service.list("USER0005", null, null, SUBJECT);
+
+        // Assumptions: the row NAMED is the first row of the page, which is the reference's own
+        //   behaviour and the reason this read uses the inclusive query rather than the forward
+        //   cursor's strict one. app/cbl/COUSR00C.cbl seeks on the typed identifier at line 221 and
+        //   then SKIPS its stepping read: the guard at line 288 excludes the enter key, so the fill
+        //   loop at lines 300 to 306 starts at the row the seek landed on. A strict comparison would
+        //   have hidden the very identifier the operator typed.
+        assertThat(page.items()).extracting(UserSummary::userId)
+                .containsExactly("USER0005", "USER0006", "USER0007");
+        verify(users, never()).findAllByOrderByUserIdAsc(any(Limit.class));
+        verify(users, never())
+                .findByUserIdGreaterThanOrderByUserIdAsc(any(String.class), any(Limit.class));
+    }
+
+    /**
+     * Asserts an opening position beyond every stored identifier is an empty success, not an error.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("an opening position past every identifier answers an empty page")
+    void anOpeningPositionPastEveryIdentifierAnswersAnEmptyPage() {
+        when(users.findByUserIdGreaterThanEqualOrderByUserIdAsc(eq("ZZZZZZZZ"), any(Limit.class)))
+                .thenReturn(List.of());
+
+        PageResponse<UserSummary> page = service.list("ZZZZZZZZ", null, null, SUBJECT);
+
+        // Assumptions: seeking past the end of the set is a SUCCESS with nothing in it, matching the
+        //   reference's own arm for a seek it could not satisfy: app/cbl/COUSR00C.cbl line 600 keys on
+        //   the not-found response, sets its end indicator and writes a boundary sentence at line 603
+        //   rather than reporting a row that was not found.
+        assertThat(page.items()).isEmpty();
+        assertThat(page.hasNext()).isFalse();
+        assertThat(page.firstKey()).isNull();
+        assertThat(page.lastKey()).isNull();
+    }
+
+    /**
+     * Asserts an opening position is trimmed and folded before it is compared with the stored key.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("an opening position is folded, so lower case positions at the same row")
+    void anOpeningPositionIsFolded() {
+        when(users.findByUserIdGreaterThanEqualOrderByUserIdAsc(eq("USER0003"), any(Limit.class)))
+                .thenReturn(rows(3, 2));
+
+        PageResponse<UserSummary> page = service.list("  user0003 ", null, null, SUBJECT);
+
+        // Assumptions: the fold and the trim are the same ones the stored key is derived with, because
+        //   this value is compared against that key. An operator typing the identifier in lower case
+        //   reaches the row they can see on the screen, and a value arriving blank-padded -- which a
+        //   fixed-width field produces -- positions at the same place as the unpadded one.
+        assertThat(page.items()).extracting(UserSummary::userId)
+                .containsExactly("USER0003", "USER0004");
+    }
+
+    /**
+     * Asserts a blank opening position is absence and opens the browse at the start of the set.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("a blank opening position opens the browse at the start of the set")
+    void aBlankOpeningPositionOpensAtTheStart() {
+        when(users.findAllByOrderByUserIdAsc(any(Limit.class))).thenReturn(rows(3));
+
+        PageResponse<UserSummary> empty = service.list("", null, null, SUBJECT);
+        PageResponse<UserSummary> blanks = service.list("   ", null, null, SUBJECT);
+
+        // Assumptions: a blank is ABSENCE and not a value to validate, which is the reference's own
+        //   reading: app/cbl/COUSR00C.cbl tests the search field for SPACES or LOW-VALUES at line 218
+        //   and seeds the seek with LOW-VALUES at line 219 -- the start of the file. Putting a blank
+        //   through the identifier domain instead would refuse it as an empty submission, so an
+        //   operator who cleared the field would be told to fill it in rather than returned to the
+        //   first page.
+        assertThat(empty.items()).hasSize(3);
+        assertThat(blanks.items()).hasSize(3);
+        verify(users, never())
+                .findByUserIdGreaterThanEqualOrderByUserIdAsc(any(String.class), any(Limit.class));
+    }
+
+    /**
+     * Asserts an opening position and a cursor together are refused, naming both parameters.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     *
+     * @throws ClientInputException always, raised by the service when a request states two positions;
+     *     captured by the assertion below
+     */
+    @Test
+    @DisplayName("an opening position sent with a cursor is refused naming both parameters")
+    void anOpeningPositionWithACursorIsRefused() {
+        when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
+                .thenReturn(rows(PAGE_SIZE + 1));
+
+        PageResponse<UserSummary> first = service.list(null, null, null, SUBJECT);
+
+        ClientInputException raised = (ClientInputException) org.assertj.core.api.Assertions
+                .catchThrowable(() -> service.list("USER0005", first.lastKey(), "next", SUBJECT));
+
+        // Assumptions: BOTH parameters are named, because the whole content of the refusal is that two
+        //   of them disagree and the request cannot say which the caller meant -- naming one would ask
+        //   a client to correct the input it should have kept. The reference cannot reach this state at
+        //   all: one turn reads the search field (lines 218 to 222) or moves by the saved key pair
+        //   (lines 435 and 389), never both.
+        assertThat(raised).isNotNull();
+        assertThat(raised.fields()).containsExactly("startUserId", "cursor");
+        assertThat(raised.getMessage())
+                .isEqualTo("User ID can NOT be combined with paging. Clear one and try again...");
+
+        // Assumptions: the refusal happens before either value is read, so no query runs. Positioning
+        //   or paging in spite of the disagreement would silently discard one of the two stated
+        //   intents.
+        verify(users, never())
+                .findByUserIdGreaterThanEqualOrderByUserIdAsc(any(String.class), any(Limit.class));
+        verify(users, never())
+                .findByUserIdGreaterThanOrderByUserIdAsc(any(String.class), any(Limit.class));
+    }
+
+    /**
+     * Asserts an opening position outside the identifier domain is refused under its own field key.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     *
+     * @throws ClientInputException always, raised by the service for each value below; captured by the
+     *     assertions
+     */
+    @Test
+    @DisplayName("an opening position outside the identifier domain is refused keyed to itself")
+    void anOpeningPositionOutsideTheDomainIsRefused() {
+        ClientInputException outsideDomain = (ClientInputException) org.assertj.core.api.Assertions
+                .catchThrowable(() -> service.list("US/R0001", null, null, SUBJECT));
+
+        // Assumptions: the SENTENCE is the identifier's own, because the value is an identifier and the
+        //   fault is the same one; only the FIELD differs, so a form marks the search control the
+        //   operator typed into rather than the identifier column of a row.
+        assertThat(outsideDomain).isNotNull();
+        assertThat(outsideDomain.fields()).containsExactly("startUserId");
+        assertThat(outsideDomain.getMessage())
+                .isEqualTo("User ID must be letters and digits only...");
+
+        ClientInputException tooWide = (ClientInputException) org.assertj.core.api.Assertions
+                .catchThrowable(() -> service.list("USER00001", null, null, SUBJECT));
+
+        assertThat(tooWide).isNotNull();
+        assertThat(tooWide.fields()).containsExactly("startUserId");
+        assertThat(tooWide.getMessage()).isEqualTo("User ID must be at most 8 characters...");
+
+        verify(users, never())
+                .findByUserIdGreaterThanEqualOrderByUserIdAsc(any(String.class), any(Limit.class));
+    }
+
+    /**
+     * Asserts the cursors a positioned page issues continue from that page rather than reapplying it.
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("paging on from a positioned page continues from the page, not from the position")
+    void pagingOnFromAPositionedPageContinuesFromThePage() {
+        when(users.findByUserIdGreaterThanEqualOrderByUserIdAsc(eq("USER0005"), any(Limit.class)))
+                .thenReturn(rows(5, PAGE_SIZE + 1));
+
+        PageResponse<UserSummary> positioned = service.list("USER0005", null, null, SUBJECT);
+
+        when(users.findByUserIdGreaterThanOrderByUserIdAsc(eq("USER0014"), any(Limit.class)))
+                .thenReturn(rows(15, 2));
+
+        PageResponse<UserSummary> next = service.list(null, positioned.lastKey(), "next", SUBJECT);
+
+        // Assumptions: the position is an OPENING input and the cursors take over from there, which is
+        //   why the second request carries no position at all. The reference behaves the same way: it
+        //   blanks the search field once a page has been shown, at app/cbl/COUSR00C.cbl line 231, so a
+        //   following page turn positions from the saved key pair and not from what was typed.
+        assertThat(positioned.items()).extracting(UserSummary::userId)
+                .startsWith("USER0005")
+                .hasSize(PAGE_SIZE);
+        assertThat(next.items()).extracting(UserSummary::userId)
+                .containsExactly("USER0015", "USER0016");
     }
 
     /**
@@ -2546,8 +2921,8 @@ class UserServiceTest {
         //   at app/cbl/COUSR03C.cbl line 128 from the constant declared at app/cpy/CSMSG01Y.cpy lines 20
         //   and 21: an unmapped attention identifier is a terminal concept with no counterpart on a
         //   request-and-response boundary, so it is carried as documentation and nothing here emits it.
-        PageResponse<UserSummary> forwards = service.list(null, "next", SUBJECT);
-        PageResponse<UserSummary> backwards = service.list(null, "previous", SUBJECT);
+        PageResponse<UserSummary> forwards = service.list(null, null, "next", SUBJECT);
+        PageResponse<UserSummary> backwards = service.list(null, null, "previous", SUBJECT);
 
         assertThat(forwards.items()).isEmpty();
         assertThat(forwards.hasNext()).isFalse();
@@ -2674,7 +3049,7 @@ class UserServiceTest {
                 "User Type can NOT be empty...",
                 "User Type must be A or U...",
                 "User ID must be at most 8 characters...",
-                "User ID contains an unsupported character...",
+                "User ID must be letters and digits only...",
                 "User ID already exist...",
                 "Unable to Add User...",
                 "User ID NOT found...",
@@ -2698,7 +3073,7 @@ class UserServiceTest {
         when(users.findAllByOrderByUserIdAsc(any(Limit.class)))
                 .thenReturn(rows(1));
 
-        PageResponse<UserSummary> page = service.list(null, null, SUBJECT);
+        PageResponse<UserSummary> page = service.list(null, null, null, SUBJECT);
 
         // Assumptions: the shape comes from the MAP and not from the scratch area the browse program
         //   builds internally. That area at app/cbl/COUSR00C.cbl lines 56 to 64 holds a single combined
@@ -3264,7 +3639,7 @@ class UserServiceTest {
         when(provisioning.provision("USER0042", "Ada", "Lovelace", "A"))
                 .thenReturn(new ProvisionedIdentity(
                         UUID.fromString("11111111-2222-3333-4444-555555555555"),
-                        PROVISIONED.credentialSecretName()));
+                        PROVISIONED.credentialSecretName(), PROVISIONED.oneTimeCredential()));
         when(users.insertUser(any(), any(), any(), any(), any())).thenReturn(1);
     }
 

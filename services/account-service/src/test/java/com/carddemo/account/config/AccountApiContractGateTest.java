@@ -12,8 +12,12 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.yaml.snakeyaml.Yaml;
@@ -105,6 +109,69 @@ class AccountApiContractGateTest {
 
     /** The vendor-extension member an operation states its required internal scope in. */
     private static final String SCOPE_EXTENSION = "x-carddemo-required-scope";
+
+    /**
+     * The one sentence in the contract that states its operation count, and the group holding the figure.
+     *
+     * <p>Assumptions: the sentence is matched on its distinctive clause rather than on a line number,
+     * because the document is edited constantly and a line reference would go stale before the figure does.
+     * The regular expression fails the case reading it when the sentence is removed or reworded, which is
+     * the correct outcome: a census claim that cannot be located is a census claim nothing holds.</p>
+     */
+    private static final Pattern OPERATION_CENSUS_CLAIM =
+            Pattern.compile("at each of the ([a-z]+) operations this document declares");
+
+    /**
+     * Spelled numbers this document's census sentences can carry, for reading a figure written in words.
+     *
+     * <p>Assumptions: the vocabulary stops at nineteen because the operation count of one bounded context
+     * cannot plausibly reach twenty, and a figure outside the vocabulary is REPORTED by the case that reads
+     * it rather than silently skipped -- so growing past it fails loudly instead of disabling the check.</p>
+     */
+    private static final List<String> NUMBER_WORDS = List.of("zero", "one", "two", "three", "four",
+            "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen",
+            "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen");
+
+    /**
+     * Asserts that the operation figure written in the contract is the number of operations it declares.
+     *
+     * <p>Refactoring Rationale: this case answers a review finding that the shared correlation header's
+     * rationale said the components exist so the header need not be written out "at each of the eleven
+     * operations" while the paths tree declared twelve. The figure had been correct and went stale when the
+     * update-validation operation was added, and nothing in the build could notice -- a prose figure is
+     * invisible to the compiler, to Checkstyle and to every other case in this class. Correcting the number
+     * alone would have left the next addition free to make it stale again, so the figure is now DERIVED:
+     * this case reads the sentence out of the committed document and compares it with the measured count.</p>
+     *
+     * <p>Assumptions: the committed file is read as text rather than through the parsed document, because
+     * the claim lives in a YAML COMMENT and a parser discards comments. Both halves of the comparison
+     * therefore come from the same shipped artifact -- the sentence from its bytes, the count from its
+     * parsed paths tree.</p>
+     *
+     * <p>Alternatives Considered: deleting the figure from the prose so there is nothing to go stale. It
+     * was rejected because the sentence's argument depends on the SCALE -- a shared component earns its
+     * indirection at twelve call sites and not at two -- and a rationale that states no magnitude gives a
+     * reader no way to judge the trade-off it describes.</p>
+     */
+    @Test
+    @DisplayName("the operation figure in the contract's prose is the count its paths tree declares")
+    void thePublishedOperationFigureIsTheMeasuredOperationCount() {
+        Matcher claim = OPERATION_CENSUS_CLAIM.matcher(contractText());
+
+        assertThat(claim.find())
+                .as("the contract must carry its operation census in the form this case reads, or the"
+                        + " figure is unchecked prose again")
+                .isTrue();
+        String written = claim.group(1);
+        assertThat(NUMBER_WORDS)
+                .as("the census figure '%s' is outside the vocabulary this case can read, so it must be"
+                        + " added rather than left unchecked", written)
+                .contains(written);
+        assertThat(NUMBER_WORDS.indexOf(written))
+                .as("the prose figure and the paths tree must agree; the operations declared are %s",
+                        operations(contract()).keySet())
+                .isEqualTo(operations(contract()).size());
+    }
 
     /**
      * Asserts that every operation publishes the correlation parameter and every response its header.
@@ -225,10 +292,10 @@ class AccountApiContractGateTest {
      * <p>Refactoring Rationale: this is a sixth defect of the same kind as the five above, found by a later
      * review. Both protected customer identifiers were published as {@code type: string} with a
      * {@code maxLength} alone -- 12 and 20, the screen-field widths -- and a bare maximum of 12 admits a
-     * WHOLE formatted national identifier, {@code 123-45-6789} being eleven characters. So a service, a
-     * stub or a proxy returning the clear value satisfied the schema exactly as the ten-character marker
-     * does, and the browser screen reading it would have painted it. The account-view declaration
-     * additionally described a mask "all but the last four" and carried the example
+     * WHOLE formatted national identifier, whose {@code NNN-NN-NNNN} form is eleven characters. So a
+     * service, a stub or a proxy returning the clear value satisfied the schema exactly as the
+     * ten-character marker does, and the browser screen reading it would have painted it. The account-view
+     * declaration additionally described a mask "all but the last four" and carried the example
      * {@code '***-**-6789'}, neither of which the delivered service ever emits, while the sibling
      * declaration of the same property described the fixed marker correctly -- so the document contradicted
      * itself about the one property whose whole purpose is non-disclosure.</p>
@@ -251,6 +318,21 @@ class AccountApiContractGateTest {
         Map<String, Object> schemas = schemas(contract());
         List<String> shapes = List.of("CustomerDetail", "CustomerResponse");
         List<String> members = List.of("ssnMasked", "governmentIssuedIdMasked");
+        // Assumptions: the counter-example below is the non-issuable sentinel this repository already
+        //   uses wherever a national identifier has to be written down -- ThrowableDigestTest declares
+        //   it as SSN_SENTINEL and the cause-chain case in GlobalExceptionHandlerTest spells the same
+        //   value -- and the digits are load-bearing rather than cosmetic. The issuing authority has
+        //   never assigned an area number of 000, has never assigned a group number of 00, and has
+        //   never assigned a serial number of 0000, so this value fails three independent allocation
+        //   rules at once and can belong to nobody. It is nonetheless the SAME eleven characters an
+        //   issuable form has, so the property this case measures is untouched: a value that fitted the
+        //   withdrawn maxLength of 12 must still fail the published pattern.
+        //   Alternatives Considered: an issuable-shaped literal, which this line carried until a review
+        //   of sensitive examples. Rejected because a value shaped like a live identifier reads as a
+        //   live one to whoever finds it by search, and this case's whole subject is keeping the clear
+        //   form of that value off a screen. A per-run random draw was rejected in turn: the value has
+        //   to be quotable in the assertion and reproducible from the source, which a draw is not.
+        String nonIssuableIdentifier = "000-00-0000";
 
         for (String shape : shapes) {
             for (String member : members) {
@@ -269,11 +351,12 @@ class AccountApiContractGateTest {
                 assertThat(CustomerMapper.IDENTIFIER_REDACTED)
                         .as("%s.%s must admit the marker the mapper publishes", shape, member)
                         .matches(expression);
-                // WHY : Assumptions: the counter-example is a formatted national identifier rather than
+                // WHY : Assumptions: the counter-example is a FORMATTED national identifier rather than
                 //       nine bare digits, because the formatted form is the one the withdrawn example
                 //       carried and the one that fitted the declared maximum. A pattern that refuses it
-                //       refuses the bare form too, being anchored on a literal.
-                assertThat("123-45-6789")
+                //       refuses the bare form too, being anchored on a literal. Why the digits are the
+                //       ones they are is argued at the declaration above.
+                assertThat(nonIssuableIdentifier)
                         .as("%s.%s must refuse a whole formatted identifier", shape, member)
                         .doesNotMatch(expression);
                 assertThat(declared)
@@ -359,10 +442,22 @@ class AccountApiContractGateTest {
      * consumer copies, and a generator that validates examples would have refused the document, so the
      * defect was both misleading and latent.</p>
      *
-     * <p>Assumptions: only examples illustrating a CLOSED object schema are checked, and only for their
-     * member names and required members. Closure is what makes an unexpected member decidably wrong, and
-     * value-level validation -- patterns, bounds, formats -- belongs to a specification validator rather
-     * than to a unit test; the two defects found were both structural.</p>
+     * <p>Assumptions: an example illustrating a CLOSED object schema is checked for its member names and
+     * its required members, because closure is what makes an unexpected member decidably wrong.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: this paragraph also said that value-level validation -- patterns,
+     * bounds, formats -- "belongs to a specification validator rather than to a unit test", and that
+     * exclusion is withdrawn because it let three real defects through. All three correlation examples in
+     * this document violated the {@code CorrelationId} facets the document itself publishes: two were
+     * thirty-six character UUIDs and one was twenty-six characters against a twenty-four character bound.
+     * No specification validator runs in this build, so the deferral pointed at a check nothing performed,
+     * and a consumer copying any of the three would have been handed a value the shared filter refuses with
+     * a 400. String facets, numeric bounds and closed value sets are now checked at every depth an example
+     * reaches, scalar members included.</p>
+     *
+     * <p>Assumptions: a {@code pattern} is applied with {@code find()} rather than {@code matches()},
+     * because JSON Schema specifies {@code pattern} as a PARTIAL match. Using {@code matches()} would
+     * report a defect for every unanchored expression in the document, none of which is one.</p>
      */
     @Test
     @DisplayName("every example conforms to the closed schema it illustrates")
@@ -390,6 +485,18 @@ class AccountApiContractGateTest {
             Object schema = mapping.get("schema");
             if (schema != null && mapping.containsKey("example")) {
                 validateExample(contract, resolve(contract, schema), mapping.get("example"),
+                        path + "/example", violations);
+            }
+            // WHY : ⚠️ Refactoring Rationale: a schema that carries its OWN example -- the form every
+            //       entry under components/schemas uses -- has no sibling `schema` key, so the branch
+            //       above never saw it and the one such example in this document was invalid: the
+            //       correlation schema's example was twenty-six characters against its own bound of
+            //       twenty-four. This branch validates a schema node against the example beside it.
+            //       Assumptions: a node counts as a schema when it declares a type, a member set or a
+            //       composition keyword, which distinguishes it from a parameter or media-type object
+            //       whose example belongs to the sibling schema the branch above already read.
+            if (schema == null && mapping.containsKey("example") && declaresASchema(mapping)) {
+                validateExample(contract, resolve(contract, mapping), mapping.get("example"),
                         path + "/example", violations);
             }
             if (schema != null && mapping.get("examples") instanceof Map<?, ?> examples) {
@@ -425,6 +532,11 @@ class AccountApiContractGateTest {
     private static void validateExample(Map<String, Object> contract, Map<String, Object> schema,
             Object example, String path, List<String> violations) {
         if (!(example instanceof Map<?, ?> object)) {
+            // WHY : Assumptions: a scalar reaches here either as a whole example or as a member of one,
+            //       and both are checked by the same routine. Checking only whole examples would have
+            //       missed two of the three invalid correlation values, which sat inside error bodies.
+            facetViolation(contract, schema, example).ifPresent(
+                    reason -> violations.add(path + ": " + reason));
             return;
         }
         Map<String, Object> shape = objectShapeOf(contract, schema);
@@ -462,6 +574,134 @@ class AccountApiContractGateTest {
                         path + "/" + entry.getKey(), violations);
             }
         }
+    }
+
+    /**
+     * Reports whether a mapping is itself a schema, rather than a container that has one beside it.
+     *
+     * <p>Assumptions: recognition is by KEYWORD -- a declared type, a member set or a composition -- rather
+     * than by position in the document. A position test would have to enumerate every place a schema may
+     * appear in OpenAPI 3.1, and a schema nested in a place the enumeration missed would silently stop
+     * being checked, which is the failure mode the case reading this exists to end.</p>
+     *
+     * @param mapping the parsed node
+     * @return {@code true} when the node declares schema keywords of its own
+     */
+    private static boolean declaresASchema(Map<?, ?> mapping) {
+        return mapping.containsKey("type") || mapping.containsKey("properties")
+                || mapping.containsKey("allOf") || mapping.containsKey("oneOf")
+                || mapping.containsKey("anyOf") || mapping.containsKey("$ref");
+    }
+
+    /**
+     * Checks one scalar value against the facets of the schema that publishes it.
+     *
+     * <p>Purpose: the facets a document declares are the contract a consumer generates validation from, so
+     * an example that violates one is a body the document promises and refuses at once. This decides that
+     * for the facets these contracts actually use -- the string bound, the string pattern, the closed value
+     * set and the numeric range -- and says nothing about facets no schema here declares.</p>
+     *
+     * <p>Assumptions: a composition is resolved before the facets are read, because this document declares
+     * several members as an {@code allOf} over one shared schema purely to attach a description, and a
+     * nullable member as a {@code oneOf} over a shape and the null type. An {@code allOf} holds only when
+     * EVERY branch holds and a {@code oneOf} or {@code anyOf} when at least one does, which is why the two
+     * are decided separately rather than flattened into one merged facet set.</p>
+     *
+     * @param contract the whole parsed document, needed to resolve a reference inside a composition
+     * @param schema the resolved schema the value is published under
+     * @param value the scalar example value, which may be {@code null}
+     * @return the reason the value fails its schema, or empty when it conforms
+     */
+    private static Optional<String> facetViolation(Map<String, Object> contract,
+            Map<String, Object> schema, Object value) {
+        Map<String, Object> resolved = resolve(contract, schema);
+        if (resolved.get("allOf") instanceof List<?> members) {
+            for (Object member : members) {
+                Optional<String> failure = facetViolation(contract, asMap(member), value);
+                if (failure.isPresent()) {
+                    return failure;
+                }
+            }
+        }
+        for (String keyword : List.of("oneOf", "anyOf")) {
+            if (!(resolved.get(keyword) instanceof List<?> branches) || branches.isEmpty()) {
+                continue;
+            }
+            List<String> failures = new ArrayList<>();
+            for (Object branch : branches) {
+                Optional<String> failure = facetViolation(contract, asMap(branch), value);
+                if (failure.isEmpty()) {
+                    return Optional.empty();
+                }
+                failures.add(failure.get());
+            }
+            return Optional.of("no " + keyword + " branch admits it (" + String.join("; ", failures) + ")");
+        }
+        if (resolved.get("enum") instanceof List<?> admitted && !admitted.contains(value)) {
+            return Optional.of("value '" + value + "' is outside the published set " + admitted);
+        }
+        if (resolved.containsKey("const") && !Objects.equals(resolved.get("const"), value)) {
+            return Optional.of("value '" + value + "' is not the published const '"
+                    + resolved.get("const") + "'");
+        }
+        if (value instanceof String text) {
+            return stringFacetViolation(resolved, text);
+        }
+        if (value instanceof Number number) {
+            return numberFacetViolation(resolved, number);
+        }
+        // WHY : Assumptions: a null example is reported only against an explicit `type: 'null'` mismatch,
+        //       which the union branch above decides, because every nullable member in these documents is
+        //       declared as such a union and a bare null violates no facet on its own.
+        return Optional.empty();
+    }
+
+    /**
+     * Checks a string example against the bound, the pattern and the declared type of its schema.
+     *
+     * @param schema the resolved schema
+     * @param value the example value
+     * @return the reason the value fails, or empty when it conforms
+     */
+    private static Optional<String> stringFacetViolation(Map<String, Object> schema, String value) {
+        Object type = schema.get("type");
+        if (type instanceof String declared && !"string".equals(declared)) {
+            return Optional.of("value '" + value + "' is a string where the schema declares " + declared);
+        }
+        if (schema.get("maxLength") instanceof Number bound
+                && value.length() > bound.intValue()) {
+            return Optional.of("value '" + value + "' is " + value.length()
+                    + " characters against a maxLength of " + bound.intValue());
+        }
+        if (schema.get("minLength") instanceof Number floor
+                && value.length() < floor.intValue()) {
+            return Optional.of("value '" + value + "' is " + value.length()
+                    + " characters against a minLength of " + floor.intValue());
+        }
+        if (schema.get("pattern") instanceof String expression
+                && !Pattern.compile(expression).matcher(value).find()) {
+            return Optional.of("value '" + value + "' does not satisfy pattern " + expression);
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Checks a numeric example against the range its schema publishes.
+     *
+     * @param schema the resolved schema
+     * @param value the example value
+     * @return the reason the value fails, or empty when it conforms
+     */
+    private static Optional<String> numberFacetViolation(Map<String, Object> schema, Number value) {
+        if (schema.get("minimum") instanceof Number floor
+                && value.doubleValue() < floor.doubleValue()) {
+            return Optional.of("value " + value + " is below the published minimum " + floor);
+        }
+        if (schema.get("maximum") instanceof Number ceiling
+                && value.doubleValue() > ceiling.doubleValue()) {
+            return Optional.of("value " + value + " is above the published maximum " + ceiling);
+        }
+        return Optional.empty();
     }
 
     /**
@@ -682,6 +922,35 @@ class AccountApiContractGateTest {
     @SuppressWarnings("unchecked")
     private static Map<String, Object> asMap(Object node) {
         return node instanceof Map ? (Map<String, Object>) node : Map.of();
+    }
+
+    /**
+     * Reads the committed contract as one normalised line of text, comment markers removed.
+     *
+     * <p>Assumptions: each line's leading YAML comment marker and indentation are stripped and the lines
+     * are joined by single spaces, so a sentence soft-wrapped across several comment lines is matchable as
+     * one string. Matching the raw bytes would require every pattern to spell out the wrapping, which is
+     * whitespace that changes whenever the surrounding block is reflowed.</p>
+     *
+     * @return the document's text, normalised for prose matching; never {@code null}
+     * @throws IllegalStateException when the resource is absent, for the reason recorded on
+     *     {@link #contract()}
+     */
+    private static String contractText() {
+        try (InputStream stream = AccountApiContractGateTest.class
+                .getResourceAsStream(CONTRACT_RESOURCE)) {
+            if (stream == null) {
+                throw new IllegalStateException(CONTRACT_RESOURCE + " is not on the test classpath");
+            }
+            String raw = new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            StringBuilder text = new StringBuilder();
+            for (String line : raw.split("\n", -1)) {
+                text.append(line.replaceFirst("^\\s*#+\\s*", "").strip()).append(' ');
+            }
+            return text.toString().replaceAll("\\s+", " ");
+        } catch (java.io.IOException failure) {
+            throw new IllegalStateException("could not read " + CONTRACT_RESOURCE, failure);
+        }
     }
 
     /**

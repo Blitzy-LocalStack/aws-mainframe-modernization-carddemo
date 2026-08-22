@@ -36,6 +36,7 @@ import {
   API_PATH_PREFIX,
   CORRELATION_ID_LENGTH,
   WITHOUT_STORED_SESSION,
+  correlationHeaders,
   getApiClient,
   isApiRequestError,
   newCorrelationId,
@@ -112,7 +113,11 @@ const PROTECTED_IDENTIFIER_MIN_DIGITS = 9;
 // punctuation, and the browser-side proof has to strip them the same way.
 const ACCEPTED_PUNCTUATION = /[-_.]/gu;
 
-const API_BASE_URL = 'https://api.carddemo.example';
+// Assumptions: the fixture carries the `/api/v1` operation prefix because
+// `normalizeApiBaseUrl` requires it -- a base URL one segment short is refused at
+// start-up rather than producing a 404 on every request. The prefix changes no
+// assertion here: every case below asserts the RELATIVE request path.
+const API_BASE_URL = 'https://api.carddemo.example/api/v1';
 
 const CORRELATION_HEADER = 'X-Correlation-Id';
 
@@ -255,6 +260,91 @@ function mintsThePublishedWidthAndShape(): void {
   }
 }
 
+/**
+ * Dispatches one request whose correlation identifier the caller pins.
+ * @param {string} pinned - The identifier to pin, passed through the published header builder rather
+ *   than written into a header bag here, so the case exercises the supported way of pinning one.
+ * @returns {Promise<string>} The correlation identifier that request actually transmitted.
+ */
+async function transmitOnePinnedRequest(pinned: string): Promise<string> {
+  const client = getApiClient();
+  client.defaults.adapter = captureAdapter;
+  await client.get('/api/v1/cards', { headers: correlationHeaders(pinned) });
+  const sent = transmitted.at(-1);
+  return sent === undefined ? '' : sent;
+}
+
+/**
+ * Asserts an identifier the caller pinned survives dispatch, and that pinning stays opt-in.
+ *
+ * Purpose: this is the case a retried unit of work cannot be recognised without. The interceptor used to
+ * overwrite the header on every dispatch, which made the identifier a name for the CALL; one service
+ * reads it as a name for the WORK -- `ReportExecutionService` derives a report submission's
+ * deduplication key from it when no explicit submission key arrives -- so a second attempt at one
+ * submission could not present the identity the first attempt was sent under.
+ *
+ * Assumptions: the unpinned dispatch is asserted in the SAME case rather than left to
+ * `correlatesEachRequestSeparately`, because the two halves are one property: preserving a pinned value
+ * must not weaken the guarantee that a request carrying none still leaves with a freshly minted one.
+ * Asserting them apart would let a change that returned early satisfy each case in isolation.
+ */
+async function preservesAPinnedIdentifierAndStillMintsWithoutOne(): Promise<void> {
+  const pinned = newCorrelationId();
+  expect(await transmitOnePinnedRequest(pinned)).toBe(pinned);
+  expect(await transmitOnePinnedRequest(pinned)).toBe(pinned);
+  const unpinned = await transmitOneRequest();
+  expect(unpinned).not.toBe(pinned);
+  expect(unpinned).toMatch(MINTED_SHAPE);
+}
+
+/**
+ * Asserts the header builder refuses every value the shared service filter would refuse.
+ *
+ * Assumptions: the four refused specimens are one per condition the filter applies, and each is the
+ * closest wrong value rather than an obviously absurd one -- an empty identifier, one character past the
+ * bound, an identifier carrying a character outside the accepted alphabet, and an all-digit run at
+ * exactly the protected-identifier floor with the accepted separators present so that the stripping step
+ * is exercised too. A value refused by the filter is answered HTTP 400 before any handler runs, which at
+ * a screen is indistinguishable from a rejected payload; failing at the call site names the real cause.
+ */
+function refusesAPinnedIdentifierTheServicesWouldRefuse(): void {
+  const atTheDigitFloor = '0'.repeat(PROTECTED_IDENTIFIER_MIN_DIGITS);
+  const separatedDigits = '000-000-000';
+  expect(wouldBeRefusedAsProtectedIdentifierShaped(atTheDigitFloor)).toBe(true);
+  expect(wouldBeRefusedAsProtectedIdentifierShaped(separatedDigits)).toBe(true);
+  for (const refused of [
+    '',
+    'C'.repeat(CORRELATION_ID_MAX_LENGTH + 1),
+    'CD 0123456789ABCDEF0123',
+    atTheDigitFloor,
+    separatedDigits,
+  ]) {
+    expect(pinning(refused)).toThrow(RangeError);
+  }
+  expect(correlationHeaders('CD0123456789ABCDEF012345')).toEqual({
+    [CORRELATION_HEADER]: 'CD0123456789ABCDEF012345',
+  });
+}
+
+/**
+ * Builds a thunk that pins one identifier, so its refusal can be asserted without a dispatch.
+ *
+ * Assumptions: a named factory rather than an inline arrow at the assertion, because
+ * `ui/eslint.config.js` selects a function expression in every position with `publicOnly: false`, so an
+ * inline thunk would owe its own JSDoc block at each of the five specimens.
+ * @param {string} candidate - Identifier to pin.
+ * @returns {() => Readonly<Record<string, string>>} A thunk invoking the published header builder.
+ */
+function pinning(candidate: string): () => Readonly<Record<string, string>> {
+  /**
+   * Invokes the header builder for the captured candidate.
+   * @returns {Readonly<Record<string, string>>} The header bag, when the candidate is accepted.
+   */
+  return function pinOne(): Readonly<Record<string, string>> {
+    return correlationHeaders(candidate);
+  };
+}
+
 /** Groups the assertions that fix the request-correlation contract. */
 function requestCorrelationContract(): void {
   beforeEach(stubBuildConfiguration);
@@ -269,6 +359,14 @@ function requestCorrelationContract(): void {
   it(
     'never mints an identifier the services refuse as protected-identifier-shaped',
     neverMintsAnIdentifierTheServicesRefuse,
+  );
+  it(
+    'preserves a pinned identifier and still mints one without it',
+    preservesAPinnedIdentifierAndStillMintsWithoutOne,
+  );
+  it(
+    'refuses a pinned identifier the services would refuse',
+    refusesAPinnedIdentifierTheServicesWouldRefuse,
   );
 }
 

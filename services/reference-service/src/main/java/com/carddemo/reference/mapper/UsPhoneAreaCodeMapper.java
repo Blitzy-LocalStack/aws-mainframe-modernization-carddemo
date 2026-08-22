@@ -32,10 +32,13 @@ import org.springframework.stereotype.Component;
  * {@code com.carddemo.common.codec.DateInquiryReplyCodec}, so the precedent is now the two siblings,
  * which are the same case as this class rather than a different one.</p>
  *
- * <p>Trade-offs: the cost is that this class does not read identically to its four static siblings, so
- * a reader moving between them meets two shapes inside one package. It is accepted because the static
- * shape forecloses both properties above, and because the charter's own exception shows the package
- * carries the two shapes deliberately rather than by accident.</p>
+ * <p>Trade-offs: the cost is that this class does not read identically to its three static siblings,
+ * so a reader moving between them meets two shapes inside one package. It is accepted because the
+ * static shape forecloses both properties above, and because the charter's own exception shows the
+ * package carries the two shapes deliberately rather than by accident. Refactoring Rationale: this
+ * sentence counted FOUR static siblings, a figure left behind by the deletion of the static
+ * {@code LookupMapper}; the three that remain are the three record conversions the charter's roster
+ * enumerates.</p>
  *
  * <p>Assumptions: one naming asymmetry is called out because it reads as a mistake and is not. This
  * class is named for the entity {@code UsPhoneAreaCode} while the type it produces is
@@ -171,12 +174,18 @@ public class UsPhoneAreaCodeMapper {
         //       findByAreaCodeLessThanOrderByAreaCodeDesc, and is reversed by its caller before it is
         //       rendered, so a sort applied at this point would undo that reversal silently and hand a
         //       backward page back in the wrong direction.
-        // WHY : Assumptions: the name and shape of this member match the transaction-type mapper's
-        //       list member deliberately rather than by coincidence, so that the conversions in this
-        //       package present one list idiom to a reader. The per-row conversion is delegated to the
-        //       member above by reference rather than repeated, which is what keeps the single-row
-        //       rulings recorded there -- the untrimmed code and the classification -- from acquiring
-        //       a second implementation free to drift from the first.
+        // WHY : Assumptions: the name and shape of this member match UsStateMapper.toResponseList and
+        //       UsStateZipPrefixMapper.toResponseList deliberately rather than by coincidence, so that
+        //       the three lookup conversions in this package present one list idiom to a reader. The
+        //       per-row conversion is delegated to the member above by reference rather than repeated,
+        //       which is what keeps the single-row rulings recorded there -- the untrimmed code and
+        //       the classification -- from acquiring a second implementation free to drift from the
+        //       first.
+        // WHY : Refactoring Rationale: this comment matched the shape against "the transaction-type
+        //       mapper's list member", and TransactionTypeMapper carries no list member -- its own
+        //       Javadoc records the withdrawal, and TransactionCategoryMapper records the same for
+        //       its own. The idiom this member follows is therefore the one the two sibling lookup
+        //       beans follow, and naming them is what a reader can check.
         return entities.stream().map(this::toResponse).toList();
     }
 }

@@ -2,19 +2,22 @@
 # infra/modules/s3-datasets/outputs.tf
 # -----------------------------------------------------------------------------
 # Purpose:
-#   The entire public return surface of the `s3-datasets` module -- TWELVE
-#   outputs and nothing else. Between them they answer the only four questions
+#   The entire public return surface of the `s3-datasets` module -- THIRTEEN
+#   outputs and nothing else. Between them they answer the only five questions
 #   a caller has about this bucket: what it is called, what it is called to IAM,
-#   where inside it each baseline dataset lives, and where its audit trail goes.
+#   where inside it each baseline dataset lives, where the allocator keeps its
+#   generation bookkeeping, and where its audit trail goes.
 #   Assumptions: the count above is maintained against the `output` blocks in
 #   this file. A return-surface count is the one figure a caller reads before
 #   wiring a module, so an under-count reads as "there is nothing else to wire"
 #   and hides the outputs a root actually needs.
 #   Refactoring Rationale: this count read TEN and the enumeration below listed
-#   SEVEN, while the file declared twelve. Both are restated from a measurement
-#   of the `output` blocks. The gap was not one omission but three: the audit
+#   SEVEN, while the file declared twelve. Both were restated from a measurement
+#   of the `output` blocks; the gap was not one omission but three -- the audit
 #   trio was never added to the list, and the two source-extract values landed
-#   with the dataset refresh. An under-count here is the failure mode the
+#   with the dataset refresh. It now reads THIRTEEN, re-measured again after
+#   `generation_claim_prefix` was added to give the generation allocator's
+#   bookkeeping prefix a caller. An under-count here is the failure mode the
 #   Assumptions paragraph above already names -- a caller reads it as the whole
 #   surface and concludes a published value is not published.
 #
@@ -27,7 +30,7 @@
 #   main.tf. Not one is a literal, so no ARN, no account identifier, no region
 #   and no bucket name is written down anywhere in this file.
 #
-#   ONE-WAY CONTRACT. These twelve output NAMES are read by four components:
+#   ONE-WAY CONTRACT. These thirteen output NAMES are read by four components:
 #
 #     infra/envs/dev/main.tf ............. writes them into Parameter Store
 #     infra/envs/prod/main.tf ............ the same, per environment
@@ -65,7 +68,7 @@
 #   reads it.
 #
 # Return values:
-#   Twelve, in declaration order. An `output` block IS a return value, so the
+#   Thirteen, in declaration order. An `output` block IS a return value, so the
 #   `description` on each one below is this file's direct discharge of the
 #   documentation standard's "Return values" element rather than an analogue of
 #   it, and tflint's terraform_documented_outputs rule is what makes a missing
@@ -79,6 +82,7 @@
 #     non_generation_uris .......... map(string)  the same THREE as s3:// URIs
 #     source_extract_prefix ........ string       where the refresh READS inputs
 #     source_extract_uri ........... string       the same prefix as an s3:// URI
+#     generation_claim_prefix ...... string       allocator replay bookkeeping
 #     noncurrent_version_retention . number       the LIMIT(5) count
 #     audit_bucket_name ............ string       the object-access log bucket
 #     audit_bucket_arn ............. string       IAM resource, audit bucket form
@@ -98,16 +102,21 @@
 #
 # Errors:
 #   Two, neither of them a fault in the module:
-#     1. EIGHT of the twelve reference a resource attribute and are therefore
+#     1. EIGHT of the thirteen reference a resource attribute and are therefore
 #        UNKNOWN UNTIL APPLY: both bucket names, both bucket ARNs, the trail
 #        ARN, and the three URI-shaped values, each of which interpolates
 #        `aws_s3_bucket.datasets.bucket`. `terraform output` run against a root
 #        that has only planned returns nothing at all for those, and a plan
-#        renders them as "(known after apply)". The remaining FOUR are known at
-#        plan time because every term in them is an input: `dataset_prefixes`
-#        and `non_generation_prefixes`, which are locals composed from their
-#        respective maps, plus `source_extract_prefix` and
-#        `noncurrent_version_retention` read straight through.
+#        renders them as "(known after apply)". The remaining FIVE are known at
+#        plan time because no term in them touches a resource:
+#        `dataset_prefixes` and `non_generation_prefixes`, which are locals
+#        composed from their respective maps, `generation_claim_prefix`, a local
+#        composed from a literal, plus `source_extract_prefix` and
+#        `noncurrent_version_retention` read straight through. That
+#        `generation_claim_prefix` falls on the plan side is load-bearing rather
+#        than incidental: its consumer is an IAM policy document in an
+#        environment root, and an apply-time-unknown prefix there would make the
+#        policy depend on the bucket it authorises access to.
 #        Refactoring Rationale: this said "every value except
 #        `noncurrent_version_retention` ... so those six are unknown", which was
 #        wrong in both directions -- it named six of what was then ten, and it
@@ -139,10 +148,12 @@
 #     non-generation distinction the separation exists to keep visible -- and
 #     erasing it is the specific way the family count stops being ten.
 #     Assumptions: that merged map is thirteen entries and the bucket carries
-#     FOURTEEN prefixed lifecycle rules; the fourteenth is
-#     `src-source-extracts`, which filters on `var.source_extract_prefix`
-#     directly rather than through the map, because that prefix is an input the
-#     module reads rather than a dataset it owns.
+#     FIFTEEN prefixed lifecycle rules; the fourteenth is `src-source-extracts`,
+#     which filters on `var.source_extract_prefix` directly rather than through
+#     the map, because that prefix is an input the module reads rather than a
+#     dataset it owns, and the fifteenth is `claim-generation-allocations`,
+#     which filters on `local.generation_claim_prefix` and governs bookkeeping
+#     rather than dataset bytes.
 # =============================================================================
 
 # Assumptions: the `bucket` attribute is published, not `id`. For
@@ -352,6 +363,39 @@ output "source_extract_prefix" {
 output "source_extract_uri" {
   description = "Fully-qualified s3:// URI of the source-extract prefix, for the operator sync documented in docs/runbooks/data-migration.md."
   value       = "s3://${aws_s3_bucket.datasets.bucket}/${var.source_extract_prefix}"
+}
+
+# Refactoring Rationale: this output exists because the prefix it names was reachable
+# by no caller. The generation allocator reads and writes one small record per
+# orchestrator execution and family under `_generation-claims/`, and it does so on
+# EVERY allocation, before any dataset object is touched. The environment roots
+# derive the batch task role's object grants from `dataset_prefixes`, which is the ten
+# generation families and nothing else, so the very first allocation of a deployment
+# was denied and every generation-writing state failed with it. A root cannot fix that
+# by restating the literal, because the prefix is a contract shared with two
+# application constants that a root has no way to read; publishing it here is what
+# lets a root scope a narrow Get and Put to the same value the code uses.
+#
+# Assumptions: this is deliberately NOT a member of `dataset_prefixes` or of
+# `non_generation_prefixes`, and it is not a fourteenth entry of the merged map
+# either. Those two maps are the inventory of prefixes that hold DATASET BYTES and
+# every one of their entries carries a retention rule expressing a generation or
+# reporting contract. This prefix holds bookkeeping, has no `dt=`/`gen=` structure and
+# is governed by the `claim-generation-allocations` rule, whose retention means
+# something different from all three of the others. Folding it in would give it a
+# generation-retention rule it must not have, would present it to consumers as a
+# dataset location, and would make the family count stop being ten.
+#
+# Trade-offs: the value is known at PLAN time -- it is a local composed from a
+# literal, with no resource attribute in it -- which is what allows an environment
+# root to interpolate it into an IAM policy document without an apply-time cycle.
+# Publishing it as an s3:// URI instead, for symmetry with the three URI-shaped
+# outputs above, was rejected for exactly that reason: interpolating the bucket name
+# would make it apply-time-unknown, and its one consumer is an IAM resource pattern
+# that needs the bare prefix rather than a URI.
+output "generation_claim_prefix" {
+  description = "Key prefix inside the dataset bucket holding the generation allocator's per-execution replay records, each recording which generation one orchestrator execution took for one family so a retried or redriven attempt reuses that number instead of consuming a second generation. Published so an environment root can scope the batch task role's s3:GetObject and s3:PutObject to it narrowly rather than repeating the literal: the same string is declared by DatasetGenerationService.RUN_CLAIM_ROOT in the batch service and by _RUN_CLAIM_ROOT in data-migration's s3_stage loader, and tests on both sides read this module's declaration and assert all three agree. Not one of the ten generation families and not one of the three reporting-artifact prefixes: it holds no dataset bytes, has no dt=/gen= structure, and its retention is the claim-generation-allocations lifecycle rule rather than any LIMIT(5) analogue."
+  value       = local.generation_claim_prefix
 }
 
 # Assumptions: the effective retention is echoed back so that the LIMIT(5)

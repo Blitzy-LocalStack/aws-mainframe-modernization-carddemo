@@ -72,11 +72,42 @@ class AuthorizationApiContractTest {
      * <p>Assumptions: a path item also carries non-operation keys -- {@code parameters}, {@code summary},
      * {@code $ref} -- so a walk that treated every child as an operation would descend into a sequence and
      * fail obscurely. This set is the filter, and it names all eight methods the specification allows rather
-     * than only the five this contract currently uses, so a path served by {@code HEAD} or {@code OPTIONS}
-     * later is covered without editing it.</p>
+     * than only the three this contract currently uses -- {@code post}, {@code get} and {@code put} -- so a
+     * path served by {@code HEAD} or {@code OPTIONS} later is covered without editing it.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: that figure read "the five this contract currently uses", which counted
+     * OPERATIONS in a sentence about METHODS. Five operations are declared across three methods, so the
+     * sentence gave a reader two wrong readings at once: that the contract uses five distinct verbs, and
+     * that the specification's eight are only three more than it needs.</p>
      */
     private static final Set<String> OPERATION_KEYS =
             Set.of("get", "put", "post", "delete", "patch", "head", "options", "trace");
+
+    /**
+     * The header sentence stating how many operations this contract exposes, and the group holding it.
+     *
+     * <p>Assumptions: the claim is located by its wording rather than by a line number, because this
+     * document is edited constantly and a line reference goes stale sooner than a figure does. A reworded
+     * or deleted sentence fails the case that reads it, which is the right outcome: an inventory nothing
+     * can locate is an inventory nothing holds.</p>
+     */
+    private static final Pattern OPERATION_CENSUS_CLAIM =
+            Pattern.compile("the ([a-z]+) synchronous operations this service exposes");
+
+    /** The header sentence stating how many reusable failure responses the document declares. */
+    private static final Pattern FAILURE_RESPONSE_CENSUS_CLAIM =
+            Pattern.compile("([A-Za-z]+) reusable failure responses under components/responses");
+
+    /**
+     * The spelled numbers a census sentence in this document may carry.
+     *
+     * <p>Assumptions: the vocabulary stops at nineteen because neither census this class reads can
+     * plausibly reach twenty, and a figure outside it is REPORTED by the case that reads it rather than
+     * quietly skipped -- so growing past the vocabulary fails loudly instead of disabling the check.</p>
+     */
+    private static final List<String> NUMBER_WORDS = List.of("zero", "one", "two", "three", "four",
+            "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen",
+            "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen");
 
     /**
      * Returns the declared member names of the paged-listing request body.
@@ -119,6 +150,85 @@ class AuthorizationApiContractTest {
         } catch (java.io.IOException failure) {
             throw new IllegalStateException("the published contract could not be read", failure);
         }
+    }
+
+    /**
+     * Reads the committed contract as one normalised line of text, comment markers removed.
+     *
+     * <p>Assumptions: each line's leading comment marker and indentation are stripped and the lines are
+     * joined by single spaces, so a sentence soft-wrapped across several comment lines matches as one
+     * string. Matching the raw bytes would make every pattern spell out the wrapping, which is whitespace
+     * that changes whenever the surrounding block is reflowed.</p>
+     *
+     * @return the document's text, normalised for prose matching, never {@code null}
+     * @throws IllegalStateException if the resource is absent, for the reason recorded on
+     *     {@link #loadContract()}
+     */
+    private static String contractText() {
+        try (InputStream resource =
+                AuthorizationApiContractTest.class.getResourceAsStream(CONTRACT_RESOURCE)) {
+            if (resource == null) {
+                throw new IllegalStateException(
+                        "the published contract is absent from the classpath at " + CONTRACT_RESOURCE);
+            }
+            String raw = new String(resource.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            StringBuilder text = new StringBuilder();
+            for (String line : raw.split("\n", -1)) {
+                text.append(line.replaceFirst("^\\s*#+\\s*", "").strip()).append(' ');
+            }
+            return text.toString().replaceAll("\\s+", " ");
+        } catch (java.io.IOException failure) {
+            throw new IllegalStateException("the published contract could not be read", failure);
+        }
+    }
+
+    /**
+     * Reads one spelled census figure out of the contract's prose.
+     *
+     * @param text the normalised document text
+     * @param claim the pattern locating the claim, whose first group is the spelled figure
+     * @return the figure the prose states
+     * @throws AssertionError if the claim is absent or its figure is outside {@link #NUMBER_WORDS}, either
+     *     of which means the census is no longer checkable and must not pass silently
+     */
+    private static int censusFigure(String text, Pattern claim) {
+        java.util.regex.Matcher match = claim.matcher(text);
+        assertThat(match.find())
+                .as("the contract must carry the census claim %s, or the figure is unchecked prose again",
+                        claim.pattern())
+                .isTrue();
+        String written = match.group(1).toLowerCase(java.util.Locale.ROOT);
+        assertThat(NUMBER_WORDS)
+                .as("the census figure '%s' is outside the vocabulary this class reads, so it must be"
+                        + " added rather than left unchecked", written)
+                .contains(written);
+        return NUMBER_WORDS.indexOf(written);
+    }
+
+    /**
+     * Collects every operation the document declares, keyed by its operation identifier.
+     *
+     * <p>Assumptions: the walk filters path-item children through {@link #OPERATION_KEYS}, so a path-level
+     * {@code parameters} sequence or {@code description} is not mistaken for an operation.</p>
+     *
+     * @return one entry per declared operation, never {@code null}
+     */
+    private static Map<String, Object> declaredOperations() {
+        Map<String, Object> operations = new java.util.LinkedHashMap<>();
+        Map<String, Object> paths = mapping(CONTRACT, "paths");
+        for (String path : paths.keySet()) {
+            Map<String, Object> item = mapping(paths, path);
+            for (String method : item.keySet()) {
+                if (!OPERATION_KEYS.contains(method)) {
+                    continue;
+                }
+                Map<String, Object> operation = mapping(item, method);
+                Object identifier = operation.get("operationId");
+                operations.put(identifier == null ? method + " " + path : String.valueOf(identifier),
+                        operation);
+            }
+        }
+        return operations;
     }
 
     /**
@@ -216,6 +326,53 @@ class AuthorizationApiContractTest {
         assertThat(published.getOpenapi()).startsWith("3.1.");
         assertThat(published.getInfo().getSummary()).isNotBlank();
         assertThat(published.getInfo().getLicense().getIdentifier()).isNotBlank();
+    }
+
+    /**
+     * The header's own census figures are the counts the document's structure carries.
+     *
+     * <p>Refactoring Rationale: this case answers a review finding that the header described "three
+     * synchronous operations", "two read operations" carrying no body and "six reusable failure responses"
+     * while the paths tree declared five operations -- four of them reads, one of those carrying a search
+     * body -- and {@code components/responses} declared eleven. Every one of those figures had been right
+     * when it was written and went stale as the surface grew, and no gate in this build could see it: a
+     * count in a YAML comment is invisible to a parser, to Checkstyle and to every other case in this
+     * class. Correcting the figures alone would leave the next addition free to make them stale again, so
+     * both are now DERIVED here from the structure they describe.</p>
+     *
+     * <p>Assumptions: the committed file is read as TEXT for this case, because the claims live in comments
+     * and the parsed document has none. Both halves of each comparison still come from the same shipped
+     * artifact -- the figure from its bytes, the count from its parsed tree.</p>
+     *
+     * <p>Assumptions: each declared operation identifier is additionally required to appear in the header,
+     * which is what makes the census a description of THIS document rather than a number that happens to
+     * match. An operation added without a mention fails here even if someone remembers to increment the
+     * figure, and an operation removed fails the count comparison, so both directions are closed.</p>
+     *
+     * <p>Alternatives Considered: dropping the figures from the prose so nothing can go stale. Rejected
+     * because the inventory is what a reader of a four-thousand-line contract orients by, and a header that
+     * declines to say how many operations exist sends that reader to count them by hand -- which is how the
+     * two numbers came to disagree in the first place.</p>
+     */
+    @Test
+    @DisplayName("the header's operation and failure-response figures are the document's own counts")
+    void headerCensusFiguresAreTheMeasuredCounts() {
+        String text = contractText();
+        Map<String, Object> operations = declaredOperations();
+
+        assertThat(censusFigure(text, OPERATION_CENSUS_CLAIM))
+                .as("the header's operation figure must equal the paths tree it describes; declared: %s",
+                        operations.keySet())
+                .isEqualTo(operations.size());
+        assertThat(censusFigure(text, FAILURE_RESPONSE_CENSUS_CLAIM))
+                .as("the header's failure-response figure must equal components/responses; declared: %s",
+                        mapping(mapping(CONTRACT, "components"), "responses").keySet())
+                .isEqualTo(mapping(mapping(CONTRACT, "components"), "responses").size());
+        for (String operationId : operations.keySet()) {
+            assertThat(text)
+                    .as("the header names the operations it counts, so %s must appear in it", operationId)
+                    .contains(operationId);
+        }
     }
 
     /**

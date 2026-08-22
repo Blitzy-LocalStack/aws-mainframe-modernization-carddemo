@@ -1,14 +1,15 @@
 /**
  * @file The transaction detail screen, migrated from `app/cbl/COTRN01C.cbl` and its mapset
  * `app/bms/COTRN01.bms` (map `COTRN1A`, 56 `DFHMDF` fields -- 21 named, 35 anonymous), reached at
- * `/transactions/:id`.
+ * `/transactions/:id` and at `/transactions/view`.
  *
  * Purpose
  * -------
  * Look one transaction up by its sixteen-character identifier and render it as a read-only record
  * view. It replaces CICS transaction `CT01`, which `app/csd/CARDDEMO.CSD` L429-L430 binds to that
- * program, and it publishes the field labels, screen widths and key-legend text the screen tests
- * assert against.
+ * program, and it publishes the screen widths and the assembled key-legend text the screen tests
+ * assert against. The painted TEXT it renders -- the caption, the lookup label and the thirteen field
+ * labels -- is published by `ui/src/messages/messages.ts` instead, and imported here.
  *
  * Composition
  * ------------
@@ -31,6 +32,15 @@
  * independently authorizable (AAP section 0.7.1). A route carrying an identifier is therefore the
  * first arrival, and one carrying none is the second.
  *
+ * ⚠️ Assumptions: the second arrival has an address of its own, `/transactions/view`, and did not
+ * always. This screen was for a time mounted only at `/transactions/:id`, so the selector-free arrival
+ * it already implemented was unreachable from anywhere -- main-menu option 7 had no path it could name
+ * and answered the reference's not-installed sentence for a screen the delivery carries. The screen
+ * itself needed no change: `ui/src/router.tsx` declares the second path onto the same component and
+ * `ui/src/routes/programRoutes.ts` resolves `COTRN01C` to it. Both arrivals are exercised by
+ * `ui/src/screens/transactionDetail/selectorFreeArrival.test.tsx`, which requires the selector-free one
+ * to issue no read at all.
+ *
  * What this screen does NOT do
  * ----------------------------
  * Assumptions: there is no write of any kind -- no confirmation control, no submit, no delete. The
@@ -50,6 +60,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ChangeEvent, CSSProperties, ReactElement } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router';
 
+import { MASKED_CARD_NUMBER } from '../../api/masking';
 import { viewTransaction } from '../../api/transactions';
 import type { TransactionDetail } from '../../api/transactions';
 import type { ApiError, FieldError, FieldValidationState } from '../../api/types';
@@ -62,9 +73,31 @@ import { RECORD_VIEW_COLUMNS } from '../../layout/recordLayout';
 import { ScreenTitle } from '../../layout/ScreenTitle';
 import { usePfKeys } from '../../layout/usePfKeys';
 import type { PfKeyHandlerMap } from '../../layout/usePfKeys';
-import { PROGRAM_MESSAGES, SHARED_MESSAGES } from '../../messages/messages';
+/*
+ * WHY : Refactoring Rationale: the painted text of map `COTRN1A` -- the row-4 caption, the lookup
+ *       label and the thirteen data-field labels -- is IMPORTED from the catalog, where this module
+ *       used to transcribe it beside the controls that name it. The ownership boundary this file
+ *       previously cited has moved: the catalog now carries `INITIAL=` literals as well as emitted
+ *       messages, keyed by originating mapset and with the transcribed line numbers recorded beside
+ *       each entry, which is what makes transformation rule T8 checkable in ONE module rather than in
+ *       twenty-one screens.
+ * WHY : Assumptions: the catalog's member keys are the `TransactionDetail` member names this screen
+ *       already used, so the declarations move and no render site does.
+ * WHY : Alternatives Considered: keeping the local groups and asserting them equal to the catalog's in
+ *       a test. Rejected because two copies that agree today are still two copies to correct, and such
+ *       a test reports that a pair disagrees without saying which side is right.
+ */
+import {
+  PROGRAM_MESSAGES,
+  SHARED_MESSAGES,
+  TRANSACTION_DETAIL_FIELD_LABELS,
+  TRANSACTION_DETAIL_KEY_LABELS as CATALOG_KEY_LABELS,
+  TRANSACTION_DETAIL_LOOKUP_LABEL,
+  TRANSACTION_DETAIL_TITLE,
+} from '../../messages/messages';
 import {
   MAIN_MENU_ROUTE,
+  TRANSACTION_LIST_ROUTE,
   inApplicationRoute,
   navigateSafely,
   screenTransitionState,
@@ -105,63 +138,6 @@ export const TRANSACTION_DETAIL_PROGRAM_NAME = 'COTRN01C';
  * that table to be consulted from.
  */
 export const TRANSACTION_DETAIL_MAPSET = 'COTRN01';
-
-/**
- * Screen caption, verbatim from the mapset's row-4 field at `app/bms/COTRN01.bms` L75-L79.
- *
- * Assumptions: this lives in the screen module rather than in the message catalog because that is the
- * ownership boundary the catalog itself draws -- it excludes every `INITIAL=` literal a `.bms` file
- * paints, on the grounds that a field label is positional and is meaningless apart from the control
- * it sits beside. `ui/src/screens/cardDetail/index.tsx` and `ui/src/screens/transactionAdd/index.tsx`
- * hold their own captions for the same reason.
- */
-export const TRANSACTION_DETAIL_TITLE = 'View Transaction';
-
-/** Lookup field label, verbatim from `app/bms/COTRN01.bms` L80-L84 (`LENGTH=14`, `COLOR=TURQUOISE`). */
-export const TRANSACTION_DETAIL_LOOKUP_LABEL = 'Enter Tran ID:';
-
-/**
- * The THIRTEEN data-field labels this screen paints, verbatim from `app/bms/COTRN01.bms`.
- *
- * Assumptions: thirteen, not fourteen, and the trailing colon on each one is part of the literal.
- * Three independent readings of the baseline agree on the count -- the mapset paints thirteen
- * `COLOR=BLUE` output fields (L105 to L256), `app/cpy-bms/COTRN01.CPY` declares thirteen matching
- * `...I` members (L66 to L138), and `app/cbl/COTRN01C.cbl` names exactly thirteen in both of its own
- * field lists, the pre-read blanking at L159-L171 and `INITIALIZE-ALL-FIELDS` at L313-L325.
- *
- * Assumptions: the keys are the `TransactionDetail` member names rather than the mapset's field
- * names, so the label and the value it labels are reached by one key at the render site. The mapset
- * spellings are cited per entry, which is what keeps the correspondence auditable in the direction a
- * reader checks it -- from a rendered label back to the `DFHMDF` that painted it.
- */
-export const TRANSACTION_DETAIL_FIELD_LABELS = {
-  /** `TRNID`, `app/bms/COTRN01.bms` L100-L104. */
-  transactionId: 'Transaction ID:',
-  /** `CARDNUM`, `app/bms/COTRN01.bms` L113-L117. */
-  cardNumber: 'Card Number:',
-  /** `TTYPCD`, `app/bms/COTRN01.bms` L127-L131. */
-  typeCode: 'Type CD:',
-  /** `TCATCD`, `app/bms/COTRN01.bms` L139-L143. */
-  categoryCode: 'Category CD:',
-  /** `TRNSRC`, `app/bms/COTRN01.bms` L151-L155. */
-  source: 'Source:',
-  /** `TDESC`, `app/bms/COTRN01.bms` L163-L167. */
-  description: 'Description:',
-  /** `TRNAMT`, `app/bms/COTRN01.bms` L175-L179. */
-  amount: 'Amount:',
-  /** `TORIGDT`, `app/bms/COTRN01.bms` L187-L191. */
-  originTimestamp: 'Orig Date:',
-  /** `TPROCDT`, `app/bms/COTRN01.bms` L199-L203. */
-  processTimestamp: 'Proc Date:',
-  /** `MID`, `app/bms/COTRN01.bms` L211-L215. */
-  merchantId: 'Merchant ID:',
-  /** `MNAME`, `app/bms/COTRN01.bms` L223-L227. */
-  merchantName: 'Merchant Name:',
-  /** `MCITY`, `app/bms/COTRN01.bms` L235-L239. */
-  merchantCity: 'Merchant City:',
-  /** `MZIP`, `app/bms/COTRN01.bms` L247-L251. */
-  merchantZip: 'Merchant Zip:',
-} as const;
 
 /** One labelled data field of the record view. */
 type TransactionDetailField = keyof typeof TRANSACTION_DETAIL_FIELD_LABELS;
@@ -208,7 +184,7 @@ export const TRANSACTION_DETAIL_SCREEN_WIDTHS = {
 export const TRANSACTION_ID_ENTRY_WIDTH = 16;
 
 /**
- * Function-key legend labels, split from this mapset's own row-24 legend literal.
+ * Function-key legend labels, assembled from the two modules that own this mapset's row-24 parts.
  *
  * Assumptions: `app/bms/COTRN01.bms` L263-L268 paints exactly `ENTER=Fetch  F3=Back  F4=Clear
  * F5=Browse Tran.` in one 47-character `COLOR=YELLOW` field, and `app/cbl/COTRN01C.cbl` L112-L127
@@ -216,16 +192,20 @@ export const TRANSACTION_ID_ENTRY_WIDTH = 16;
  * agree and these four are the whole contract. PF7, PF8 and PF12 are absent from both and are
  * therefore not bound.
  *
- * Assumptions: `F4=Clear` is taken from {@link UNIFORM_PF_KEY_LABELS} rather than written again,
- * because that module records it as byte-identical across every measured legend that binds PF4. The
- * other three are screen-owned: `ENTER=Fetch` and `F5=Browse Tran.` appear on no other mapset, and
- * `F3=Back` is one of three competing PF3 spellings in the population.
+ * Assumptions: `F4=Clear` comes from {@link UNIFORM_PF_KEY_LABELS} and the other three from the
+ * message catalog, and that split is the boundary those two modules draw rather than an
+ * inconsistency. `F4=Clear` is byte-identical across every measured legend that binds PF4, so
+ * `ui/src/layout/PfKeyBar.tsx` owns it and the catalog deliberately carries no entry for it;
+ * `ENTER=Fetch` and `F5=Browse Tran.` appear on no other mapset and `F3=Back` is one of three
+ * competing PF3 spellings, so the catalog carries all three as this mapset's own text. Restating
+ * either side here would put a second spelling of a verbatim constant in the tree with nothing
+ * keeping the two equal.
  */
 export const TRANSACTION_DETAIL_KEY_LABELS = {
-  ENTER: 'ENTER=Fetch',
-  PFK03: 'F3=Back',
+  ENTER: CATALOG_KEY_LABELS.ENTER,
+  PFK03: CATALOG_KEY_LABELS.PFK03,
   PFK04: UNIFORM_PF_KEY_LABELS.PFK04,
-  PFK05: 'F5=Browse Tran.',
+  PFK05: CATALOG_KEY_LABELS.PFK05,
 } as const;
 
 /**
@@ -243,15 +223,18 @@ export const TRANSACTION_DETAIL_LEGEND = [
   TRANSACTION_DETAIL_KEY_LABELS.PFK05,
 ].join('  ');
 
-/**
- * Route the transaction browse is reached at, which this screen's PF5 transfers to.
- *
- * Assumptions: `app/cbl/COTRN01C.cbl` L125-L127 moves `'COTRN00C'` into `CDEMO-TO-PROGRAM` and
- * transfers, and `COTRN00C` is the transaction LIST program -- so PF5 here is navigation and not a
- * save, notwithstanding that PF5 means save on most other CardDemo screens. The painted legend
- * `F5=Browse Tran.` is the independent confirmation.
+/*
+ * WHY : Assumptions: the browse route this screen's PF5 transfers to is IMPORTED from
+ *       `ui/src/routes/navigation.ts` rather than declared here. `app/cbl/COTRN01C.cbl` L125-L127 moves
+ *       `'COTRN00C'` into `CDEMO-TO-PROGRAM` and transfers, and `COTRN00C` is the transaction LIST
+ *       program -- so PF5 here is navigation and not a save, notwithstanding that PF5 means save on most
+ *       other CardDemo screens; the painted legend `F5=Browse Tran.` is the independent confirmation.
+ * WHY : ⚠️ Refactoring Rationale: this module used to declare and export its own
+ *       `TRANSACTION_LIST_ROUTE = '/transactions'`. That was a second spelling of a path the navigation
+ *       module now owns -- the browse is an admissible ORIGIN, so its route had to be declared there for
+ *       `inApplicationRoute` to admit it -- and two spellings of one path is one place for PF5's
+ *       destination to drift silently to a route the table does not serve.
  */
-export const TRANSACTION_LIST_ROUTE = '/transactions';
 
 /** Screen-level message this screen owns, verbatim from `app/cbl/COTRN01C.cbl` L149. */
 const TRANSACTION_DETAIL_MESSAGES = PROGRAM_MESSAGES.COTRN01C;
@@ -267,28 +250,6 @@ const AMOUNT_MASK_INTEGER_POSITIONS = 8;
 
 /** HTTP status the transaction contract answers when no row carries the identifier. */
 const NOT_FOUND_STATUS = 404;
-
-/** Character the reduced card rendering hides each concealed digit behind. */
-const CARD_NUMBER_MASK_CHARACTER = '*';
-
-/** Digits of a card number the reduced rendering leaves visible, per AAP section 0.4.1.9. */
-const CARD_NUMBER_VISIBLE_DIGITS = 4;
-
-/**
- * A card number that has ALREADY been reduced to its last four digits.
- *
- * Alternatives Considered: importing `MASKED_CARD_NUMBER` from `ui/src/api/masking.ts`, which owns the
- * contract's own pattern. Rejected because that module is not among this screen's declared
- * dependencies, and -- more usefully -- because this check exists to be INDEPENDENT of the boundary's:
- * `viewTransaction` already refuses a response carrying a whole number, so a pattern shared with it
- * would fail in the same way at the same moment. Declaring it here makes the render site's guard a
- * second, separate opinion, which is the only arrangement in which it can catch anything.
- *
- * Assumptions: the leading run is `+` rather than a fixed twelve, because the count of concealed
- * characters depends on the stored width and the mapset's field is `LENGTH=16` while the reduced form
- * of a shorter stored value would carry fewer.
- */
-const REDUCED_CARD_NUMBER = /^\*+[0-9]{4}$/u;
 
 /**
  * Wire shape the transaction contract publishes an amount in.
@@ -417,35 +378,44 @@ export function transactionDatePortion(timestamp: string | null): string {
 }
 
 /**
- * Presents a card number that the service has already reduced to its last four digits.
+ * Presents a card number the service has already reduced, and withholds anything else.
  *
- * Assumptions: the value ARRIVES reduced and this function neither unmasks nor re-masks one.
- * `ui/src/api/transactions.ts` performs the reduction server-side and refuses a response carrying a
- * whole number, and AAP section 0.4.1.9 permits an unmasked account number on the administrative
- * card-detail endpoint alone -- which this screen does not call. Re-applying a mask to an
- * already-reduced value would turn `************1234` into `************1234` with a different count
- * of asterisks, so the already-reduced case is detected and passed through untouched.
+ * ⚠️ Refactoring Rationale: this function neither unmasks NOR re-masks, and until this revision it did
+ * re-mask while its own docstring said it did not. It carried a local `/^\*+[0-9]{4}$/u` and, on a
+ * miss, sliced the last four characters and prefixed a run of asterisks -- so a value the recognition
+ * test rejected was reduced HERE, in the browser, holding the unreduced value first. Two things were
+ * wrong with that. The local pattern was more permissive than the contract's, which
+ * `ui/src/api/masking.ts` states as exactly twelve asterisks and four digits, and a mask pattern that
+ * drifts in the permissive direction is the one failure mode that module exists to prevent. And a
+ * client-side mask is the thing that module explicitly forbids: "a helper that masked a value
+ * client-side would invite a caller to hold the unmasked one first, which is the exposure the
+ * service-side mask exists to remove."
  *
- * Trade-offs: a value that is NOT already reduced is reduced here rather than rendered as it
- * arrived. That branch should be unreachable, because the transport refuses such a response before
- * this screen sees it; it is implemented anyway because the two failures are not comparable. The cost
- * of reducing a value that was already safe is a rendering with too many asterisks, which a reader
- * notices; the cost of rendering one that was not is a whole account number written into the DOM, the
- * accessibility tree, a screenshot and any bug report that carries them. Refusing to render was the
- * other alternative and is rejected because a blank field reports nothing an operator can act on.
+ * Assumptions: the recognition test is `MASKED_CARD_NUMBER` imported from that module rather than a
+ * copy. The earlier note argued a separate copy made this a second, independent opinion; the review
+ * that produced this revision rejected that reasoning, and rightly -- an independent opinion is only
+ * worth having if it is at least as strict, and this one was looser, so what it actually bought was a
+ * screen that would render a partial mask its four sibling clients refuse.
+ *
+ * Assumptions: an unrecognised value is WITHHELD rather than reduced. `viewTransaction` in
+ * `ui/src/api/transactions.ts` tests the same pattern and throws a `RangeError` before this screen
+ * sees the response, and {@link BLANK_TRANSACTION_RECORD} is the only other source of this field, so
+ * the branch is unreachable from either. It is implemented as a withholding rather than left out
+ * because the cost of the two outcomes is not symmetric: an empty field is a rendering an operator
+ * reports, whereas a whole account number reaches the DOM, the accessibility tree, a screenshot and
+ * every bug report that carries them. AAP section 0.4.1.9 permits an unmasked number on the
+ * administrative card-detail endpoint alone, which this screen does not call.
+ *
+ * Assumptions: the blank of the cleared record takes the same branch and renders blank, which is what
+ * the mapset paints -- `app/cbl/COTRN01C.cbl` L309-L326 moves `SPACES` into `CARDNUMI` on PF4 and on
+ * every failed lookup, so a blank value beside its standing label is the reference's cleared state.
  * @param {string} cardNumber - The card number as `TransactionDetail.cardNumber` carries it, expected
- *   to be the reduced rendering.
- * @returns {string} The reduced rendering: the concealed positions as mask characters followed by the
- *   final four digits, or the argument unchanged when it is already in that form.
+ *   to be the contract's reduced rendering or, on a cleared screen, blank.
+ * @returns {string} The argument unchanged when it is the contract's reduced rendering, and the empty
+ *   string for every other value including a blank one.
  */
 export function presentMaskedCardNumber(cardNumber: string): string {
-  if (REDUCED_CARD_NUMBER.test(cardNumber)) {
-    return cardNumber;
-  }
-
-  const visible = cardNumber.slice(-CARD_NUMBER_VISIBLE_DIGITS);
-  const concealedCount = cardNumber.length - visible.length;
-  return `${CARD_NUMBER_MASK_CHARACTER.repeat(concealedCount)}${visible}`;
+  return MASKED_CARD_NUMBER.test(cardNumber) ? cardNumber : '';
 }
 
 /**
@@ -757,8 +727,9 @@ function timestampValue(timestamp: string | null, valueStyle: CSSProperties): Re
  * each helper rather than assumed. {@link formatTransactionAmount} finds no match in an empty string
  * and returns it unchanged, so a blank amount stays blank instead of becoming `+00000000.00` -- a
  * formatted zero would assert a value the record does not carry. {@link transactionDatePortion}
- * slices an empty string to an empty string, and {@link presentMaskedCardNumber} conceals nothing in
- * one. All three therefore render a space-filled field as the mapset paints it.
+ * slices an empty string to an empty string, and {@link presentMaskedCardNumber} answers the empty
+ * string for a value that is not the contract's reduced rendering, which a blank is not. All three
+ * therefore render a space-filled field as the mapset paints it.
  */
 const BLANK_TRANSACTION_RECORD: TransactionDetail = {
   transactionId: '',
@@ -927,6 +898,13 @@ export function TransactionDetailScreen(): ReactElement {
    *       parameter by NAME, so reading any other spelling -- `transactionId`, `tranId` -- would
    *       silently yield `undefined` and turn every deep link into the empty-form arrival, with
    *       nothing failing to say so.
+   * WHY : ⚠️ Assumptions: `undefined` is a FIRST-CLASS answer here and not only the symptom of a
+   *       misspelling, because the same component is also mounted at the selector-free
+   *       `/transactions/view` for main-menu option 7, which carries no selection. Both arrivals are
+   *       the reference's own: `app/cbl/COTRN01C.cbl` L103-L108 reads its selection carrier and L109
+   *       paints the empty map when it is blank. The two are distinguished by this value alone -- the
+   *       effect below reads on a present one and does nothing at all on an absent one -- so nothing
+   *       else in the screen needs to know which route it arrived on.
    */
   const { id } = useParams<{ id: string }>();
   /*
@@ -1159,6 +1137,14 @@ export function TransactionDetailScreen(): ReactElement {
    *       previous entry at all. The handed-over origin is validated against the route table by
    *       `inApplicationRoute`, so an origin that is not a route this application serves falls to the
    *       menu rather than being navigated to.
+   * WHY : Assumptions: the browse is the producer of that origin, which is what makes both arms of
+   *       this expression reachable. `ui/src/screens/transactionList/index.tsx` hands over
+   *       `TRANSACTION_LIST_ROUTE` on the arm that opens a selected row -- the target of
+   *       `app/cbl/COTRN00C.cbl` L190 and L191, which move `WS-TRANID` and `WS-PGMNAME` into the
+   *       reference's own `CDEMO-FROM-*` carriers before transferring -- and that route is one of the
+   *       parameterless application routes `inApplicationRoute` admits. A deep link, a reload and the
+   *       parameterless route carry no origin at all and take the fallback, which is the same arm the
+   *       reference takes when `CDEMO-FROM-PROGRAM` is blank.
    */
   const backDestination =
     inApplicationRoute(screenTransitionState(location.state).from) ?? MAIN_MENU_ROUTE;

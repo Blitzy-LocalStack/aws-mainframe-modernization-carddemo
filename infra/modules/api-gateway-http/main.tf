@@ -43,8 +43,14 @@
 #   cards, transactions, reference, authorizations and reports. Two of the seven
 #   own a second top-level path segment because their contracts publish one:
 #   card-service serves its administrative card-detail read at
-#   `/api/v1/admin/cards/{cardNumber}`, and transaction-service serves bill
-#   payment at `/api/v1/billpay`. Auth-service is not one of the two -- its five
+#   `/api/v1/admin/cards/{cardKey}`, and transaction-service serves bill
+#   payment at `/api/v1/billpay`. The path parameter is spelled `{cardKey}` here
+#   because that is what `var.route_keys` declares and what the card contract
+#   accepts: an opaque, service-minted selector rather than the primary account
+#   number, so no request target this stage routes or logs carries a PAN. The
+#   rename from `{cardNumber}` is recorded against that variable in variables.tf,
+#   and this comment tracked the old spelling after the value itself had changed.
+#   Auth-service is not one of the two -- its five
 #   user-administration operations are a subtree of its own prefix, at
 #   `/api/v1/auth/users` and `/api/v1/auth/users/{userId}`, so the greedy
 #   `/api/v1/auth/{proxy+}` key already reaches them. Refactoring Rationale: this

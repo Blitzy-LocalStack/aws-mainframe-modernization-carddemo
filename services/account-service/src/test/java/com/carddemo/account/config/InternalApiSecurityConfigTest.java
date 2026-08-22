@@ -113,16 +113,37 @@ class InternalApiSecurityConfigTest {
     private static final String ERROR_PATH = "/error";
 
     /**
-     * Builds the deployed decoder over both callers' keys.
+     * Builds the deployed decoder over both callers' keys, reading the wall clock.
      *
      * <p>Assumptions: the two keys DIFFER, which is what makes every impersonation case below meaningful.
      * Identical keys would let a token minted under one subject verify under the other's key, so the
      * key-identifier and subject assertions would pass vacuously.</p>
      *
+     * <p>Assumptions: the system clock is supplied here rather than a fixed one, because every case that
+     * reaches this helper mints its fixture at {@code Instant.now()} and asserts a property that is not about
+     * time -- so the verifier's notion of now has to agree with the fixture's, and the wall clock is what
+     * does. The cases that ARE about time pass their own instant to {@link #decoder(Clock)}.</p>
+     *
      * @return the decoder the bean method produces, never {@code null}
      */
     private static JwtDecoder decoder() {
-        return new InternalApiSecurityConfig().internalTokenDecoder(KEY, OTHER_KEY);
+        return decoder(Clock.systemUTC());
+    }
+
+    /**
+     * Builds the deployed decoder over both callers' keys, against a nominated clock.
+     *
+     * <p>⚠️ Purpose: the lifetime validator's verdict now depends on what the VERIFIER believes the time is,
+     * and the shape that matters -- a token issued in the future -- can only be expressed by fixing one side
+     * of that comparison. This overload is how a case fixes the verifier's side; the alternative, moving the
+     * token's claims instead, cannot distinguish a rule anchored to the verifier's clock from one that reads
+     * the token alone, which is exactly the defect being regressed against.</p>
+     *
+     * @param clock the clock the decoder reads this service's own notion of now from
+     * @return the decoder the bean method produces, never {@code null}
+     */
+    private static JwtDecoder decoder(Clock clock) {
+        return new InternalApiSecurityConfig().internalTokenDecoder(KEY, OTHER_KEY, clock);
     }
 
     /**
@@ -364,6 +385,72 @@ class InternalApiSecurityConfigTest {
                 Instant.now(), InternalServiceToken.MAX_LIFETIME);
 
         assertThat(decoder().decode(atTheBound).getSubject()).isEqualTo(SUBJECT);
+    }
+
+    /**
+     * Verifies a token issued eight hours in this service's future is refused, while an ordinary one is not.
+     *
+     * <p>⚠️ Purpose: this is the finding this case was written for, and the token it presents is correct in
+     * every OTHER respect -- real key, real caller, matching key identifier, admitted scope, right audience,
+     * and a declared lifetime of exactly the published maximum. Its issue time is eight hours ahead, so its
+     * expiry is eight hours and five minutes ahead: nothing on the path refused it. The declared-lifetime
+     * bound was satisfied because the difference is five minutes; the framework's default validator set was
+     * satisfied because it refuses an expiry that has already PASSED and does not read the issue time at all.
+     * The credential was therefore accepted for eight hours by the rule whose whole purpose is a five-minute
+     * capture window on a bearer token that reaches account and customer reads with no user in the loop.</p>
+     *
+     * <p>Assumptions: an ordinary freshly minted token is decoded in the same case, through the same decoder,
+     * because the refusal alone would also be satisfied by an anchoring so tight that every real caller was
+     * refused -- and a deployment in which every internal read fails is a different defect, not a safer
+     * version of this one.</p>
+     *
+     * @throws Exception if signing the forged token fails, which would itself be the defect
+     */
+    @Test
+    @DisplayName("a token issued eight hours ahead is refused while a freshly minted one is accepted")
+    void aTokenIssuedInTheFutureIsRefused() throws Exception {
+        String futureIssued = handSigned(SUBJECT, SUBJECT, InternalServiceToken.SCOPE_CARD_XREF_READ, KEY,
+                Instant.now().plus(Duration.ofHours(8)), InternalServiceToken.MAX_LIFETIME);
+
+        assertThatThrownBy(() -> decoder().decode(futureIssued))
+                .isInstanceOf(JwtException.class)
+                .hasMessageContaining(InternalServiceToken.MAX_LIFETIME.toString());
+        assertThat(decoder().decode(correctToken()).getSubject())
+                .as("the anchoring must not refuse the token the production caller actually mints")
+                .isEqualTo(SUBJECT);
+    }
+
+    /**
+     * Verifies the lifetime decision is taken against the clock this context supplies, not the token's own.
+     *
+     * <p>⚠️ Assumptions: ONE token is presented to TWO decoders whose only difference is the clock, which is
+     * what makes this case falsifiable. A rule reading the token alone -- the state this replaces -- returns
+     * the same verdict for both, because the token is identical; only a rule anchored to the verifier's own
+     * instant can admit it against one clock and refuse it against another. The refusing clock is set eight
+     * hours BEHIND the issue instant, which is the same relation as an attacker dating a token eight hours
+     * ahead, expressed from the side this case can fix.</p>
+     *
+     * <p>Assumptions: the presented token is minted through the shared minter at its maximum lifetime rather
+     * than hand-assembled, so the admitted half asserts what a production caller actually presents -- and the
+     * expiry stays in the real future, which keeps the framework's own expiry validator out of both
+     * verdicts.</p>
+     */
+    @Test
+    @DisplayName("the lifetime verdict follows the injected clock, not the token's own claims")
+    void theLifetimeVerdictFollowsTheInjectedClock() {
+        Instant issued = Instant.now();
+        String token = minter(KEY, InternalServiceToken.MAX_LIFETIME, issued).mint(
+                InternalServiceToken.AUDIENCE_ACCOUNT_CONTEXT,
+                InternalServiceToken.SCOPE_CARD_XREF_READ);
+
+        assertThat(decoder(Clock.fixed(issued, ZoneOffset.UTC)).decode(token).getSubject())
+                .as("against a clock that agrees with the minter, the token is ordinary")
+                .isEqualTo(SUBJECT);
+        assertThatThrownBy(() -> decoder(
+                Clock.fixed(issued.minus(Duration.ofHours(8)), ZoneOffset.UTC)).decode(token))
+                .as("against a clock eight hours behind it, the same token is issued in the future")
+                .isInstanceOf(JwtException.class)
+                .hasMessageContaining(InternalServiceToken.MAX_LIFETIME.toString());
     }
 
     /**
@@ -638,16 +725,16 @@ class InternalApiSecurityConfigTest {
     void aBlankOrShortKeyIsRefusedAtConstruction() {
         InternalApiSecurityConfig config = new InternalApiSecurityConfig();
 
-        assertThatThrownBy(() -> config.internalTokenDecoder("   ", OTHER_KEY))
+        assertThatThrownBy(() -> config.internalTokenDecoder("   ", OTHER_KEY, Clock.systemUTC()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("carddemo.internal-identity.authorization-signing-key");
-        assertThatThrownBy(() -> config.internalTokenDecoder(KEY, "   "))
+        assertThatThrownBy(() -> config.internalTokenDecoder(KEY, "   ", Clock.systemUTC()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("carddemo.internal-identity.transaction-signing-key");
-        assertThatThrownBy(() -> config.internalTokenDecoder("tooshort", OTHER_KEY))
+        assertThatThrownBy(() -> config.internalTokenDecoder("tooshort", OTHER_KEY, Clock.systemUTC()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining(String.valueOf(InternalServiceToken.MIN_KEY_LENGTH));
-        assertThatThrownBy(() -> config.internalTokenDecoder(KEY, "tooshort"))
+        assertThatThrownBy(() -> config.internalTokenDecoder(KEY, "tooshort", Clock.systemUTC()))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining(String.valueOf(InternalServiceToken.MIN_KEY_LENGTH));
     }

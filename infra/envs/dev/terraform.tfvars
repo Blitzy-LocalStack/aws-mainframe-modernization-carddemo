@@ -416,9 +416,17 @@ skip_final_snapshot = true
 #       was a repeatable destroy/recreate cycle, because a scheduled-for-deletion
 #       secret name cannot be reused until its window elapses. Trade-offs: recreating
 #       this environment under the same names now requires
-#       `aws secretsmanager delete-secret --force-delete-without-recovery` on the six
-#       purpose secrets first, which is one deliberate operator step in place of a
-#       standing setting that silently removed the recovery window from every one.
+#       `aws secretsmanager delete-secret --force-delete-without-recovery` on
+#       the five purpose secrets first, which is one deliberate operator step in place
+#       of a standing setting that silently removed the recovery window from every one.
+#       Refactoring Rationale: this operator step said SIX purpose secrets and main.tf
+#       declares five -- the messaging HMAC key was withdrawn with the injection that
+#       read it, and the count was left behind. A count in an operator instruction is
+#       not decoration: the operator works down a list, finds five names, and has to
+#       decide whether the sixth is a secret they failed to find or a sentence that
+#       failed to move. The prose-count gate in .github/workflows/infra-ci.yml now
+#       measures the aws_secretsmanager_secret declarations in this root against the
+#       counts spelled in its documentation, so the two cannot part again silently.
 secret_recovery_window_in_days = 30
 # WHY : Assumptions: alarm_email_endpoints is deliberately ABSENT from this file. It
 #       is a required input with no default, supplied out of band

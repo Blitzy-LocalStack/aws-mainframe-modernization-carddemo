@@ -1081,23 +1081,16 @@ locals {
   #       Actuator and a Prometheus registry, and the shared kernel's meter filter
   #       stamps three common tags on each meter, while before this widget nothing in
   #       this module read the `CardDemo` namespace at all.
-  # WHY : Refactoring Rationale: that paragraph also named a telemetry sidecar in
-  #       infra/modules/ecs-service as the component scraping the Actuator endpoint
-  #       and exporting through CloudWatch EMF, and concluded that meters "were
-  #       therefore being collected, stored and billed while being visible nowhere".
-  #       The sidecar is withdrawn -- it is outside the frozen specification and was
-  #       forcing an eleventh ECR repository and a ninth interface endpoint, both also
-  #       outside it -- so the claim would now overstate what exists in two directions
-  #       at once: nothing scrapes the endpoint, and nothing is therefore being billed
-  #       for storage either.
-  #       Trade-offs: this widget consequently has a namespace with no publisher until
-  #       a scraper is introduced that fits the specification's endpoint and repository
-  #       counts. It is kept rather than deleted because the producer half is real and
-  #       unchanged -- every service exposes the meters with the common tags -- so what
-  #       is missing is one collector, not a metric contract; and an empty widget on the
-  #       operations dashboard states that absence to an operator, where a deleted
-  #       widget would hide it. docs/architecture/observability.md records the same gap
-  #       in the same terms.
+  # WHY : Assumptions: the publisher of this namespace is the telemetry collector
+  #       sidecar infra/modules/ecs-service adds to every task. It scrapes each
+  #       service's Actuator Prometheus endpoint on task loopback every sixty seconds
+  #       and exports what it collects through its awsemf exporter, which names the
+  #       identical `CardDemo` namespace this module reads -- so the two modules are
+  #       joined by that one literal and by nothing else.
+  #       Refactoring Rationale: this widget was left reading a namespace nothing wrote
+  #       to when the sidecar was withdrawn, and the note here recorded the gap instead
+  #       of closing it. Restoring the collector closes it, so the panel is a panel over
+  #       live series again rather than a marker for an absent one.
   # WHY : Assumptions: the series are selected by SEARCH expression rather than by
   #       an explicit metric list, and that is forced by how the exporter publishes.
   #       It runs with no dimension roll-up and with resource-to-telemetry conversion
@@ -1140,10 +1133,50 @@ locals {
     }
   }]
 
+  # WHY : Assumptions: a SECOND application-meter panel exists because the namespace
+  #       is fed by two channels whose meters are named differently, and one panel
+  #       cannot select both. A long-running service is SCRAPED, so its meters arrive
+  #       through Micrometer's Prometheus naming convention with the dots replaced by
+  #       underscores -- `http_server_requests_seconds_count` -- which is what the
+  #       panel above selects. A one-shot task has no listener to scrape and PUSHES
+  #       instead, through Micrometer's OTLP registry, whose convention keeps the dots
+  #       -- `jvm.memory.used`, `spring.batch.job` -- so the tokens above match none of
+  #       it. Without this panel the batch and data-migration steps would publish into
+  #       the namespace and appear on no graph, which is the same defect the panel
+  #       above was added to fix, one channel over.
+  # WHY : Assumptions: each term is QUOTED inside the search expression. CloudWatch
+  #       metric search treats a period as a delimiter, so an unquoted `jvm.memory.used`
+  #       is read as three ANDed tokens and would also select the underscored series
+  #       from the scrape channel, merging the two channels this panel exists to
+  #       separate. The quoted form matches the metric name as written.
+  # WHY : Trade-offs: the two series chosen are the batch job timer Spring Batch
+  #       records for every job execution, and heap usage, rather than a business
+  #       meter. That mirrors the panel above for the same reason -- these are the
+  #       meters that exist today -- and the same search keeps returning new series as
+  #       jobs record them, with no edit here.
+  batch_meter_widget = [{
+    type   = "metric"
+    x      = 0
+    y      = local.shared_widget_y + 24
+    width  = 24
+    height = 6
+    properties = {
+      title  = "Task-mode meters pushed to the CardDemo namespace"
+      region = data.aws_region.current.region
+      view   = "timeSeries"
+      period = var.alarm_period_seconds
+      metrics = [
+        [{ expression = "SEARCH('{${local.application_metric_namespace}} \"spring.batch.job\"', 'Sum', ${var.alarm_period_seconds})", label = "Batch job executions", id = "batchjobs" }],
+        [{ expression = "SEARCH('{${local.application_metric_namespace}} \"jvm.memory.used\"', 'Average', ${var.alarm_period_seconds})", label = "Task JVM heap in use", id = "taskheap" }],
+      ]
+    }
+  }]
+
   dashboard_widgets = concat(
     local.ecs_service_widgets,
     local.queue_depth_widget,
     local.application_meter_widget,
+    local.batch_meter_widget,
     [
       {
         type   = "metric"

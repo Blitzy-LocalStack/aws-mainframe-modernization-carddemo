@@ -716,10 +716,31 @@ strings. That is **eight columns** and **seven named constraints** —
 > `reference-service`'s `V1__reference.sql` did, and
 > `ReleasedMigrationImmutabilityTest` in `common-lib` now fails the build for any
 > such edit. The accurate post-state therefore lives **here**, where it can be
-> maintained, and the migration keeps the bytes it was released with. Alternatives
-> Considered: a no-op `V3` whose only content is a corrected comment. Rejected
-> because a migration that changes nothing is a poor carrier for documentation and
-> would still leave the stale text in place beside it.
+> maintained, and the migration keeps the bytes it was released with.
+>
+> ⚠️ **It also lives in `V3__batch_run_contract_restatement.sql`, and that reverses
+> an earlier judgement recorded in this paragraph.** This note previously rejected
+> "a no-op `V3` whose only content is a corrected comment", on the ground that a
+> migration changing nothing is a poor carrier for documentation. That reasoning was
+> sound about the file it imagined and wrong about the file that was needed, because
+> the miscount is not the whole defect: `V1__batch.sql` issues a `COMMENT ON COLUMN`
+> for **seven of its eight columns** — `attempt` has none — and for **none of its
+> seven constraints**. So the database's own record of the contract stops exactly
+> where the stale description stops, and the operator those comments were written
+> for, inspecting the table from a session during a failed nightly run with no
+> access to this repository, could read every column but the one a redrive raises
+> first. `V3` writes that commentary: the missing column comment and a comment on
+> each of the seven named constraints. It is therefore not a no-op, and it carries
+> the accurate post-state in its own header as a by-product of doing real work.
+> Alternatives Considered: correcting `V1` and re-recording its two digests in
+> `ReleasedMigrationImmutabilityTest` in the same commit. Rejected — that is
+> precisely the action the guard exists to refuse, and the cost of being wrong about
+> whether an environment holds the old checksum is a service that will not start,
+> against a benefit of one accurate comment block. Trade-offs: `V1`'s header still
+> reads seven and five and no route exists to change it, so a reader who opens that
+> file alone still reads a stale count. Every other route to the contract — this
+> section, `V3`, the catalogue and `BatchRunRepositoryIT` — agrees on eight and
+> seven.
 
 The check constraints keep the ledger from recording an impossible run, and each
 earns its place:
@@ -1247,6 +1268,35 @@ expect on the classpath, and each is absent for a stated reason.
 
 ## 10. Build, run, and test
 
+<!-- test-inventory: 51 tests + 12 integration tests -->
+**63** test classes across nine packages: **51** matching `*Test`, run by Surefire,
+and **12** matching `*IT`, run by Failsafe against Testcontainers-backed
+PostgreSQL. Every one of the nine test packages carries a `package-info.java`,
+because the documentation gate of §11 audits test sources too.
+
+| Package | `*Test` | `*IT` |
+|---|---|---|
+| `dto` | 14 | — |
+| `job` | 12 | 1 |
+| `mapper` | 8 | — |
+| `service` | 7 | — |
+| `domain` | 5 | — |
+| `config` | 3 | — |
+| `batch` | 1 | — |
+| `fixtures` | 1 | — |
+| `repository` | — | 11 |
+
+Assumptions: the census is **machine-checked rather than asserted**, which is why
+the marker comment above it is written in the exact shape a parser reads.
+`ServiceReadmeInventoryTest` in `common-lib` walks this module's `src/test/java`,
+counts the two suffixes itself, compares both against the marker and checks that
+the bolded total equals their sum — so editing a figure here without editing the
+tree fails the reactor build. Refactoring Rationale: this section previously had no
+marker at all, so this module was the one service whose published census nothing
+measured; §10.4 states required coverage rather than delivered coverage, which
+meant the two figures a reader most wants — how many tests exist, and how many need
+a container — were absent from a page that discussed testing at length.
+
 ### 10.1 Build and test
 
 ```bash
@@ -1257,10 +1307,12 @@ expect on the classpath, and each is absent for a stated reason.
 #       assertion of section 10.4, and that is why it is the one to run before
 #       trusting that section. Failsafe is bound in the parent POM and executes
 #       for both selected modules, and both contribute: `batch-service` holds
-#       three `*IT` classes -- `repository/PostingUnitOfWorkIT`,
-#       `repository/CrossSchemaFeedRepositoryIT` and
-#       `repository/BatchRunRepositoryIT` -- and `common-lib` holds
-#       `CardDemoCommonAutoConfigurationIT`. Each starts a real PostgreSQL
+#       ELEVEN `*IT` classes -- ten under `repository`, of which
+#       `PostingUnitOfWorkIT`, `CrossSchemaFeedRepositoryIT` and
+#       `BatchRunRepositoryIT` carry the atomicity, grant-scope and idempotency
+#       assertions specifically, plus `job/PostTransactionsJobParityIT` -- and
+#       `common-lib` holds `CardDemoCommonAutoConfigurationIT`. The census at the
+#       head of this section is the authority for that figure. Each starts a real PostgreSQL
 #       container through Testcontainers rather than an in-memory engine, so the
 #       cross-schema grants and the single-transaction commit are exercised
 #       against the engine that enforces them.
@@ -1343,13 +1395,16 @@ running rather than its coverage contribution.
 
 **This table is a specification, not an inventory.** Each row states a test this
 module's contract requires and the rule that test pins; a row's presence here is not a
-claim that the test exists, and nothing in §10 proves the container-backed atomicity
-assertion in the last row. Assumptions: the table is written as required coverage
+claim that the test exists. Assumptions: the table is written as required coverage
 because that is the durable half — the rule each test must pin comes from §4 and from
 the baseline it cites, and it does not change when the test is written. Trade-offs: a
-reader cannot learn from this table which of the seven currently run, and must ask the
-module's test tree instead. That is the intended direction, because the tree answers it
-exactly and a column here would answer it only until the next commit.
+reader cannot learn from this table which of the seven currently run, and must read it
+against the machine-checked census at the head of §10 and against the module's test
+tree. That is the intended direction, because the census and the tree answer it
+exactly and a column here would answer it only until the next commit. The last row's
+container-backed atomicity assertion is settled rather than outstanding — the
+paragraph below names the three classes that carry it, and the `verify` command in
+§10.1 is the one that runs them.
 
 | Required test | The rule it pins |
 |---|---|
@@ -1588,7 +1643,7 @@ abbreviation is not an accepted variant.
 | Decision | Category | Citation | Argued in |
 |---|---|---|---|
 | Multiply before divide in the interest calculation; dividing first yields different cents | Alternatives Considered: | `app/cbl/CBACT04C.cbl:464-465` | §4.4 |
-| Truncation for that divide, because there is no `ROUNDED` phrase, while half-up rounding remains the default elsewhere | Alternatives Considered: | `app/cbl/CBACT04C.cbl:464-465`, receiving field `:168` | §4.4 |
+| Half-up rounding for that divide, like every other reduction on the money path; the baseline's truncation — no `ROUNDED` phrase, receiving field `:168` — is the reference behaviour and is registered as divergence `C-ROUNDING`, not reproduced here | Alternatives Considered: | `app/cbl/CBACT04C.cbl:464-465`, receiving field `:168`; `Money.GENERAL_ROUNDING` | §4.4 |
 | The cross-schema grant keeps the posting unit of work a single ACID commit; saga and outbox-plus-compensating-reversal named and rejected because they would make partial-posting states observable and break golden-master parity outright | Alternatives Considered: | `app/cbl/CBTRN02C.cbl:424-444`, writes at `:440-442` | §4.2 |
 | A return code of 4 is a warn tier rather than a failure, and the skip-predicate to run-predicate inversion is spelled out | Refactoring Rationale: | producer `app/cbl/CBTRN02C.cbl:229-230`; inverted sense demonstrated at `app/jcl/TRANBKP.jcl:51` | §3.1, §3.2 |
 | The counter line carries two spaces before its colon, as observable output | Assumptions: | `app/cbl/CBTRN02C.cbl:228`, against `:227` for contrast | §3.3 |
@@ -1615,7 +1670,7 @@ abbreviation is not an accepted variant.
 | The empty fee paragraph is preserved as a documented no-op extension point | Trade-offs: | `app/cbl/CBACT04C.cbl:518-520`, against the header claim at `app/jcl/INTCALC.jcl:20` | §4.9 |
 | Money is `BigDecimal` at scale 2 and a JSON string, never a binary floating-point type | Alternatives Considered: | Transformation rule T3; enforced by an ArchUnit assertion | §4.10 |
 | The container exits with a graded numeric status while every build and test gate stays binary | Trade-offs: | `tests/README.md` §8 grades 0/2/4/8/16; `services/batch-service/Dockerfile` entry point | §3.4 |
-| The runtime image tag is the headless Amazon Linux variant, because **no Alpine variant of that image exists** | Assumptions: | `services/batch-service/Dockerfile` | §10.2 |
+| The runtime image tag is the headless Amazon Linux 2023 variant; `21-alpine` does not resolve in the ECR Public Corretto repository at all, and the Alpine Corretto image that **does** exist on Docker Hub is declined rather than unavailable — it is the larger of the two, 166.1 MB against 143.9 MB compressed, because no headless Alpine variant is published | Alternatives Considered: | `services/batch-service/Dockerfile` | §10.2 |
 | No accessor generator, no bean mapper, no declared resilience library and no use of the transitive one, no circuit breaker, no cache, no streaming platform | Alternatives Considered: | `services/batch-service/pom.xml`, deliberately-absent-dependencies block | §9.3 |
 | The disclosure-group composite key's physical order differs from the order the COBOL moves the fields in | Assumptions: | `app/cpy/CVTRA02Y.cpy:5-8` and `app/cbl/CBACT04C.cbl:76-82`, against the moves at `:210-212` | §4.5 |
 | The `'DEFAULT'` seed is one row per type-and-category pair, space-padded to ten characters, and its absence abends | Assumptions: | `app/cbl/CBACT04C.cbl:437` and `:443-460`; width at `app/cpy/CVTRA02Y.cpy:6` | §4.5 |

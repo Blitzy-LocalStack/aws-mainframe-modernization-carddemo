@@ -69,18 +69,26 @@
  *       published operation set, the declared authorities and the declared response headers
  *       against the handlers and the filter chain.</li>
  *   <li>{@code StepFunctionsConfig} -- LANDED. The client through which a
- *       {@code states:StartExecution} call starts a report execution. The AWS SDK Step
+ *       {@code states:StartExecution} call starts a report execution and a
+ *       {@code states:DescribeExecution} call reads what became of one. The AWS SDK Step
  *       Functions artifact backing it is declared at this module's {@code pom.xml} L271.
+ *       Assumptions: BOTH actions are named because they take different resources -- the start
+ *       names the state machine, the describe names that machine's execution ARNs -- so a task
+ *       role granted only the first serves submissions and fails every status read.
  *       Assumptions: it declares a call timeout and nothing else -- no region, no credential
  *       provider and no endpoint override appear in source, because all three are resolved
  *       from the task environment the deployment supplies, and hard-coding any of them would
  *       make one environment's value compiled into every environment's image.</li>
  *   <li>{@code ObjectStoreConfig} -- LANDED. The object-store client the artifact writers publish
- *       through. This context declares an output bucket and two key prefixes in its configuration, so
- *       without this bean nothing in the module could reach them and the orchestrated
- *       {@code GenerateStatements} and {@code GenerateReports} states would run to completion having
- *       stored nothing. Assumptions: no region, credential provider or endpoint is named here, for the
- *       same reason the execution client names none.</li>
+ *       through and the request edge reads back through. This context declares an output bucket and two
+ *       key prefixes in its configuration, so without this bean nothing in the module could reach them
+ *       and the orchestrated {@code GenerateStatements} and {@code GenerateReports} states would run to
+ *       completion having stored nothing. Assumptions: the read half is named as well as the write
+ *       half, because {@code com.carddemo.reporting.service.ArtifactStore} issues {@code HeadObject}
+ *       and both whole-object and ranged {@code GetObject} through this same bean -- all three
+ *       authorized by {@code s3:GetObject} -- so a task role granted writes alone reports every
+ *       produced artifact as absent. Assumptions: no region, credential provider or endpoint is named
+ *       here, for the same reason the execution client names none.</li>
  *   <li>{@code ArtifactIdentityConfig} -- LANDED. The keyed tokeniser an artifact object key is derived
  *       through. Assumptions: it is configuration rather than a service because an object key is not a
  *       private thing -- the store writes it to its own access log, indexes it for listing and reports
@@ -88,11 +96,11 @@
  *       has to be in place before any writer runs, and it is what keeps an account identifier and every
  *       part of a card number out of a key.</li>
  *   <li>{@code ObjectStoreConfig} -- the object-store client the two artifact writers publish
- *       through. Assumptions: it exists because this context declares an output bucket and two key
- *       prefixes in its configuration and had no client bean to reach them with, so the orchestrated
- *       statement and report states would have run this image and stored nothing. Like the Step
- *       Functions client it declares no region, credential provider or endpoint override in source,
- *       for the same reason.</li>
+ *       through and the artifact read side answers from. Assumptions: it exists because this context
+ *       declares an output bucket and two key prefixes in its configuration and had no client bean to
+ *       reach them with, so the orchestrated statement and report states would have run this image and
+ *       stored nothing. Like the Step Functions client it declares no region, credential provider or
+ *       endpoint override in source, for the same reason.</li>
  *   <li>{@code ArtifactIdentityConfig} -- the keyed tokeniser that names a stored statement artifact
  *       without naming its cardholder. Assumptions: an object key is not a private thing -- the store
  *       writes it into its own access log for every request that touches the object -- so the key is

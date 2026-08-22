@@ -58,7 +58,13 @@
  * links to it and never assembles one.
  */
 
-import { getApiClient, keysetPagingMembers, requestPath } from './client';
+import {
+  correlationHeaders,
+  getApiClient,
+  keysetPagingMembers,
+  newCorrelationId,
+  requestPath,
+} from './client';
 import { MASKED_CARD_NUMBER } from './masking';
 import type {
   ContractOperation,
@@ -248,6 +254,45 @@ const PUBLISHED_ARTIFACT_LOCATION = new RegExp(
  */
 const IDEMPOTENCY_KEY_HEADER = 'Idempotency-Key';
 
+/**
+ * Mints one identity for one report submission, reusable across every attempt at that submission.
+ *
+ * Purpose: gives a screen a value it can hold while it retries a submission whose answer never
+ * arrived, so the service recognises the second attempt as the same submission instead of starting a
+ * second run of the same report.
+ *
+ * ⚠️ Assumptions: the identity is a correlation identifier, and it is one because the same value is sent
+ * as BOTH headers this submission pins -- the submission key and the correlation identifier -- so it has
+ * to satisfy both published domains at once, and the correlation domain is strictly the narrower of the
+ * two. The reporting service accepts up to forty characters of letters, digits, hyphens and underscores
+ * (`IDEMPOTENCY_KEY_MAX_LENGTH` and `IDEMPOTENCY_KEY_PATTERN` in
+ * `services/reporting-service/src/main/java/com/carddemo/reporting/service/ReportExecutionService.java`).
+ * The shared correlation filter accepts at most twenty-four characters, admits only letters, digits and
+ * three separators, and additionally REFUSES a value that is a run of nine or more digits once separators
+ * are removed. `newCorrelationId` already produces exactly the intersection: a two-character prefix
+ * followed by twenty-two hexadecimal characters, twenty-four in all, whose leading letter is what keeps
+ * it out of the refused digit-run shape by construction.
+ *
+ * Alternatives Considered: minting a wider identity of this module's own -- a UUID, or forty characters
+ * of entropy to use the submission key's whole width. Rejected because the extra width is unusable: a
+ * value the reporting service accepts but the correlation filter refuses is answered HTTP 400 before any
+ * handler runs, so the submission would fail on the header meant to make it retryable. The eleven random
+ * bytes behind the prefix are eighty-eight bits, far past any collision concern for a value that only has
+ * to be unique among one operator's submissions.
+ *
+ * Alternatives Considered: deriving the identity from the submission itself -- a digest of the report
+ * type and the two bounds. Rejected because it would make two DELIBERATE runs of one report over one
+ * range indistinguishable, and the service remembers an execution name for ninety days -- a retention
+ * `ReportExecutionService.start` documents on the orchestrator's behalf; the operator
+ * would be told their second, intended submission was a duplicate. A minted identity separates "the same
+ * submission again" from "the same report again", which is the distinction the retry needs.
+ * @returns {string} A submission identity satisfying both the submission-key and the correlation-identifier
+ *   contracts, suitable for {@link submitTransactionReport}'s second argument.
+ */
+export function newSubmissionKey(): string {
+  return newCorrelationId();
+}
+
 // WHY : Refactoring Rationale: submitting a report STARTS an execution, and this call resolves to a
 //       HANDLE for that execution rather than to the report body. The baseline reached the same
 //       asynchrony through a queue: `app/cbl/CORPT00C.cbl` L462 performs SUBMIT-JOB-TO-INTRDR, whose
@@ -303,12 +348,13 @@ const IDEMPOTENCY_KEY_HEADER = 'Idempotency-Key';
  * @param {ReportRequest} request - The report-type marks, the range bounds a caller-supplied run
  *   reads, and the confirmation answer. Answer `confirm` with 'Y' to start; answer 'N' to decline.
  *   Both bounds are ten-character calendar values and are sent exactly as given.
- * @param {string} [idempotencyKey] - An optional key identifying this submission ATTEMPT. Send the
- *   same key again to retry a submission whose response was lost: the second attempt is then
- *   recognised as a duplicate and refused rather than starting a second run. Omit it -- the normal
- *   case -- and each submission starts a distinct run, which is what allows one report to be produced
- *   again over one range. At most forty characters, and only letters, digits, hyphens and
- *   underscores; anything else is refused with HTTP 400.
+ * @param {string} [submissionKey] - An optional identity for this SUBMISSION, minted by
+ *   {@link newSubmissionKey}. Send the same identity again to retry a submission whose response was
+ *   lost: the second attempt is then recognised as the same submission and answered with the run that
+ *   already exists rather than starting a second one. It pins the request's correlation identifier as
+ *   well as its submission key, so the attempts are also one unit of work in the logs. Omit it and each
+ *   submission starts a distinct run, which is what allows one report to be produced again over one
+ *   range.
  * @returns {Promise<ReportSubmissionOutcome>} One of THREE outcomes, read from the body's own
  *   `outcome` member. `STARTED` carries the execution handle -- its `executionName`, which
  *   `readReportExecution` is addressed by, and the resolved bounds the run received -- together with
@@ -320,7 +366,11 @@ const IDEMPOTENCY_KEY_HEADER = 'Idempotency-Key';
  *   `readReportExecution`, read through `listTransactionReportLines` and `readTransactionReportTotals`,
  *   and collected through `collectReportArtifact`.
  * @throws {RangeError} If a started run arrives without the handle or the sentence the contract
- *   requires alongside it, or if an unanswered turn arrives without the prompt.
+ *   requires alongside it, if an unanswered turn arrives without the prompt, or -- before anything is
+ *   sent -- if a supplied submission identity is one the shared correlation filter would refuse. That
+ *   last case names a caller that minted its own identity instead of calling
+ *   {@link newSubmissionKey}: the identity is sent as the correlation identifier too, so the wider
+ *   submission-key domain alone is not enough for it.
  * @throws {Error} The normalised failure from `./client`, carrying the shared `ApiError` document:
  *   HTTP 400 when no type was marked, the confirmation answer was UNRECOGNISED -- a blank answer is
  *   the `UNANSWERED` outcome at 200 and not a refusal -- or a supplied submission key was malformed;
@@ -330,17 +380,29 @@ const IDEMPOTENCY_KEY_HEADER = 'Idempotency-Key';
  */
 export async function submitTransactionReport(
   request: ReportRequest,
-  idempotencyKey?: string,
+  submissionKey?: string,
 ): Promise<ReportSubmissionOutcome> {
   const response = await getApiClient().post<ReportSubmissionOutcomeBody>(
     requestPath(SUBMIT_TRANSACTION_REPORT),
     request,
     // Assumptions: the configuration argument is omitted entirely rather than carrying an undefined
     //   header, because tsconfig sets exactOptionalPropertyTypes and an explicit undefined would
-    //   serialise the header name with no value on every submission that supplied no key.
-    idempotencyKey === undefined
+    //   serialise the header name with no value on every submission that supplied no key. A submission
+    //   that supplies none therefore leaves the correlation identifier to `./client`, which mints a
+    //   fresh one per dispatch -- correct for a submission with no identity to preserve.
+    // Assumptions: one identity is sent under BOTH names, and the second is not redundant. The service
+    //   prefers the submission key and falls back to a digest of the correlation identifier when none
+    //   arrives, so pinning the correlation identifier too keeps the deduplication identity stable even
+    //   where the submission-key header does not survive the hop -- an allow list that omits it, a proxy
+    //   that strips it -- and makes every attempt at one submission one unit of work in the logs.
+    submissionKey === undefined
       ? undefined
-      : { headers: { [IDEMPOTENCY_KEY_HEADER]: idempotencyKey } },
+      : {
+          headers: {
+            [IDEMPOTENCY_KEY_HEADER]: submissionKey,
+            ...correlationHeaders(submissionKey),
+          },
+        },
   );
 
   const body = response.data;

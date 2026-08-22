@@ -200,13 +200,14 @@ output "log_group_arn" {
 #       resource access onto this role. Queue actions are bounded to the exact
 #       ARNs a caller passes and the flag read is bounded to one parameter, so no
 #       statement composed here can reach another bounded context's data.
-# WHY : Refactoring Rationale: a fourth policy, task_telemetry, stood beside these
-#       and is withdrawn with the collector sidecar it served -- it granted this
-#       role log-stream writes on its own group plus the two X-Ray ingestion
-#       actions, and the latter was the only wildcard Resource anywhere on this
-#       role. Both counts above are restated rather than left standing, and the
-#       role's posture is now stronger than the sentence they were qualifying:
-#       neither a wildcard action nor a wildcard resource reaches it.
+# WHY : Assumptions: a FOURTH module-composed policy, task_telemetry, is attached
+#       whenever the telemetry sidecar is enabled, which is the default -- so the
+#       count a reader should carry away is four, not three. It grants log-stream
+#       writes on this workload's own group plus the two X-Ray segment-ingestion
+#       actions, and those two carry the only wildcard Resource anywhere on this
+#       role because X-Ray supports no resource-level permission for them. It reaches
+#       no business resource, so the one-directional property above still holds with
+#       it attached.
 output "task_role_arn" {
   description = <<-EOT
     ARN string of the IAM role the APPLICATION assumes at run time, as
@@ -217,9 +218,10 @@ output "task_role_arn" {
     iam:PassRole statement, and a resource-owning module names it in a resource
     policy where a grant belongs with the resource rather than with the
     workload. The role is not empty when it arrives: main.tf attaches the
-    caller's task_role_policy_json plus two module-composed statements -- the
-    exact-queue actions and the one-parameter write-gate read -- so what the
-    service may reach is those three things and nothing besides. Never null: both
+    caller's task_role_policy_json plus three module-composed statements -- the
+    exact-queue actions, the one-parameter write-gate read, and the telemetry
+    grant covering this workload's own log group and X-Ray segment ingestion -- so
+    what the service may reach is those four things and nothing besides. Never null: both
     roles are
     created for all nine instantiations.
   EOT

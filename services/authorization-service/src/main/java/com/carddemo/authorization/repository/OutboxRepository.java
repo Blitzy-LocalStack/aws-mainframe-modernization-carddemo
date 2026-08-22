@@ -227,13 +227,28 @@ public interface OutboxRepository extends JpaRepository<AuthReplyOutbox, Long> {
      * instead, so the caller can commit and release its connection before it sends anything.
      *
      * <p>Refactoring Rationale: the candidate ordering is (next_attempt_at, outbox_id) rather than
-     * outbox_id alone, and the abandonment and attempt-ceiling predicates are new. Ordering by identity
-     * alone made the ready set the globally oldest pending rows, so a handful of permanently failing
-     * heads were reselected on every poll and, at a batch of that size, every healthy group behind them
-     * was STARVED -- a liveness failure retrying could not clear, because the failing rows never stopped
-     * being the oldest. A failed row's backoff now pushes its instant forward, which yields its place to
-     * a group whose instant has arrived; and a row that has exhausted the caller's attempt ceiling, or
-     * that the caller has abandoned, leaves the ready set altogether.
+     * outbox_id alone. Ordering by identity alone made the ready set the globally oldest pending rows, so
+     * a handful of permanently failing heads were reselected on every poll and, at a batch of that size,
+     * every healthy group behind them was STARVED -- a liveness failure retrying could not clear, because
+     * the failing rows never stopped being the oldest. A failed row's backoff now pushes its instant
+     * forward, which yields its place to a group whose instant has arrived.
+     *
+     * <p>⚠️ Refactoring Rationale: there is deliberately NO attempt-count predicate, and one was here:
+     * {@code and h.attempts < :maxAttempts} withheld a row from this statement once its attempts reached
+     * the caller's ceiling. It made a reply's eligibility EXPIRE, which contradicts the outbox guarantee
+     * that §0.4.3 of the technical specification states as "a reply is published for every committed
+     * authorization"; and because this statement derives a group's head from the group's lowest
+     * unpublished, unabandoned identity, a head withheld that way and then abandoned promoted the SAME
+     * CARD'S next reply -- so the card's sequence was delivered with a hole in it, which is the single
+     * failure the ordering group exists to prevent. What keeps a permanently failing row from being
+     * reselected every poll is its own backoff, written by the publisher when the send failed, and that
+     * mechanism was always the one doing the work: the ceiling only decided when to stop trying.
+     *
+     * <p>Assumptions: the abandonment predicate remains, and it is not the withdrawn ceiling under
+     * another name. Nothing in this service writes {@code abandoned_at}; it is set by an operator's
+     * governed statement after the missing reply has been reconciled by hand, which is exactly when a
+     * group SHOULD be allowed to move past the row. Its two occurrences below are therefore the
+     * quarantine an operator asks for and never a state the publisher can reach on its own.
      *
      * <p>Trade-offs: a concurrent claim may return fewer rows than its bound, up to none at all, because
      * the candidates it observed were taken by the pass it raced; those rows are leased to that pass and
@@ -251,8 +266,6 @@ public interface OutboxRepository extends JpaRepository<AuthReplyOutbox, Long> {
      *     next-attempt instant is after it is not a candidate; must not be {@code null}
      * @param leaseUntil the instant each claimed row's next attempt is deferred to, which is how long
      *     this pass owns the row if it neither completes nor fails it; must not be {@code null}
-     * @param maxAttempts the attempt count at or above which a row is no longer a candidate, so a
-     *     permanently failing reply leaves the ready set instead of being retried forever
      * @return the rows this call has ALREADY CLAIMED, one per ordering group and oldest-ready group
      *     first, so a caller publishes them and does not claim them again; empty when nothing is ready
      *     or when a concurrent pass took every candidate this one observed
@@ -266,7 +279,6 @@ public interface OutboxRepository extends JpaRepository<AuthReplyOutbox, Long> {
                  where h.published_at is null
                    and h.abandoned_at is null
                    and h.next_attempt_at <= :now
-                   and h.attempts < :maxAttempts
                    and h.outbox_id = (select min(g.outbox_id)
                                         from auth_reply_outbox g
                                        where g.published_at is null
@@ -290,16 +302,16 @@ public interface OutboxRepository extends JpaRepository<AuthReplyOutbox, Long> {
             select * from claimed order by outbox_id
             """, nativeQuery = true)
     List<AuthReplyOutbox> claimGroupHeads(@Param("batchSize") int batchSize,
-            @Param("now") LocalDateTime now, @Param("leaseUntil") LocalDateTime leaseUntil,
-            @Param("maxAttempts") int maxAttempts);
+            @Param("now") LocalDateTime now, @Param("leaseUntil") LocalDateTime leaseUntil);
 
     /**
      * Claims the next unpublished replies of one ordering group, above the identity just handled.
      *
      * <p>Assumptions: this carries the same transition discipline as the head claim above -- the same
      * comparison against the observed claim token, the same write lock that comparison's UPDATE takes,
-     * the same unqualified table name resolved through the pinned search path -- and those rulings are
-     * not restated here. What differs is only which rows are candidates.
+     * the same unqualified table name resolved through the pinned search path, and the same deliberate
+     * ABSENCE of an attempt bound -- and those rulings are not restated here. What differs is only which
+     * rows are candidates.
      *
      * <p>Alternatives Considered: not offering this method at all, and letting a group advance by one
      * reply per claim of its head. Rejected because per-group claiming would then bound a group's
@@ -327,8 +339,6 @@ public interface OutboxRepository extends JpaRepository<AuthReplyOutbox, Long> {
      *     next-attempt instant is after it is not a candidate; must not be {@code null}
      * @param leaseUntil the instant each claimed row's next attempt is deferred to, which is how long
      *     this pass owns the row if it neither completes nor fails it; must not be {@code null}
-     * @param maxAttempts the attempt count at or above which a row is no longer a candidate, so a
-     *     permanently failing reply leaves the ready set instead of being retried forever
      * @return the rows this call has ALREADY CLAIMED, in ascending identity order, so a caller publishes
      *     them and does not claim them again; empty when the group holds no further pending row or when
      *     a concurrent pass took the candidates this one observed
@@ -342,7 +352,6 @@ public interface OutboxRepository extends JpaRepository<AuthReplyOutbox, Long> {
                  where f.published_at is null
                    and f.abandoned_at is null
                    and f.next_attempt_at <= :now
-                   and f.attempts < :maxAttempts
                    and f.order_group_id = :orderGroupId
                    and f.outbox_id > :afterOutboxId
                  order by f.outbox_id
@@ -364,8 +373,7 @@ public interface OutboxRepository extends JpaRepository<AuthReplyOutbox, Long> {
             """, nativeQuery = true)
     List<AuthReplyOutbox> claimGroupFollowers(@Param("orderGroupId") String orderGroupId,
             @Param("afterOutboxId") long afterOutboxId, @Param("batchSize") int batchSize,
-            @Param("now") LocalDateTime now, @Param("leaseUntil") LocalDateTime leaseUntil,
-            @Param("maxAttempts") int maxAttempts);
+            @Param("now") LocalDateTime now, @Param("leaseUntil") LocalDateTime leaseUntil);
 
     /**
      * Deletes replies that were published before a stated cut-off instant.

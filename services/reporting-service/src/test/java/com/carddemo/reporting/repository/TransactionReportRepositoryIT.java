@@ -25,6 +25,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -79,17 +80,17 @@ import org.testcontainers.utility.MountableFile;
  * consumes an open cursor over a whole range; the interactive list consumes one keyset window at a
  * time. What is asserted of each is stated on the nested class that asserts it.</p>
  *
- * <h2>What this class asserts that no sibling asserts</h2>
+ * <h2>The repository contract this class pins</h2>
  *
- * <p>Assumptions: the other classes in this directory divide the module's engine-backed properties
- * between them, and this one takes the report surface rather than restating any of theirs.
- * {@code ReportingQueryBootstrapIT} establishes no relation and proves the declared queries parse;
- * {@code StatementHeadingChunkIT} seeds stand-in tables for the heading walk;
- * {@code ReportingDeployedRelationIT} applies the shipped definitions and proves the projections
- * mask and that the login role cannot write; {@code StatementCardXrefRepositoryIT} drives the
- * statement run's cross-reference cursor and owns the two-level write-refusal proof. None of the
- * four calls a method on {@link TransactionReportRepository} and none loads
- * {@code fixtures/tranfile.txt}. This class is the only consumer of both.</p>
+ * <p>Assumptions: the contract is stated as properties of {@link TransactionReportRepository} and of
+ * the relations it reads, so it stays checkable against this file alone. Each is established against
+ * a real engine carrying the shipped definitions: the open cursor's unbroken card runs, the keyset
+ * window's boundaries and its further-window probe, the amount carried exactly at eleven digits and
+ * scale two, an explicit join predicate onto each of the three dimensions, and the refusal of both a
+ * window size that cannot describe a window and a cursor key this surface did not produce. One
+ * hand-off is worth naming: the privilege half of the write refusal, against a base table in another
+ * context's schema, belongs to {@code StatementCardXrefRepositoryIT}, which also drives the
+ * statement path's cross-reference cursor.</p>
  *
  * <h2>Why the shipped definitions are applied rather than reproduced</h2>
  *
@@ -113,6 +114,10 @@ import org.testcontainers.utility.MountableFile;
  * customer data definition at all, so the report path reads neither master, and every assertion
  * below stays inside the four participants its own job declares.</p>
  *
+ * <p>The context this class builds names one narrow nested configuration as the whole context rather
+ * than the module root, and its property set pins a region and switches off the two configuration
+ * importers. Each of those choices carries its own rationale at its own line.</p>
+ *
  * <h2>Parameters, return values, exceptions or errors</h2>
  *
  * <p>This is a test class with no constructor a caller invokes, no value it yields and no exception
@@ -121,7 +126,6 @@ import org.testcontainers.utility.MountableFile;
  * (Explainability) forbids a docstring that omits parameters, return values or exceptions.</p>
  */
 @Testcontainers
-// WHAT: names one narrow nested configuration as the whole context rather than the module root.
 // WHY : Assumptions: services/reporting-service/src/test/resources/application-test.yml is the
 //       constraint. It declares the token issuer as the EMPTY STRING rather than leaving the key
 //       absent, and carries no orchestrator execution identifier and no object-store bucket, so a
@@ -136,7 +140,6 @@ import org.testcontainers.utility.MountableFile;
         webEnvironment = SpringBootTest.WebEnvironment.NONE)
 @ActiveProfiles("test")
 @TestPropertySource(properties = {
-    // WHAT: pins a region and switches off the two configuration importers.
     // WHY : Assumptions: this module carries cloud starters as compile dependencies, so a context
     //       that enables auto-configuration at all builds their beans and the region provider
     //       resolves eagerly. Nothing below contacts a cloud service, so the value identifies
@@ -554,6 +557,9 @@ class TransactionReportRepositoryIT {
          * cross-reference repeatedly and would break the account subtotal at its L182 to L183 in the
          * wrong place.</p>
          *
+         * <p>Step by step, the case requires each card's rows to occupy one unbroken run and to
+         * ascend within it.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          */
         @Test
@@ -566,7 +572,6 @@ class TransactionReportRepositoryIT {
             assertThat(lines).extracting(TransactionReportRepository.ReportLine::getTransactionId)
                     .doesNotHaveDuplicates();
 
-            // WHAT: requires each card's rows to occupy one unbroken run, and to ascend within it.
             // WHY : Assumptions: the leading ordering component is the keyed per-card digest and NOT
             //       the card number, so the relative order BETWEEN two cards is the digest's and not
             //       the number's -- data-migration/sql/V1__reporting_views.sql L711 to L712 states
@@ -585,6 +590,9 @@ class TransactionReportRepositoryIT {
          * assemble one either. Its input is opened at {@code app/cbl/CBTRN03C.cbl} L376 and closed in
          * {@code 9000-TRANFILE-CLOSE.} at its L514 to L516, and between those two points it holds one
          * record at a time.</p>
+         *
+         * <p>Step by step, the case counts rows as they pass a bound placed below the
+         * counter.</p>
          *
          * <p>This method takes no parameter and returns no value.</p>
          *
@@ -607,7 +615,6 @@ class TransactionReportRepositoryIT {
             try (Stream<TransactionReportRepository.ReportLine> cursor =
                     reportQueries.streamReportLines(REPORT_START_DATE, REPORT_END_DATE)) {
 
-                // WHAT: counts rows as they pass a bound placed below the counter.
                 // WHY : Trade-offs: this establishes that the pipeline is PULL-based and stops at the
                 //       bound -- the counter fires WINDOW_SIZE times over a range holding
                 //       IN_RANGE_ROW_COUNT rows -- and it deliberately claims nothing more. It does
@@ -660,13 +667,15 @@ class TransactionReportRepositoryIT {
          * would leave the migrated output non-deterministic, and a golden-master comparison over a
          * non-deterministic ordering compares nothing.</p>
          *
+         * <p>Step by step, the case adds a secondary ordering key the reference sort does not
+         * declare.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          */
         @Test
         @Transactional(readOnly = true)
         @DisplayName("two traversals over an unchanged corpus yield one identical sequence")
         void twoTraversalsOverAnUnchangedCorpusYieldOneIdenticalSequence() {
-            // WHAT: adds a secondary ordering key the reference sort does not declare.
             // WHY : Trade-offs: the target's order is a SUPERSET constraint -- it fixes an order
             //       between two rows sharing a card, where app/jcl/TRANREPT.jcl L46 leaves it
             //       arbitrary -- and the compromise is accepted so that a rerun reproduces the same
@@ -728,6 +737,9 @@ class TransactionReportRepositoryIT {
          * in the communication area at its L230 to L235. The envelope carries the same three answers.
          * </p>
          *
+         * <p>Step by step, the case requires the trailing boundary to name the last row the window
+         * actually carried.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          */
         @Test
@@ -740,7 +752,6 @@ class TransactionReportRepositoryIT {
             assertThat(window.firstKey()).isNotNull();
             assertThat(window.lastKey()).isNotNull();
 
-            // WHAT: requires the trailing boundary to name the last row the window actually carried.
             // WHY : Assumptions: register row R2 of the main-tree charter settles this and is cited
             //       rather than restated -- the reference is genuinely inconsistent between its two
             //       browse screens, app/cbl/COCRDLIC.cbl L1207 to L1214 overwriting the stored key
@@ -788,6 +799,9 @@ class TransactionReportRepositoryIT {
          * start of the file, which is what {@code app/cbl/COCRDLIC.cbl} L230 to L232 exists to carry
          * between two turns of a pseudo-conversational task.</p>
          *
+         * <p>Step by step, the case requires every row of the following window to sit past the
+         * anchor in walk order.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          */
         @Test
@@ -802,7 +816,6 @@ class TransactionReportRepositoryIT {
             PageResponse<TransactionReportRepository.ReportLine> second = windows.get(1);
             String anchor = unsealForTest(windows.get(0).lastKey());
 
-            // WHAT: requires every row of the following window to sit past the anchor in walk order.
             // WHY : Assumptions: the comparison is on WALK POSITION and not on the identifier's own
             //       collation, because the ordering is led by the per-card digest and an identifier
             //       is only ordered WITHIN a card. Comparing identifiers directly would assert a
@@ -824,6 +837,9 @@ class TransactionReportRepositoryIT {
          * forward would not be a migration of a browse that both {@code app/cbl/COCRDLIC.cbl} and
          * {@code app/cbl/COTRN00C.cbl} drive in both directions.</p>
          *
+         * <p>Step by step, the case requires a further window to be reported unconditionally on the
+         * backward path.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          */
         @Test
@@ -843,7 +859,6 @@ class TransactionReportRepositoryIT {
             assertThat(identifiersOf(steppedBack.items()))
                     .containsExactlyElementsOf(identifiersOf(windows.get(1).items()));
 
-            // WHAT: requires a further window to be reported unconditionally on the backward path.
             // WHY : Assumptions: the reference does the same -- app/cbl/COCRDLIC.cbl L1287 sets its
             //       next-page-exists condition on the backward path without testing anything -- and
             //       it is a fact about the request rather than an assumption: a caller can only step
@@ -858,6 +873,9 @@ class TransactionReportRepositoryIT {
          * {@code CA-NEXT-PAGE-NOT-EXISTS VALUE LOW-VALUES} at {@code app/cbl/COCRDLIC.cbl} L243
          * describes an unpositioned arrival -- so an exhausted backward step is an ordinary answer
          * rather than a failure, and it still has to name where the caller is standing.</p>
+         *
+         * <p>Step by step, the case expects the surviving position in {@code lastKey} while
+         * {@code firstKey} is absent.</p>
          *
          * <p>This method takes no parameter and returns no value.</p>
          */
@@ -876,7 +894,6 @@ class TransactionReportRepositoryIT {
 
             assertThat(steppedBack.items()).isEmpty();
 
-            // WHAT: expects the surviving position in lastKey while firstKey is absent.
             // WHY : Assumptions: the two are easy to transpose and the envelope's own contract settles
             //       which is which. Its filtered-empty factory names its parameters after the
             //       DIRECTION each continues rather than after the component each lands in, and it
@@ -905,6 +922,9 @@ class TransactionReportRepositoryIT {
          * of a walk rather than only the first is what shows the derivation holds at each position and
          * not merely at the start.</p>
          *
+         * <p>Step by step, the case reads the further-window answer as a probe result rather than
+         * as a tally.</p>
+         *
          * @param windowOrdinal the one-based position of the window being checked, used only to
          *     select it out of the forward walk
          * @param expectedRows the number of rows that window is expected to carry
@@ -920,7 +940,6 @@ class TransactionReportRepositoryIT {
             PageResponse<TransactionReportRepository.ReportLine> window =
                     walkForward().get(windowOrdinal - 1);
 
-            // WHAT: reads the further-window answer as a probe result rather than as a tally.
             // WHY : Assumptions: the reference establishes it by reading one record past the screen
             //       and setting a flag from whether that record was found -- the lookahead at
             //       app/cbl/COCRDLIC.cbl L1197 to L1214 and the one at app/cbl/COTRN00C.cbl L305 to
@@ -951,6 +970,9 @@ class TransactionReportRepositoryIT {
          * because its browse state at {@code app/cbl/COCRDLIC.cbl} L230 to L235 is a pair of keys, so
          * an ordinal interface would be a migration of something that is not there.</p>
          *
+         * <p>Step by step, the case writes one extra row onto the card the open window starts on,
+         * then reads on, and removes the interleaved row again before leaving the case.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          *
          * @throws SQLException if the interleaved row cannot be written or removed, which would leave
@@ -963,7 +985,6 @@ class TransactionReportRepositoryIT {
             List<String> firstIdentifiers = identifiersOf(first.items());
             String interleavedCard = first.items().get(0).getCardNum();
 
-            // WHAT: writes one extra row onto the card the open window starts on, then reads on.
             // WHY : Assumptions: the row is placed on THAT card and given an identifier below the
             //       window's own leading identifier, so under the declared order it lands ahead of
             //       the boundary the caller is holding -- which is precisely the position at which an
@@ -992,7 +1013,6 @@ class TransactionReportRepositoryIT {
                         readFirstWindow();
                 assertThat(identifiersOf(reread.items())).contains(interleavedId);
             } finally {
-                // WHAT: removes the interleaved row again before leaving the case.
                 // WHY : Assumptions: every other case in this class reads the committed corpus
                 //       exactly as fixtures/tranfile.txt declares it, and the arrangement runs once
                 //       for the whole class rather than once per case. Leaving the row behind would
@@ -1016,12 +1036,14 @@ class TransactionReportRepositoryIT {
          * and neither has a representation for a screen of nothing. A request for none would read
          * only the probe row and report a further window while carrying nothing.</p>
          *
+         * <p>Step by step, the case expects the framework's data-access wrapper around the guard's
+         * own exception.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("a window size that cannot describe a window is refused")
         void aWindowSizeThatCannotDescribeAWindowIsRefused() {
-            // WHAT: expects the framework's data-access wrapper around the guard's own exception.
             // WHY : Assumptions: this was MEASURED rather than predicted. The surface is reached
             //       through a repository proxy carrying the framework's persistence exception
             //       translator, and that translator converts an IllegalArgumentException escaping any
@@ -1054,17 +1076,21 @@ class TransactionReportRepositoryIT {
          * {@code app/cpy/CVTRA05Y.cpy} L5; a key of any other width names no row, so the answer would
          * reach a client as a range exhausted rather than as a request refused.</p>
          *
+         * <p>Step by step, the case offers a two-component key joined by a separator, of the wrong
+         * overall width.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          */
         @Test
         @DisplayName("a cursor key this surface did not produce is refused")
         void aCursorKeyThisSurfaceDidNotProduceIsRefused() {
-            // WHAT: offers a two-component key joined by a separator, of the wrong overall width.
             // WHY : Assumptions: this is the exact shape a key had before the surface reduced it to
             //       the transaction identifier alone, so it is the malformed value most likely to be
-            //       replayed by a stale client rather than an arbitrary string. Its width is 33 rather
-            //       than 16, so it exercises the width check on a value that would otherwise select
-            //       nothing and read as a range exhausted.
+            //       replayed by a stale client rather than an arbitrary string. A well-formed key is the
+            //       sixteen characters TRAN-ID PIC X(16) declares at app/cpy/CVTRA05Y.cpy L5, so a composite
+            //       of two such identifiers joined by a separator is 33 rather than 16 -- and it therefore
+            //       exercises the width check on a value that would otherwise select nothing and read as a
+            //       range exhausted.
             assertThatThrownBy(() -> reportQueries.readNextReportLines(
                     REPORT_START_DATE,
                     REPORT_END_DATE,
@@ -1203,6 +1229,9 @@ class TransactionReportRepositoryIT {
          * {@code WS-PAGE-SIZE PIC 9(03) COMP-3 VALUE 20} at its L131 to L132, and that band exists so
          * a printed page carries a heading and a subtotal. It is not a client request size.</p>
          *
+         * <p>Step by step, the case requires the envelope's size to be the requested one and
+         * nothing else.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          */
         @Test
@@ -1216,7 +1245,6 @@ class TransactionReportRepositoryIT {
                             WINDOW_SIZE,
                             TransactionReportRepositoryIT::sealForTest);
 
-            // WHAT: requires the envelope's size to be the requested one and nothing else.
             // WHY : Assumptions: report pagination and keyset positioning are DIFFERENT concepts and
             //       this case asserts nothing whatever about the 20-line output band -- no heading, no
             //       page subtotal and no band boundary appears in any assertion here, because those
@@ -1299,6 +1327,9 @@ class TransactionReportRepositoryIT {
          * timestamp, at {@code app/cbl/CBTRN03C.cbl} L173 to L174, and that ten-character prefix is
          * what the shared utility returns.</p>
          *
+         * <p>Step by step, the case derives the row's business date through the shared timestamp
+         * utility.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          */
         @Test
@@ -1306,7 +1337,6 @@ class TransactionReportRepositoryIT {
         void theAdmittedSetIsExactlyWhatTheSharedDateUtilityComputes() {
             List<String> expected = new ArrayList<>();
             for (Map<String, Object> row : decodeAll(TRANSACTION_FIXTURE, TRANSACTION_DESCRIPTOR)) {
-                // WHAT: derives the row's business date through the shared timestamp utility.
                 // WHY : Assumptions: the ten-character date part is obtained ONLY from
                 //       com.carddemo.common.time.TimestampFormatter, whose datePrefix and toLocalDate
                 //       accessors own the 26-character 'YYYY-MM-DD HH:MM:SS.mmmmmm' contract, and this
@@ -1336,6 +1366,9 @@ class TransactionReportRepositoryIT {
          * record filter at {@code app/jcl/TRANREPT.jcl} L47 to L48 and again in the program itself at
          * {@code app/cbl/CBTRN03C.cbl} L173 to L174.</p>
          *
+         * <p>Step by step, the case requires one lower-bound comparison and one upper-bound
+         * comparison, no more.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          *
          * @throws NoSuchMethodException if the declared query method is absent under the name and
@@ -1349,7 +1382,6 @@ class TransactionReportRepositoryIT {
                     .getAnnotation(Query.class)
                     .value();
 
-            // WHAT: requires one lower-bound comparison and one upper-bound comparison, no more.
             // WHY : Trade-offs: one predicate is simpler than two and is provably equivalent, because
             //       both reference applications are the same inclusive both-bounds test over the same
             //       ten-character date part -- so a second application could only re-evaluate a
@@ -1372,6 +1404,9 @@ class TransactionReportRepositoryIT {
          * injected range is what makes a rerun reproduce a run; a clock read would make the same
          * corpus yield a different report tomorrow.</p>
          *
+         * <p>Step by step, the case requires two different supplied ranges to yield two different
+         * admitted sets.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          */
         @Test
@@ -1381,7 +1416,6 @@ class TransactionReportRepositoryIT {
             List<String> asOfTheOrphanDate =
                     identifiersOf(readRange(ORPHAN_BUSINESS_DATE, ORPHAN_BUSINESS_DATE));
 
-            // WHAT: requires two different supplied ranges to yield two different admitted sets.
             // WHY : Assumptions: a surface reading a clock instead of its arguments would answer both
             //       calls identically, because nothing but the arguments differs between them. The
             //       second range is the date the three unresolvable rows carry, which is years away
@@ -1441,6 +1475,9 @@ class TransactionReportRepositoryIT {
          * off-by-one from moving a key onto the neighbouring field, which would fail silently by
          * producing values that look plausible.</p>
          *
+         * <p>Step by step, the case states the conversion rule between the two conventions as an
+         * assertion.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          */
         @Test
@@ -1452,7 +1489,6 @@ class TransactionReportRepositoryIT {
             assertThat(offsetOf(spec, "TRAN-CARD-NUM")).isEqualTo(CARD_NUMBER_ZERO_BASED_OFFSET);
             assertThat(offsetOf(spec, "TRAN-PROC-TS")).isEqualTo(PROC_TIMESTAMP_ZERO_BASED_OFFSET);
 
-            // WHAT: states the conversion rule between the two conventions as an assertion.
             // WHY : Assumptions: a zero-based offset is the one-based position MINUS ONE, and the rule
             //       runs in that direction only. Applying it the other way round shifts every field
             //       by one byte, and the corroboration app/jcl/TRANIDX.jcl L27 supplies as
@@ -1473,6 +1509,9 @@ class TransactionReportRepositoryIT {
          * apart. The corpus supplies exactly that case: two of the four cross-reference rows carry the
          * same account.</p>
          *
+         * <p>Step by step, the case requires the shared account to appear as two separate card
+         * runs, not one.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          */
         @Test
@@ -1489,7 +1528,6 @@ class TransactionReportRepositoryIT {
                 }
             }
 
-            // WHAT: requires the shared account to appear as two separate card runs, not one.
             // WHY : Assumptions: this is the observable difference between breaking on a card and
             //       breaking on an account. Were the grouping keyed on the account identifier, these
             //       two cards would form a single run and the cross-reference would be resolved once
@@ -1578,6 +1616,9 @@ class TransactionReportRepositoryIT {
          * against the corpus is what shows the four-way join assembled the line the reference
          * assembles.</p>
          *
+         * <p>Step by step, the case compares the two character values after removing the pad to
+         * their declared width.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          */
         @Test
@@ -1592,7 +1633,6 @@ class TransactionReportRepositoryIT {
             assertThat(line.getCategoryCd())
                     .isEqualTo(categoryCode(source, "TRAN-CAT-CD"));
 
-            // WHAT: compares the two character values after removing the pad to their declared width.
             // WHY : Assumptions: the reference stores these in blank-padded character fields and the
             //       target columns are declared CHAR, so the engine pads a shorter value back out to
             //       the declared width on the way in. Comparing the padded forms would make every
@@ -1618,6 +1658,9 @@ class TransactionReportRepositoryIT {
          * all -- {@code app/jcl/TRANREPT.jcl} declares no account data definition -- so the
          * cross-reference is the only possible source and is why it is a join participant.</p>
          *
+         * <p>Step by step, the case reads the declared width of the cross-reference's own account
+         * field.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          */
         @Test
@@ -1629,7 +1672,6 @@ class TransactionReportRepositoryIT {
                         .isEqualTo(crossReferencedAccountOf(line.getCardFingerprint()));
             }
 
-            // WHAT: reads the declared width of the cross-reference's own account field.
             // WHY : Assumptions: app/cpy/CVACT03Y.cpy L7 declares XREF-ACCT-ID as PIC 9(11) and
             //       app/cbl/CBTRN03C.cbl L364 moves it into an X(11) report field, so the reference
             //       prints its leading zeros verbatim rather than suppressing them. The target carries
@@ -1651,6 +1693,9 @@ class TransactionReportRepositoryIT {
          *
          * <p>This method takes no parameter and returns no value.</p>
          *
+         * <p>Step by step, the case requires each dimension to be joined by an explicit predicate
+         * in the query text.</p>
+         *
          * @throws NoSuchMethodException if the declared query method is absent under the name and
          *     parameter types asserted here
          */
@@ -1664,7 +1709,6 @@ class TransactionReportRepositoryIT {
                     .getAnnotation(Query.class)
                     .value();
 
-            // WHAT: requires each dimension to be joined by an explicit predicate in the query text.
             // WHY : Alternatives Considered: mapping the three as associations on the driving entity
             //       was rejected, because the driving relation and the three dimensions live in
             //       separate projections whose only agreement is a column value -- a join predicate
@@ -1687,6 +1731,9 @@ class TransactionReportRepositoryIT {
          * {@code app/cbl/CBTRN03C.cbl} L134 to L136 carry the same picture, so the accumulation
          * precision matches the value precision throughout.</p>
          *
+         * <p>Step by step, the case keeps this surface's precision separate from the account
+         * projection's.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          */
         @Test
@@ -1700,7 +1747,6 @@ class TransactionReportRepositoryIT {
                 assertThat(amount.precision()).isLessThanOrEqualTo(AMOUNT_PRECISION);
             }
 
-            // WHAT: keeps this surface's precision separate from the account projection's.
             // WHY : Assumptions: nine integer digits plus two decimals is eleven and belongs to the
             //       transaction record; the account balance is PIC S9(10)V99, twelve bytes, and
             //       belongs to a different record read by a different job. Unifying the two would
@@ -1720,13 +1766,15 @@ class TransactionReportRepositoryIT {
          * {@code TRAN-CAT-BAL,18,11,ZD}, stating both that the field is zoned and that eleven bytes
          * is the width of that picture.</p>
          *
+         * <p>Step by step, the case decodes each expected amount through the shared codec rather
+         * than parsing it.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          */
         @Test
         @Transactional(readOnly = true)
         @DisplayName("the four amount cases the corpus supplies survive the round trip exactly")
         void theFourAmountCasesTheCorpusSuppliesSurviveTheRoundTripExactly() {
-            // WHAT: decodes each expected amount through the shared codec rather than parsing it.
             // WHY : Alternatives Considered: writing the expected amounts out as literals, or slicing
             //       the eleven bytes and parsing them here. Both were rejected because the registered
             //       descriptor is the ONE place the offsets and the sign convention are declared, so a
@@ -1818,6 +1866,9 @@ class TransactionReportRepositoryIT {
          * driving relation on its own is what makes the discrepancy observable, and it is unaffected by
          * whether any dimension resolved.</p>
          *
+         * <p>Step by step, the case names the offending rows from the driving relation rather than
+         * from the report.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          */
         @Test
@@ -1831,7 +1882,6 @@ class TransactionReportRepositoryIT {
             assertThat(reported).isEmpty();
             assertThat(driving).isEqualTo(3L);
 
-            // WHAT: names the offending rows from the driving relation rather than from the report.
             // WHY : Assumptions: a caller that could only see the report would know a row was missing
             //       but not which one, and so could not produce the reference's own diagnostic, which
             //       displays the offending key alongside its message at app/cbl/CBTRN03C.cbl L487. The
@@ -1900,6 +1950,9 @@ class TransactionReportRepositoryIT {
          * {@code REPRO INFILE(INFILE) OUTFILE(OUTFILE)} to load a keyed copy. The target rejects that:
          * the card-first ordering is an index plus a read-only projection, and no byte is copied.</p>
          *
+         * <p>Step by step, the case reads the catalog's own relation kind for each of the four
+         * participants.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          *
          * @throws SQLException if the catalog cannot be read, which would leave the posture unproven
@@ -1908,7 +1961,6 @@ class TransactionReportRepositoryIT {
         @Test
         @DisplayName("every relation this surface reads is a plain view, not a stored copy")
         void everyRelationThisSurfaceReadsIsAPlainViewNotAStoredCopy() throws SQLException {
-            // WHAT: reads the catalog's own relation kind for each of the four participants.
             // WHY : Alternatives Considered: materialising the card-ordered projection, which the
             //       reference does. Rejected because a second physical copy is a second truth for
             //       figures whose only purpose is to restate the first exactly, and keeping it in step
@@ -1937,6 +1989,9 @@ class TransactionReportRepositoryIT {
          * rather than an artifact a program carries; {@code app/jcl/TRANREPT.jcl} L59 runs the program
          * with the data sets already defined.</p>
          *
+         * <p>Step by step, the case tries to load the migration engine's own entry type from this
+         * module's classpath.</p>
+         *
          * <p>This method takes no parameter and returns no value. The load attempt below is expected
          * to raise {@link ClassNotFoundException}, which is captured and asserted on rather than
          * propagated, so this method declares no exception of its own.</p>
@@ -1946,7 +2001,6 @@ class TransactionReportRepositoryIT {
         void thisModuleShipsNoMigrationDirectoryAndNoMigrationTooling() {
             assertThat(Files.isDirectory(repositoryRoot().resolve(MIGRATION_DIRECTORY))).isFalse();
 
-            // WHAT: tries to load the migration engine's own entry type from this module's classpath.
             // WHY : Assumptions: absence is established by attempting the load rather than by
             //       searching this module's text for the tool's name, because the name legitimately
             //       APPEARS in this module -- in the module descriptor's own note recording that the
@@ -1967,6 +2021,9 @@ class TransactionReportRepositoryIT {
          * is cited only as position evidence, declaring {@code KEYS(26 304)} whose second operand is
          * the same processing-timestamp offset this class asserts above.</p>
          *
+         * <p>Step by step, the case locates the declaration of that index in the owning service's
+         * migration.</p>
+         *
          * <p>This method takes no parameter and returns no value.</p>
          *
          * @throws SQLException if the catalog cannot be read
@@ -1976,7 +2033,6 @@ class TransactionReportRepositoryIT {
         void theIndexTheReportReadsThroughIsOwnedByAnotherContext() throws SQLException {
             assertThat(indexExists("idx_transactions_proc_ts")).isTrue();
 
-            // WHAT: locates the declaration of that index in the owning service's migration.
             // WHY : Assumptions: the index is proven to belong to the transaction context by finding
             //       its declaration in that context's own migration file, not by this class having
             //       created it -- nothing here issues a definition of any kind. Naming the owning file
@@ -2609,6 +2665,8 @@ class TransactionReportRepositoryIT {
     /**
      * Applies the shipped definition files to the container, in the order an operator applies them.
      *
+     * <p>This method gives each copied file a distinct numeric name inside the container.</p>
+     *
      * <p>This method takes no parameter and returns no value.</p>
      *
      * @throws IllegalStateException if a definition file is absent from the working tree, naming the
@@ -2625,7 +2683,6 @@ class TransactionReportRepositoryIT {
                         + " reporting context reads; that file owns them and this class must not"
                         + " create them");
             }
-            // WHAT: gives each copied file a distinct numeric name inside the container.
             // WHY : Assumptions: the bootstrap appears twice in the list on purpose, so two entries
             //       resolve to one working-tree path. A name derived from the file would collide on
             //       that pair and the second application would silently re-run whichever copy landed
@@ -2689,13 +2746,14 @@ class TransactionReportRepositoryIT {
      * no privilege and drops nothing; the boundary this directory draws is on DEFINITIONS, and
      * inserting rows sits inside it because a corpus has to be loaded before anything can be read.</p>
      *
+     * <p>This method loads the types before the categories.</p>
+     *
      * <p>This method takes no parameter and returns no value.</p>
      *
      * @throws IllegalStateException if any row cannot be loaded
      */
     private static void loadFixtureCorpus() {
         try (Connection connection = POSTGRES.createConnection("")) {
-            // WHAT: loads the types before the categories.
             // WHY : Assumptions: the category relation carries a restricting foreign key onto the type
             //       relation, which preserves the reference extension's own delete-restrict semantic,
             //       so a category inserted before its type is refused. The order is therefore a
@@ -2749,12 +2807,17 @@ class TransactionReportRepositoryIT {
     }
 
     /**
-     * Loads {@code cardxref.txt} into the card cross-reference.
+     * Loads {@code cardxref.txt} into the card cross-reference and refreshes the derived identity.
      *
      * <p>Assumptions: this is the REPORT-path fixture, the data definition at
      * {@code app/jcl/TRANREPT.jcl} L67, and it is the only one of the two cross-reference fixtures
      * loaded. Loading the statement-path one as well would insert one card twice and the relation's
      * key is the card number.</p>
+     *
+     * <p>Assumptions: the derived identity relation is refreshed here as part of the load, because a
+     * card the cross-reference carries but that relation does not is absent from
+     * {@code reporting.v_card_xref} and unresolvable by {@code reporting.resolve_card}. The adjacent
+     * comment records why the refresh is a call rather than a trigger.</p>
      *
      * @param connection an open connection able to write the account schema
      * @throws SQLException if any row cannot be inserted
@@ -2772,10 +2835,31 @@ class TransactionReportRepositoryIT {
             }
             insert.executeBatch();
         }
+        // WHY : Assumptions: the identity relation is brought level with the rows just inserted, and
+        //       this is the SAME step the load path performs rather than an arrangement convenience.
+        //       reporting.card_identity holds one row per card and is backfilled when
+        //       data-migration/sql/V1__reporting_views.sql creates it, so every card inserted after
+        //       that script ran -- which is every card here, because the migrations are applied before
+        //       the fixture -- has no identity row until the maintenance procedure runs, and a card
+        //       with no identity row is absent from reporting.v_card_xref and unresolvable by
+        //       reporting.resolve_card. The omission is silent, which is why it is closed in the load.
+        //       data-migration/src/carddemo_migration/loaders/aurora.py publishes the same step as
+        //       refresh_card_identity(connection), to be run after its cross-reference load.
+        // WHY : Alternatives Considered: a trigger on account.card_xref maintaining the row as part of
+        //       the write, which would make this call unnecessary. Rejected because
+        //       data-migration/sql/V1__reporting_views.sql runs under
+        //       SET LOCAL ROLE carddemo_reporting_owner and that role holds no TRIGGER privilege on a
+        //       relation the account context owns; granting it would widen a cross-context boundary
+        //       and would make an account-context write fail whenever reporting maintenance failed.
+        try (Statement refresh = connection.createStatement()) {
+            refresh.execute("call reporting.refresh_card_identity()");
+        }
     }
 
     /**
      * Loads {@code tranfile.txt} into the transaction relation.
+     *
+     * <p>This method parses both timestamps through the shared timestamp utility.</p>
      *
      * @param connection an open connection able to write the ledger schema
      * @throws SQLException if any row cannot be inserted
@@ -2797,7 +2881,6 @@ class TransactionReportRepositoryIT {
                 insert.setString(9, text(row, "TRAN-MERCHANT-CITY"));
                 insert.setString(10, text(row, "TRAN-MERCHANT-ZIP"));
                 insert.setString(11, text(row, "TRAN-CARD-NUM"));
-                // WHAT: parses both timestamps through the shared timestamp utility.
                 // WHY : Assumptions: the two fields are 26-character character data in the record and
                 //       microsecond timestamps in the column, and the shared utility owns that
                 //       contract -- parsing them here with a locally written pattern would put a

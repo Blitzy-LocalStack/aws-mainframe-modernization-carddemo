@@ -18,7 +18,6 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
-import java.net.URI;
 import java.security.Principal;
 import java.time.Clock;
 import java.util.List;
@@ -27,6 +26,7 @@ import java.util.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
+import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -40,6 +40,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.util.UriComponentsBuilder;
 
 /**
  * Serves the five user-administration operations migrated from {@code COUSR00C} through
@@ -317,6 +318,26 @@ public class UserController {
      * the sealer's to decide inside the service, which is where a refusal is turned into the field entry
      * the contract promises.
      *
+     * <p>Purpose: the opening position is the baseline's search field. {@code app/cbl/COUSR00C.cbl}
+     * reads {@code USRIDINI} on the ENTER turn and seeks the browse on it -- {@code LOW-VALUES} when it
+     * is blank at lines 218 and 219, the typed identifier otherwise at line 221 -- so an operator could
+     * jump the browse to any identifier without paging to it. This parameter is that field, and it is
+     * positioned AT OR AFTER the value given: the row typed appears at the top of the page, and a value
+     * no row carries positions on the next identifier rather than refusing.
+     *
+     * <p>⚠️ Refactoring Rationale: this parameter did not exist and the browser client compensated by
+     * filtering the page it had already been handed, which meant an identifier sorting beyond the first
+     * ten rows produced an empty table instead of the page the baseline showed. Positioning is the
+     * server's to do because only the server can read past the page the client holds. The same parameter
+     * cannot be combined with a cursor: the service refuses the pair with 400 naming both, since a
+     * request stating two positions cannot say which the caller meant, and one baseline turn was a seek
+     * or a page move but never both.
+     *
+     * <p>Assumptions: only the WIDTH is constrained here, and the character domain is the service's to
+     * apply, exactly as it is for the identifier in a path. That keeps one domain check in one place for
+     * a value submitted through four different inputs, and keeps the refusal's field key -- which names
+     * the search control rather than a row's identifier -- decided beside the check that raises it.
+     *
      * <p>Trade-offs: the envelope publishes forward availability only -- there is no backward equivalent
      * beside it -- so a client wanting to know whether it may page back reads whether it is holding a
      * first key at all, an absent one meaning it is already at the beginning. Publishing a second flag
@@ -325,6 +346,9 @@ public class UserController {
      * the two directions are not symmetrical in the envelope, which a reader comparing the four members
      * would otherwise expect.
      *
+     * @param startUserId the identifier to open the browse at or after, or {@code null} or blank to open
+     *     at the start of the set; at most eight characters and drawn from the ASCII letters and digits,
+     *     and not to be sent together with a cursor
      * @param cursor the sealed position to continue from, or {@code null} for the first page
      * @param direction {@code next} or {@code previous}, or {@code null} to default to next; meaningful
      *     only alongside a cursor
@@ -334,7 +358,9 @@ public class UserController {
      * @return HTTP 200 carrying one page of at most ten summaries in ascending identifier order, with
      *     both boundary cursors and the forward availability indicator; never {@code null}
      * @throws ClientInputException if the supplied cursor cannot be opened, or names a direction other
-     *     than the one requested, which the shared advice renders as 400 keyed to the cursor
+     *     than the one requested, which the shared advice renders as 400 keyed to the cursor; if the
+     *     opening position falls outside the identifier domain, keyed to that parameter; or if a position
+     *     and a cursor arrive together, keyed to both
      * @throws IllegalStateException if the store could not be read, carrying the sentence the baseline
      *     wrote for a failed lookup at {@code app/cbl/COUSR00C.cbl} lines 610, 644 and 678
      */
@@ -344,6 +370,9 @@ public class UserController {
             //       for the reason recorded on MESSAGE_USER_ID_REQUIRED: without one, bean validation's
             //       own default text reaches the caller in the same fieldErrors array as the reference's
             //       authored wording, and two of the defaults published an internal bound.
+            @RequestParam(name = "startUserId", required = false)
+            @Size(max = USER_ID_MAX_LENGTH, message = MESSAGE_USER_ID_TOO_LONG)
+            String startUserId,
             @RequestParam(name = "cursor", required = false)
             @Size(max = CursorToken.MAX_TOKEN_LENGTH, message = MESSAGE_CURSOR_TOO_LONG)
             String cursor,
@@ -352,7 +381,7 @@ public class UserController {
             String direction,
             Principal principal) {
 
-        return this.users.list(cursor, direction, principal.getName());
+        return this.users.list(startUserId, cursor, direction, principal.getName());
     }
 
     /**
@@ -404,7 +433,10 @@ public class UserController {
      *
      * <p>Assumptions: the location header is built from the collection path and the stored identifier
      * rather than echoed from the request, so it names the row as it was actually keyed. The contract
-     * declares the header required and its form absolute-path, which is what this composes.
+     * declares the header required and its form absolute-path, which is what this composes. It is
+     * assembled one PATH SEGMENT at a time rather than by concatenation, for the reason recorded at the
+     * return statement: a header built by joining strings is only correct while the identifier carries no
+     * character that means something in a URI.
      *
      * @param request the validated new row's values; must not be {@code null}
      * @return HTTP 201 carrying the stored row, the one-time credential and a location header addressing
@@ -423,7 +455,39 @@ public class UserController {
         //       framework diagnostic that rendered this argument could not disclose it -- but the shortest
         //       path to a live credential in a log store is a well-meant line added here, which is why
         //       there is none.
-        return ResponseEntity.created(URI.create(COLLECTION_PATH + "/" + created.userId()))
+        // WHY : ⚠️ Refactoring Rationale: the header is assembled by a path-segment builder, and it used
+        //       to be assembled by concatenating the collection path, a slash and the identifier into
+        //       URI.create. Concatenation makes the header only as trustworthy as the identifier's
+        //       character domain: any character with a meaning in a URI reference -- a slash splitting the
+        //       segment, a question mark opening a query, a hash opening a fragment, a percent opening an
+        //       escape -- would have produced a header naming something other than the created row, and
+        //       URI.create would have thrown on the ones that are not legal at all rather than escaping
+        //       them. The domain UserService now enforces makes every stored identifier a legal segment on
+        //       its own, so this builder cannot have anything to escape; it is used anyway because the
+        //       header's correctness then rests on a rule the type system applies here rather than on a
+        //       rule enforced in another class.
+        //       Alternatives Considered: ServletUriComponentsBuilder.fromCurrentRequest, which would
+        //       return an absolute URL. Rejected: the committed contract declares this header as an
+        //       absolute PATH, and deriving it from the inbound request would let a forwarded host header
+        //       decide what the response says.
+        // WHY : ⚠️ Assumptions: this is the ONE response in this service that carries a live credential,
+        //       so it is the one response that must not be retained anywhere between here and the
+        //       operator's screen. no-store is the directive that forbids retention outright -- by a
+        //       shared cache, by a private browser cache and by the browser's own history restore --
+        //       where no-cache merely requires revalidation before reuse and therefore still permits a
+        //       copy to sit on disk. Alternatives Considered: max-age=0 with must-revalidate, which is
+        //       the pairing usually reached for and which also permits the stored copy; and setting
+        //       nothing and relying on 201 not being cacheable by default, which is true of shared
+        //       caches and says nothing about the back-forward cache a browser restores a form from.
+        //       Trade-offs: the directive is set on the successful create alone rather than on every
+        //       response this adapter emits. A blanket header would be simpler and would misstate the
+        //       obligation: the read, list and update responses carry no credential, and a client told
+        //       not to store them loses ordinary revalidation for nothing.
+        return ResponseEntity.created(UriComponentsBuilder.fromPath(COLLECTION_PATH)
+                        .pathSegment(created.userId())
+                        .build()
+                        .toUri())
+                .cacheControl(CacheControl.noStore())
                 .body(created);
     }
 
@@ -444,7 +508,9 @@ public class UserController {
      * have split one read across two paths distinguished by nothing the server does, and a caller could
      * not have said which to use except by naming the screen it intended to draw next.
      *
-     * @param userId the identifier of the row to read; must not be blank and at most eight characters
+     * @param userId the identifier of the row to read, carried as ONE path segment; must not be blank,
+     *     at most eight characters and drawn from the ASCII letters and digits, which is the domain
+     *     that makes every stored identifier speakable in a path
      * @return HTTP 200 carrying the stored row, including the subject reference the list projection
      *     omits; never {@code null}
      * @throws ClientInputException if the identifier is blank, carrying the sentence the baseline wrote
@@ -493,7 +559,9 @@ public class UserController {
      * a mutation that happens because the operator left a screen cannot be expressed over HTTP without
      * inventing a request the client never sent.
      *
-     * @param userId the identifier of the row to change; must not be blank and at most eight characters
+     * @param userId the identifier of the row to change, carried as ONE path segment; must not be blank,
+     *     at most eight characters and drawn from the ASCII letters and digits, which is the domain
+     *     that makes every stored identifier speakable in a path
      * @param request the validated values the row is to hold; must not be {@code null}
      * @return HTTP 200 carrying the row as stored after the change; never {@code null}
      * @throws ClientInputException if the identifier is blank, if a submitted field is blank, if the user
@@ -583,7 +651,9 @@ public class UserController {
      * addresses a method this path publishes or is refused by the framework before any handler runs, so
      * the condition the sentence described cannot arise and nothing here can raise it.
      *
-     * @param userId the identifier of the row to delete; must not be blank and at most eight characters
+     * @param userId the identifier of the row to delete, carried as ONE path segment; must not be blank,
+     *     at most eight characters and drawn from the ASCII letters and digits, which is the domain
+     *     that makes every stored identifier speakable in a path
      * @param confirmed explicit confirmation that the row named in the path is to be destroyed; must be
      *     present and {@code true}
      * @return HTTP 204 with no body, by design

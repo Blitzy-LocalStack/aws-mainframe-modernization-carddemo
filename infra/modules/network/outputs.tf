@@ -159,7 +159,7 @@ output "availability_zones" {
 # -----------------------------------------------------------------------------
 
 output "public_subnet_ids" {
-  description = "Ordered list of the public subnet identifiers, one per availability zone. This tier is reserved for the two kinds of thing that need a route to the internet gateway: the zone-local NAT gateways this module creates, which are its only current occupants, and an internet-facing load balancer. No consumer reads it today - neither a sibling module nor either environment root - because the load balancer in this deployment is INTERNAL and both roots therefore place it in the private-application subnets, leaving the NAT gateways this module creates as this tier's only occupants. Nothing holding application state or record data belongs here."
+  description = "Ordered list of the public subnet identifiers, one per availability zone. This tier is reserved for the two kinds of thing that need a route to the internet gateway: the zone-local NAT gateways this module creates, and the load balancer. Read by alb: both environment roots pass this output as that module's subnet_ids - infra/envs/dev/main.tf and infra/envs/prod/main.tf - because AAP section 0.4.1.9 places the load balancer in the public tier. Assumptions: an INTERNAL scheme and a public subnet are not in tension. alb sets internal = true, which withholds public addresses and an internet-routable name whatever the selected subnets' route tables carry, so this placement decides where the load balancer's network interfaces live and not whether the internet can address them. Nothing holding application state or record data belongs here."
   value = [
     for zone in local.availability_zones :
     aws_subnet.public[zone].id
@@ -286,7 +286,7 @@ output "nat_gateway_public_ips" {
 #   consumer ask for the endpoint it actually means, and it is why widening the
 #   set from eight names to ten changed nothing for any consumer of this output.
 output "interface_vpc_endpoint_ids" {
-  description = "Map from short AWS service name to that service's interface VPC endpoint identifier, keyed exactly as var.interface_endpoint_services is written: ecr.api, ecr.dkr, logs, secretsmanager, kms, sqs, states and ssm. Its consumer is the environment root, which needs a specific endpoint's identity to attach a metric or an endpoint policy to it; no sibling module reads it today. Each endpoint places an ENI in the private application subnets, which is how a task reaches these services without egressing the VPC."
+  description = "Map from short AWS service name to that service's interface VPC endpoint identifier, keyed exactly as var.interface_endpoint_services is written: ecr.api, ecr.dkr, logs, secretsmanager, kms, sqs, states, ssm, xray and cognito-idp - ten keys, the same ten that variable's exact-set validation admits. No consumer reads it today - neither a sibling module nor either environment root - and it is published because attaching a metric, an alarm or a narrower endpoint policy to one specific endpoint needs that endpoint's identity, which rediscovering by service name from a data source would duplicate. Each endpoint places an ENI in the private application subnets, which is how a task reaches these services without egressing the VPC."
   value = {
     for service, endpoint in aws_vpc_endpoint.interface :
     service => endpoint.id

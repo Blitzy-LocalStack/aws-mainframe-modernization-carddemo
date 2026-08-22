@@ -26,29 +26,39 @@
  * probe read to answer the question. That ordinal now lives in `ui/src/hooks/usePagedQuery.ts`, which
  * publishes it as `hasPrev`, per AAP section 0.7.1 moving navigation state client-side.
  *
- * Narrowing contract
- * ------------------
- * ⚠️ Assumptions: the search field is a browse POSITIONING key and not a substring search. The
- * reference moves `USRIDINI` into `SEC-USR-ID` and hands it to `STARTBR ... RIDFLD(SEC-USR-ID)`,
- * whose greater-or-equal positioning opens the browse AT OR AFTER the identifier typed; a blank entry
- * becomes `LOW-VALUES` and opens at the start of the file.
+ * Positioning contract
+ * --------------------
+ * ⚠️ Assumptions: the search field is a browse POSITIONING key and not a substring search, which is why
+ * this section is not headed "narrowing" -- it does not reduce a set, it chooses where reading begins.
+ * The reference moves `USRIDINI` into `SEC-USR-ID` and hands it to `STARTBR ... RIDFLD(SEC-USR-ID)`,
+ * which opens the browse AT OR AFTER the identifier typed; a blank entry becomes `LOW-VALUES` and opens
+ * at the start of the file.
  *
- * ⚠️ Trade-offs: that positioning is applied to the page this client HOLDS rather than pushed into the
- * request, and the reason is a contract limit rather than a choice. `UserListQuery` in
- * `ui/src/api/types.ts` declares `cursor` and `direction` and NOTHING else, and the service agrees
- * from the other side -- `services/auth-service/src/main/java/com/carddemo/auth/api/UserController.java`
- * declares exactly two request parameters on its listing, `cursor` and `direction`. So there is no
- * positioning parameter to send. Alternatives Considered, and why each is worse: (1) sending one
- * anyway, rejected because the parameter does not exist and `ui/src/api/auth.ts` exposes no member
- * for it, so the entry would be silently dropped and the operator would see an unnarrowed page as
- * though the key had been honoured; (2) minting a cursor here from the typed identifier, rejected
- * because a cursor is an opaque token the service SEALS -- including the direction it was issued for
- * -- so a fabricated one is refused with HTTP 400 rather than answered, and `types.ts` states the
- * client neither parses, compares nor constructs one; (3) paging forward repeatedly until the key is
- * reached, rejected because it turns one keystroke into an unbounded number of requests where the
- * reference issues a single `STARTBR`. The accepted consequence is stated rather than hidden: an
- * identifier beyond the page on display narrows that page to nothing and the operator reaches the key
- * with F8, where the terminal would have positioned there directly.
+ * ⚠️ Refactoring Rationale: that positioning is pushed into the REQUEST, as the `startUserId` member of
+ * `UserListQuery`, and it used to be applied client-side to the page this screen had already been
+ * handed. The consequence of the client-side form was not a rounding error: the delivered page is ten
+ * rows, so an identifier sorting past the tenth stored row narrowed that page to NOTHING and the
+ * operator saw an empty table where the terminal positioned directly at the key. Only the server can
+ * read past the page the client holds, so positioning is the server's work.
+ *
+ * ⚠️ Assumptions: positioning is INCLUSIVE and belongs to the OPENING read alone. The row the operator
+ * types is the first row of the page -- the reference skips its stepping `READNEXT` on the enter turn,
+ * guarded at L288, so the row the `STARTBR` landed on is the row at the top of the screen -- and an
+ * identifier no row carries positions on the next one rather than refusing, which is why the reference
+ * answers an unmatched seek with a boundary sentence at L603 and not a not-found. Once a page is held,
+ * F7 and F8 continue from the cursors that page returned and the identifier is not sent again: the
+ * service refuses a position and a cursor together, because a request stating two positions cannot say
+ * which was meant, and one reference turn was a seek or a page move but never both.
+ *
+ * Alternatives Considered, and why each is worse than a request parameter: (1) minting a cursor here
+ * from the typed identifier, rejected because a cursor is an opaque token the service SEALS --
+ * including the direction it was issued for -- so a fabricated one is refused with HTTP 400 rather than
+ * answered, and `types.ts` states the client neither parses, compares nor constructs one; (2) paging
+ * forward repeatedly until the key is reached, rejected because it turns one keystroke into an
+ * unbounded number of requests where the reference issues a single `STARTBR`; (3) keeping the
+ * client-side filter as well as sending the parameter, rejected because the server has already
+ * positioned the page, so a second comparison here could only remove rows the service deliberately
+ * returned.
  *
  * Disclosure
  * ----------
@@ -82,7 +92,7 @@ import { ScreenTitle } from '../../layout/ScreenTitle';
 import { usePfKeys } from '../../layout/usePfKeys';
 import type { PfKeyHandlerMap, PfKeyRejection } from '../../layout/usePfKeys';
 import { INVALID_KEY_PRESSED, PROGRAM_MESSAGES, SHARED_MESSAGES } from '../../messages/messages';
-import { ADMIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
+import { ADMIN_MENU_ROUTE, USER_LIST_ROUTE, navigateSafely } from '../../routes/navigation';
 /*
  * WHY : Assumptions: only the TEXT-grade colour map and the typography map are read here, and
  *       `SPACING_TOKENS` deliberately is not. Every gap on this screen is expressed through a named
@@ -114,8 +124,17 @@ export const USER_LIST_PROGRAM_NAME = 'COUSR00C';
  */
 export const USER_LIST_MAPSET = 'COUSR00';
 
-/** Route this screen occupies, which administrative menu option 1 transfers to. */
-export const USER_LIST_PATH = '/users';
+/**
+ * Route this screen occupies, which administrative menu options 1, 3 and 4 transfer to.
+ *
+ * ⚠️ Refactoring Rationale: the value is TAKEN from `ui/src/routes/navigation.ts` where it was a
+ * literal here. That module owns the closed set of routes a screen may name as the origin it was
+ * entered from, and this browse is now such an origin -- it transfers to the update and deletion
+ * screens, whose exit keys read that set -- so a second literal would let this screen hand over a
+ * path the set refuses. The alias keeps the name this module publishes, which its two path builders
+ * and the route tests read.
+ */
+export const USER_LIST_PATH: string = USER_LIST_ROUTE;
 
 /**
  * Rows one page of this browse holds.
@@ -272,7 +291,7 @@ function actionCellId(userId: string): string {
  * Assumptions: the identifier travels in the PATH rather than in a carried session field, which is
  * what makes the request self-describing and therefore independently authorizable. AAP section 0.7.1
  * replaces `CDEMO-CU00-USR-SELECTED` with exactly this, and `ui/src/router.tsx` mounts the receiving
- * screen at `/users/:id/edit`.
+ * screen at `/users/:id/edit`, whose selector segment this builder always supplies.
  * @param {string} userId - Identifier of the selected operator, from that row rather than from state.
  * @returns {string} The concrete route the update screen is entered at.
  */
@@ -401,43 +420,6 @@ export function reduceUserRowSelection(
   }
 
   return NO_ROW_SELECTION;
-}
-
-/**
- * Retains the page rows positioned at or after a browse key.
- *
- * ⚠️ Assumptions: `STARTBR` positions at-or-after rather than exactly, so the comparison is
- * greater-or-equal on the identifier and not an equality or a substring test. The reference hands the
- * typed value straight to `RIDFLD(SEC-USR-ID)` and a blank entry becomes `LOW-VALUES`, which positions
- * at the start of the file -- so a blank key retains everything.
- *
- * ⚠️ Trade-offs: this runs client-side over the delivered page for the reason the module overview
- * records at length -- the listing publishes no positioning parameter and its cursor is sealed, so
- * there is nowhere to send the key. The comparison is a plain lexical one on the eight-character
- * identifier, which is the same ordering the security file's key sequence has, so the rows retained
- * are the rows the terminal would have shown from that point within this page.
- * @param {readonly UserSummary[]} rows - The page as the browse delivered it, in key order.
- * @param {string} browseKey - The identifier typed into the search field, already trimmed.
- * @returns {readonly UserSummary[]} The rows at or after the key, or every row for a blank key.
- */
-export function positionAtOrAfter(
-  rows: readonly UserSummary[],
-  browseKey: string,
-): readonly UserSummary[] {
-  if (browseKey === '') {
-    return rows;
-  }
-
-  const key = browseKey.toUpperCase();
-
-  return rows.filter(
-    /**
-     * Reports whether one row sorts at or after the browse key.
-     * @param {UserSummary} row - A row of the delivered page.
-     * @returns {boolean} `true` when the row's identifier is not before the key.
-     */
-    (row: UserSummary): boolean => row.userId.toUpperCase() >= key,
-  );
 }
 
 /**
@@ -625,24 +607,39 @@ export function buildUserListColumns({
 }
 
 /**
- * Reads one page of users, positioned by the sealed cursor the browse hands over.
+ * Reads one page of users: positioned at the applied key on the opening read, by cursor thereafter.
  *
- * ⚠️ Assumptions: the request carries the cursor and the direction and NOTHING else. `UserListQuery`
- * declares those two members only, so no page, offset, size or limit is expressible -- the service
- * fixes the arity at ten and settles further-page availability from a read of one row beyond the page.
- * A `null` cursor is the opening read and is sent as an ABSENT query rather than as an explicit null,
- * because `ui/src/api/auth.ts` refuses a direction whose cursor is missing rather than sending it.
+ * ⚠️ Assumptions: the two positions are sent on DIFFERENT reads and never together. A `null` cursor is
+ * the opening read and carries the applied key, if there is one; every later read carries the cursor
+ * the previous page returned and no key, because the service refuses the pair and because the key has
+ * already done its work -- the page it opened is what the cursor now continues from.
+ *
+ * Assumptions: no page, offset, size or limit is expressible on either read. `UserListQuery` declares
+ * one position, one cursor and one direction; the service fixes the arity at ten and settles
+ * further-page availability from a read of one row beyond the page.
+ *
+ * Assumptions: a blank applied key is sent as an ABSENT member rather than as an empty string, even
+ * though the contract admits the empty form and gives it the same meaning. The reference reaches the
+ * same read by not filling its search field at all, so an absent member is the closer transcription,
+ * and it keeps the opening request byte-identical to the one a screen with no search field would send.
  * @param {PagedQueryRequest} request - The position to read from and the direction to read in.
+ * @param {string} appliedKey - The identifier the operator applied with Enter, already trimmed, or the
+ *   empty string when the browse opens at the start of the set.
  * @returns {Promise<PageResponse<UserSummary>>} One bounded page of user rows with its two cursors.
- * @throws {Error} The normalised `ApiRequestError` the shared client raises -- 401 for an absent or
- *   expired token and 403 for an authenticated caller outside the administrative group. The browse
- *   hook catches it and publishes it as its `error`, which this screen reports as
- *   {@link SHARED_MESSAGES.UNABLE_TO_LOOKUP_USER}.
+ * @throws {Error} The normalised `ApiRequestError` the shared client raises -- 400 for a key outside
+ *   the identifier domain, 401 for an absent or expired token and 403 for an authenticated caller
+ *   outside the administrative group. The browse hook catches it and publishes it as its `error`,
+ *   which this screen reports as {@link SHARED_MESSAGES.UNABLE_TO_LOOKUP_USER}.
  */
-function fetchUserPage(request: PagedQueryRequest): Promise<PageResponse<UserSummary>> {
-  return request.cursor === null
-    ? listUsers()
-    : listUsers({ cursor: request.cursor, direction: request.direction });
+function fetchUserPage(
+  request: PagedQueryRequest,
+  appliedKey: string,
+): Promise<PageResponse<UserSummary>> {
+  if (request.cursor !== null) {
+    return listUsers({ cursor: request.cursor, direction: request.direction });
+  }
+
+  return appliedKey === '' ? listUsers() : listUsers({ startUserId: appliedKey });
 }
 
 /**
@@ -689,13 +686,36 @@ export default function UserListScreen(): ReactElement {
    */
   const searchFocusRef = useRef<HTMLInputElement | null>(null);
 
+  const readPage = useCallback(
+    /**
+     * Reads one page, carrying the applied positioning key on the opening read.
+     *
+     * ⚠️ Assumptions: the reader closes over the applied key rather than the key being handed to the
+     * hook as a criterion, because the hook is deliberately ignorant of what a screen's criteria ARE
+     * -- `ui/src/hooks/usePagedQuery.ts` states that its restart value is named in a dependency list
+     * and read nowhere in its body. So the key travels in the reader and the same value travels again
+     * as `resetKey` below, which is what makes the restart and the request agree by construction.
+     *
+     * ⚠️ Assumptions: the closure is SAFE against the reader being called with a stale key, and the
+     * hook's own ordering is why. It holds the reader in a ref refreshed by an effect with no
+     * dependency list, declared BEFORE the effect that restarts on `resetKey`; React runs a
+     * component's effects in declaration order, so on the render that applies a new key the ref
+     * already carries this closure by the time the restart runs.
+     * @param {PagedQueryRequest} request - The position to read from and the direction to read in.
+     * @returns {Promise<PageResponse<UserSummary>>} One bounded page with its two cursors.
+     */
+    (request: PagedQueryRequest): Promise<PageResponse<UserSummary>> =>
+      fetchUserPage(request, appliedBrowseKey),
+    [appliedBrowseKey],
+  );
+
   const browse = usePagedQuery<UserSummary>({
     // WHY : Assumptions: ten row positions, from the mapset's ten `SEL0001`-`SEL0010` families at rows
     //       10 to 19 and corroborated by `02 USER-REC OCCURS 10 TIMES` in the program. The hook
     //       supplies no default for this deliberately, because the five migrated browses page at five
     //       different arities and a default would be wrong on most of them while still type-checking.
     pageSize: USER_LIST_PAGE_SIZE,
-    fetchPage: fetchUserPage,
+    fetchPage: readPage,
     /*
      * WHY : Alternatives Considered: calling the hook's imperative `reset` from the search handler.
      *       Rejected because the hook publishes `resetKey` for precisely this and states that a change
@@ -723,22 +743,19 @@ export default function UserListScreen(): ReactElement {
     [],
   );
 
-  const rows = useMemo(
-    /**
-     * Applies the browse positioning key to the page the service delivered.
-     * @returns {readonly UserSummary[]} The rows at or after the applied key.
-     */
-    (): readonly UserSummary[] => positionAtOrAfter(browse.items, appliedBrowseKey),
-    [browse.items, appliedBrowseKey],
-  );
-
   const selection = useMemo(
     /**
      * Reduces the live action cells to the single row action they express.
+     *
+     * ⚠️ Refactoring Rationale: the reduction reads the page AS DELIVERED, where it read a
+     * client-filtered view of it. The positioning key now reaches the service, so the delivered page
+     * already begins at the applied key and a second comparison here could only drop rows the service
+     * deliberately returned -- which is what previously emptied the table for any key sorting past the
+     * tenth stored row. The reference reduces exactly what its map displays, and this is that.
      * @returns {UserRowSelection} The reduction, recomputed when a cell entry or the page changes.
      */
-    (): UserRowSelection => reduceUserRowSelection(rows, actionCodes),
-    [rows, actionCodes],
+    (): UserRowSelection => reduceUserRowSelection(browse.items, actionCodes),
+    [browse.items, actionCodes],
   );
 
   const handleEnter = useCallback(
@@ -753,7 +770,8 @@ export default function UserListScreen(): ReactElement {
      * Assumptions: the search field is CLEARED once the key has been applied, and only then. L231-L233
      * moves a space into `USRIDINO` under `IF NOT ERR-FLG-ON`, so the entry survives a failed turn and
      * is consumed by a successful one. The applied key is held separately from the entry for that
-     * reason: clearing the control must not un-narrow the page it just produced.
+     * reason: clearing the control must not move the browse off the page it just opened, and the
+     * applied value is what the reader sends and what restarts the browse.
      * @returns {void} Completion is a navigation, a painted sentence or a restarted browse.
      */
     (): void => {
@@ -770,11 +788,25 @@ export default function UserListScreen(): ReactElement {
         //       section 0.7.1 replaces with a path parameter so the receiving request is
         //       self-describing and can be authorized on its own terms rather than on a value the
         //       client asserted.
+        /*
+         * WHY : ⚠️ Refactoring Rationale: the transition hands this browse over as the destination's
+         *       ORIGIN, where it previously handed over nothing. `app/cbl/COUSR00C.cbl` L193-L194 and
+         *       L203-L204 move this transaction and program into `CDEMO-FROM-TRANID` and
+         *       `CDEMO-FROM-PROGRAM` on both arms immediately before the `XCTL`, and `COUSR03C.cbl`
+         *       L111-L118 returns to whatever that carrier names on PF3 -- so the reference returns an
+         *       administrator to this browse and this delivery returned them to the administrative
+         *       menu, because the destination read a carrier nobody wrote.
+         * WHY : Assumptions: the origin is this browse's parameterless route rather than the address
+         *       the operator arrived at, because the destination validates the claim against a closed
+         *       set of parameterless routes and this screen's search key lives in its state rather
+         *       than in its address.
+         */
         navigateSafely(
           navigate,
           selection.code === USER_LIST_ROW_ACTION_CODES.update
             ? userEditPath(selection.userId)
             : userDeletePath(selection.userId),
+          { from: USER_LIST_ROUTE },
         );
         return;
       }
@@ -1202,7 +1234,7 @@ export default function UserListScreen(): ReactElement {
        */}
       <Table
         columns={columns}
-        dataSource={rows}
+        dataSource={browse.items}
         loading={browse.isLoading}
         pagination={false}
         /*

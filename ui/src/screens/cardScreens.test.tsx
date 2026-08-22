@@ -43,7 +43,7 @@ import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ReactElement } from 'react';
-import { MemoryRouter, Route, Routes } from 'react-router';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { getCard, listCards, lookupCard, updateCard } from '../api/cards';
@@ -51,11 +51,21 @@ import type { CardDetail, CardSummary, PageResponse } from '../api/cards';
 import { AppShell } from '../layout/AppShell';
 import { INFORMATION_BAND_TEST_ID, MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
 import { RECORD_VIEW_BREAKPOINT, RECORD_VIEW_COLUMNS } from '../layout/recordLayout';
-import { SHARED_MESSAGES, STATUS_MESSAGES } from '../messages/messages';
+import {
+  CARD_DETAIL_EDIT_CONTROL_LABEL,
+  SHARED_MESSAGES,
+  STATUS_MESSAGES,
+} from '../messages/messages';
 import { CARD_DETAIL_ROUTE, CARD_EDIT_ROUTE } from '../routes/cards';
+import { CARD_LIST_ROUTE } from '../routes/navigation';
 import { BREAKPOINT_TOKENS } from '../theme/tokens';
 import { CARD_DETAIL_FIELD_LABELS, CardDetailScreen, formatCardExpiry } from './cardDetail';
-import { CARD_LIST_ENTRY_CONTROL_LABELS, CARD_LIST_LABELS, CardListScreen } from './cardList';
+import {
+  CARD_LIST_ENTRY_CONTROL_LABELS,
+  CARD_LIST_LABELS,
+  CARD_LIST_ROW_ACTION_CODES,
+  CardListScreen,
+} from './cardList';
 import { CardUpdateScreen } from './cardUpdate';
 
 /**
@@ -144,17 +154,17 @@ const CARD: CardDetail = {
 /**
  * Renders one screen at a concrete path inside an in-memory router.
  *
- * Assumptions: `MemoryRouter` rather than the application's own
- * `CardDemoRouter`, which wraps `BrowserRouter`. A memory router lets a case
- * mount one screen at one path without navigating a jsdom `history`, and it
+ * Assumptions: `MemoryRouter` rather than the shipped browser router that
+ * `ui/src/router.tsx` builds with `createBrowserRouter`. A memory router lets a
+ * case mount one screen at one path without navigating a jsdom `history`, and it
  * keeps a case from depending on the whole route table -- so a route added or
  * renamed later cannot break an assertion about a message band.
  *
  * Refactoring Rationale: the single `AppShell` is inside the tree because the band
  * these cases assert on is painted BY it. Each screen delegates its row-23 message
- * through `useShellSlot` rather than composing a band of its own, mirroring
- * `ui/src/App.tsx`, so a bare screen would render no band at all and every case
- * below would fail for the wrong reason.
+ * through `useShellSlot` rather than composing a band of its own, mirroring the
+ * shell LAYOUT route the shipped table mounts these screens under, so a bare screen
+ * would render no band at all and every case below would fail for the wrong reason.
  * @param {string} path - Initial location for the router.
  * @param {string} routePattern - Route pattern the element is mounted at.
  * @param {ReactElement} element - The screen under test.
@@ -1026,8 +1036,358 @@ function cardExpiryRenderingCases(): void {
   it('paints a malformed stored expiry unchanged', detailPaintsAMalformedExpiryUnchanged);
 }
 
+/*
+ * WHY : Assumptions: the origin is read from the ARRIVING location's own state rather than through
+ *       `screenTransitionState`, the reader the screens use. What these cases have to establish is that
+ *       the transition HANDS the member over; routing the assertion through the production reader would
+ *       let a reader that silently dropped it agree with a sender that never sent it, and the two
+ *       defects look identical from the destination.
+ */
+
+/** Prefix a probe route renders, so one arrival can be found by text. */
+const ARRIVED_AT = 'arrived at';
+
+/** What a probe reports when the transition handed over no origin at all. */
+const NO_ORIGIN = 'no origin';
+
+/** What a probe reports when an origin arrived carrying something other than text. */
+const UNREADABLE_ORIGIN = 'unreadable origin';
+
+/**
+ * Reports the origin a transition handed over, as text a case can assert on.
+ * @param {unknown} state - The `state` member of the arriving location, whatever a caller put there.
+ * @returns {string} The handed-over route, {@link NO_ORIGIN} when the transition carried none, or
+ *   {@link UNREADABLE_ORIGIN} when it carried a member of another type.
+ */
+function handedOverOrigin(state: unknown): string {
+  if (typeof state !== 'object' || state === null || !('from' in state)) {
+    return NO_ORIGIN;
+  }
+  const { from } = state as { readonly from?: unknown };
+  return typeof from === 'string' ? from : UNREADABLE_ORIGIN;
+}
+
+/**
+ * Stands in for a destination screen, reporting where the transition arrived and what it carried.
+ *
+ * Assumptions: a probe rather than the real destination screen, because a real screen would issue its
+ * own read and render its own record, and neither is under test here -- while the pathname it arrived
+ * at is not observable from inside a screen that renders successfully either way.
+ * @returns {ReactElement} One line naming the arrival and its handed-over origin.
+ */
+function TransitionProbe(): ReactElement {
+  const location = useLocation();
+
+  return <p>{`${ARRIVED_AT} ${location.pathname} with ${handedOverOrigin(location.state)}`}</p>;
+}
+
+/**
+ * Asserts a transition arrived at one route carrying one origin.
+ * @param {string} pathname - Route the transition must have reached.
+ * @param {string} origin - The origin it must have handed over, or {@link NO_ORIGIN}.
+ * @returns {Promise<void>} Resolves once the arrival has rendered.
+ */
+async function expectArrival(pathname: string, origin: string): Promise<void> {
+  expect(await screen.findByText(`${ARRIVED_AT} ${pathname} with ${origin}`)).toBeInTheDocument();
+}
+
+/** Concrete detail route of the card every case in this section addresses. */
+const DETAIL_PATH = `/cards/${CARD_SELECTOR}`;
+
+/** Concrete update route of that same card. */
+const EDIT_PATH = `${DETAIL_PATH}/edit`;
+
+/**
+ * Builds an initial router entry, with a handed-over origin only when one is supplied.
+ *
+ * Assumptions: `null` produces an entry with NO state member rather than one carrying an empty
+ * object, because that is the arrival the fallback arms exist for -- a typed address, a bookmark, a
+ * reload, or a transition that fell back to a full document navigation and so dropped its state.
+ * @param {string} pathname - Concrete route the case starts at.
+ * @param {string | null} origin - Origin the entering transition handed over, or `null` for none.
+ * @returns {string | { pathname: string; state: { from: string } }} The entry `MemoryRouter` takes.
+ */
+function entryWithOrigin(
+  pathname: string,
+  origin: string | null,
+): string | { pathname: string; state: { from: string } } {
+  return origin === null ? pathname : { pathname, state: { from: origin } };
+}
+
+/**
+ * Renders the browse screen with probes at both card routes it can transfer to.
+ * @returns {void} Nothing; the tree is rendered into the test document.
+ */
+function renderBrowseWithProbes(): void {
+  render(
+    <MemoryRouter initialEntries={[CARD_LIST_ROUTE]}>
+      <AppShell>
+        <Routes>
+          <Route path={CARD_LIST_ROUTE} element={<CardListScreen />} />
+          <Route path={CARD_DETAIL_ROUTE} element={<TransitionProbe />} />
+          <Route path={CARD_EDIT_ROUTE} element={<TransitionProbe />} />
+        </Routes>
+      </AppShell>
+    </MemoryRouter>,
+  );
+}
+
+/**
+ * Renders the update screen at one card's route, with probes at both destinations its exit key has.
+ * @param {string | null} origin - Origin the entering transition handed over, or `null` for none.
+ * @returns {void} Nothing; the tree is rendered into the test document.
+ */
+function renderUpdateWithProbes(origin: string | null): void {
+  render(
+    <MemoryRouter initialEntries={[entryWithOrigin(EDIT_PATH, origin)]}>
+      <AppShell>
+        <Routes>
+          <Route path={CARD_EDIT_ROUTE} element={<CardUpdateScreen />} />
+          <Route path={CARD_LIST_ROUTE} element={<TransitionProbe />} />
+          <Route path={CARD_DETAIL_ROUTE} element={<TransitionProbe />} />
+        </Routes>
+      </AppShell>
+    </MemoryRouter>,
+  );
+}
+
+/**
+ * Renders the detail screen at one card's route, with a probe at the update route it transfers to.
+ * @param {string | null} origin - Origin the entering transition handed over, or `null` for none.
+ * @returns {void} Nothing; the tree is rendered into the test document.
+ */
+function renderDetailWithProbes(origin: string | null): void {
+  render(
+    <MemoryRouter initialEntries={[entryWithOrigin(DETAIL_PATH, origin)]}>
+      <AppShell>
+        <Routes>
+          <Route path={CARD_DETAIL_ROUTE} element={<CardDetailScreen />} />
+          <Route path={CARD_EDIT_ROUTE} element={<TransitionProbe />} />
+          <Route path={CARD_LIST_ROUTE} element={<TransitionProbe />} />
+        </Routes>
+      </AppShell>
+    </MemoryRouter>,
+  );
+}
+
+/**
+ * Presses one of the browse row's two immediate controls, once the row is painted.
+ *
+ * ⚠️ Trade-offs: the control is located by its LABEL TEXT and lifted to the button around it, rather
+ * than by role and accessible name -- which is the query this file uses everywhere else and the one a
+ * reader would expect here. It was measured on this tree: the `await screen.findByRole('button', {
+ * name })` form cost 7.3 seconds per press against a few milliseconds for this one, because the `name`
+ * option makes `dom-accessibility-api` compute an accessible name per candidate and each computation
+ * calls `getComputedStyle(element, '::before')`, which jsdom routes through its virtual console. That
+ * is the same defect `ui/src/screens/cardScreenShell.test.tsx` measured at 20.4s and 40.1s for the
+ * same two controls, and it made the same trade for the same reason.
+ *
+ * Trade-offs: reading the text does not assert that the code is the control's ACCESSIBLE NAME, and
+ * nothing asserts that -- the companion file above asserts the weaker property this helper also relies
+ * on, that the code is carried by a `tbody` button. That is accepted here because these cases are
+ * about where a transfer goes and what it hands over; the codes' presence on the row is that file's
+ * subject, and duplicating it at 7.3 seconds a press would buy nothing.
+ *
+ * Assumptions: `'S'` and `'U'` are each the whole text of their own control and collide with nothing
+ * else rendered, since the headings read `Select`, `Account Number`, `Card Number` and `Active` and the
+ * row's values are an account number, a masked card number and a status flag -- so a text query is
+ * unambiguous here even though it would not be on a screen with denser copy.
+ *
+ * Assumptions: the wait is on the row's action field by label, which is a cheap query, so the
+ * synchronous queries below run only once the row exists.
+ * @param {string} code - The action code the control is labelled with, `'S'` or `'U'`.
+ * @returns {Promise<void>} Resolves once the click has been dispatched.
+ * @throws {Error} If the label text is not inside a button, which means the row's immediate controls
+ *   have been re-rendered as something else and this helper can no longer reach them.
+ */
+async function pressRowControl(code: string): Promise<void> {
+  await screen.findByLabelText(CARD_LIST_LABELS.selectColumn.trim());
+  const control = screen.getByText(code).closest('button');
+  if (control === null) {
+    throw new Error(`The browse row control labelled ${code} is not rendered inside a button.`);
+  }
+  await userEvent.click(control);
+}
+
+/**
+ * The browse hands the detail screen its own route as the caller, on the pointer transfer.
+ *
+ * Assumptions: the assertion is on the ORIGIN and not merely on the destination, because the
+ * destination was always right. What was missing is the member the destination's exit key resolves --
+ * `app/cbl/COCRDLIC.cbl` L520-L521 moves `LIT-THISTRANID` and `LIT-THISPGM` into `CDEMO-FROM-TRANID`
+ * and `CDEMO-FROM-PROGRAM` inside the same `'S'` arm that names the detail program at L526 -- so a
+ * transfer that reached the right screen with nothing handed over still lost behaviour.
+ * @returns {Promise<void>} Resolves once the arrival has been observed.
+ */
+async function browseHandsTheDetailScreenItsCaller(): Promise<void> {
+  vi.mocked(listCards).mockResolvedValue(ONE_ROW_PAGE);
+
+  renderBrowseWithProbes();
+  await pressRowControl(CARD_LIST_ROW_ACTION_CODES.detail);
+
+  await expectArrival(DETAIL_PATH, CARD_LIST_ROUTE);
+}
+
+/**
+ * The browse hands the update screen its own route as the caller, on the pointer transfer.
+ * @returns {Promise<void>} Resolves once the arrival has been observed.
+ */
+async function browseHandsTheUpdateScreenItsCaller(): Promise<void> {
+  vi.mocked(listCards).mockResolvedValue(ONE_ROW_PAGE);
+
+  renderBrowseWithProbes();
+  await pressRowControl(CARD_LIST_ROW_ACTION_CODES.update);
+
+  await expectArrival(EDIT_PATH, CARD_LIST_ROUTE);
+}
+
+/**
+ * The Enter turn's selection arm hands over the same caller the pointer controls do.
+ *
+ * Assumptions: this is a SEPARATE case from the pointer transfers rather than a duplicate of them,
+ * because the two reach the transition through different code -- the controls call the row handlers
+ * directly while this goes through the turn's own selection edit, which is the path the reference
+ * has and the one the row controls are an accommodation for. The handover was missing on all three.
+ * @returns {Promise<void>} Resolves once the arrival has been observed.
+ */
+async function browseHandsTheCallerOnAnEnterTurn(): Promise<void> {
+  vi.mocked(listCards).mockResolvedValue(ONE_ROW_PAGE);
+
+  renderBrowseWithProbes();
+  const actionField = await screen.findByLabelText(CARD_LIST_LABELS.selectColumn.trim());
+  await userEvent.type(actionField, CARD_LIST_ROW_ACTION_CODES.update);
+  await userEvent.keyboard('{Enter}');
+
+  await expectArrival(EDIT_PATH, CARD_LIST_ROUTE);
+}
+
+/**
+ * A card opened by typed number carries the same caller as one opened from a row.
+ *
+ * Assumptions: this path is asserted because the destination cannot tell the two apart and must not
+ * behave differently -- both arrive from this browse, so both leave it by the exit key. A handover on
+ * the row controls alone would make the exit destination depend on which control opened the card.
+ * @returns {Promise<void>} Resolves once the arrival has been observed.
+ */
+async function browseHandsTheCallerOnAResolvedNumber(): Promise<void> {
+  vi.mocked(listCards).mockResolvedValue(ONE_ROW_PAGE);
+  vi.mocked(lookupCard).mockResolvedValue(CARD);
+
+  renderBrowseWithProbes();
+  await userEvent.type(await cardFilterControl(), '4000000000000011');
+  await userEvent.click(
+    screen.getByRole('button', { name: CARD_LIST_ENTRY_CONTROL_LABELS.openDetail }),
+  );
+
+  await expectArrival(DETAIL_PATH, CARD_LIST_ROUTE);
+}
+
+/**
+ * The update screen's exit key returns to the browse when the browse is what entered it.
+ *
+ * Assumptions: the probe reports {@link NO_ORIGIN} for the arrival because the exit transition itself
+ * hands nothing over, and that is not the property under test -- the destination is. The reference's
+ * exit arm does write its own program into the from-fields (`app/cbl/COCRDUPC.cbl` L456-L457), but the
+ * browse this exit reaches reads no origin at all, so a handover here would be one nothing observes.
+ * The absence is recorded rather than a handover being invented to satisfy a symmetry.
+ * @returns {Promise<void>} Resolves once the arrival has been observed.
+ */
+async function updateReturnsToTheBrowseItWasEnteredFrom(): Promise<void> {
+  vi.mocked(getCard).mockResolvedValue(CARD);
+
+  renderUpdateWithProbes(CARD_LIST_ROUTE);
+  await screen.findByDisplayValue(CARD.embossedName);
+  await userEvent.keyboard('{F3}');
+
+  await expectArrival(CARD_LIST_ROUTE, NO_ORIGIN);
+}
+
+/**
+ * The update screen's exit key falls back to this card's detail route when no caller was handed over.
+ *
+ * Assumptions: this is the documented fallback and the case exists to keep it documented -- an
+ * arrival with no caller is a typed address, a bookmark or a reload, and the record is still named by
+ * the address, so the nearest screen showing it is one step away. It is a deliberate divergence from
+ * the reference's own default arm, which is the main menu (`app/cbl/COCRDUPC.cbl` L451), and the
+ * divergence is argued at the handler.
+ * @returns {Promise<void>} Resolves once the arrival has been observed.
+ */
+async function updateFallsBackToThisCardsDetail(): Promise<void> {
+  vi.mocked(getCard).mockResolvedValue(CARD);
+
+  renderUpdateWithProbes(null);
+  await screen.findByDisplayValue(CARD.embossedName);
+  await userEvent.keyboard('{F3}');
+
+  await expectArrival(DETAIL_PATH, NO_ORIGIN);
+}
+
+/**
+ * The detail screen forwards the caller it was entered with when it transfers on to the update form.
+ *
+ * Assumptions: it forwards that caller rather than naming itself, because a card route cannot BE a
+ * caller -- `ui/src/routes/navigation.ts` excludes both card routes from its closed origin set, since
+ * each is minted from an opaque selector and no enumerable set could hold them. So a browse-detail-
+ * update chain ends where the browse-update chain ends, on one press of the exit key.
+ * @returns {Promise<void>} Resolves once the arrival has been observed.
+ */
+async function detailForwardsItsCallerToTheUpdateScreen(): Promise<void> {
+  vi.mocked(getCard).mockResolvedValue(CARD);
+
+  renderDetailWithProbes(CARD_LIST_ROUTE);
+  await userEvent.click(
+    await screen.findByRole('button', { name: CARD_DETAIL_EDIT_CONTROL_LABEL }),
+  );
+
+  await expectArrival(EDIT_PATH, CARD_LIST_ROUTE);
+}
+
+/**
+ * The detail screen forwards nothing when it was itself entered with no caller.
+ *
+ * Assumptions: the pair of detail cases is what pins the forwarding. A case asserting only the
+ * forwarded value would stay green against a screen that named a fixed origin of its own, which is
+ * the mistake this arrangement rules out: with no caller to forward, the update screen must be left
+ * on its own fallback rather than handed one this screen invented.
+ * @returns {Promise<void>} Resolves once the arrival has been observed.
+ */
+async function detailForwardsNothingWhenItHadNoCaller(): Promise<void> {
+  vi.mocked(getCard).mockResolvedValue(CARD);
+
+  renderDetailWithProbes(null);
+  await userEvent.click(
+    await screen.findByRole('button', { name: CARD_DETAIL_EDIT_CONTROL_LABEL }),
+  );
+
+  await expectArrival(EDIT_PATH, NO_ORIGIN);
+}
+
+/**
+ * Registers the caller-origin cases, which run as a round trip rather than per screen.
+ * @returns {void} Nothing; the cases are registered as a side effect.
+ */
+function cardCallerOriginCases(): void {
+  afterEach(resetTransportMocks);
+
+  it('hands the detail screen its caller from a browse row', browseHandsTheDetailScreenItsCaller);
+  it('hands the update screen its caller from a browse row', browseHandsTheUpdateScreenItsCaller);
+  it('hands over the caller on the Enter turn selection', browseHandsTheCallerOnAnEnterTurn);
+  it('hands over the caller for a card opened by number', browseHandsTheCallerOnAResolvedNumber);
+  it(
+    'returns from the update form to the browse that entered it',
+    updateReturnsToTheBrowseItWasEnteredFrom,
+  );
+  it("falls back to the card's own detail route with no caller", updateFallsBackToThisCardsDetail);
+  it('forwards its own caller to the update form', detailForwardsItsCallerToTheUpdateScreen);
+  it(
+    'forwards nothing when it was entered without a caller',
+    detailForwardsNothingWhenItHadNoCaller,
+  );
+}
+
 describe('card screens render outcomes through the shared message band', cardScreenBandCases);
 describe(
   'the card detail screen renders the expiry the way the mapset paints it',
   cardExpiryRenderingCases,
 );
+describe('the card screens hand over and honour the caller origin', cardCallerOriginCases);

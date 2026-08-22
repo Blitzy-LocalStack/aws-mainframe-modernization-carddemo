@@ -187,7 +187,7 @@ contains the complete mapping. This section carries only the ALB-relevant slice.
 
 ## 6. What this module provisions and deliberately omits
 
-The settled HCL contains eight managed resource blocks. Five are conditional
+The settled HCL contains nine managed resource blocks. Six are conditional
 fallback access-log storage; three are the load-balancing surface.
 
 | Managed resource | Cardinality and purpose |
@@ -195,11 +195,20 @@ fallback access-log storage; three are the load-balancing surface.
 | `aws_s3_bucket.access_logs` | Zero or one encrypted fallback bucket when `access_logs_bucket` is null |
 | `aws_s3_bucket_ownership_controls.access_logs` | Enforces bucket-owner object ownership on the fallback bucket |
 | `aws_s3_bucket_public_access_block.access_logs` | Blocks every public ACL and policy path on the fallback bucket |
+| `aws_s3_bucket_versioning.access_logs` | Keeps a delivered access record recoverable after a delete or replace, which is what makes the fallback bucket describable as an audit trail |
 | `aws_s3_bucket_server_side_encryption_configuration.access_logs` | Applies S3-managed AES-256 encryption to fallback log objects |
 | `aws_s3_bucket_policy.access_logs` | Requires TLS and grants bounded ALB log delivery |
 | `aws_lb.this` | The internal Application Load Balancer |
 | `aws_lb_listener.https` | The sole HTTPS listener, with a fixed 404 default action |
 | `aws_lb_listener_rule.service` | Seven `for_each` path rules, keyed by online service name |
+
+Refactoring Rationale: this inventory said eight blocks and omitted
+`aws_s3_bucket_versioning.access_logs`, while §9.1 of this same README already
+cited that resource as the reason `CKV_AWS_21` is closed by construction. The two
+passages contradicted each other, and a reader reconciling them would have had to
+read the HCL to find out which was stale. The count and the table are now both
+taken from [`main.tf`](main.tf), where every conditional block shares the single
+`local.create_access_logs_bucket` guard, so the six move together.
 
 Four data sources derive deployment context without introducing literal account
 or region values:
@@ -265,7 +274,7 @@ defaults such as `tags = {}` leave environment-owned policy with the caller.
 | Input | Supplier | Contract beyond the generated row |
 |---|---|---|
 | `environment` | Environment root | Distinguishes the deployment in names and tags; lowercase validation and the joint name budget fail malformed values during planning |
-| `subnet_ids` | A `network` output selected by the root | At least two distinct IDs are required; the module is tier-agnostic, and the settled roots select the private-application set |
+| `subnet_ids` | A `network` output selected by the root | At least two distinct IDs are required; the module is tier-agnostic, and both settled roots select the public tier — `module.network.public_subnet_ids`, per §3 and AAP §0.4.1.9 — which does not make the composition public because `internal = true` withholds public addresses regardless of the route table |
 | `alb_security_group_id` | `network.alb_security_group_id` | The module attaches the group and never adds or widens a rule |
 | `certificate_arn` | Environment root, from an issued ACM certificate | The certificate must be validated and belong to the ALB's provider region |
 | `certificate_domain_name` | Environment root's internal service DNS identity | Republished for the API Gateway private integration's TLS server-name verification |

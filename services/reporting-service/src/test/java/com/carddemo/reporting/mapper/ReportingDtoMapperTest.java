@@ -1941,8 +1941,9 @@ final class ReportingDtoMapperTest {
      * every name through {@link CopybookLayout}, which is the migration's single normative source of
      * record geometry and a real dependency of this module, so an unregistered record, a renamed one
      * or a changed declared length fails here. The two properties the earlier wording claimed but
-     * never checked -- that the transaction and reporting records are genuinely two records, and that
-     * the ten names cover nine layouts -- are now assertions rather than prose.
+     * never checked -- that the report's transaction record and the statement's transaction record are
+     * genuinely two records, and that the ten names cover nine layouts -- are now assertions rather
+     * than prose.
      */
     @Test
     @DisplayName("every named record resolves to its registered layout, and TRAN is not TRNX")
@@ -1978,25 +1979,34 @@ final class ReportingDtoMapperTest {
                 .isEqualTo(CopybookLayout.layout(FIXTURE_RECORD_LAYOUTS.get("cardxref.txt")))
                 .isEqualTo(CopybookLayout.layout(FIXTURE_RECORD_LAYOUTS.get("xreffile.txt")));
 
-        // WHY : Assumptions: the transaction record at app/cpy/CVTRA05Y.cpy and the reporting record at
-        //       app/cpy/COSTM01.CPY both sum to 350 characters and declare the same fourteen field
-        //       names, but their keys are reordered -- the first opens with the transaction identifier
-        //       at L5 and holds the card number at L15, the second opens with a 32-character key at L21
-        //       whose leading component is the card number at L22. Equal length is therefore not
-        //       enough to tell them apart, and the key length and leading field name are; asserting
-        //       those is what stops a later reader treating either as the other and reading a card
-        //       number out of a description.
-        CopybookLayout.RecordSpec transactionRecord =
+        // WHY : Assumptions: the report's transaction record at app/cpy/CVTRA05Y.cpy and the
+        //       statement's transaction record at app/cpy/COSTM01.CPY both sum to 350 characters and
+        //       declare the same fourteen field names, but their keys are reordered -- the first opens
+        //       with the transaction identifier at L5 and holds the card number at L15, the second
+        //       opens with a 32-character key at L21 whose leading component is the card number at
+        //       L22. Equal length is therefore not enough to tell them apart, and the key length and
+        //       leading field name are; asserting those is what stops a later reader treating either
+        //       as the other and reading a card number out of a description.
+        // WHY : Refactoring Rationale: the two locals were named transactionRecord and
+        //       reportingRecord, which taught the opposite of the distinction above -- both records
+        //       are transaction records and BOTH feed reporting, so the pair of names implied that
+        //       TRAN was the only transaction layout and TRNX the only reporting one. They are named
+        //       for the artifact each one drives instead, which is the distinction that decides which
+        //       offsets a reader may use.
+        CopybookLayout.RecordSpec reportTransactionRecord =
                 CopybookLayout.layout(FIXTURE_RECORD_LAYOUTS.get("tranfile.txt"));
-        CopybookLayout.RecordSpec reportingRecord =
+        CopybookLayout.RecordSpec statementTransactionRecord =
                 CopybookLayout.layout(FIXTURE_RECORD_LAYOUTS.get("trnxfile.txt"));
 
-        assertThat(transactionRecord.reclen()).isEqualTo(350).isEqualTo(reportingRecord.reclen());
-        assertThat(transactionRecord.fields()).hasSameSizeAs(reportingRecord.fields());
-        assertThat(transactionRecord.keyLength()).isEqualTo(16);
-        assertThat(reportingRecord.keyLength()).isEqualTo(32);
-        assertThat(transactionRecord.keyLength()).isNotEqualTo(reportingRecord.keyLength());
-        assertThat(transactionRecord.fields().get(0).name()).isEqualTo("TRAN-ID");
-        assertThat(reportingRecord.fields().get(0).name()).isEqualTo("TRNX-CARD-NUM");
+        assertThat(reportTransactionRecord.reclen()).isEqualTo(350)
+                .isEqualTo(statementTransactionRecord.reclen());
+        assertThat(reportTransactionRecord.fields())
+                .hasSameSizeAs(statementTransactionRecord.fields());
+        assertThat(reportTransactionRecord.keyLength()).isEqualTo(16);
+        assertThat(statementTransactionRecord.keyLength()).isEqualTo(32);
+        assertThat(reportTransactionRecord.keyLength())
+                .isNotEqualTo(statementTransactionRecord.keyLength());
+        assertThat(reportTransactionRecord.fields().get(0).name()).isEqualTo("TRAN-ID");
+        assertThat(statementTransactionRecord.fields().get(0).name()).isEqualTo("TRNX-CARD-NUM");
     }
 }

@@ -1,31 +1,51 @@
 /**
- * @file Contrast regression tests for the two colour pairs design gap G7 records.
+ * @file Contrast regression tests for the colour decisions design gap G7 records.
  *
  * Purpose
  * -------
- * Recompute, from the installed design system and this tree's own theme, the contrast ratios that
- * `ui/src/theme/tokens.ts` claims - so that the claim is measured on every run rather than trusted.
- * Two pairs are asserted to clear the WCAG AA minimum for normal text, and the two operand tokens they
- * replace are asserted to FALL SHORT of it, because a substitution whose reason has quietly gone away
- * should be retired rather than left in place.
+ * Recompute, from the installed design system and this tree's own theme, the contrast claims
+ * `ui/src/theme/tokens.ts` makes - so that a claim is measured on every run rather than trusted.
+ * Three kinds of claim are asserted here, and each fails differently if the bridge drifts:
  *
- * Refactoring Rationale: this file exists because both shortfalls were recorded as prose markers at
- * the elements where they were measured, and prose cannot fail. A browser audit had put the header
- * band at 4.49:1 and the reference-type prompts at 2.2:1; both markers stated the numbers, named the
- * module where the remedy belonged, and left the colours as they were. Measuring them here is what
- * makes the remedy hold: a palette change, a seed change or a token rename that reopens either gap
- * fails a test instead of shipping.
+ * 1. The SURFACE decision. `ui/src/layout/AppShell.tsx` paints its header, body and legend zones
+ *    with one surface instead of leaving the design system's dark `Layout.Header` fill in place.
+ *    The measurement that retired that fill is asserted, together with the measurement that makes
+ *    the decision load-bearing: the text-grade blue the frame now paints does NOT clear the minimum
+ *    on that dark fill, so a reintroduced dark zone would reopen the gap rather than inherit its fix.
+ * 2. The DIVERGENCE between the hue map and the text map. `BMS_TEXT_COLOR_TOKENS` names a different
+ *    token from `BMS_COLOR_TOKENS` for exactly the roles whose operand fails as text, and that
+ *    correspondence is asserted role by role rather than described.
+ * 3. The three measured IMPOSSIBILITIES. No cyan-family, success-family or warning-family token the
+ *    system derives reaches the minimum as text, which is why three roles snapped out of their own
+ *    hue families. All three families are enumerated exhaustively, because the claim is that none
+ *    of their members clears the bar.
+ *
+ * ⚠️ Refactoring Rationale: every case here measured against an `ACCESSIBLE_TEXT_TOKENS` map that
+ * resolved three colours PER SURFACE - dark chrome, layout grey, container - and that map is
+ * withdrawn as superseded. Two of its four entries named a surface the application no longer paints,
+ * and no component ever imported it: this file was its only consumer, so the substitutions it
+ * documented were proved against backgrounds nothing rendered. The successor mechanism is
+ * `BMS_TEXT_COLOR_TOKENS` measured once against `TEXT_CONTRAST_SURFACE`, and the ratios the
+ * withdrawn map proved are proved here again against the surface the frame actually paints. Nothing
+ * measured is dropped except the one case that justified the map's SHAPE - that no single blue
+ * served both surfaces - which has no subject left once there is one surface.
+ *
+ * Assumptions: `ui/src/theme/textContrast.test.ts` asserts the whole text map, role by role, and the
+ * overlap with this file is deliberate rather than duplication. That file is the requirement - every
+ * role clears the threshold; this file is the EVIDENCE for the gap register - which pairings failed,
+ * on which surface, and what that forced. A reader auditing G7 needs the failures, and a failure is
+ * not something the requirement file can hold.
  *
  * Assumptions: the ratios are computed from `theme.getDesignToken` under this tree's own theme rather
  * than from a browser, so a case measures exactly the values the application renders with - including
  * the two seed overrides `ui/src/theme/antdTheme.ts` applies. A browser measurement is what discovered
- * both gaps and is not reproducible in a unit test; the arithmetic below is, and it agrees with the
+ * these gaps and is not reproducible in a unit test; the arithmetic below is, and it agrees with the
  * browser figures to two decimal places.
  *
- * Assumptions: the alpha-composited case is handled rather than assumed away. The prompt substitute is
- * a translucent black - `rgba(0,0,0,0.65)` at the pinned version - so its rendered colour depends on
- * the surface beneath it, and a helper that read only hex values would silently compute nothing for
- * the very token this file exists to check.
+ * Assumptions: the alpha-composited case is handled rather than assumed away. Three of the text-grade
+ * tokens are translucent blacks - `rgba(0,0,0,0.65)` and `rgba(0,0,0,0.88)` at the pinned version - so
+ * their rendered colour depends on the surface beneath them, and a helper that read only hex values
+ * would silently compute nothing for the tokens most of the tree paints prose in.
  */
 
 import { theme } from 'antd';
@@ -34,10 +54,11 @@ import { describe, expect, it } from 'vitest';
 import packageManifest from '../../package.json';
 import { cardDemoTheme } from './antdTheme';
 import {
-  ACCESSIBLE_TEXT_TOKENS,
   BMS_COLOR_TOKENS,
+  BMS_TEXT_COLOR_TOKENS,
   CONTRAST_MEASURED_AT_ANTD_VERSION,
   CONTRAST_REFERENCE_SURFACES,
+  TEXT_CONTRAST_SURFACE,
   WCAG_AA_NORMAL_TEXT_MINIMUM,
 } from './tokens';
 import type { AntdTokenName } from './tokens';
@@ -230,20 +251,24 @@ function tokenContrast(name: AntdTokenName, surfaceColour: string): number {
 }
 
 /**
- * Every cyan-family token the design system derives, which is the family G7 rules out for text.
+ * The surface every text pairing in this file is measured against.
  *
- * Assumptions: the whole family is listed rather than sampled, because the claim being asserted is
- * that NONE of them reaches the minimum. A sample would leave the claim resting on the ones nobody
- * checked.
+ * Assumptions: resolved from the theme rather than recorded as a hex, because it is a token -
+ * `TEXT_CONTRAST_SURFACE` names `colorBgContainer`, which is what `SURFACE_TOKENS.screen` paints on
+ * all three shell zones. A recorded literal for it stood in `CONTRAST_REFERENCE_SURFACES` and was
+ * withdrawn: a copy of a token value is the drift the bridge exists to prevent, not an instance of
+ * preventing it.
  */
+const PAINTED_SURFACE = colourToken(TEXT_CONTRAST_SURFACE);
+
 /**
- * Every warning-family token the design system derives, which is the family G7 rules out for the
- * title strings on a light surface.
+ * Every warning-family token the design system derives, which is the family G7 rules out for text.
  *
- * Assumptions: listed exhaustively for the same reason as the cyan family - the claim is that NONE
- * of them reaches the minimum, so a sample would leave the claim resting on the unchecked members.
- * `colorWarningOutline` is included even though it is a shadow colour rather than a text colour,
- * because excluding a member by judgement is what turns an exhaustive census back into a sample.
+ * Assumptions: listed exhaustively rather than sampled, because the claim being asserted is that
+ * NONE of them reaches the minimum, so a sample would leave the claim resting on the unchecked
+ * members. `colorWarningOutline` is included even though it is a shadow colour rather than a text
+ * colour, because excluding a member by judgement is what turns an exhaustive census back into a
+ * sample.
  */
 const WARNING_FAMILY_TOKENS: readonly AntdTokenName[] = [
   'colorWarning',
@@ -259,6 +284,16 @@ const WARNING_FAMILY_TOKENS: readonly AntdTokenName[] = [
   'colorWarningOutline',
 ];
 
+/**
+ * Every cyan-family token the design system derives, which is the other family G7 rules out.
+ *
+ * Assumptions: enumerated for the same reason as the warning family - the claim is that none of
+ * them clears the threshold as text.
+ *
+ * ⚠️ Refactoring Rationale: the documentation block that belonged to this list had drifted ABOVE
+ * the warning list, so the warning list carried two blocks and this one carried none. The lists
+ * are unchanged; the blocks now sit on the constants they describe.
+ */
 const CYAN_FAMILY_TOKENS: readonly AntdTokenName[] = [
   'colorInfo',
   'colorInfoBg',
@@ -273,179 +308,178 @@ const CYAN_FAMILY_TOKENS: readonly AntdTokenName[] = [
 ];
 
 /**
- * The substituted blue clears the minimum on the design system's dark chrome.
- * @returns {void} Nothing; the assertion carries the outcome.
+ * Every success-family token the design system derives, the third family G7 rules out for text.
+ *
+ * ⚠️ Refactoring Rationale: this list is NEW, and it is added because the register claimed more
+ * than the tests proved. Design gap G7 records that three roles cannot be corrected inside their
+ * own hue, and only the cyan and warning censuses were asserted - the success family was named in
+ * prose with a measured best of 3.463:1 and nothing checked it, which is the same shape of defect
+ * as a documented resolution with no consumer. Enumerated exhaustively for the reason the other two
+ * are: the claim is that none of its members clears the threshold.
  */
-function clearsTheMinimumForTheHeaderBand(): void {
-  const ratio = tokenContrast(
-    ACCESSIBLE_TEXT_TOKENS.BLUE_ON_DARK_CHROME,
-    CONTRAST_REFERENCE_SURFACES.darkChrome,
-  );
-
-  expect(ratio).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT_MINIMUM);
-}
+const SUCCESS_FAMILY_TOKENS: readonly AntdTokenName[] = [
+  'colorSuccess',
+  'colorSuccessBg',
+  'colorSuccessBgHover',
+  'colorSuccessBorder',
+  'colorSuccessBorderHover',
+  'colorSuccessHover',
+  'colorSuccessActive',
+  'colorSuccessText',
+  'colorSuccessTextHover',
+  'colorSuccessTextActive',
+];
 
 /**
- * The operand blue still falls short on that surface, which is why the substitute exists.
+ * The design system's own header fill fails the mapsets' dominant colour as text.
  *
- * Assumptions: asserted as a SHORTFALL deliberately. If a future palette lifts the operand token past
- * the minimum, this case fails and the right response is to retire the substitution rather than to
- * relax the assertion - a substitution whose reason has gone away is a divergence with no
- * justification left.
+ * Purpose: this is the measurement that retired that fill. `COLOR=BLUE` is 289 of the measured
+ * operands, `BMS_COLOR_TOKENS` maps it to the primary role, and on the library's `headerBg` default
+ * the role's own anchor lands 0.01 below the requirement - so the deficient half of the pairing was
+ * the BACKGROUND, which no token map can correct.
+ *
+ * Assumptions: asserted as a SHORTFALL, so a palette that lifted the pairing past the minimum fails
+ * here and the surface decision gets re-argued rather than silently kept for a reason that expired.
  * @returns {void} Nothing; the assertion carries the outcome.
  */
-function keepsTheReasonTheHeaderSubstituteExists(): void {
+function failsTheDominantOperandOnTheDesignSystemHeaderFill(): void {
   const ratio = tokenContrast(BMS_COLOR_TOKENS.BLUE, CONTRAST_REFERENCE_SURFACES.darkChrome);
 
   expect(ratio).toBeLessThan(WCAG_AA_NORMAL_TEXT_MINIMUM);
 }
 
 /**
- * The substituted prompt colour clears the minimum on the document surface.
+ * The one-surface decision is what makes the text map valid, not an aesthetic preference.
  *
- * Assumptions: this token is translucent, so the case also exercises the compositing above - a
- * measurement that ignored alpha would report the contrast of pure black and pass for the wrong
- * reason.
- * @returns {void} Nothing; the assertion carries the outcome.
+ * Purpose: assert both halves of that. The text-grade blue the frame paints clears the minimum on
+ * the surface the frame paints, and FAILS on the dark fill the frame no longer uses - so the fix is
+ * a property of the surface plus the token together, and a reintroduced dark zone would reopen
+ * design gap G7 rather than inherit its resolution.
+ *
+ * Assumptions: this case replaces the withdrawn map's "no single accessible blue serves both
+ * surfaces" case, which justified resolving text per surface. That shape is gone; what survives from
+ * the measurement is the warning it carries for anyone adding a second surface, which is asserted
+ * here instead of described.
+ * @returns {void} Nothing; the assertions carry the outcome.
  */
-function clearsTheMinimumForAPromptOnTheBody(): void {
-  const ratio = tokenContrast(
-    ACCESSIBLE_TEXT_TOKENS.TURQUOISE_ON_BODY,
-    CONTRAST_REFERENCE_SURFACES.documentBody,
+function bindsTheTextGradeBlueToTheSurfaceItWasMeasuredOn(): void {
+  expect(tokenContrast(BMS_TEXT_COLOR_TOKENS.BLUE, PAINTED_SURFACE)).toBeGreaterThanOrEqual(
+    WCAG_AA_NORMAL_TEXT_MINIMUM,
   );
-
-  expect(ratio).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT_MINIMUM);
-}
-
-/**
- * No cyan-family token reaches the minimum as text on the document surface.
- *
- * Assumptions: this is the measurement that forced the prompt substitute to leave the hue family, so
- * it is asserted rather than only argued in the gap register. If the informational seed ever moves
- * dark enough for its own ramp to carry text, this case fails and the substitution should be revisited
- * in favour of keeping the turquoise hue.
- * @returns {void} Nothing; the assertions carry the outcome.
- */
-function rulesOutTheWholeCyanFamilyForBodyText(): void {
-  for (const name of CYAN_FAMILY_TOKENS) {
-    expect(tokenContrast(name, CONTRAST_REFERENCE_SURFACES.documentBody)).toBeLessThan(
-      WCAG_AA_NORMAL_TEXT_MINIMUM,
-    );
-  }
-}
-
-/**
- * The substituted blue clears the minimum on the shell's own light surface too.
- *
- * Assumptions: asserted against `shellSurface` rather than `documentBody` because that is the fill
- * the band is actually painted on when a screen renders it in its own body - the shell mounts an antd
- * `Layout`, whose `colorBgLayout` sits one step darker than the container surface. Measuring against
- * the lighter of the two would overstate the ratio and pass for the wrong reason.
- * @returns {void} Nothing; the assertion carries the outcome.
- */
-function clearsTheMinimumForTheBandOnTheShellSurface(): void {
-  const ratio = tokenContrast(
-    ACCESSIBLE_TEXT_TOKENS.BLUE_ON_BODY,
-    CONTRAST_REFERENCE_SURFACES.shellSurface,
-  );
-
-  expect(ratio).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT_MINIMUM);
-}
-
-/**
- * The operand blue still falls short on the shell surface, which is why that substitute exists.
- *
- * Assumptions: a shortfall assertion, for the reason given at the dark-chrome case. It also records
- * that the two surfaces failed independently: the same operand token misses the minimum on both, so
- * neither substitution is redundant with the other.
- * @returns {void} Nothing; the assertion carries the outcome.
- */
-function keepsTheReasonTheBodySubstituteExists(): void {
-  const ratio = tokenContrast(BMS_COLOR_TOKENS.BLUE, CONTRAST_REFERENCE_SURFACES.shellSurface);
-
-  expect(ratio).toBeLessThan(WCAG_AA_NORMAL_TEXT_MINIMUM);
-}
-
-/**
- * Neither accessible blue serves the other surface, which is why the lookup takes a surface.
- *
- * Assumptions: this is the case that justifies the shape of the API rather than a colour choice. If a
- * future palette produced one step of the ramp that cleared the minimum on both fills, this case
- * fails and the right response is to collapse the two entries into one and drop the parameter, not to
- * relax the assertion.
- * @returns {void} Nothing; the assertions carry the outcome.
- */
-function rulesOutASingleAccessibleBlueForBothSurfaces(): void {
   expect(
-    tokenContrast(
-      ACCESSIBLE_TEXT_TOKENS.BLUE_ON_DARK_CHROME,
-      CONTRAST_REFERENCE_SURFACES.shellSurface,
-    ),
-  ).toBeLessThan(WCAG_AA_NORMAL_TEXT_MINIMUM);
-  expect(
-    tokenContrast(ACCESSIBLE_TEXT_TOKENS.BLUE_ON_BODY, CONTRAST_REFERENCE_SURFACES.darkChrome),
+    tokenContrast(BMS_TEXT_COLOR_TOKENS.BLUE, CONTRAST_REFERENCE_SURFACES.darkChrome),
   ).toBeLessThan(WCAG_AA_NORMAL_TEXT_MINIMUM);
 }
 
 /**
- * The substituted title colour clears the minimum on the shell surface, and the operand does not.
+ * What the retired fill bought, recorded as a measurement rather than as a regret.
  *
- * Assumptions: both halves are asserted in one case because they are one decision - the substitute is
- * only justified while the operand falls short. Only the normal-text threshold is used, for the reason
- * {@link WCAG_AA_NORMAL_TEXT_MINIMUM} records: the largest string here is a 20px semibold heading,
- * which reaches neither the 24px nor the 18.66px-bold bar the 3:1 allowance requires, and an
- * accessibility audit of the rendered page classified that same element as normal weight and failed it
- * at 4.5:1. The classification would not change the outcome either way - the operand measures 1.74:1,
- * below the relaxed allowance as well - so nothing here rests on which bar applies.
- * @returns {void} Nothing; the assertions carry the outcome.
- */
-function clearsTheMinimumForTheTitleStringsOnTheShellSurface(): void {
-  expect(
-    tokenContrast(ACCESSIBLE_TEXT_TOKENS.TITLE_ON_BODY, CONTRAST_REFERENCE_SURFACES.shellSurface),
-  ).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT_MINIMUM);
-  expect(
-    tokenContrast(BMS_COLOR_TOKENS.YELLOW, CONTRAST_REFERENCE_SURFACES.shellSurface),
-  ).toBeLessThan(WCAG_AA_NORMAL_TEXT_MINIMUM);
-}
-
-/**
- * The title operand needs no substitute on the dark chrome, where it clears the minimum.
- *
- * Assumptions: asserted so the asymmetry in the bridge is verified rather than only described. Blue is
- * substituted on both surfaces and yellow on one, and this is the measurement that makes the second
- * half of that sentence true.
+ * Purpose: the title strings are `COLOR=YELLOW`, and the warning operand CLEARED the minimum on the
+ * dark chrome while measuring 1.90:1 on the surface the frame paints - which is why `YELLOW` snaps
+ * to the base text token there. Asserting it keeps the recorded trade-off honest: the gold was
+ * legible on the fill that was given up, and the snap is the price of the uniform surface.
  * @returns {void} Nothing; the assertion carries the outcome.
  */
-function keepsTheTitleOperandOnTheDarkChrome(): void {
+function recordsWhatTheRetiredFillBoughtForTheTitleStrings(): void {
   const ratio = tokenContrast(BMS_COLOR_TOKENS.YELLOW, CONTRAST_REFERENCE_SURFACES.darkChrome);
 
   expect(ratio).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT_MINIMUM);
 }
 
 /**
- * No warning-family token reaches the minimum as text on the shell surface.
+ * The text map diverges from the hue map exactly where the hue map fails as text.
  *
- * Assumptions: this is the measurement that forced the title substitute to leave the gold hue, so it
- * is asserted rather than only argued in the gap register - the same treatment the cyan family gets.
- * If the warning seed ever moves dark enough for its own ramp to carry text, this case fails and the
- * substitution should be revisited in favour of keeping the yellow.
+ * Purpose: replace a described correspondence with an asserted one. For every measured role, either
+ * the two maps name the same token - and then that token must clear the threshold on the painted
+ * surface - or they differ, and then the hue map's operand must be the reason: it must fall short.
+ * A divergence with no shortfall behind it would be an unexplained colour change, and a shortfall
+ * with no divergence would be a shipped accessibility failure.
+ *
+ * Assumptions: the roles are read off `BMS_COLOR_TOKENS` rather than listed, so a ninth role added
+ * to the bridge is covered by this case on the day it is added.
  * @returns {void} Nothing; the assertions carry the outcome.
  */
-function rulesOutTheWholeWarningFamilyForTitleText(): void {
-  for (const name of WARNING_FAMILY_TOKENS) {
-    expect(tokenContrast(name, CONTRAST_REFERENCE_SURFACES.shellSurface)).toBeLessThan(
-      WCAG_AA_NORMAL_TEXT_MINIMUM,
-    );
+function divergesFromTheHueMapExactlyWhereItFailsAsText(): void {
+  for (const role of Object.keys(BMS_COLOR_TOKENS) as (keyof typeof BMS_COLOR_TOKENS)[]) {
+    const operandRatio = tokenContrast(BMS_COLOR_TOKENS[role], PAINTED_SURFACE);
+    if (BMS_TEXT_COLOR_TOKENS[role] === BMS_COLOR_TOKENS[role]) {
+      expect(
+        operandRatio,
+        `${role} reads text from its hue token, so that token must clear the threshold`,
+      ).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT_MINIMUM);
+      continue;
+    }
+    expect(
+      operandRatio,
+      `${role} names a different token for text, so its hue token must be the reason`,
+    ).toBeLessThan(WCAG_AA_NORMAL_TEXT_MINIMUM);
+    expect(
+      tokenContrast(BMS_TEXT_COLOR_TOKENS[role], PAINTED_SURFACE),
+      `${role} text token must clear the threshold on the surface the frame paints`,
+    ).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT_MINIMUM);
   }
 }
 
 /**
- * The recorded surfaces still describe the installed design system.
+ * No cyan-family token reaches the minimum as text on the surface the frame paints.
  *
- * Assumptions: the dark chrome value is the library's own `Layout.headerBg` default, recorded in the
- * bridge because `ui/eslint.config.js` bans the deep import that would read it. This case is what
- * stops that record outliving the version it was taken at: a version bump fails here, and
- * re-measuring the default is then part of the upgrade rather than an omission discovered later.
+ * Assumptions: this is the measurement that forced the turquoise prompt role out of its hue family,
+ * so it is asserted rather than only argued in the gap register. If the informational seed ever
+ * moves dark enough for its own ramp to carry text, this case fails and the snap should be revisited
+ * in favour of keeping the turquoise hue.
+ * @returns {void} Nothing; the assertions carry the outcome.
+ */
+function rulesOutTheWholeCyanFamilyForBodyText(): void {
+  for (const name of CYAN_FAMILY_TOKENS) {
+    expect(
+      tokenContrast(name, PAINTED_SURFACE),
+      `${name} must not reach the threshold`,
+    ).toBeLessThan(WCAG_AA_NORMAL_TEXT_MINIMUM);
+  }
+}
+
+/**
+ * No warning-family token reaches the minimum as text on the surface the frame paints.
+ *
+ * Assumptions: the same treatment the cyan family gets, for the same reason - this is what forced
+ * the title role to snap to the base text token rather than to a darker gold.
+ * @returns {void} Nothing; the assertions carry the outcome.
+ */
+function rulesOutTheWholeWarningFamilyForTitleText(): void {
+  for (const name of WARNING_FAMILY_TOKENS) {
+    expect(
+      tokenContrast(name, PAINTED_SURFACE),
+      `${name} must not reach the threshold`,
+    ).toBeLessThan(WCAG_AA_NORMAL_TEXT_MINIMUM);
+  }
+}
+
+/**
+ * No success-family token reaches the minimum as text on the surface the frame paints.
+ *
+ * Assumptions: the third census, and the one the register was asserting without evidence. It is
+ * what forced the green role to snap to the base text token: its own anchor measures 2.265:1 and
+ * the darkest shade its ramp publishes reaches 3.463:1, so no green in this theme can be read as
+ * normal text.
+ * @returns {void} Nothing; the assertions carry the outcome.
+ */
+function rulesOutTheWholeSuccessFamilyForBodyText(): void {
+  for (const name of SUCCESS_FAMILY_TOKENS) {
+    expect(
+      tokenContrast(name, PAINTED_SURFACE),
+      `${name} must not reach the threshold`,
+    ).toBeLessThan(WCAG_AA_NORMAL_TEXT_MINIMUM);
+  }
+}
+
+/**
+ * The recorded dark-chrome fill still describes the installed design system.
+ *
+ * Assumptions: that hex is the library's own `Layout.headerBg` default, recorded in the bridge
+ * because `ui/eslint.config.js` bans the deep import that would read it. This case is what stops
+ * the record outliving the version it was taken at: a version bump fails here, and re-measuring the
+ * default is then part of the upgrade rather than an omission discovered later. Every other value
+ * this file measures is resolved from the theme, so the pin protects exactly the one literal left.
  * @returns {void} Nothing; the assertion carries the outcome.
  */
 function pinsTheMeasurementToTheInstalledVersion(): void {
@@ -453,32 +487,32 @@ function pinsTheMeasurementToTheInstalledVersion(): void {
 }
 
 /**
- * Registers the eleven contrast cases.
+ * Registers the eight contrast cases.
  * @returns {void} Nothing; the cases are registered as a side effect.
  */
 function contrastCases(): void {
-  it('clears the minimum for the header band', clearsTheMinimumForTheHeaderBand);
-  it('keeps the reason the header substitute exists', keepsTheReasonTheHeaderSubstituteExists);
   it(
-    'clears the minimum for the band on the shell surface',
-    clearsTheMinimumForTheBandOnTheShellSurface,
-  );
-  it('keeps the reason the body substitute exists', keepsTheReasonTheBodySubstituteExists);
-  it(
-    'rules out a single accessible blue for both surfaces',
-    rulesOutASingleAccessibleBlueForBothSurfaces,
+    'fails the dominant operand on the design system header fill',
+    failsTheDominantOperandOnTheDesignSystemHeaderFill,
   );
   it(
-    'clears the minimum for the title strings on the shell surface',
-    clearsTheMinimumForTheTitleStringsOnTheShellSurface,
+    'binds the text-grade blue to the surface it was measured on',
+    bindsTheTextGradeBlueToTheSurfaceItWasMeasuredOn,
   );
-  it('keeps the title operand on the dark chrome', keepsTheTitleOperandOnTheDarkChrome);
+  it(
+    'records what the retired fill bought for the title strings',
+    recordsWhatTheRetiredFillBoughtForTheTitleStrings,
+  );
+  it(
+    'diverges from the hue map exactly where it fails as text',
+    divergesFromTheHueMapExactlyWhereItFailsAsText,
+  );
+  it('rules out the whole cyan family for body text', rulesOutTheWholeCyanFamilyForBodyText);
+  it('rules out the whole success family for body text', rulesOutTheWholeSuccessFamilyForBodyText);
   it(
     'rules out the whole warning family for title text',
     rulesOutTheWholeWarningFamilyForTitleText,
   );
-  it('clears the minimum for a prompt on the body', clearsTheMinimumForAPromptOnTheBody);
-  it('rules out the whole cyan family for body text', rulesOutTheWholeCyanFamilyForBodyText);
   it('pins the measurement to the installed version', pinsTheMeasurementToTheInstalledVersion);
 }
 

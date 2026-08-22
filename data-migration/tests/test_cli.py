@@ -30,7 +30,7 @@ from carddemo_migration.config import (
 )
 from carddemo_migration.copybook import ebcdic_codec, layouts, packed, zoned
 from carddemo_migration.credentials import EXIT_FAILED, EXIT_FATAL, EXIT_OK, EXIT_USAGE
-from carddemo_migration.loaders import aurora
+from carddemo_migration.loaders import aurora, s3_stage
 from carddemo_migration.loaders.aurora import (
     LoadContext,
     prepare_record,
@@ -115,6 +115,7 @@ _IMPLEMENTED_SUBCOMMANDS = (
     "refresh-dataset",
     "apply-credentials",
     "reconcile-sequences",
+    "refresh-card-identity",
     "load-dataset",
     "verify-row-counts",
     "verify-checksum",
@@ -2980,13 +2981,22 @@ class _SourceServingS3Client(_CapableS3Client):
 
         Raises
         ------
-        FileNotFoundError
-            If the key is not served, standing in for the service's own absent-object error.
+        FakeServiceError
+            With code ``NoSuchKey`` when nothing is served under the key, which is the shape the
+            service reports absence in and the only shape the loader classifies as absence.
         """
         self.reads.append(dict(kwargs))
         key = str(kwargs.get("Key"))
         if key not in self._bodies:
-            raise FileNotFoundError(f"no object is served at {key!r}")
+            # WHY : Refactoring Rationale: this raised `FileNotFoundError`, described as standing
+            #   in for the service's absent-object error. It did not stand in for it: the loader
+            #   classifies absence by the service's own ERROR CODE, and a built-in with no error
+            #   document carries none, so an absent object read through this double surfaced as a
+            #   provider failure instead. That was invisible while the only absent-object read on
+            #   the staging path was a listing, and it failed the moment the generation allocator
+            #   began reading a replay record directly. It now raises the same shared service
+            #   error, with the same code, as the base double this class extends.
+            raise FakeServiceError("NoSuchKey", 404, f"no object is served at {key!r}")
         # WHY : Assumptions: the body is a stream rather than bytes, because that is the shape the
         #   SDK returns and the fetch calls ``read`` on it in bounded chunks. Returning bytes would
         #   let a fetch that forgot the read pass here and fail against the real service.
@@ -3066,7 +3076,17 @@ def test_stage_dataset_fetches_the_registered_extract_from_object_storage(
 
     assert cli.main(["stage-dataset", "--dataset=users", "--business-date=2022-07-18"]) == EXIT_OK
 
-    assert [read["Key"] for read in client.reads] == [key]
+    # WHY : Refactoring Rationale: the reads are filtered to those OUTSIDE the reservation
+    #   bookkeeping prefix, where this compared the whole list. Reserving a generation now reads
+    #   the execution's own allocation record directly -- one `GetObject` on
+    #   `_generation-claims/run=.../family=USERS` -- instead of listing a claim prefix, so an
+    #   unfiltered comparison would fail on a read that says nothing about which extract was
+    #   fetched. Filtering by prefix rather than dropping entries by position keeps the assertion
+    #   about the extract fetch, which is what this test is for.
+    extract_reads = [
+        read["Key"] for read in client.reads if not read["Key"].startswith(s3_stage._RUN_CLAIM_ROOT)
+    ]
+    assert extract_reads == [key]
     dataset_writes = [put for put in client.puts if put.get("IfNoneMatch") != "*"]
     assert len(dataset_writes) == 1
     written = dataset_writes[0]
@@ -4122,11 +4142,23 @@ class _SourcePrefixS3Client(_CapableS3Client):
 
         Raises
         ------
-        KeyError
-            If the key was never stored, which is what an absent extract looks like from here.
+        FakeServiceError
+            With code ``NoSuchKey`` when the key was never stored, which is the shape the service
+            reports absence in and the only shape the loader classifies as absence.
         """
         self.gets.append(kwargs)
-        body = self.objects[kwargs["Key"]]
+        key = str(kwargs["Key"])
+        if key not in self.objects:
+            # WHY : Refactoring Rationale: an absent key raised the `KeyError` of the underlying
+            #   dictionary, described as what an absent extract looks like from here. It is not
+            #   what one looks like from the loader: absence is classified by the service's own
+            #   ERROR CODE, and a `KeyError` carries no error document, so an absent object read
+            #   through this double surfaced as a provider failure. That went unnoticed while every
+            #   absent-object read on the staging path was a listing, and it failed the moment the
+            #   generation allocator began reading its replay record directly. It now raises the
+            #   shared service error every other double in this suite raises, with the same code.
+            raise FakeServiceError("NoSuchKey", 404, f"no object is stored at {key!r}")
+        body = self.objects[key]
         return {"Body": io.BytesIO(body), "ContentLength": len(body), "Metadata": {}}
 
 
@@ -4294,7 +4326,17 @@ def test_refresh_dataset_fetches_stages_loads_and_verifies_one_dataset(
     #   whole point of the fix: the state used to name a filesystem path nothing provisions, so
     #   every branch failed on an absent file. Asserting the key proves the read goes to the
     #   deployment's own bucket prefix -- the one the runbook already tells an operator to sync to.
-    assert [request["Key"] for request in client.gets] == [source_key]
+    # WHY : Refactoring Rationale: the reads are filtered to those OUTSIDE the reservation
+    #   bookkeeping prefix, where this compared the whole list. This refresh reserves a generation
+    #   for two families -- the seed segment and the TRANTYPE.BKUP family it also copies into --
+    #   and each reservation reads that execution's own allocation record, so an unfiltered
+    #   comparison fails on two reads that say nothing about where the extract came from.
+    extract_reads = [
+        request["Key"]
+        for request in client.gets
+        if not str(request["Key"]).startswith(s3_stage._RUN_CLAIM_ROOT)
+    ]
+    assert extract_reads == [source_key]
     # The staged generations carry the extract's bytes verbatim, excluding the conditional claim.
     dataset_writes = [put for put in client.puts if put.get("IfNoneMatch") != "*"]
     # WHY : Assumptions: TWO generations are written for this token, and the second is not an
@@ -4598,7 +4640,16 @@ def test_refresh_dataset_accepts_a_local_extract_without_reading_the_bucket(
     )
 
     assert exit_code == EXIT_OK
-    assert client.gets == [], "an override must not read the source prefix at all"
+    # WHY : Refactoring Rationale: the reads are filtered to those OUTSIDE the reservation
+    #   bookkeeping prefix, where this asserted the list was empty. The claim this test makes is
+    #   that a local override reads no SOURCE object, and that claim is unchanged; what changed is
+    #   that reserving a generation reads the execution's own allocation record, which is neither a
+    #   source object nor optional. Asserting emptiness would now fail on a read that is not the
+    #   one being ruled out.
+    source_reads = [
+        get for get in client.gets if not str(get["Key"]).startswith(s3_stage._RUN_CLAIM_ROOT)
+    ]
+    assert source_reads == [], "an override must not read the source prefix at all"
 
 
 def test_refresh_steps_reconcile_the_allocator_only_for_the_transaction_master() -> None:
@@ -5914,6 +5965,7 @@ _DATABASE_COMMANDS: Final[tuple[tuple[str, ...], ...]] = (
     ),
     ("verify-row-count-report",),
     ("reconcile-sequences",),
+    ("refresh-card-identity",),
 )
 
 
@@ -5951,6 +6003,12 @@ def test_a_configuration_failure_reports_the_fatal_tier_not_the_failed_tier(
     #   happened to use a different one passing for the wrong reason.
     monkeypatch.setattr(cli, "resolve_aurora_settings", _unresolvable)
     monkeypatch.setattr(cli, "resolve_migration_settings", _unresolvable)
+    # WHY : Assumptions: the master resolver is patched too, because `refresh-card-identity` is the
+    #   one database command that reaches it -- the reporting schema has no `_migrator` login, so
+    #   the reconciliation connects as the principal that applied the reporting definition. Leaving
+    #   it resolvable would let that command pass this case by connecting rather than by
+    #   classifying.
+    monkeypatch.setattr(cli, "resolve_master_settings", _unresolvable)
     monkeypatch.setattr(session, "resolve_verifier_settings", _unresolvable)
     monkeypatch.setattr(row_counts, "reporting_settings", _unresolvable)
 
@@ -9252,3 +9310,142 @@ def test_every_loadable_dataset_can_resolve_a_staged_source(
         resolved = cli._staged_source(name)
         assert resolved.endswith(descriptor.source_object), name
         assert family in resolved, name
+
+
+def test_refresh_card_identity_reconciles_the_reporting_relation_and_reports_the_delta(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_aurora: FakeAuroraDatabase,
+    aurora_settings: AuroraConnectionSettings,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Reconcile the per-card identity relation and report what the run changed.
+
+    Purpose
+    -------
+    Prove the cutover step that has no other caller. ``sql/V1__reporting_views.sql`` creates
+    ``reporting.card_identity`` and backfills it at creation, which on a cutover is before the
+    extract exists, so a card loaded afterwards is absent from ``reporting.v_card_xref`` and
+    gets no statement. Nothing in the chain reports that omission, so the only protection is
+    this step being invoked -- and until it had a command it could not be.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Redirects the master-credential resolver and the driver's connect at their owning
+        modules.
+    fake_aurora : FakeAuroraDatabase
+        The recording database double, arranged to report a relation five cards behind.
+    aurora_settings : AuroraConnectionSettings
+        Synthetic connection settings, translated through ``as_connection_params``.
+    capsys : pytest.CaptureFixture[str]
+        Reads the rendered line an operator sees.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the step reports success without calling the procedure, if it does not commit, or if
+        the rendered line does not state the delta it measured.
+    """
+    # WHY : Assumptions: the MASTER resolver is the one patched, because `reporting` is the single
+    #   context with no `_migrator` login -- V0 creates seven of those and the reporting objects
+    #   are applied by the bootstrap principal -- so the reconciliation reaches its `SET ROLE`
+    #   through that principal and through no per-context credential. Patching the migration
+    #   resolver instead would leave the command connecting for real.
+    monkeypatch.setattr(cli, "resolve_master_settings", lambda: aurora_settings)
+    monkeypatch.setattr(
+        aurora,
+        "connect",
+        lambda settings: fake_aurora.connect(**settings.as_connection_params()),
+    )
+
+    # WHY : Assumptions: the arranged counts describe five identities REPLACED -- five cards in the
+    #   cross-reference with no identity row and five identity rows with no card -- so the two
+    #   cardinalities agree while ten rows are wrong. That is deliberately the hardest shape rather
+    #   than the simplest: a step that decided whether to act by comparing the two counts would
+    #   report "nothing to do" here and leave every one of those ten rows in place, which is the
+    #   specific defect the unconditional call exists to prevent.
+    fake_aurora.arrange_rows('FROM "reporting"."card_identity"', [[13]])
+    fake_aurora.arrange_rows('FROM "account"."card_xref"', [[13]])
+    fake_aurora.arrange_rows("WHERE NOT EXISTS", [[5]])
+
+    assert cli.main(["refresh-card-identity"]) == EXIT_OK
+
+    issued = " ".join(fake_aurora.executed_sql())
+    # WHY : Assumptions: the procedure call is asserted rather than the counts alone, because a
+    #   step that measured the divergence and then failed to close it would report the same
+    #   numbers. The call is what makes the postcondition true.
+    assert "CALL reporting.refresh_card_identity()" in issued
+    assert 'SET ROLE "carddemo_reporting_owner"' in issued
+    assert fake_aurora.commits, "an uncommitted reconciliation leaves the relation behind"
+    reported = capsys.readouterr().out
+    assert "reconciled reporting.card_identity" in reported
+    # WHY : Assumptions: the measured delta is asserted in the OPERATOR-visible line, because that
+    #   line is the only record afterwards that the step was not merely ceremonial -- the relation
+    #   it reconciled looks identical by cardinality before and after.
+    assert "gained=5" in reported
+    assert "removed=5" in reported
+
+
+def test_refresh_card_identity_reports_the_failed_tier_when_the_procedure_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    aurora_settings: AuroraConnectionSettings,
+) -> None:
+    """Refuse rather than report success when the relation cannot be reconciled.
+
+    Purpose
+    -------
+    Pin the tier a cutover script branches on. A statement run started against an unreconciled
+    relation produces no document for the affected cardholders and reports nothing, so this step
+    reporting success it did not achieve is the one failure mode that stays invisible until a
+    cardholder asks where their statement is.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Replaces the resolver and makes the loader raise its own operational error.
+    aurora_settings : AuroraConnectionSettings
+        Synthetic connection settings the resolver returns.
+
+    Returns
+    -------
+    None
+        The assertions are the result.
+
+    Raises
+    ------
+    AssertionError
+        If the step reports success, or lets the loader's error escape as a traceback.
+    """
+    monkeypatch.setattr(cli, "resolve_master_settings", lambda: aurora_settings)
+
+    class _Connection:
+        """Stand in for an open connection the step is obliged to close."""
+
+        def __init__(self) -> None:
+            """Record that nothing has closed this connection yet."""
+            self.closed = False
+
+        def close(self) -> None:
+            """Record the close the step performs in its ``finally`` arm."""
+            self.closed = True
+
+    connection = _Connection()
+    monkeypatch.setattr(aurora, "connect", lambda settings: connection)
+
+    def _absent(*args: object, **kwargs: object) -> None:
+        """Stand in for the loader meeting a database with no such procedure."""
+        raise aurora.AuroraLoadError("reporting.refresh_card_identity() does not exist")
+
+    monkeypatch.setattr(aurora, "refresh_card_identity", _absent)
+
+    # WHY : Assumptions: 8 and not 16. The environment resolved and the connection opened, so a
+    #   retry can succeed once the reporting definition is applied -- which is the distinction the
+    #   two tiers carry for the batch chain, and the reason the fatal tier is reserved for a
+    #   parameter that was never published.
+    assert cli.main(["refresh-card-identity"]) == EXIT_FAILED
+    assert connection.closed, "the connection must be released even on the refusal path"

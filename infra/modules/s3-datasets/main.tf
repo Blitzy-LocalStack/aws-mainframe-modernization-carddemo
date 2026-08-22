@@ -6,9 +6,10 @@
 #   customer-managed-key-encrypted, publicly inaccessible S3 bucket carrying a
 #   TLS-only bucket policy, plus prefix-scoped lifecycle rules for the TEN
 #   generation-dataset families the baseline defines, the THREE non-generation
-#   reporting artifacts and the ONE source-extract input prefix -- fourteen
-#   prefix-scoped rules, and one further bucket-wide housekeeping rule that
-#   carries no retention action.
+#   reporting artifacts, the ONE source-extract input prefix and the ONE
+#   generation-reservation bookkeeping prefix -- fifteen prefix-scoped rules,
+#   and one further bucket-wide housekeeping rule that carries no retention
+#   action.
 #
 #   What it reproduces, and by what mechanism. The baseline expresses dataset
 #   generations through IDCAMS: `DEFINE GENERATIONDATAGROUP ... LIMIT(5)
@@ -74,7 +75,7 @@
 #     count-based one. Rejected -- LIMIT(5) counts generations, it does not age
 #     them. Recorded in full on the lifecycle configuration.
 #   - Trade-offs: one prefix-scoped rule per family rather than a single
-#     bucket-wide rule, accepting fourteen rules to gain per-family retention and
+#     bucket-wide rule, accepting fifteen rules to gain per-family retention and
 #     an auditable prefix filter per baseline generation base.
 #   - Assumptions: the prefix TOPOLOGY is identical in every environment and
 #     only retention and transition values differ, which is the contract
@@ -381,6 +382,72 @@ locals {
   # five generations whenever the chain runs faster than the gate, silently
   # converting a count cap into a hybrid.
   noncurrent_expiration_min_age_days = 1
+
+  # The generation-reservation bookkeeping prefix.
+  #
+  # Assumptions: this is a LOCAL and not an input, because it is topology rather
+  # than configuration. The value is a shared contract with two application
+  # artifacts that declare the identical literal --
+  # `DatasetGenerationService.RUN_CLAIM_ROOT` in
+  # services/batch-service/src/main/java/com/carddemo/batch/service/ and
+  # `_RUN_CLAIM_ROOT` in
+  # data-migration/src/carddemo_migration/loaders/s3_stage.py -- and neither of
+  # them can read a Terraform variable. An input would therefore let a root
+  # override a value the code cannot follow, and the override would fail only at
+  # run time, only for the run that needed the record: an IAM statement scoped to
+  # the overridden prefix would deny the Get and the Put on the real one, so the
+  # very first generation allocation of that environment would abort. Both
+  # application constants are asserted equal to this declaration by tests --
+  # `DatasetGenerationServiceTest.CrossLanguageClaimContract` and
+  # `data-migration/tests/test_s3_stage.py` -- which read this file, so the three
+  # cannot diverge silently.
+  #
+  # Assumptions: the prefix is TOP-LEVEL, a sibling of the thirteen dataset
+  # prefixes rather than a child of any of them. A bookkeeping prefix inside a
+  # family root would be returned by that family's own delimited listing as a
+  # date-partition candidate, which both generation parsers would then have to
+  # reject -- and a parser that rejects is one a later edit can be persuaded to
+  # accept. Outside every family root it is unreachable from a family listing by
+  # construction.
+  #
+  # Trade-offs: it is deliberately NOT a member of `all_dataset_prefixes`. That
+  # map is the inventory of prefixes that hold DATASET BYTES: outputs.tf
+  # publishes it for consumers to write generations under, every `gdg-` and
+  # `seq-` retention rule reads its prefix from it, and the environment roots
+  # derive their task-role object grants from it. Adding this prefix there would
+  # silently widen all three -- a fourteenth entry would acquire a
+  # generation-retention rule it must not have, and would appear to consumers as
+  # a dataset location. It is published as its own output instead, so a root
+  # grants it explicitly and narrowly.
+  generation_claim_prefix = "_generation-claims/"
+
+  # Assumptions: thirty days, and the number is bounded from below by a verified
+  # service limit rather than chosen for roundness. A replay record exists to
+  # make a SECOND attempt of one orchestrator execution reuse the generation the
+  # first attempt allocated, so it must outlive every way that execution can run
+  # again. The longest of those is Step Functions redrive, whose redrivable
+  # period is 14 days measured from the day the execution COMPLETES
+  # (https://docs.aws.amazon.com/step-functions/latest/dg/redrive-executions.html).
+  # The record is written when the execution starts, so an expiry measured from
+  # object creation must cover that period plus the execution's own duration --
+  # bounded by the per-state timeouts the step-functions-batch module validates
+  # at no more than 21600 seconds each, so hours rather than days. Thirty days
+  # clears 14 plus that duration with room for an operator investigating a failed
+  # night before redriving it.
+  # Trade-offs: expiring these records at all is a cost decision, not a
+  # correctness one -- the records are a few bytes each and their only harm is
+  # unbounded accumulation of one object per execution per family, ten per
+  # nightly run, which is 3,650 objects a year that no other rule in this
+  # configuration would ever remove. Retaining them forever was the alternative
+  # and was rejected on that arithmetic; expiring them sooner than the redrive
+  # window was rejected because a redriven execution would then allocate a second
+  # generation for work the first attempt had already staged, which is precisely
+  # the duplicate the record prevents.
+  # Assumptions: the rule below expires the CURRENT version on this age and also
+  # bounds noncurrent versions, because a conditional create can be superseded
+  # only by an operator repair; the noncurrent clause exists so such a repair
+  # cannot leave an unreachable version behind for ever.
+  generation_claim_expiration_days = 30
 }
 
 resource "aws_s3_bucket" "datasets" {
@@ -509,7 +576,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "datasets" {
     # Trade-offs: an S3 Bucket Key lets S3 derive one data key per bucket and
     # day and reuse it across objects, instead of issuing a KMS Decrypt or
     # GenerateDataKey call for EVERY object read and written. The batch chain
-    # writes and re-reads many objects per generation across fourteen prefixes,
+    # writes and re-reads many objects per generation across fifteen prefixes,
     # so the per-object call pattern is exactly the shape that multiplies KMS
     # request volume -- and KMS requests are both billed per call and subject
     # to a per-region rate quota that a large export can approach. The accepted
@@ -768,7 +835,7 @@ resource "aws_s3_bucket_policy" "datasets" {
 #    in `local.noncurrent_expiration_min_age_days` as an eligibility gate.
 #
 #   - Trade-offs: one prefix-scoped rule per family rather than a single
-#    bucket-wide rule. The cost is fourteen rules where one would have compiled,
+#    bucket-wide rule. The cost is fifteen rules where one would have compiled,
 #    and it is accepted deliberately for two reasons. Per-family retention
 #    becomes overridable for one environment through the optional
 #    `noncurrent_versions` member without touching the prefix topology -- which
@@ -987,22 +1054,80 @@ resource "aws_s3_bucket_lifecycle_configuration" "datasets" {
     }
   }
 
+  # The generation-reservation replay records -- the one prefix in this bucket
+  # that holds no dataset bytes at all.
+  #
+  # Refactoring Rationale: this rule exists because the prefix it governs had no
+  # rule and no owner. The generation allocator records, per orchestrator
+  # execution and per family, which generation that execution took, so a retried
+  # or redriven attempt reuses the number instead of consuming a second
+  # generation for a byte-identical copy. Those records were being written with
+  # nothing to ever remove them: the fourteen prefix-scoped rules above all
+  # filter on a dataset prefix, and this prefix is a sibling of every one of
+  # them, so a record written on any night would have been stored for the life of
+  # the bucket. Ten per nightly run compounds to thousands a year of objects
+  # whose usefulness ends within a fortnight.
+  #
+  # Assumptions: THIS RETENTION IS NOT A GENERATION CONTRACT and the rule is
+  # identified `claim-` rather than `gdg-`, `seq-` or `src-` so that the four
+  # different retention meanings in this configuration stay distinguishable in a
+  # plan diff and in the console. Ten reproduce a baseline LIMIT(5) generation
+  # limit, two are hygiene over rewritten reporting outputs, one is hygiene over
+  # a re-uploaded input, and this one expires bookkeeping whose subject has gone.
+  #
+  # Assumptions: this is the ONLY rule here that expires a CURRENT version. Every
+  # other rule expires noncurrent versions alone, because a current dataset
+  # object is a generation and only the logical generation window may retire it.
+  # A replay record is not a generation and is not addressed by any dataset
+  # reference: nothing reads it after its execution's redrive window closes, so
+  # expiring the current version is the only thing that removes it at all.
+  #
+  # Assumptions: the per-generation reservation MARKERS are not governed here and
+  # are deliberately excluded. A marker lives inside the `gen=NNNN/` prefix it
+  # reserves -- which is what makes a reserved-but-unstaged number visible to
+  # both generation discoverers as a listed common prefix -- so it lies under a
+  # family prefix and is removed with its generation when the five-generation
+  # window scratches it. Expiring markers on age instead would release a
+  # generation number while its prefix still held staged bytes, and the next run
+  # would allocate that number and write a second dataset over the first.
+  rule {
+    id     = "claim-generation-allocations"
+    status = "Enabled"
+
+    filter {
+      prefix = local.generation_claim_prefix
+    }
+
+    expiration {
+      days = local.generation_claim_expiration_days
+    }
+
+    noncurrent_version_expiration {
+      newer_noncurrent_versions = var.noncurrent_version_retention
+      noncurrent_days           = local.noncurrent_expiration_min_age_days
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = var.abort_incomplete_multipart_upload_days
+    }
+  }
+
   # One bucket-wide housekeeping rule, and the ONLY rule here that is not scoped
   # to a dataset prefix.
   #
   # Assumptions: an incomplete multipart upload can be initiated against ANY
-  # key, including one that matches none of the thirteen dataset prefixes above --
+  # key, including one that matches none of the fifteen prefixes above --
   # a mistyped prefix, an ad-hoc staging path used during an investigation, or a
   # key written by a future consumer before its prefix is added to the
   # inventory. A prefix-scoped abort rule only reclaims parts whose key matches
   # its prefix, so parts left anywhere else would be stored and billed
-  # indefinitely while remaining invisible as objects. The fourteen rules above
+  # indefinitely while remaining invisible as objects. The fifteen rules above
   # therefore cannot on their own make the guarantee their own abort comment
   # claims; this rule is what completes it.
   #
   # Trade-offs: this deliberately overlaps the per-family abort blocks rather
   # than replacing them. Both specify the same number of days, so for a key
-  # under one of the fourteen prefixes the two agree and the outcome is identical
+  # under one of the fifteen prefixes the two agree and the outcome is identical
   # -- there is no conflict to resolve. The redundancy is accepted because the
   # per-family block states the policy where the generations it protects are
   # declared, which is where a reader looking at one family will find it, while
@@ -1015,7 +1140,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "datasets" {
   # bucket-wide scope safe here. Every rule that expires or transitions a
   # version stays prefix-scoped, because a bucket-wide retention rule would
   # apply one retention policy to every dataset at once and erase the per-family
-  # control the fourteen rules exist to provide. Aborting an incomplete upload
+  # control the fifteen rules exist to provide. Aborting an incomplete upload
   # deletes no object version, so it cannot affect generation retention.
   #
   # Assumptions: `prefix = ""` is the documented way to match every object while

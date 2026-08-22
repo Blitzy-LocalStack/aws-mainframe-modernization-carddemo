@@ -488,24 +488,53 @@ export async function signOut(refreshToken: string): Promise<void> {
  * Assumptions: reaching an end of the file is a SUCCESS. A short or empty page answers 200 with a
  * short `items` and `hasNext` false; it is never a 404, so a caller must not render an
  * end-of-browse as an error.
- * @param {UserListQuery} [query] - Optional sealed cursor and the direction it was issued for. Omit
- *   it entirely for the first page.
+ *
+ * Assumptions: an opening page may be POSITIONED instead of read from the start of the set, by
+ * `startUserId`, which is the reference's own search field -- `app/cbl/COUSR00C.cbl` reads `USRIDINI`
+ * on the enter turn at L218 to L221 and seeks the browse on it. Positioning is inclusive, so the row
+ * named is the first row of the page, and a value no row carries positions on the next identifier
+ * rather than refusing. It belongs to the OPENING turn only: once a page is held, a caller continues
+ * from that page's sealed cursors and drops the identifier, which is why the two are refused together
+ * below rather than one being silently preferred.
+ * @param {UserListQuery} [query] - Optional opening position, OR a sealed cursor and the direction it
+ *   was issued for. The two positions are mutually exclusive. Omit it entirely for the first page read
+ *   from the start of the set.
  * @returns {Promise<PageResponse<UserSummary>>} One bounded page of user rows, with the `firstKey`
  *   and `lastKey` a caller pages from and the `hasNext` that says whether a forward move exists.
- * @throws {RangeError} If a direction is supplied without a usable cursor, which names no page to step
- *   from and which the contract refuses; the refusal is raised here rather than sent, so the caller
- *   learns which two inputs disagreed instead of receiving the opening page as though the step had
- *   happened.
- * @throws {Error} The normalised `ApiRequestError`: 400 for a cursor sealed for the other direction,
- *   401 for an absent or expired token, and 403 for an authenticated caller outside the
- *   administrative group -- which is distinct from 401 and must not sign the caller out.
+ * @throws {RangeError} If an opening position and a cursor are supplied together, or if a direction is
+ *   supplied without a usable cursor -- which names no page to step from and which the contract
+ *   refuses. Both refusals are raised here rather than sent, so the caller learns which two inputs
+ *   disagreed instead of receiving a page as though one of them had not been asked for.
+ * @throws {Error} The normalised `ApiRequestError`: 400 for a cursor sealed for the other direction or
+ *   for an opening position outside the identifier domain, 401 for an absent or expired token, and 403
+ *   for an authenticated caller outside the administrative group -- which is distinct from 401 and must
+ *   not sign the caller out.
  */
 export async function listUsers(query: UserListQuery = {}): Promise<PageResponse<UserSummary>> {
+  // Assumptions: the two POSITIONS are refused here rather than sent, and named in the same order the
+  //   service's own refusal names them, so a client that surfaces this message and a client that
+  //   surfaces the service's 400 tell an operator the same thing. Sending the pair would spend a round
+  //   trip to learn what is decidable without one, and preferring either silently would discard a
+  //   position the caller stated.
+  if (query.startUserId !== undefined && query.cursor !== undefined) {
+    throw new RangeError(
+      'A user browse takes either an opening identifier or a cursor, not both; a cursor already' +
+        ' states the position to read from.',
+    );
+  }
   // Assumptions: the pair is checked before assembly rather than after, so a direction with no cursor
   //   is refused instead of being dropped. Dropping it was the previous behaviour and it contradicted
   //   the paragraph above, which states that the contract refuses that pair with a 400 -- a caller
   //   reading that sentence would expect a refusal and silently receive the opening page instead.
   const params: Record<string, string> = {};
+  // Assumptions: an EMPTY opening position is sent rather than dropped, because the contract admits
+  //   the empty form and gives it the same meaning as omission -- the reference seeks on LOW-VALUES
+  //   when its search field is blank, at L219. Dropping it would make an explicit "read from the
+  //   start" indistinguishable from a caller that never named a position, which is a distinction a
+  //   replayed request should keep.
+  if (query.startUserId !== undefined) {
+    params.startUserId = query.startUserId;
+  }
   // Refactoring Rationale: the pair is established by the shared guard rather than assembled here,
   //   because this module used to drop a supplied direction whenever no cursor accompanied it and
   //   answer the caller with the opening page -- the one combination the contract refuses with a 400

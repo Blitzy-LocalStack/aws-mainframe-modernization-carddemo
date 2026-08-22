@@ -3,6 +3,7 @@ package com.carddemo.reporting.config;
 import com.carddemo.common.error.ApiErrorSecurityHandlers;
 import com.carddemo.common.security.CognitoAccessTokenValidator;
 import com.carddemo.common.security.JwtRoleConverter;
+import com.carddemo.reporting.service.StatementService;
 import jakarta.servlet.DispatcherType;
 import java.time.Clock;
 import java.util.List;
@@ -44,13 +45,21 @@ import org.springframework.security.web.access.intercept.RequestAuthorizationCon
  * through the read-only views, so a chain that admitted an unauthenticated caller would disclose them.
  * This class is where the module gained an authorization decision of its own.</p>
  *
- * <p>Assumptions: no BUSINESS route here is administrator-only. The baseline reaches the report request
- * screen {@code app/cbl/CORPT00C.cbl} from the MAIN menu, {@code app/cbl/COMEN01C.cbl}, which both user
- * types reach, so restricting it to an administrator would REMOVE a capability an ordinary user has
- * today. Transformation rule T9 permits no behavioural change without a documented divergence, and
- * tightening a control is still a change. The two management endpoints are the one rule granted by
- * network position rather than by authority, and neither is a business route -- see
- * {@link #METRIC_SCRAPE_PATH}.</p>
+ * <p>Assumptions: every business route here that has a BASELINE COUNTERPART admits both group
+ * authorities. The baseline reaches the report request screen {@code app/cbl/CORPT00C.cbl} from the MAIN
+ * menu, {@code app/cbl/COMEN01C.cbl}, which both user types reach, so restricting it to an administrator
+ * would REMOVE a capability an ordinary user has today. Transformation rule T9 permits no behavioural
+ * change without a documented divergence, and tightening a control is still a change. The two management
+ * endpoints are the one rule granted by network position rather than by authority, and neither is a
+ * business route -- see {@link #METRIC_SCRAPE_PATH}.</p>
+ *
+ * <p>⚠️ Assumptions: the one exception is the statement ARTIFACT COLLECTION route, which admits the
+ * administrator authority alone -- see {@link #statementArtifactAccess()}. It has no baseline
+ * counterpart to preserve: the reference produces the two statement datasets in a batch job and no
+ * online transaction of {@code app/csd/CARDDEMO.CSD} serves either of them to a terminal, so no
+ * capability an ordinary user has today is withdrawn by restricting it. The alternative -- inheriting the
+ * catch-all -- is what a review found, and it made one card's entitlement a handle on every
+ * cardholder's statement in the run.</p>
  *
  * <h2>The sign-on decision this chain deliberately does not reproduce</h2>
  *
@@ -279,10 +288,17 @@ public class SecurityConfig {
     /**
      * The metric scrape path, reachable only from inside the task.
      *
-     * <p>Assumptions: the only configured consumer is TASK-LOCAL. The collector sidecar scrapes
-     * {@code https://127.0.0.1:<container-port>} at {@code metrics_path: /actuator/prometheus} every
-     * sixty seconds -- {@code infra/modules/ecs-service/main.tf} -- and that scrape configuration
-     * carries no authorization header at all, so it can present no token.</p>
+     * <p>Assumptions: any consumer of this path is TASK-LOCAL, and no consumer is configured
+     * today. A scraper would reach {@code https://127.0.0.1:<container-port>} at
+     * {@code /actuator/prometheus} from inside the task's own network namespace and would present
+     * no authorization header, so the rule below grants this path by NETWORK POSITION rather than
+     * by authority. Refactoring Rationale: this named a collector sidecar in
+     * {@code infra/modules/ecs-service/main.tf} as that consumer. The sidecar is withdrawn -- it
+     * sat outside the frozen specification -- so the endpoint is published with nothing collecting
+     * from it. The rule is unchanged by that withdrawal, because it was never the scraper's
+     * identity that justified it: a token-free consumer inside the namespace and no consumer at
+     * all both require exactly the loopback restriction, and widening the rule to demand an
+     * operator authority would break the path the moment a scraper is introduced.</p>
      *
      * <p>Refactoring Rationale: an earlier revision of this class covered the whole
      * {@code /actuator/**} namespace with one rule requiring the administrator authority, on the ground
@@ -294,6 +310,24 @@ public class SecurityConfig {
      * right: before either revision this namespace was authorized by {@code authenticated()} alone.</p>
      */
     public static final String METRIC_SCRAPE_PATH = "/actuator/prometheus";
+
+    /**
+     * The one business path this chain restricts to an administrator, being the statement artifact
+     * collection route.
+     *
+     * <p>Assumptions: the pattern is COMPOSED from the constants the statement surface publishes rather
+     * than spelled out, so a rule guarding the route and the route itself cannot drift apart. A literal
+     * here would still compile, still match nothing, and still leave the route governed by the catch-all
+     * if the surface ever moved -- which is the failure mode this composition removes.
+     *
+     * <p>Assumptions: the trailing wildcard matches exactly ONE path segment, which is the opaque
+     * selector the operation takes. A recursive wildcard would additionally match any deeper path the
+     * surface might publish beneath the segment, and inheriting a rule is precisely what the review this
+     * constant exists for found going wrong -- so the pattern is the narrowest one that covers the
+     * declared route.
+     */
+    public static final String STATEMENT_ARTIFACT_PATH =
+            StatementService.STATEMENTS_BASE_PATH + StatementService.ARTIFACTS_SEGMENT + "*";
 
     /**
      * The loopback addresses the task-local collector can reach this service from.
@@ -355,6 +389,45 @@ public class SecurityConfig {
      *     never {@code null}
      */
     public static AuthorizationManager<RequestAuthorizationContext> diagnosticAccess() {
+        return AuthorityAuthorizationManager.hasAuthority(JwtRoleConverter.ADMIN_AUTHORITY);
+    }
+
+    /**
+     * The authorization decision that guards {@link #STATEMENT_ARTIFACT_PATH}, exposed for assertion.
+     *
+     * <p>⚠️ Purpose: this rule exists because of a confidentiality defect a review found, and it is the
+     * chain's half of the fix. A statement is requested for ONE CARD, and the objects this route serves
+     * are the two RUN-WIDE renderings -- every cardholder's statement in the portfolio, in one 80-column
+     * file and one 100-column markup file. Under the catch-all, any caller holding an ordinary group
+     * claim could ask for a single card it was entitled to, take the selectors the response published,
+     * and collect the whole run. Restricting the route to the administrator authority is what makes the
+     * bulk objects an operator artifact rather than a cardholder one.
+     *
+     * <p>Assumptions: the response side is fixed as well as the route, and neither alone is sufficient.
+     * {@code StatementService.ArtifactAudience} withholds the selectors and the index positions from an
+     * ordinary caller, so the response no longer advertises an address that caller is refused at; this
+     * rule ensures the address does not work even when it is guessed, obtained from an operator's
+     * response, or reached after the response side is one day changed.
+     *
+     * <p>Alternatives Considered: returning card-bound BYTE RANGES to an ordinary caller instead of
+     * restricting the route, which the review allowed as the other resolution. Rejected on a measured
+     * ground: the run index gives a card-bound range in the PLAIN-TEXT artifact only, and the markup
+     * artifact -- which the same response publishes -- has no index and no card-addressable boundary at
+     * all, so a range-bound collection would have to withdraw the markup artifact from every ordinary
+     * caller anyway. It would also make every collection a read of the index plus a ranged read whose
+     * bounds came from a caller-supplied selector, which is a wider attack surface than the one it
+     * closes.
+     *
+     * <p>Trade-offs: an ordinary caller can no longer collect a rendered statement at all, where before
+     * it could collect every cardholder's. What it retains is the whole of its own statement as
+     * structured data, through the summary and transaction operations, which are the two operations the
+     * contract publishes for a cardholder. Restoring a per-card rendered artifact is a writer-side change
+     * -- one object per statement -- and not an authorization one, and nothing here forecloses it.
+     *
+     * @return the manager that grants only a principal holding {@link JwtRoleConverter#ADMIN_AUTHORITY},
+     *     never {@code null}
+     */
+    public static AuthorizationManager<RequestAuthorizationContext> statementArtifactAccess() {
         return AuthorityAuthorizationManager.hasAuthority(JwtRoleConverter.ADMIN_AUTHORITY);
     }
 
@@ -501,10 +574,12 @@ public class SecurityConfig {
                         .requestMatchers(HEALTH_DIAGNOSTIC_PATH).access(diagnosticAccess())
                         .requestMatchers(HEALTH_PATH).permitAll()
                         // WHY : Assumptions: the two management endpoints are granted by NETWORK
-                        //       POSITION and not by authority, because their only configured consumer
-                        //       is the task-local collector sidecar, which presents no token. Declared
-                        //       before the business rule so a request of any method to either endpoint
-                        //       is judged by position alone.
+                        //       POSITION and not by authority, because any consumer of either is
+                        //       task-local and presents no token -- and today none is configured at
+                        //       all, the collector sidecar that was to scrape them having been
+                        //       withdrawn from infra/modules/ecs-service. Declared before the business
+                        //       rule so a request of any method to either endpoint is judged by
+                        //       position alone.
                         .requestMatchers(BUILD_IDENTITY_PATH, METRIC_SCRAPE_PATH)
                         .access(loopbackOnly())
                         // WHY : Assumptions: the management namespace is matched HERE, after the three
@@ -533,6 +608,13 @@ public class SecurityConfig {
                         //       failure direction -- loud and safe rather than quiet and open -- and
                         //       the constant's own documentation records where to add the rule.
                         .requestMatchers(MANAGEMENT_PATH).denyAll()
+                        // WHY : ⚠️ Assumptions: the statement artifact route is matched HERE, before the
+                        //       catch-all, because the catch-all is what admitted an ordinary group
+                        //       claim to the run-wide statement objects. The order is the rule: the
+                        //       first matching entry decides, so this line placed after the catch-all
+                        //       would never be consulted and the restriction would be silently absent.
+                        //       The reasoning for the restriction is on statementArtifactAccess().
+                        .requestMatchers(STATEMENT_ARTIFACT_PATH).access(statementArtifactAccess())
                         .anyRequest()
                         .access(businessAccess()))
                 .oauth2ResourceServer(server -> server

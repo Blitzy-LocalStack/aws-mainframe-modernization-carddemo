@@ -84,9 +84,14 @@
  *   <dt>{@code PostTransactionsJob} — nightly chain state 4</dt>
  *   <dd>Re-expresses {@code app/cbl/CBTRN02C.cbl}, driven by
  *       {@code app/jcl/POSTTRAN.jcl:23} ({@code EXEC PGM=CBTRN02C}). The
- *       three-write posting unit of work stays a single commit, so the
- *       partial-posting states a saga would expose never become
- *       observable.</dd>
+ *       three-write posting unit of work stays a single commit -- and the
+ *       feed's consumed position advances inside that same commit, so a
+ *       re-run can neither double-post a committed record nor lose a
+ *       rolled-back one -- and the partial-posting states a saga would
+ *       expose never become observable. The record's decisions and writes
+ *       themselves are {@code PostingRecordUnitOfWork}'s; this job supplies
+ *       the boundary around them, the pass that walks the feed, and the
+ *       reject dataset assembled outside the boundary.</dd>
  *
  *   <dt>{@code CalculateInterestJob} — nightly chain state 5</dt>
  *   <dd>Re-expresses {@code app/cbl/CBACT04C.cbl}, driven by

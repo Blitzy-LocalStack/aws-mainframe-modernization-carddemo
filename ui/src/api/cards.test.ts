@@ -42,7 +42,11 @@ import {
   removeApiHarness,
 } from '../test/apiHarness';
 
-const API_BASE_URL = 'https://api.carddemo.example';
+// Assumptions: the fixture carries the `/api/v1` operation prefix because
+// `normalizeApiBaseUrl` requires it -- a base URL one segment short is refused at
+// start-up rather than producing a 404 on every request. The prefix changes no
+// assertion here: every case below asserts the RELATIVE request path.
+const API_BASE_URL = 'https://api.carddemo.example/api/v1';
 
 const CORRELATION_HEADER = 'X-Correlation-Id';
 
@@ -379,7 +383,15 @@ async function sendsAnEmptyBodyForTheOpeningPage(): Promise<void> {
   expect(onlyRequest().body).toEqual({});
 }
 
-/** Asserts a direction with no cursor is refused locally and never dispatched. */
+/**
+ * Asserts a direction with no cursor is refused locally and never dispatched.
+ *
+ * Assumptions: the refusal asserted here is the CLIENT's and not the card contract's, and the
+ * distinction is written down because the two differ deliberately. `card-api.yaml` answers that pair
+ * with the opening page, transcribing `app/cbl/COCRDLIC.cbl` L444-L454, so this case must assert that
+ * nothing was dispatched rather than that a 400 came back -- an assertion on the status would be
+ * asserting a response this contract never sends.
+ */
 async function refusesADirectionWithNoCursor(): Promise<void> {
   await expect(listCards({ direction: 'next' })).rejects.toThrow(RangeError);
   expect(dispatchedRequests()).toHaveLength(0);

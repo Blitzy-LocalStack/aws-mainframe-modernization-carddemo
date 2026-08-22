@@ -3,22 +3,30 @@
  * response types forming the boundary between HTTP/JSON and the service layer
  * of the LEDGER bounded context.
  *
- * <h2>Target contract, not a directory listing</h2>
+ * <h2>A target contract that is also measured against the directory</h2>
  *
- * <p>Assumptions: every type name and every inventory figure in this charter
- * states the package's target contract as the migration plan assigns it. It is
- * read against the plan rather than against a listing of the directory beside
- * it, and it says as much about which shape may <em>not</em> be added here as
- * about which belongs.
+ * <p>Assumptions: this charter carries two things at once and they are read
+ * differently. The CLOSED SET is the package's target contract as the migration
+ * plan assigns it, so it says as much about which shape may <em>not</em> be
+ * added here as about which belongs. The ROSTER and the figure below are
+ * MEASURED: every type name is spelled as the file spells it and the count is
+ * the directory's own, so a reader can reconcile the two and a shape that is
+ * present without belonging is visible as a difference rather than hidden by a
+ * charter that describes only intent.
  *
- * <p>Alternatives Considered: deriving the inventory from the directory instead
- * of from the plan. Rejected, because a charter that describes whatever happens
- * to be present cannot say which shape may not be added -- and a package holding
- * records but no stated contract is exactly the state in which a locally
- * declared page envelope or a numeric identifier gets introduced. Stating the
- * closed set costs a charter that must be revised when the contract itself
- * changes, and buys a boundary a reviewer can enforce against a proposed
- * addition.
+ * <p>Alternatives Considered: letting the contract be inferred from whatever the
+ * directory happens to hold, with no closed set stated at all. Rejected, because
+ * a charter that describes only what is present cannot say which shape may not be
+ * added -- and a package holding records but no stated contract is exactly the
+ * state in which a locally declared page envelope or a numeric identifier gets
+ * introduced. Stating the closed set costs a charter that must be revised when
+ * the contract itself changes, and buys a boundary a reviewer can enforce against
+ * a proposed addition. Refactoring Rationale: the earlier form of this paragraph
+ * went further and said the inventory was read against the plan RATHER than
+ * against the directory beside it, which is how the roster came to name two types
+ * that no file declares and to omit one that does: a name nobody has to check
+ * against a file is a name that drifts silently, and the sibling mapper charter
+ * quotes this roster.
  *
  * <p><b>Purpose.</b> This package holds the wire shapes of the four migrated
  * online transaction screens -- list, view, add and bill payment -- as request
@@ -44,14 +52,25 @@
  * ruleset audits at-clause bodies for emptiness, so a fabricated tag would be
  * either discarded or reported.
  *
- * <h2>The closed inventory: fourteen files</h2>
+ * <h2>The closed inventory: fifteen files</h2>
  *
- * <p>Fourteen {@code .java} files constitute this package and no more. Eleven are
+ * <p>Fifteen {@code .java} files constitute this package and no more. Eleven are
  * records; two are the sealed alternatives that pair the two response shapes of each
- * write operation; the fourteenth is this charter. All fourteen are landed, so this
+ * write operation; one is the plain interface that names the key pair both key-bearing
+ * requests declare; the fifteenth is this charter. All fifteen are landed, so this
  * inventory is also a measurement of the directory and every entry below reads in the
  * present tense. Each record is named with the reference program and symbolic map it
  * derives from, because that provenance is the only authority for its component set.
+ *
+ * <p>Assumptions: the figure and the roster are re-measured by listing the directory and
+ * reading the declaration line of each file, and the declared FORM of each entry is stated
+ * rather than left to the suffix. An earlier revision counted fourteen by tallying the
+ * eleven records, the two sealed alternatives and this charter, which omitted
+ * {@code TransactionKeySelection} entirely -- a file present in the directory and absent
+ * from the closed inventory is the one state this charter exists to make impossible,
+ * because the sibling mapper charter quotes this figure as its authority for how many
+ * mappers the package needs and a roster short by one propagates into a second false
+ * statement in another file.
  *
  * <p>Refactoring Rationale: the count moved from eight to twelve when each write
  * operation's 200 body became its own type. Both write operations answer two statuses
@@ -151,7 +170,7 @@
  *       the one type here that is not a record, and it declares only the three members both shapes
  *       already declare -- deliberately not the money member, whose meaning differs between
  *       them.</li>
- *   <li>{@code TransactionCopyRequest} -- the copy-last payload, from
+ *   <li>{@code CopyLastRequest} -- the copy-last payload, from
  *       {@code app/cbl/COTRN02C.cbl} line 471 and {@code app/cpy-bms/COTRN02.CPY}. Three
  *       components, and only three: the two key alternatives and the confirmation. That is the
  *       whole of what {@code COPY-LAST-TRAN-DATA} reads, because line 473 performs
@@ -161,20 +180,35 @@
  *       {@code @NotBlank} -- so a copy could only be requested from a screen the operator had
  *       already filled in completely, and pressing the copy key on an empty screen, which is the
  *       ordinary way to use it, was refused by bean validation before the service ran.</li>
- *   <li>{@code TransactionCopiedDraftResponse} -- the ten non-monetary columns lines 482 to 492
- *       move onto the terminal, published as a nested member of {@code TransactionAddPreview} and
- *       under the wire name {@code TransactionCopiedDraft}. The eleventh copied column is the
- *       amount, which the enclosing preview already carries in the normalised form line 481
+ *   <li>{@code CopiedTransactionData} -- the ten non-monetary columns lines 482 to 492 move onto
+ *       the terminal, paired with the identifier of the row they came from, published as a nested
+ *       member of {@code TransactionAddPreview} under the same name its own schema carries in
+ *       {@code services/transaction-service/src/main/resources/openapi/transaction-api.yaml}.
+ *       Eleven components: those ten plus {@code sourceTransactionId}. The eleventh COPIED column
+ *       is the amount, which the enclosing preview already carries in the normalised form line 481
  *       renders it in, so it is deliberately not a member here. Refactoring Rationale: it is new,
  *       and before it existed the copy answered the amount alone -- so a client could neither
  *       render the copied row nor re-send it, and its only means of confirming was to invoke the
  *       copy operation a second time, which re-reads whichever row is latest and therefore writes
  *       whatever a concurrent insert has since made it.</li>
+ *   <li>{@code TransactionKeySelection} -- the two accessors
+ *       {@code VALIDATE-INPUT-KEY-FIELDS} reads at {@code app/cbl/COTRN02C.cbl} lines 196 and 210,
+ *       declared as a plain interface that {@code TransactionAddRequest} and
+ *       {@code CopyLastRequest} both implement. It is the target of the at-least-one-key
+ *       constraint validator, so one implementation of the refusal at lines 224 to 229 of that
+ *       program serves both records. Alternatives Considered: a second class-level constraint and
+ *       a second validator, one per record. Rejected because Bean Validation resolves a validator
+ *       by assignability, so the interface needs no duplication, and two copies of one refusal can
+ *       drift -- the copy they would drift on decides whether a submission carrying neither key is
+ *       refused, so one of the two operations would write against a key it never resolved. It is
+ *       the one member of this inventory nothing serialises: no operation declares it as a body and
+ *       the published contract has no schema for it.</li>
  * </ul>
  *
- * <p>Refactoring Rationale: the count moved from twelve to fourteen when the copy-last
- * operation gained its own request shape and its own draft. Both are recorded in the roster
- * above with the defect each closes; neither adds a capability. Assumptions: the roster is
+ * <p>Refactoring Rationale: the count moved from twelve to fifteen when the copy-last
+ * operation gained its own request shape, its own draft and the shared key interface their
+ * common refusal is declared over. All three are recorded in the roster above with the defect
+ * each closes; none adds a capability. Assumptions: the roster is
  * re-measured against the directory rather than incremented, and this revision is the reason
  * that matters -- the enumeration carried {@code BillPaymentPreview} and
  * {@code BillPaymentOutcome} TWICE, in two differently worded entries, so it listed fourteen
@@ -184,7 +218,7 @@
  *
  * <p>Assumptions: two counts that were both eight met in this module and must still
  * not be conflated. The root charter of this module records that the module holds
- * eight Java packages and therefore exactly eight package charter files. The fourteen
+ * eight Java packages and therefore exactly eight package charter files. The fifteen
  * above is a different quantity entirely: it is the file count of this one package.
  * The two figures are independent -- which is now visible, because this one moved twice
  * while the package count did not move at all. A reader reconciling one against
@@ -200,14 +234,29 @@
  *
  * <h2>The naming convention this package holds itself to</h2>
  *
- * <p>Every type here ends in {@code Request}, {@code Response} or {@code Outcome},
- * following the migration plan's own file pattern for this layer and one documented
- * extension of it. The convention is stated rather than assumed because two members of
- * the inventory invite a departure from it. {@code TransactionListItemResponse} is an
- * element type rather than a whole reply, so a bare noun would read more naturally for
- * it; it keeps the suffix all the same, because the suffix is what makes the closed
- * inventory self-checking -- a file in this directory whose name ends in none of the
- * three is visibly outside the list without anyone having to consult the list.
+ * <p>{@code Request}, {@code Response} and {@code Outcome} are the three suffixes the
+ * migration plan's own file pattern for this layer gives, with {@code Outcome} the one
+ * documented extension of the two the plan spells. Measured against the directory, ten of the
+ * fourteen types carry one of the three and four do not, so the convention is stated as a rule
+ * with named exceptions rather than as a claim about every file. {@code TransactionListItemResponse}
+ * is the member that invites a departure and does not take it: it is an element type rather than a
+ * whole reply, so a bare noun would read more naturally for it, and it keeps the suffix because a
+ * suffix earns its place only while a reader can rely on it.
+ *
+ * <p>Assumptions: the four exceptions are exceptions for two distinct reasons, and each is named
+ * here so that a fifth cannot be added by resemblance. {@code TransactionAddPreview},
+ * {@code BillPaymentPreview} and {@code CopiedTransactionData} carry the names their own schemas
+ * carry in {@code openapi/transaction-api.yaml} and their own interfaces carry in the browser
+ * client's {@code types.ts}; renaming any of the three here would leave one name in three
+ * documents spelled three ways, and the two previews would additionally become a second
+ * {@code ...Response} for an operation that already has one -- which is the very confusion the
+ * sealed alternative exists to remove. {@code TransactionKeySelection} is the opposite case: it
+ * reaches no wire at all, so any of the three suffixes would assert a transport role it does not
+ * have. Alternatives Considered: renaming all four to the suffix set so the rule could be stated
+ * without exceptions. Rejected because the rule is worth less than the agreement between these
+ * records and the contract they publish: a suffix census is recoverable by listing the directory,
+ * whereas a Java type whose name no longer matches its published schema is a discrepancy every
+ * reader of both documents has to re-derive.
  *
  * <p>Refactoring Rationale: {@code Outcome} is the extension, and it is admitted rather
  * than avoided for a reason that is about accuracy and not about brevity. The two sealed

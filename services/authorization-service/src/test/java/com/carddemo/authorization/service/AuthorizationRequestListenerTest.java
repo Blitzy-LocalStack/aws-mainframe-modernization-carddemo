@@ -1635,17 +1635,29 @@ class AuthorizationRequestListenerTest {
     }
 
     /**
-     * A counter narrowing on the decision path is reported, naming the account and the member.
+     * A counter narrowing on the decision path is reported, and names no account identifier.
      *
      * <p>⚠️ Purpose: saturation loses information, and the whole basis on which that loss was accepted over
      * the reference's truncation is that it is REPORTED at the moment it happens. A clamp that silently
      * held the counter at its bound would be no more auditable than truncation, so the report is the half
      * of the policy that makes it defensible and it is asserted rather than assumed.</p>
      *
+     * <p>⚠️ Refactoring Rationale: this case asserted {@code accountId=} PRESENT on the line, so the
+     * expectation encoded a disclosure instead of guarding against one. The identifier is the key of a
+     * customer's account, the report reaches a retained log, and the neighbouring row-count refusal in the
+     * same class states the opposite rule for the same reason -- so the expectation is inverted. Both
+     * halves are asserted together because they are one contract: the narrowing must still be reported,
+     * and it must be reportable without naming the account.</p>
+     *
      * <p>Assumptions: the line is asserted to carry BOTH the value that was requested and the value that
      * will be stored, because an operator reconciling a count against the detail table needs to know how
      * far past the bound the account went, and a line naming only the bound tells them nothing they could
-     * not read from the schema.</p>
+     * not read from the schema. Those two values plus the member name are what the diagnosis uses; the
+     * account itself is reached through the governed table, under access control and audit.</p>
+     *
+     * <p>Assumptions: the capture is taken at INFO rather than WARN, so it holds EVERY line this handling
+     * produced. A capture limited to the warning would prove only that one line stopped naming the
+     * account, and the property worth holding is that no line of the handling names it.</p>
      *
      * <p>Assumptions: the DECLINED arm is the one driven here even though the approved arm shares the
      * reporter. The reporter takes the counter accessor as a parameter, so a defect that passed the wrong
@@ -1656,8 +1668,8 @@ class AuthorizationRequestListenerTest {
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("a counter narrowing on the decision path names the account, the member and both values")
-    void aCounterNarrowingOnTheDecisionPathIsReported() {
+    @DisplayName("a counter narrowing names the member and both values and withholds the account")
+    void aCounterNarrowingOnTheDecisionPathIsReportedWithoutTheAccount() {
         givenResolvableCard();
         PendingAuthSummary atCeiling = summaryWithRoom();
         assignCounters(atCeiling, 0, PendingAuthSummary.COUNTER_MAX);
@@ -1668,20 +1680,25 @@ class AuthorizationRequestListenerTest {
         captured.start();
         listenerLogger.addAppender(captured);
         Level previousLevel = listenerLogger.getLevel();
-        listenerLogger.setLevel(Level.WARN);
+        listenerLogger.setLevel(Level.INFO);
         try {
             this.listener.onRequest(
                     messageFor(requestFor(Money.of("6000.00")), ALLOWED_REPLY_QUEUE));
 
-            assertThat(captured.list.stream().map(ILoggingEvent::getFormattedMessage).toList())
+            List<String> lines =
+                    captured.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
+            assertThat(lines)
                     .as("a saturation nobody is told about is indistinguishable from the truncation "
                             + "this policy was chosen over")
                     .anyMatch(line -> line.contains("event=auth.summary.counter-narrowed")
-                            && line.contains("accountId=" + ACCOUNT_ID)
                             && line.contains("field=declinedAuthCount")
                             && line.contains("requested=" + (PendingAuthSummary.COUNTER_MAX + 1))
                             && line.contains("stored=" + PendingAuthSummary.COUNTER_MAX));
-            assertThat(captured.list.stream().map(ILoggingEvent::getFormattedMessage).toList())
+            assertThat(lines)
+                    .as("the account key must not reach a retained log line, on this path or any other "
+                            + "line of the same handling")
+                    .noneMatch(line -> line.contains(String.valueOf(ACCOUNT_ID)));
+            assertThat(lines)
                     .as("the arm that is still in domain must not be reported, or every decision on a "
                             + "saturated account would name both members")
                     .noneMatch(line -> line.contains("event=auth.summary.counter-narrowed")
@@ -1691,6 +1708,7 @@ class AuthorizationRequestListenerTest {
             listenerLogger.detachAppender(captured);
         }
     }
+
     /**
      * An approval the account's limit no longer admits is SUPERSEDED by a decline, everywhere it is reported.
      *

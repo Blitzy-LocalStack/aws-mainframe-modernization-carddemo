@@ -4,10 +4,12 @@ import com.carddemo.common.money.Money;
 import com.carddemo.reporting.domain.CardXrefView;
 import jakarta.persistence.QueryHint;
 import org.springframework.data.domain.Limit;
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.Stream;
 import org.hibernate.jpa.AvailableHints;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.jpa.repository.QueryHints;
 import org.springframework.data.repository.Repository;
@@ -120,14 +122,24 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <p>Alternatives Considered: extending {@code CrudRepository} or {@code JpaRepository}. Either
  * would inherit {@code save}, {@code saveAll}, {@code delete}, {@code deleteAll} and
- * {@code deleteById} onto the public surface of a type whose entire contract is that it has no write
- * path, and {@code data-migration/sql/V1__reporting_views.sql} records that no insert, update,
- * delete or truncate privilege exists on any of these relations: its closing
+ * {@code deleteById} onto the public surface of a type whose entire contract is that it cannot write
+ * the relations it reads, and {@code data-migration/sql/V1__reporting_views.sql} records that no
+ * insert, update, delete or truncate privilege exists on any of them: its closing
  * {@code REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ... FROM carddemo_reporting}
  * names all seven of them, and the only privilege conveyed to this module's login role is the
  * {@code GRANT SELECT ON reporting.v_card_xref TO carddemo_reporting} beside it. So those five
  * methods would compile, appear in every completion list, and fail at the database. The marker base
- * declares nothing, so only the two methods below exist. </p>
+ * declares nothing, so only the methods below exist. </p>
+ *
+ * <p>Refactoring Rationale: that sentence read "a type whose entire contract is that it has no write
+ * path", and the qualification matters because exactly one method below DOES cause a write:
+ * {@code refreshCardIdentity} executes a maintenance procedure that reconciles
+ * {@code reporting.card_identity} against the cross-reference it derives from. The distinction the
+ * original wording collapsed is the one that keeps the contract intact -- this interface writes no
+ * relation it reads, holds no insert, update or delete privilege on any of them, and reaches the one
+ * write it can cause only through EXECUTE on a {@code SECURITY DEFINER} routine whose body it cannot
+ * alter. Inheriting {@code save} would still be wrong for every reason above; naming this exception
+ * is what stops a reader concluding the interface has a general write path. </p>
  *
  * <h2>Reading across a schema boundary</h2>
  *
@@ -190,8 +202,8 @@ import org.springframework.transaction.annotation.Transactional;
  * {@code MOVE XREFFILE-STATUS TO LK-M03B-RC} at L176, handing back the status of the <i>previous</i>
  * operation on the file; an unrecognised definition name is worse still, because {@code WHEN OTHER}
  * at L127 through L128 branches straight to the goback and leaves the return code never assigned.
- * Register entry <b>R4</b> records the decision. Because this module has no write path, no method
- * exists below for such a request to fall through in the first place. </p>
+ * Register entry <b>R4</b> records the decision. Because this module cannot write the cross-reference
+ * at all, no method exists below for such a request to fall through in the first place. </p>
  *
  * <p>Assumptions: a query here yields a fully populated projection or nothing, which is hygiene the
  * reference already practises rather than something invented for the migration. The read at L351 of
@@ -461,7 +473,8 @@ public interface StatementCardXrefRepository extends Repository<CardXrefView, St
      * rows in bounded chunks removes both -- each chunk is one statement inside one short transaction
      * that has ended before any artifact is written.</p>
      *
-     * <p>Assumptions: both joins are OUTER joins and not inner ones, and the difference is
+     * <p>Assumptions: both DIMENSION joins -- the customer and the account -- are OUTER joins and not
+     * inner ones, and the difference is
      * behavioural rather than stylistic. {@code app/cbl/CBSTM03A.CBL} reads the customer at
      * {@code 2000-CUSTFILE-GET} L368 and the account at {@code 3000-ACCTFILE-GET} L392 with no
      * not-found arm, and reaches its abend paragraph at L921 when either read fails. An inner join
@@ -501,9 +514,52 @@ public interface StatementCardXrefRepository extends Repository<CardXrefView, St
      * key.</p>
      *
      * <p>Assumptions: the empty string is the start sentinel for BOTH components and works for both
-     * for the same reason -- it sorts below every non-empty value, so the disjunction's first arm
-     * admits every row on the opening call. The masked rendering is declared {@code NOT NULL}, so the
-     * comparison needs no null arm.</p>
+     * for the same reason -- it sorts below every non-empty value, so the opening call admits every
+     * row. Both compared columns are declared {@code NOT NULL}, so the comparison needs no null
+     * arm.</p>
+     *
+     * <p>Refactoring Rationale: this is NATIVE SQL and drives from {@code reporting.card_identity}
+     * rather than JPQL over {@code CardXrefView}, and the reason is a planner property of the relation
+     * rather than a preference about query languages. Every projection in the {@code reporting} schema
+     * is declared {@code WITH (security_barrier = true)}, which stops PostgreSQL inlining it into the
+     * enclosing query and confines what may be pushed below it to LEAKPROOF quals. Equality on text is
+     * leakproof and a range comparison is not, so a keyset predicate plus an ordering could not reach
+     * the index inside the view at all: the engine had to materialise the whole cross-reference and
+     * top-N sort it FOR EVERY CHUNK, which measured a hash join over two full relations and a sort of
+     * 18 999 rows -- per chunk, so the walk was quadratic in the cardholder population. Driving from
+     * the identity relation, whose two readable columns are exactly the ordering tuple and are covered
+     * by {@code idx_card_identity_masked_fingerprint}, makes one chunk an index-only seek: measured
+     * 0.4 ms for the opening chunk and 0.6 ms for a continuation, at the same cardinality.</p>
+     *
+     * <p>Assumptions: each dimension is reached through a {@code LATERAL} subquery carrying
+     * {@code LIMIT 1}, and the {@code LIMIT 1} is what makes the arrangement work rather than a bound
+     * on a result that could be larger. A subquery with a limit cannot be pulled up, so the engine has
+     * to evaluate it once per outer row with the outer row's key bound in -- which is the parameterised
+     * access a barrier view otherwise refuses to offer. Written as ordinary joins instead, the same
+     * query is de-lateralised straight back into the materialise-and-sort plan above, which was
+     * measured rather than assumed. The bound cannot discard a row: the cross-reference arm keys on
+     * {@code card_fingerprint}, which is the identity relation's primary key and the projection's
+     * identifier; the customer and account arms key on those relations' primary keys.</p>
+     *
+     * <p>Assumptions: the cross-reference arm is an INNER lateral join while the customer and account
+     * arms are OUTER, and the asymmetry preserves this method's row set exactly. The relation this
+     * query used to drive from is {@code reporting.v_card_xref}, which is itself an inner join of the
+     * identity relation to the cross-reference, so a card whose cross-reference row has been deleted
+     * while its identity row still stands was already absent from the result. An outer arm here would
+     * ADD such a card back with null dimensions, which the caller reports as an abend -- so a stale
+     * identity row would begin failing statement runs instead of being skipped. The customer and
+     * account arms stay outer for the reason recorded above: a missing dimension row is the reference's
+     * abend and must be visible rather than dropped.</p>
+     *
+     * <p>Assumptions: the continuation is a ROW-VALUE comparison rather than the three-arm disjunction
+     * the equivalent predicate expands to, because only the row-value form becomes an index CONDITION
+     * -- the disjunction plans as a filter over an ordered scan that starts at the beginning of the
+     * index every time. The two are equivalent here because both columns are {@code NOT NULL}; with a
+     * nullable component they would not be, since a row comparison yields unknown on a null.</p>
+     *
+     * <p>Assumptions: the aliases are quoted so PostgreSQL preserves their case, which is what lets
+     * them match the projection's property names directly instead of relying on a name transformation
+     * between the two.</p>
      *
      * @param afterCardNum the masked card rendering of the last card already produced, or the empty
      *     string to start from the beginning, which sorts below every rendering; must not be
@@ -518,36 +574,172 @@ public interface StatementCardXrefRepository extends Repository<CardXrefView, St
      *     includes any of them being absent -- a defect to report against the data-migration package,
      *     as register entry <b>R11</b> records, and never one to work around from here
      */
-    @Query("""
-            select x.cardNum as cardNum,
-                   x.cardFingerprint as cardFingerprint,
-                   x.customerId as customerId,
-                   x.accountId as accountId,
-                   cu.firstName as firstName,
-                   cu.middleName as middleName,
-                   cu.lastName as lastName,
-                   cu.addressLine1 as addressLine1,
-                   cu.addressLine2 as addressLine2,
-                   cu.addressLine3 as addressLine3,
-                   cu.stateCode as stateCode,
-                   cu.countryCode as countryCode,
-                   cu.postalCode as postalCode,
-                   cu.ficoCreditScore as ficoCreditScore,
-                   a.currentBalance as currentBalance
-            from CardXrefView x
-            left join CustomerView cu on cu.customerId = x.customerId
-            left join AccountView a on a.accountId = x.accountId
-            where x.cardNum > :afterCardNum
-               or (x.cardNum = :afterCardNum and x.cardFingerprint > :afterFingerprint)
-            order by x.cardNum asc, x.cardFingerprint asc
+    @Query(nativeQuery = true, value = """
+            select ci.card_num_masked  as "cardNum",
+                   ci.card_fingerprint as "cardFingerprint",
+                   x.customer_id       as "customerId",
+                   x.account_id        as "accountId",
+                   cu.first_name       as "firstName",
+                   cu.middle_name      as "middleName",
+                   cu.last_name        as "lastName",
+                   cu.addr_line_1      as "addressLine1",
+                   cu.addr_line_2      as "addressLine2",
+                   cu.addr_line_3      as "addressLine3",
+                   cu.addr_state_cd    as "stateCode",
+                   cu.addr_country_cd  as "countryCode",
+                   cu.addr_zip         as "postalCode",
+                   cu.fico_credit_score as "ficoCreditScore",
+                   a.curr_bal          as "currentBalanceAmount"
+            from reporting.card_identity as ci
+            join lateral (
+                    select xr.customer_id, xr.account_id
+                    from reporting.v_card_xref as xr
+                    where xr.card_fingerprint = ci.card_fingerprint
+                    limit 1) as x on true
+            left join lateral (
+                    select c.first_name, c.middle_name, c.last_name,
+                           c.addr_line_1, c.addr_line_2, c.addr_line_3,
+                           c.addr_state_cd, c.addr_country_cd, c.addr_zip,
+                           c.fico_credit_score
+                    from reporting.v_customers as c
+                    where c.customer_id = x.customer_id
+                    limit 1) as cu on true
+            left join lateral (
+                    select acct.curr_bal
+                    from reporting.v_accounts as acct
+                    where acct.account_id = x.account_id
+                    limit 1) as a on true
+            where (ci.card_num_masked, ci.card_fingerprint) > (:afterCardNum, :afterFingerprint)
+            order by ci.card_num_masked asc, ci.card_fingerprint asc
             limit :limit
             """)
     @QueryHints(@QueryHint(name = AvailableHints.HINT_READ_ONLY, value = "true"))
     @Transactional(readOnly = true)
-    List<StatementHeadingRow> findHeadingChunk(
+    List<StatementHeadingTuple> findHeadingChunkTuples(
             @Param("afterCardNum") String afterCardNum,
             @Param("afterFingerprint") String afterFingerprint,
             @Param("limit") int limit);
+
+    /**
+     * Returns the next chunk of statement headings in the cursor's order.
+     *
+     * <p>Purpose: this is the declared contract a statement run pages with, and it is the whole of what
+     * a caller needs to know about. It delegates to {@link #findHeadingChunkTuples} without adding a
+     * read, a predicate or an ordering of its own.</p>
+     *
+     * <p>Refactoring Rationale: the delegation exists because a NATIVE query cannot produce a
+     * {@link Money}, and the query had to become native for the planner reason recorded on
+     * {@link #findHeadingChunkTuples}. Spring Data builds an interface projection over the result
+     * tuple, and the conversion service it uses for that has {@code Object}-to-{@code Object}
+     * conversion deliberately removed -- so a {@code BigDecimal} column cannot be converted to a value
+     * class however many static factories that class publishes, and the getter fails at INVOCATION
+     * time with "Target type is not an interface and no matching Converter found". An entity query does
+     * not have the problem, because the provider applies the column's attribute converter; a native one
+     * has no attribute to convert. The tuple projection therefore exposes the raw decimal and converts
+     * it in a default method, which is exactly what the entity's converter does.</p>
+     *
+     * <p>Alternatives Considered: changing {@link StatementHeadingRow#getCurrentBalance()} to return a
+     * {@code BigDecimal} and letting the caller wrap it. Rejected because the money contract belongs at
+     * the boundary and not in the caller -- {@code service/StatementService} would then hold the
+     * scale-and-magnitude decision that {@link Money} exists to own -- and because it would move a
+     * conversion that currently cannot be skipped into a place where it could be.</p>
+     *
+     * <p>Alternatives Considered: adding the raw accessor to {@link StatementHeadingRow} itself and
+     * overriding the money getter there. Rejected because that interface is implemented directly
+     * elsewhere in the module, so a new abstract member would break those implementations at compile
+     * time for a reason that has nothing to do with them. The sub-interface adds the member where only
+     * the provider's proxy sees it.</p>
+     *
+     * @param afterCardNum the masked card rendering of the last card already produced, or the empty
+     *     string to start from the beginning, which sorts below every rendering; must not be
+     *     {@code null}
+     * @param afterFingerprint the fingerprint of the last card already produced, which breaks the tie
+     *     among the cards sharing that rendering, or the empty string to start from the beginning;
+     *     must not be {@code null}
+     * @param limit the greatest number of cards to return in this chunk
+     * @return the heading rows for the next cards in order, at most {@code limit} of them, empty when
+     *     the relation holds no further card; never {@code null}
+     * @throws org.springframework.dao.DataAccessException if the relations cannot be read, which
+     *     includes any of them being absent
+     */
+    @Transactional(readOnly = true)
+    default List<StatementHeadingRow> findHeadingChunk(
+            String afterCardNum, String afterFingerprint, int limit) {
+        return List.copyOf(findHeadingChunkTuples(afterCardNum, afterFingerprint, limit));
+    }
+
+    /**
+     * Brings the card identity relation level with the cross-reference it is derived from.
+     *
+     * <p>Purpose: a whole-run statement pass MUST call this before it walks the heading cursor, so the
+     * run cannot omit a cardholder whose card was issued since the derived relation was last
+     * reconciled. That obligation is on the caller and is not discharged anywhere inside this
+     * interface -- {@code findHeadingChunk} below reads the relation and does not maintain it, because
+     * a read that wrote would turn every page of a walk into a reconciliation of the whole
+     * portfolio.</p>
+     *
+     * <p>Assumptions: the relation this maintains, {@code reporting.card_identity}, is DERIVED state --
+     * one row per card in {@code account.card_xref}, carrying the keyed fingerprint every card-bearing
+     * projection publishes. Derived state can be stale, and the failure a stale row produces is silent:
+     * a card absent from it is absent from {@code reporting.v_card_xref}, so the run emits one
+     * statement fewer and nothing reports the omission. Calling this first is what makes the omission
+     * impossible rather than unlikely.</p>
+     *
+     * <p>Assumptions: the caller must NOT be inside a read-only transaction. Spring puts the JDBC
+     * connection into read-only mode for {@code @Transactional(readOnly = true)}, and PostgreSQL then
+     * refuses any write in that transaction with SQLSTATE 25006 -- regardless of the procedure being
+     * {@code SECURITY DEFINER}, because read-only is a property of the transaction and not of the
+     * privilege. Every other method on this interface is read-only, so this one is the exception a
+     * caller has to notice; it declares {@code readOnly = false} for itself, which governs a
+     * transaction it starts and cannot override one it joins.</p>
+     *
+     * <p>Assumptions: a stronger form of that same constraint holds for THIS service as deployed, and
+     * it is stated here because it decides who may call this at all.
+     * {@code src/main/resources/application.yml} declares the pool {@code read-only: true}, so the
+     * driver opens every transaction on a pooled connection {@code READ ONLY} and this call is refused
+     * whatever the transaction annotation says --
+     * {@code repository/StatementCardXrefRepositoryIT} asserts that refusal rather than describing it.
+     * The consequence is that the deployed reconciliation is owned by the LOAD PATH, which holds a
+     * writable connection:
+     * {@code data-migration/src/carddemo_migration/loaders/aurora.py} publishes it as
+     * {@code refresh_card_identity(connection)}, which that package's orchestration entry point must
+     * sequence after the last load into {@code account.card_xref} and before any statement run. A
+     * caller
+     * inside this service that needs to reconcile must therefore be given a writable datasource of its
+     * own; this interface cannot obtain one, and the pool's read-only posture is deliberate -- it is
+     * this module's second, independent guard over writes, beside the role's privileges.</p>
+     *
+     * <p>Assumptions: the work is done by a database procedure rather than by statements issued from
+     * here, because the reporting role can neither write the relation nor read the cross-reference the
+     * rows come from. The procedure is owned by the schema owner and declared {@code SECURITY DEFINER}
+     * with a pinned {@code search_path}, so this role's whole privilege over the operation is EXECUTE
+     * on one routine whose body it cannot alter.</p>
+     *
+     * <p>Assumptions: this is a {@code CALL} and not a {@code SELECT}, and the difference is forced by
+     * the driver rather than chosen. {@code @Modifying} executes the statement through
+     * {@code executeUpdate()}, and the PostgreSQL driver rejects that for anything returning a result
+     * set, so a {@code SECURITY DEFINER} function in this position would fail with "A result was
+     * returned when none was expected". A procedure without output parameters returns none.</p>
+     *
+     * <p>Assumptions: the procedure is idempotent and writes only the difference -- it inserts the
+     * cards it does not hold and deletes the cards the cross-reference no longer holds -- so calling it
+     * before every run costs nothing on a population that has not changed. That is what makes an
+     * unconditional call at the head of a run the right shape, rather than a call guarded by a
+     * freshness check that would itself have to read the relation.</p>
+     *
+     * <p>This method takes no parameter and returns no value; the procedure reports its effect through
+     * the relation it maintains rather than through a count, because a count of inserted rows is not a
+     * value any caller can act on differently.</p>
+     *
+     * @throws org.springframework.dao.DataAccessException if the procedure cannot be executed, which
+     *     includes it being absent -- a database provisioned without
+     *     {@code data-migration/sql/V1__reporting_views.sql} -- and includes the call having been made
+     *     over a read-only connection or inside a read-only transaction
+     */
+    @Modifying
+    @Query(nativeQuery = true, value = "call reporting.refresh_card_identity()")
+    @Transactional
+    void refreshCardIdentity();
 
     /**
      * One card's statement heading: the card, its customer's printed attributes and its account balance.
@@ -680,5 +872,53 @@ public interface StatementCardXrefRepository extends Repository<CardXrefView, St
          *     account row is absent
          */
         Money getCurrentBalance();
+    }
+
+    /**
+     * The heading shape the native query's result tuple can actually populate.
+     *
+     * <p>Purpose: carry the same fifteen heading attributes as {@link StatementHeadingRow}, with the
+     * balance exposed as the raw decimal the tuple holds and the monetary accessor implemented over it.
+     * Only {@link #findHeadingChunkTuples} names this type; every caller sees
+     * {@link StatementHeadingRow}.</p>
+     *
+     * <p>Assumptions: the money accessor is a {@code default} method, and that is what keeps it out of
+     * the projection's input properties -- Spring Data excludes default methods when it works out which
+     * tuple aliases a projection needs, so the query selects {@code currentBalanceAmount} and nothing
+     * named {@code currentBalance} is looked for. Were it abstract, the provider would look for an alias
+     * of that name and fail on the conversion this arrangement exists to avoid.</p>
+     *
+     * <p>Assumptions: the conversion is the same expression the entity's attribute converter applies --
+     * null in, null out; otherwise {@link Money#of(BigDecimal)} -- so a heading read through
+     * this query and the same account read through {@code domain/AccountView} produce the same value,
+     * including the same refusal of an amount wider than the declared twelve digits.</p>
+     *
+     * <p>This interface is a projection with no constructor a caller invokes and raises nothing of its
+     * own; the inapplicability is stated because Rule 1 forbids omitting it.</p>
+     */
+    interface StatementHeadingTuple extends StatementHeadingRow {
+
+        /**
+         * Returns the account balance as the column holds it, before it becomes a monetary value.
+         *
+         * @return the value of {@code v_accounts.curr_bal} as an exact decimal at scale two, or
+         *     {@code null} when the outer join found no account row for the card's cross-reference
+         */
+        BigDecimal getCurrentBalanceAmount();
+
+        /**
+         * Returns the account balance the heading band prints.
+         *
+         * @return the current balance as an exact amount at scale two, or {@code null} when the joined
+         *     account row is absent
+         * @throws ArithmeticException if the column holds an amount wider than the twelve digits the
+         *     shared money type admits, which names a view definition to reconcile with
+         *     {@code app/cpy/CVACT01Y.cpy} rather than an amount to round
+         */
+        @Override
+        default Money getCurrentBalance() {
+            BigDecimal amount = getCurrentBalanceAmount();
+            return amount == null ? null : Money.of(amount);
+        }
     }
 }

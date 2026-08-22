@@ -82,7 +82,11 @@ import {
   SHARED_MESSAGES,
   STATUS_MESSAGES,
 } from '../../messages/messages';
-import { ADMIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
+import {
+  ADMIN_MENU_ROUTE,
+  REFERENCE_TYPE_LIST_ROUTE,
+  navigateSafely,
+} from '../../routes/navigation';
 import {
   BMS_TEXT_COLOR_TOKENS,
   FIELD_ERROR_TOKENS,
@@ -1535,6 +1539,27 @@ export default function RefTypeListScreen(): ReactElement {
    * `COTRTLIC.cbl` L630-L652 transfers to `COTRTUPC` with `CDEMO-PGM-ENTER` set at L635 -- a
    * fresh entry -- so no unconfirmed request travels with it and none is left behind here
    * either.
+   *
+   * ⚠️ Refactoring Rationale: the transfer now hands this screen's route over as the destination's
+   * caller, which it did not, and the omission was observable. The same arm that transfers writes
+   * `LIT-THISTRANID` and `LIT-THISPGM` into `CDEMO-FROM-TRANID` and `CDEMO-FROM-PROGRAM`
+   * (`COTRTLIC.cbl` L632-L633), and the maintenance program prefers exactly those two over its own
+   * default on the exit key (`COTRTUPC.cbl` L429-L443). With nothing handed over, that screen could
+   * only take its fallback arm, so an operator who pressed F2 here and then F3 there was returned to
+   * the administrative menu rather than to the list they left -- and this screen's grid state, its
+   * filters and its page position went with it.
+   *
+   * Assumptions: the origin travels in the history entry's state and not in the address, which is
+   * uniform with every other handover in this application: `ScreenTransitionState` in
+   * `ui/src/routes/navigation.ts` records that a query member is request-target data and reaches the
+   * edge access log. Nothing sensitive is at stake in this particular value -- it is a parameterless
+   * route naming a screen -- but keeping one rule about what may appear in a request line is what
+   * stops the exception from having to be re-argued at the next call site.
+   *
+   * Assumptions: the value is a CONSTANT from that module rather than this screen's own literal, so
+   * the origin a destination validates against its closed route set is the same string the router
+   * mounts this screen at. A literal here would be a second copy of a path that the destination's
+   * validator would silently reject if the two ever drifted.
    * @returns {void} Navigation is performed as a side effect.
    */
   function openAddScreen(): void {
@@ -1543,7 +1568,7 @@ export default function RefTypeListScreen(): ReactElement {
     setActionCodes({});
     setDescriptionDrafts({});
     clearPendingAction();
-    navigateSafely(navigate, REF_TYPE_ADD_ROUTE);
+    navigateSafely(navigate, REF_TYPE_ADD_ROUTE, { from: REFERENCE_TYPE_LIST_ROUTE });
   }
 
   /**

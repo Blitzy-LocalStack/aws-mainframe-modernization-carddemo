@@ -947,12 +947,25 @@ locals {
   #       HTMLFILE at :92-96, DCB=(LRECL=100,BLKSIZE=800,RECFM=FB), the HTML one.
   # WHY : Refactoring Rationale: this state writes NO generation prefix, and the note
   #       here said it did. The correction matters because the two mechanisms have
-  #       different retention: reporting-service publishes the two artifacts at FIXED
-  #       object keys under its own configured statement prefix
-  #       (GenerateStatementsTask composes prefix + statements.txt and
-  #       prefix + statements.html, and S3ArtifactWriter completes one upload per key),
-  #       so a rerun replaces the previous night's artifact as a new object VERSION over
-  #       the same key. Neither statement dataset has a DEFINE GENERATIONDATAGROUP base
+  #       different retention: reporting-service publishes its artifacts at FIXED
+  #       object keys under its own configured statement prefix, so a rerun replaces the
+  #       previous night's artifact as a new object VERSION over the same key.
+  # WHY : Assumptions: the run composes FOUR keys under that prefix, not two, and the
+  #       fourth is why bucket versioning on this prefix is load-bearing rather than
+  #       merely convenient. GenerateStatementsTask composes prefix + statements.txt,
+  #       prefix + statements.html and prefix + statements-index.txt -- the per-card
+  #       record ranges a single-card read bisects -- and then prefix +
+  #       statements-current.txt, the generation pointer, published LAST. S3ArtifactWriter
+  #       completes one upload per key and publishes only on an explicit complete(), so a
+  #       failed run aborts and leaves every one of them at its previous version.
+  # WHY : Trade-offs: the pointer stores the three artifacts' object VERSION IDENTIFIERS
+  #       rather than copies of their bytes, which is what makes a generation switch one
+  #       write instead of three. The cost is a hard dependency on versioning staying
+  #       enabled for this prefix: with versioning suspended the stored identifiers stop
+  #       resolving and every statement read fails closed. infra/modules/s3-datasets
+  #       enables it bucket-wide, so the dependency is satisfied by construction and is
+  #       recorded here because nothing in this file would otherwise show that suspending
+  #       it breaks a reader rather than merely losing history. Neither statement dataset has a DEFINE GENERATIONDATAGROUP base
   #       anywhere in the baseline -- an exhaustive search matches only
   #       app/jcl/DEFGDGB.jcl, DEFGDGD.jcl, DALYREJS.jcl and REPTFILE.jcl, none of which
   #       defines a statement base -- and infra/modules/s3-datasets holds their prefixes
@@ -1048,9 +1061,9 @@ locals {
   #       starts directly, and that duality costs it its metrics unless they are
   #       pushed per run. ecs-service supplies Micrometer's OTLP registry settings
   #       only to workloads it creates no service for -- batch and data-migration --
-  #       because a serving task publishes /actuator/prometheus and the collector
-  #       sidecar scrapes it, and enabling both paths on one task definition would
-  #       export every meter twice. A reporting run started here has no listener to
+  #       because a serving task publishes /actuator/prometheus for a scraper to read,
+  #       and enabling both paths on one task definition would export every meter twice
+  #       the moment a scraper is introduced. A reporting run started here has no listener to
   #       scrape: the command switches the container into a one-shot job, so the
   #       scrape half of that arrangement is absent and, without these three
   #       overrides, the statement and report steps would export spans and not one
@@ -1065,6 +1078,24 @@ locals {
   #       and logged by Micrometer, which is a bounded warning rather than a failed
   #       step -- the alternative, gating the overrides on a new module input, would
   #       add a second place for the two settings to disagree.
+  # WHY : Refactoring Rationale: these three overrides were spelled
+  #       MANAGEMENT_OTLP_METRICS_EXPORT_{ENABLED,STEP,URL}, and in that form they did
+  #       nothing. spring-boot-starter-opentelemetry 4.1.0 installs
+  #       OpenTelemetryEnvironmentVariableEnvironmentPostProcessor, which maps OTEL_*
+  #       variables onto Spring properties and adds the result with
+  #       MutablePropertySources.addFirst -- above the system environment. The
+  #       reporting task definition carries OTEL_METRICS_EXPORTER=none, because
+  #       ecs-service creates a service for it and its serving mode is scraped, and
+  #       that mapped value beat the MANAGEMENT_* override for the same property. The
+  #       statement and report steps therefore exported no counter and no timer while
+  #       appearing configured. Overriding the OTEL_* name instead lands in the same
+  #       channel: an ECS container override replaces a task-definition variable of the
+  #       same name, so "otlp" wins for the lifetime of the run and reverts for the
+  #       serving task.
+  # WHY : Assumptions: the interval is expressed in MILLISECONDS rather than as a
+  #       Spring duration, because the framework reads this variable through
+  #       Duration.ofMillis as the OpenTelemetry specification defines it -- "15s"
+  #       here is rejected as a non-numeric duration and leaves the registry default.
   # WHY : Trade-offs: the fifteen-second step matches what ecs-service gives the
   #       other task-mode workloads and for the same reason -- the registry's own
   #       default publishes once a minute, and a report that finishes inside that
@@ -1073,16 +1104,16 @@ locals {
   #       against losing its metrics entirely.
   reporting_metrics_push_environment = [
     {
-      Name  = "MANAGEMENT_OTLP_METRICS_EXPORT_ENABLED"
-      Value = "true"
+      Name  = "OTEL_METRICS_EXPORTER"
+      Value = "otlp"
     },
     {
-      Name  = "MANAGEMENT_OTLP_METRICS_EXPORT_STEP"
-      Value = "15s"
-    },
-    {
-      Name  = "MANAGEMENT_OTLP_METRICS_EXPORT_URL"
+      Name  = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
       Value = "http://127.0.0.1:4318/v1/metrics"
+    },
+    {
+      Name  = "OTEL_METRIC_EXPORT_INTERVAL"
+      Value = "15000"
     },
   ]
 

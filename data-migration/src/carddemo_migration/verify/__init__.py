@@ -107,10 +107,13 @@ including the default privileges of future tables -- is explicitly revoked by
 The actual topology, stated because an understatement of it reads as a stronger guarantee than
 the one that holds. In the ``reporting`` schema:
 
-* **seven product views** created by ``data-migration/sql/V1__reporting_views.sql`` --
+* **eight product views** created by ``data-migration/sql/V1__reporting_views.sql`` --
   ``v_report_transactions``, ``v_statement_transactions``, ``v_transaction_types``,
-  ``v_transaction_categories``, ``v_accounts``, ``v_customers`` and ``v_card_xref`` -- which are
-  ``reporting-service``'s entire readable data surface;
+  ``v_transaction_categories``, ``v_accounts``, ``v_customers``, ``v_card_xref`` and
+  ``v_transaction_category_balances`` -- which are ``reporting-service``'s entire readable data
+  surface. Seven of the eight are mapped as entities; ``v_report_transactions`` is read by native
+  query, which is why ``application-test.yml`` counts seven MAPPED views and this counts eight
+  CREATED ones;
 * **two verification views** created by ``data-migration/sql/V3__verification_surfaces.sql`` --
   ``v_verification_row_counts`` and ``v_verification_money_totals`` -- which are what the two
   whole-migration SQL reports in ``data-migration/sql/verify/`` select from;

@@ -16,15 +16,18 @@ import org.springframework.stereotype.Component;
  * <p>Assumptions: every class in this package is written by hand and no code generator is introduced
  * anywhere in it. The package-scope rulings this class applies are settled once in this package's own
  * {@code package-info.java} -- the hand-written charter, the rejection of MapStruct and, on a separate
- * ground, of Lombok, the trim boundary that follows the column type at its L319 to L334, the
- * items-only boundary at its L473 to L478, and the absence of an inbound member on the seeded lookups
- * at its L513 to L516 -- and they are cited here rather than argued again. What this file adds is the
- * evidence specific to this one code.</p>
+ * ground, of Lombok, the trim boundary of its <i>The trim boundary, which follows the column type</i>
+ * section, the items-only boundary of its <i>What this package does not do</i> section, and the
+ * absence of an inbound member on the seeded lookups under its <i>Deliberate omissions</i> -- and they
+ * are cited by the heading each one sits under rather than argued again. Refactoring Rationale: each
+ * of those three was cited by a line range that the charter had since outgrown, so all three pointed
+ * at neighbouring text; a heading is located by search and survives an edit above it. What this file
+ * adds is the evidence specific to this one code.</p>
  *
  * <p>Alternatives Considered: this class is a Spring {@code @Component} with instance members and is
  * deliberately not declared {@code final}, rather than the {@code final} class with a private
- * constructor and static members that the charter fixes for the four entity conversions at its own
- * L213 to L239. The static shape was the alternative and was not taken here. The charter already
+ * constructor and static members that the charter fixes for the three record conversions. The static
+ * shape was the alternative and was not taken here. The charter already
  * admits this second shape for the three seeded-lookup conversions, and records that a component is
  * left non-final precisely so that it remains proxyable; both of
  * those properties are wanted here. This conversion is reached by constructor injection, which is the
@@ -32,31 +35,38 @@ import org.springframework.stereotype.Component;
  * baseline's static linkage, and an injected bean can be substituted in a slice test where a static
  * member cannot.</p>
  *
- * <p>Trade-offs: the cost of that choice is that this class does not read identically to its four
- * static siblings -- {@code TransactionTypeMapper}, {@code TransactionCategoryMapper},
- * {@code DisclosureGroupMapper} and {@code LookupMapper}, enumerated in the charter's roster at its
- * L142 to L160 -- so a reader moving between them meets two shapes inside one package. It is accepted
- * because the alternative forecloses both properties above, and because the charter's own exception at
- * its L161 to L164 shows the package already carries the two shapes deliberately rather than by
- * accident.</p>
+ * <p>Trade-offs: the cost of that choice is that this class does not read identically to its three
+ * static siblings -- {@code TransactionTypeMapper}, {@code TransactionCategoryMapper} and
+ * {@code DisclosureGroupMapper}, the three the charter's roster enumerates -- so a reader moving
+ * between them meets two shapes inside one package. It is accepted
+ * because the alternative forecloses both properties above, and because the charter's own account of
+ * the static-versus-component split shows the package carries the two shapes deliberately rather than
+ * by accident.</p>
  *
- * <p>Assumptions: this is the SAME single-row conversion {@code LookupMapper} performs at its L53 to
- * L55, and the duplication is stated rather than glossed, because a reader finding two
- * implementations of one conversion needs to know which one is reached.
- * {@code AddressLookupController} routes both of its state operations through
- * {@code LookupMapper} -- as a method reference on the paged route at its L287 and directly on the
- * single-code route at its L306 -- so <b>no call site in the delivered code reaches this class</b>.
- * What it adds over that sibling is the list member and the per-entity home for the rulings below,
- * which is the reason it exists as a bean rather than as a fourth static member on
- * {@code LookupMapper}. Trade-offs: an unreached conversion is dead weight and is recorded as such
- * here rather than defended; removing it or routing the controller through it are both single-caller
- * changes, and either is preferable to leaving a reader to guess which member the state route uses.
- * The charter records the identical position for this class's area-code counterpart at its L166 to
- * L178.</p>
+ * <p>Assumptions: this class is the SOLE implementation of this conversion, and its callers are named
+ * here because a reader arriving from the published route will not find them in the adapter.
+ * {@code com.carddemo.reference.service.AddressLookupService} holds this bean as a final field, takes
+ * it as a constructor parameter and reaches it on BOTH of this context's state operations: as the
+ * per-row render function its keyset browse hands to {@code ReferencePaging.page} in
+ * {@code listStates}, and directly on the single-code read in {@code readState}.
+ * {@code AddressLookupController} imports no type from this package at all -- it validates its one
+ * path parameter and its paging parameters and delegates both routes to that service.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: this paragraph used to state that the same single-row conversion was
+ * ALSO implemented by a static {@code LookupMapper}, that {@code AddressLookupController} routed both
+ * state operations through it, and concluded that <b>no call site in the delivered code reached this
+ * class</b>. All three statements are false of the module as it stands, and the third was the damaging
+ * one: it invited deletion of the one implementation both delivered state operations use. No class
+ * named {@code LookupMapper} exists in this module -- it was deleted when the keyset selection moved
+ * out of the controller into {@code AddressLookupService}, which the charter records under <i>The six
+ * mappers, and why three of them are static</i> -- so the duplication the paragraph disclosed is gone
+ * rather than merely re-described, and nothing replaces the disclosure. Assumptions: the same
+ * correction is carried on {@code UsStateZipPrefixMapper}, which had the identical paragraph, so the
+ * two files state one position.</p>
  *
  * <p>Assumptions: there is no inbound member here, and the absence is a decision rather than
- * something outstanding. The charter records at its L513 to L516 that the three seeded lookup tables
- * carry none: these rows are seeded reference data, loaded by
+ * something outstanding. The charter records under <i>Deliberate omissions</i> that the three seeded
+ * lookup tables carry none: these rows are seeded reference data, loaded by
  * {@code services/reference-service/src/main/resources/db/migration/V2__seed_reference.sql}, so the
  * DTO package publishes no create and no update shape for them and there would be nothing for an
  * inbound member to accept. A reader comparing this class against {@code TransactionTypeMapper},
@@ -87,8 +97,9 @@ public class UsStateMapper {
      * Renders one stored state or territory code as the shape the contract publishes.
      *
      * <p>Assumptions: the argument is a loaded, non-null row whose single member is present.
-     * {@code V1__reference.sql} declares {@code state_cd CHAR(2) NOT NULL} at its L427 and makes that
-     * same column the primary key through {@code pk_us_states} at its L429, so the member has no
+     * {@code V1__reference.sql} declares {@code state_cd CHAR(2) NOT NULL} on
+     * {@code reference.us_states} and makes that same column the primary key through
+     * {@code pk_us_states}, so the member has no
      * absent case for this method to substitute a value for. A null in that position means the row
      * was never loaded, and reporting it as a blank code would hide exactly that.</p>
      *
@@ -103,10 +114,10 @@ public class UsStateMapper {
         //       01 US-STATE-CODE-TO-EDIT  PIC X(2), and its L1013 condition name
         //       VALID-US-STATE-CODE carries the admitted literals over that item, every one of them
         //       quoted and compared as two characters. The stored column is CHAR(2) at
-        //       V1__reference.sql L427, so a code fills its whole declared width and there is no
-        //       padding to remove; this package's charter settles at its L314 to L319 that a key of
-        //       declared width is never altered in a way that could change its value, in either
-        //       direction.
+        //       state_cd CHAR(2) in V1__reference.sql, so a code fills its whole declared width and
+        //       there is no padding to remove; this package's charter settles under its heading "The
+        //       trim boundary, which follows the column type" that a key of declared width is never
+        //       altered in a way that could change its value, in either direction.
         // WHY : Assumptions: the baseline settles that by contrast rather than by assertion, which is
         //       why two line ranges of one program are cited together instead of one.
         //       app/cbl/COACTUPC.cbl opens the state edit at L2493, moves the candidate address value
@@ -119,7 +130,8 @@ public class UsStateMapper {
         //       why no normalisation member exists in this file for a caller to reach for.
         // WHY : Assumptions: the consequence of altering the value is silent, which is why it is
         //       recorded at this line rather than left to the column type to imply.
-        //       V1__reference.sql records at its L420 to L426 that bpchar ignores trailing blanks, so
+        //       V1__reference.sql records in the comment above that column that bpchar ignores
+        //       trailing blanks, so
         //       a probe arriving as 'AL ' from a declared-width source still matches its row, whereas
         //       under a varying-width column the same probe returns nothing -- and raises no error
         //       either, because a trailing blank is truncated away rather than rejected. A value
@@ -152,12 +164,13 @@ public class UsStateMapper {
         String publishedCode = entity.getStateCode();
 
         // WHY : Assumptions: this invokes the canonical constructor of a single-component record
-        //       positionally, which the charter records at its L544 to L545 as the calling convention
-        //       throughout this package. One naming detail is worth stating because it reads as a
-        //       slip and is not: the column is state_cd, this entity's member is stateCode, and the
-        //       record component is stateCd. The DTO package owns the published name, and the charter
-        //       settles at its L552 to L558 that this package follows those names rather than
-        //       renaming either side to make the group look uniform.
+        //       positionally, which the charter records as the calling convention throughout this
+        //       package, in the DTO entry of its enumerated external contracts. One naming detail is
+        //       worth stating because it reads as a slip and is not: the column is state_cd, this
+        //       entity's member is stateCode, and the record component is stateCd. The DTO package
+        //       owns the published name, and the charter settles, where it calls out the area-code
+        //       naming asymmetry, that this package follows those names rather than renaming either
+        //       side to make the group look uniform.
         return new UsStateResponse(publishedCode);
     }
 
@@ -166,8 +179,8 @@ public class UsStateMapper {
      *
      * <p>Assumptions: this yields the items alone. The first key, the last key and the more-pages
      * indicator of {@code com.carddemo.common.web.PageResponse} are assembled outside this package,
-     * which the charter fixes at its L473 to L478 on the ground that only the layer holding the
-     * keyset cursor can say whether a further page exists; a mapper is handed rows and knows nothing
+     * which the charter fixes under its <i>What this package does not do</i> heading on the ground
+     * that only the layer holding the keyset cursor can say whether a further page exists; a mapper is handed rows and knows nothing
      * about the query that produced them. That is the reason this file does not import that envelope,
      * and it holds whatever shape the reply takes.</p>
      *
@@ -179,8 +192,9 @@ public class UsStateMapper {
      * {@code UsStatePage} and that the two address lookups beside it page the same way, so a caller
      * writes one paging loop for all three instead of special-casing this one. The reply is therefore
      * a keyset page -- {@code AddressLookupController} declares
-     * {@code PageResponse<UsStateResponse>} at its L262 and mints the page's positions at its L283 to
-     * L287 -- and the seeded list can outgrow a single reply without altering a shape a client
+     * {@code PageResponse<UsStateResponse>} on {@code listUsStates}, and the positions it carries are
+     * minted by {@code AddressLookupService.listStates}, which is the layer that holds the cursor --
+     * and the seeded list can outgrow a single reply without altering a shape a client
      * already reads. There is accordingly no paging asymmetry between the three lookup conversions
      * for a reader to account for.</p>
      *
@@ -212,9 +226,15 @@ public class UsStateMapper {
         //       -- the untouched declared-width code anchored on app/cpy/CSLKPCDY.cpy L1012 and the
         //       refusal to test the condition name at its L1013 -- from acquiring a second
         //       implementation free to drift from the first. The name and shape of this member match
-        //       UsPhoneAreaCodeMapper.toResponseList at its L194 deliberately rather than by
-        //       coincidence, so that the conversions in this package present one list idiom to a
-        //       reader.
+        //       UsPhoneAreaCodeMapper.toResponseList deliberately rather than by coincidence, so that
+        //       the conversions in this package present one list idiom to a reader.
+        // WHY : Alternatives Considered: the keyset browse renders its page one row at a time rather
+        //       than through this member, and routing it through here was the alternative.
+        //       AddressLookupService.listStates hands toResponse to ReferencePaging.page as a per-row
+        //       render function, because discarding the surplus probe row and sealing both boundary
+        //       positions have to stay in the layer that asked the repository for the extra row; a
+        //       member handed a whole page cannot tell a probe row from a published one. What this
+        //       member serves is a caller holding a list that is already settled.
         return entities.stream().map(this::toResponse).toList();
     }
 }

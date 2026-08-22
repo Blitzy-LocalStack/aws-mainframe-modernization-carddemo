@@ -7,10 +7,29 @@
  * Every screen in the baseline opens with the same band: a transaction slot and
  * a program slot on the left, the two shared application titles in the centre,
  * and the paint-time date and time on the right. That band is constant across
- * the mapsets, so it is authored once here and composed by the app shell rather
- * than repeated in each of the 21 screen routes. AAP section 0.4.4 fixes this
- * split: the title band, the message line and the function-key legend are the
- * three shared shell elements, and this module is the first of them.
+ * the mapsets, so its markup is authored once here rather than re-created in each
+ * of the 21 screen routes. AAP section 0.4.4 fixes the split it belongs to: the
+ * title band, the message line and the function-key legend are the three shared
+ * shell elements, and this module is the first of them.
+ *
+ * Where it is rendered
+ * -------------------
+ * Assumptions: this component has TWO mount arrangements, and it is written to be
+ * indifferent between them - it renders from props alone and reads no router, no
+ * store and no context. Measured across every screen module under `ui/src/screens`:
+ * eighteen screens DELEGATE their identity to `ui/src/layout/AppShell.tsx` through
+ * `useShellSlot`, and the shell renders this band once inside its `Layout.Header`;
+ * three - the main menu, the administrative menu and the authorization detail
+ * screen - render this component themselves inside their own body and publish
+ * nothing to the shell, so the shell paints no band for them and there is still
+ * exactly one band per screen.
+ *
+ * ⚠️ Refactoring Rationale: the sentence above said the band was "composed by the
+ * app shell rather than repeated in each of the 21 screen routes", which reads as a
+ * claim that no screen composes it. Three do. The correction matters because the
+ * consequences differ per arrangement and are cited further down this file: the
+ * enclosing landmark is `banner` in one case and the content region in the other,
+ * which is why the explicit `role="region"` at the render site is not optional.
  *
  * Provenance
  * ----------
@@ -239,9 +258,15 @@ export const HEADER_TIME_FORMAT = 'HH:mm:ss' as const;
  *       more, and what they were for has been settled one level up. They let a mount site name the
  *       background behind this band -- `body` or `darkChrome` -- so the band could pick a contrast-safe
  *       resolution per surface, because `colorPrimary` as text measured 4.49:1 against the design system's
- *       dark chrome fill and 3.76:1 against the shell's light fill, both under the 4.5:1 WCAG AA minimum
- *       for normal text. Those measurements are real and they are recorded, in
- *       `ui/src/theme/tokens.ts` at ACCESSIBLE_TEXT_TOKENS and CONTRAST_REFERENCE_SURFACES.
+ *       dark chrome fill and 4.104:1 against the surface the shell paints, both under the 4.5:1 WCAG AA
+ *       minimum for normal text. Those measurements are real and they are recorded, in
+ *       `ui/src/theme/tokens.ts`: the retired fill at CONTRAST_REFERENCE_SURFACES and the per-role
+ *       resolution at BMS_TEXT_CONTRAST_AUDIT, with the shortfalls asserted in
+ *       `ui/src/theme/contrast.test.ts`. ⚠️ Refactoring Rationale: this note cited an
+ *       ACCESSIBLE_TEXT_TOKENS map that has since been withdrawn as superseded -- it resolved a colour
+ *       per surface, which is the very thing the one-surface decision below removed the need for -- and
+ *       the 3.76:1 figure it cited was measured against `colorBgLayout`, a fill the frame no longer
+ *       paints anywhere.
  * WHY : Assumptions: the adopted remedy removes the second surface instead of resolving against it. The
  *       shell now paints ALL THREE of its zones with `SURFACE_TOKENS.screen` -- `colorBgContainer` -- so
  *       there is exactly one background behind screen text anywhere in the tree, which is what lets
@@ -514,17 +539,22 @@ export function ScreenHeader(props: ScreenHeaderProps): ReactElement {
 
   return (
     // Alternatives Considered: a bare <header> with aria-labelledby, and a
-    // role="banner". Both were rejected. Per ARIA in HTML a <header> nested
-    // inside main, section, article, aside or nav maps to a generic role rather
-    // than to a landmark, and this band always renders inside the shell's
-    // content region, so the element alone would expose no landmark at all;
-    // banner was rejected because it is the page-level introductory landmark and
-    // should appear once per document, whereas this band is per screen.
-    // role="region" plus an accessible name is the landmark that matches what
-    // the band is, and a region is only exposed to assistive technology when it
-    // is named - which aria-labelledby supplies from the title heading below.
-    // The header element is kept underneath so the DOM still says what the block
-    // is to anyone reading or querying it.
+    // role="banner". Both were rejected, and the EXPLICIT role is what makes the
+    // outcome the same under both of this component's mount arrangements. Per ARIA
+    // in HTML the implicit mapping of a <header> depends on where it sits: on the
+    // three screens that compose this band inside their own body it is nested in
+    // antd's <main>, which maps it to a generic role and exposes no landmark at
+    // all, while on the eighteen delegating screens the shell renders it inside
+    // its own <header>, whose nearest sectioning root is still <body> - so the
+    // implicit mapping there would be a SECOND banner in the document. Neither is
+    // wanted, and role="region" overrides both: banner is the page-level
+    // introductory landmark and should appear once per document, whereas this band
+    // is per screen. `appShellIntegration.test.tsx` asserts exactly one banner in
+    // the frame, which is the assertion this attribute keeps true.
+    // A region is only exposed to assistive technology when it is named - which
+    // aria-labelledby supplies from the title heading below. The header element is
+    // kept underneath so the DOM still says what the block is to anyone reading or
+    // querying it.
     <Flex
       component="header"
       role="region"
@@ -565,7 +595,13 @@ export function ScreenHeader(props: ScreenHeaderProps): ReactElement {
              * title. Rendering both as headings would put two same-level
              * headings in the band with no parent, and rendering this one as the
              * heading would name the region after the programme rather than the
-             * application. ui/src/App.tsx already draws the same split.
+             * application. ⚠️ Refactoring Rationale: this note cited
+             * `ui/src/App.tsx` as already drawing the same split, and that file
+             * draws nothing now - it renders the theme provider and the router
+             * provider and no markup of its own. The corroboration that remains is
+             * `ui/index.html` L143, whose `<title>` is the application name and not
+             * the programme name, which is the same ranking of the two constants
+             * reached independently.
              * The trimmed alias is used because the 40-character literal centres
              * its text with leading spaces for a monospaced cell grid; in this
              * proportional layout the Flex above does the centring and those
@@ -600,14 +636,18 @@ export function ScreenHeader(props: ScreenHeaderProps): ReactElement {
              * argued that level={4} already applies fontSizeHeading4 and
              * lineHeightHeading4, so naming them would duplicate the component's
              * own decision. That held only while one number could serve both
-             * purposes, and it could not: every route also paints a caption of
-             * its own, ten of them chose level 3 for it, and a level-3 caption
-             * structurally OUTRANKS a level-4 band, so an operator navigating by
-             * heading was told the screen's caption was the document's highest
-             * heading and this band a subheading of nothing. The rank therefore
-             * comes from APP_TITLE_HEADING_LEVEL, which is above the one every
-             * caption now shares, and the size from the bridge entries directly
-             * -- so the band looks exactly as it did and the outline is correct.
+             * purposes, and it could not: a screen paints a caption of its own
+             * BELOW this band, and ten of them had chosen level 3 for it, so a
+             * level-3 caption structurally OUTRANKED a level-4 band and an
+             * operator navigating by heading was told the screen's caption was the
+             * document's highest heading and this band a subheading of nothing.
+             * The rank therefore comes from APP_TITLE_HEADING_LEVEL, and every
+             * caption that exists now takes SCREEN_TITLE_HEADING_LEVEL one step
+             * below it through `ScreenTitle` -- 20 of the 21 screens render that
+             * component, and the sign-on screen renders no caption heading of any
+             * rank, so it cannot outrank anything -- while the size comes from the
+             * bridge entries directly, so the band looks exactly as it did and the
+             * outline is correct.
              * The reason the bridge chose the fourth step is unchanged: the band
              * occupies one of 24 rows in the baseline, and a larger step costs
              * vertical space on screens whose field count reaches 128.

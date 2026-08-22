@@ -194,8 +194,11 @@ chmod 600 .env.auth-service.local
 git check-ignore -v .env.auth-service.local   # prints the rule that protects it
 ```
 
-Fill it with the eleven variables §7 marks as having no fallback, one
-`KEY=value` per line. Then build and start:
+Fill it with the **fourteen** variables §7 marks as having no fallback, one
+`KEY=value` per line, and with the two a local run has to override because their
+defaults name paths and ports that exist only in a deployed task —
+`CARDDEMO_DB_SSL_ROOT_CERT` and, if 8080 is already taken on this host,
+`SERVER_PORT`. Then build and start:
 
 ```bash
 # WHAT: the COMPLETE local launch contract, in the order it has to be performed.
@@ -208,14 +211,26 @@ Fill it with the eleven variables §7 marks as having no fallback, one
 #       first.
 #       (2) Assumptions: `spring-boot-maven-plugin` repackages the jar so it is
 #       self-contained, and no class path is assembled at launch.
-#       (3) Assumptions: TWELVE variables in §7 have no fallback, so an incomplete
+#       (3) Assumptions: FOURTEEN variables in §7 have no fallback, so an incomplete
 #       environment stops the process at startup rather than letting it serve requests
-#       bound to nothing. §7 marks each of the twelve `none`, and the environment file
-#       has to set every one of them. Eleven are `${...}` placeholders in
-#       `application.yml`; the twelfth, CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY, is not
-#       written in any profile and reaches the shared kernel through relaxed binding --
-#       see the rationale under §7, because auditing the profiles for placeholders will
-#       not find it.
+#       bound to nothing. §7 marks each of the fourteen `none`, and the environment file
+#       has to set every one of them. THIRTEEN are `${...}` placeholders carrying no
+#       `:default` in `application.yml` -- the figure is
+#       `grep -ohE '[$][{][A-Z0-9_]+[}]' src/main/resources/application*.yml | sort -u
+#       | wc -l` run inside this module, which is how it should be re-derived rather
+#       than counted by eye. The digit class is load-bearing: dropping it reports
+#       twelve, because SPRING_SECURITY_OAUTH2_... carries a 2. The fourteenth,
+#       CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY, is not written in any profile and
+#       reaches the shared kernel through relaxed binding -- see the rationale under §7,
+#       because auditing the profiles for placeholders will not find it.
+#       Refactoring Rationale: this note said TWELVE and the paragraph above it said
+#       eleven, while the configuration declared thirteen no-default placeholders. Two
+#       of them -- CARDDEMO_AUTH_CREDENTIAL_SECRET_PREFIX and
+#       CARDDEMO_AUTH_CREDENTIAL_SECRET_KMS_KEY_ARN -- were in no list here at all, so an
+#       operator who set every key this file named still could not start the process, and
+#       the two figures disagreeing was the signal that the list was transcribed from
+#       memory rather than derived. Both figures are now derived from the profiles, and
+#       §7's table is the single place they are enumerated.
 #       Trade-offs: the failure names the SYMPTOM rather than the key for the
 #       framework-bound values, which is worth knowing before you read one. Measured
 #       on the sibling transaction service with nothing set, the first failure is
@@ -229,8 +244,21 @@ Fill it with the eleven variables §7 marks as having no fallback, one
 #       (4) Trade-offs: those variables are supplied from an environment file that
 #       is deliberately not committed, rather than typed on the command line,
 #       because a shell history is a poor place for a credential and `.gitignore`
-#       already excludes `.env`. The cost is that this file cannot show you the
-#       file's contents; §7 names every key it must carry.
+#       already excludes `.env` and `.env.*`. The cost is that this file cannot show
+#       you the file's contents; §7 names every key it must carry.
+#       Refactoring Rationale: the name sourced here is `.env.auth-service.local`, the
+#       SAME name the block above creates, and the two being one name is the fix rather
+#       than a tidy-up. This line read `. ./auth-service.env` while the block above
+#       created `.env.auth-service.local` and explained at length why that name is the
+#       ignored one, so an operator following the instructions literally wrote the
+#       Cognito client secret, the TLS keystore password and two database passwords into
+#       a file `git status` would then offer to commit. A single spelling in the create
+#       step, in this source step and in every later reference is the only form of this
+#       instruction that is safe to follow without reading it twice.
+#       (4a) Assumptions: `set -a` exports every assignment the file makes and `set +a`
+#       stops that, so the credentials reach this one JVM and not every later command in
+#       the shell. The leading `./` is deliberate: `. file` searches PATH first, and a
+#       PATH entry holding a file of that name would be sourced instead.
 #       (5) Assumptions: `SERVER_SSL_ENABLED` is not a `${...}` placeholder in any
 #       profile — it reaches `server.ssl.enabled` through the framework's relaxed
 #       binding of an environment name onto a property. That is why it appears in
@@ -245,7 +273,7 @@ Fill it with the eleven variables §7 marks as having no fallback, one
 mvn -B -f services/pom.xml -pl auth-service -am package
 
 export SERVER_SSL_ENABLED=false
-set -a && . ./auth-service.env && set +a
+set -a && . ./.env.auth-service.local && set +a
 java -jar services/auth-service/target/auth-service-1.0.0-SNAPSHOT.jar
 ```
 
@@ -275,13 +303,47 @@ docker build -f services/auth-service/Dockerfile -t carddemo/auth-service:local 
 Both tags are additionally **digest-pinned** in the Dockerfile, so a re-tag
 upstream cannot change what a rebuild produces.
 
-**There is no Alpine variant of the Corretto image.** The repository publishes
-only `-al2` and `-al2023` tags, with `headful`, `headless`, `generic` and `jdk`
-suffixes, and the highest 21.x is `21.0.12`. Substituting a musl-style suffix
-fails the build outright, because the tag is not published at all — the failure
-is a manifest-not-found on pull, not a runtime incompatibility, so it will not be
-diagnosed by reading Java. The build stage is matched to the runtime's JDK vendor
-and major version for the same reason.
+**The Amazon ECR Public Corretto repository publishes no Alpine tag.**
+`public.ecr.aws/amazoncorretto/amazoncorretto` — the registry path the runtime tag
+above comes from — publishes only the `-al2` and `-al2023` families, each with a
+`headful`, `headless`, `generic` or `jdk` suffix, and the highest published 21.x is
+`21.0.12`. So editing that reference to a musl-style suffix does not select a
+smaller image; the tag does not resolve at all, and the build fails with a
+manifest-not-found **at the pull**, which is not a failure anyone diagnoses by
+reading Java. The fact is recorded beside the line it would be edited on for that
+reason.
+
+Alternatives Considered: an Alpine Corretto runtime **does exist** and was weighed
+rather than assumed away. Amazon publishes musl-based Corretto 21 tags on Docker Hub
+as `amazoncorretto:21-alpine`, `21-alpine3.24` and `21.0.12-alpine`, built from the
+same `corretto/corretto-docker` sources as the AL2023 tags, so the choice here is a
+choice between two *published* runtimes and not between one runtime and nothing. It
+was rejected on three specifics, in decreasing order of weight.
+
+1. **libc under a JVM money workload.** Alpine's musl is not the glibc the JDK is
+   primarily built and soak-tested against, and the divergences that matter to this
+   service are exactly the quiet ones — locale and character-set handling on the
+   fixed-width and zoned-decimal codec path, `getaddrinfo` and DNS-resolution
+   behaviour behind the connection pool, and stack sizing on threads that recurse
+   through `BigDecimal` arithmetic. A defect in any of those surfaces as a wrong
+   value or an intermittent connection failure rather than as a startup error, which
+   is the worst return on a base-image saving.
+2. **Patch provenance.** An AL2023 base's package versions are the ones Amazon Linux
+   security advisories are written against, so a CVE report on this image maps onto a
+   specific ALAS bulletin and a specific package version. An Alpine base moves that
+   correspondence to a second distribution's advisory stream for no gain, while the
+   registry the deployment already pulls from is the ECR Public one.
+3. **libc agreement across stages.** The build stage is
+   `maven:3.9.16-amazoncorretto-21-al2023`, which is glibc. Keeping the runtime on
+   AL2023 means the jar is packaged and executed against one C library; an Alpine
+   runtime would make the two stages disagree, which matters as soon as anything on
+   the dependency path ships a native component.
+
+Trade-offs: what is given up is image size — the AL2023 headless runtime is the
+larger of the two — and it is paid for with a runtime whose libc, patch stream and
+build stage all agree. `headless` is what recovers most of the difference anyway: it
+omits the AWT and graphics stack an HTTP service never loads, where `generic` keeps
+it and `jdk` would ship `javac` into production.
 
 Runtime properties, all set in the Dockerfile:
 
@@ -312,6 +374,23 @@ read. Image publication belongs to the deployment workflow.
 #       container.
 mvn -B -f services/pom.xml -pl auth-service -am verify
 ```
+
+<!-- test-inventory: 21 tests + 1 integration tests -->
+**22** test classes: **21** matching `*Test`, run by Surefire, and **1** matching `*IT`, run by
+Failsafe. That census is machine-checked — `ServiceReadmeInventoryTest` in `common-lib` parses
+the comment above and re-measures both figures against this module's test tree, so the count
+fails the build when it drifts rather than ageing quietly in prose.
+
+Refactoring Rationale: this module was the one service README carrying **no** marker, so its
+test census was the only one in the reactor that nothing measured — and a census nothing
+measures understates coverage in the direction that reads as a gap, which sends a contributor
+to write a case that already exists. The marker's wording is fixed by the pattern
+`ServiceReadmeInventoryTest` compiles, not chosen here: the Surefire figure comes first, the
+Failsafe figure second, and the words between them are literal, so a README cannot opt in
+while publishing something the check cannot parse. Alternatives Considered: stating the
+census in prose only, as this section did. Rejected for the reason the check exists — the
+prose figure and the tree drifted apart in three other READMEs before the marker was
+introduced.
 
 The principal test classes, and what each one holds:
 
@@ -394,6 +473,89 @@ Names only. **No value for any variable below appears anywhere in this
 repository** — not in this file, not in a profile, not in an infrastructure
 parameter file.
 
+Three routes deliver a setting to this service — a `${...}` placeholder carrying no
+default, a placeholder carrying one, and a variable name written as a placeholder in
+no document at all — and an absent value behaves differently on each. The tables
+below keep the routes apart for that reason rather than summing them into one number.
+
+Assumptions: the split is by ROUTE and not by importance, because the route is what
+decides how a missing value announces itself: §7.1 stops the context, §7.2 starts
+with a value the file states, and §7.3 holds both the setting whose absence stops the
+context and the one whose absence starts an ungated service. A reader needs the route
+to know which failure to expect and where to look for it.
+
+#### 7.1 Placeholders with no fallback — the context cannot start without these
+
+Thirteen. Every one is a `${...}` placeholder carrying no `:` default, and every
+one is declared in `src/main/resources/application.yml`: **neither overlay declares
+a placeholder of its own**, so the required set is identical in `dev` and `prod`.
+
+```bash
+# WHAT: list every placeholder the three profile documents of THIS module resolve,
+#       ignoring occurrences inside comments.
+# WHY : Assumptions: this is the measurement the thirteen came from, published so a
+#       reader can repeat it instead of trusting a number. It prints twenty-one
+#       occurrences, all of them in application.yml: eight carry a `:` default and
+#       are the first eight rows of §7.2; the remaining thirteen are the table
+#       below. No occurrence in this module is an internal property-to-property
+#       reference, so "no colon" and "names a variable" coincide here — which is NOT
+#       true of every service, so the audit is stated per module rather than
+#       borrowed.
+grep -n '\${' services/auth-service/src/main/resources/application*.yml \
+  | grep -v ':[0-9]*: *#'
+```
+
+| Variable | Purpose | Read by |
+|---|---|---|
+| `SPRING_DATASOURCE_URL` | Connection target for the runtime role | Boot binder |
+| `SPRING_DATASOURCE_USERNAME` | Runtime database role | Boot binder |
+| `SPRING_DATASOURCE_PASSWORD` | Credential reference for the runtime role | Boot binder |
+| `SPRING_FLYWAY_USER` | Migration role, distinct from the runtime role | Boot binder |
+| `SPRING_FLYWAY_PASSWORD` | Credential reference for the migration role | Boot binder |
+| `SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI` | Issuer location whose keys validate presented tokens | `config/SecurityConfig` `@Value` |
+| `CARDDEMO_SECURITY_JWT_EXPECTED_CLIENT_ID` | The app client a presented token must name | `config/SecurityConfig` `@Value` |
+| `CARDDEMO_AUTH_COGNITO_USER_POOL_ID` | Pool this context administers | `service/CognitoUserProvisioningService` `@Value` |
+| `CARDDEMO_AUTH_COGNITO_CLIENT_ID` | App client used for the sign-on exchange | `service/CognitoIdentityService` `@Value` |
+| `CARDDEMO_AUTH_COGNITO_CLIENT_SECRET` | Client credential reference for that exchange | `service/CognitoIdentityService` `@Value` |
+| `CARDDEMO_AUTH_CREDENTIAL_SECRET_PREFIX` | Secret-name prefix a created user's first credential is written under | `service/CognitoUserProvisioningService` `@Value` |
+| `CARDDEMO_AUTH_CREDENTIAL_SECRET_KMS_KEY_ARN` | Customer-managed key that credential entry is encrypted with | `service/CognitoUserProvisioningService` `@Value` |
+| `CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD` | Opens the listener keystore | Boot binder |
+
+Assumptions: the two `CREDENTIAL_SECRET` rows were missing from this table and are
+**not optional extras**. Without the prefix a user created at run time gets a pool
+account in its force-change state whose temporary password has nowhere to be
+written, which is an account nobody can ever sign in to; without the key the entry
+would fall back to the account's default managed key, which is readable by every
+principal holding `GetSecretValue` and looks identical from the API. Both are
+`@Value` constructor parameters of `CognitoUserProvisioningService`, so an absent
+value fails context refresh.
+
+Trade-offs: **the failure names the symptom rather than the key for the six
+binder-read rows**, and it is worth knowing which six before reading one. Spring
+Boot's binder leaves an unresolvable placeholder as its own literal text, so an
+unset `SPRING_DATASOURCE_URL` surfaces as `'url' must start with "jdbc"` — measured
+on the sibling transaction service with nothing set. The seven `@Value` rows resolve
+through the environment instead, which throws naming the placeholder it could not
+resolve; `config/SecurityConfig` reads two of them (L1056, L1058),
+`service/CognitoUserProvisioningService` three (L386, L389, L390) and
+`service/CognitoIdentityService` two (L440, L441) — two plus three plus two is the
+seven. That class's other two `@Value` parameters, the group names at L387 and L388,
+carry defaults and are [§7.2](#72-placeholders-carrying-a-documented-default) rows
+rather than rows here.
+
+Assumptions: `CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD` is the one row in this table
+whose necessity is conditional, and the condition is a value a **local** run
+changes. `application.yml` sets `server.ssl.enabled: true`, so a deployed task reads
+the password on every start; a loopback run that exports `SERVER_SSL_ENABLED=false`
+never opens a keystore, and the unresolved placeholder is bound as literal text that
+nothing reads. The module's own `test` profile is the observable case:
+`src/test/resources/application-test.yml` sets `server.ssl.enabled: false` and
+declares no keystore password, and `repository/UserRepositoryIT` refreshes a context
+under it. Twelve of the thirteen are therefore unconditional; this one is required of
+every deployment and of any local run that leaves the listener encrypted.
+
+#### 7.2 Placeholders carrying a documented default
+
 | Variable | Purpose | Fallback |
 |---|---|---|
 | `SPRING_PROFILES_ACTIVE` | Selects the environment overlay | — |
@@ -407,22 +569,45 @@ parameter file.
 | `CARDDEMO_AUTH_COGNITO_USER_POOL_ID` | Pool this context administers | none |
 | `CARDDEMO_AUTH_COGNITO_CLIENT_ID` | App client used for the sign-on exchange | none |
 | `CARDDEMO_AUTH_COGNITO_CLIENT_SECRET` | Client credential reference for that exchange | none |
+| `CARDDEMO_AUTH_CREDENTIAL_SECRET_PREFIX` | Secret-register name prefix a created user's one-time credential is written under; the service appends `/runtime-user/` beneath it, Terraform's seed identities use `/seed-user/` | none |
+| `CARDDEMO_AUTH_CREDENTIAL_SECRET_KMS_KEY_ARN` | Customer-managed key that encrypts each created credential entry, so possession of the entry is not sufficient without the key grant | none |
 | `CARDDEMO_SERVER_TLS_KEYSTORE_PASSWORD` | Opens the listener keystore | none |
 | `CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY` | Keys the sealed paging cursor the user list issues | none |
 | `CARDDEMO_ONLINE_WRITES_PARAMETER` | Names the SSM flag that closes writes during the batch window | none in effect |
 | `CARDDEMO_VERSION` | Release label on every log record, metric series and span | `unspecified`, which the service module refuses |
-| `CARDDEMO_SERVER_TLS_KEYSTORE` | Keystore location | has a default |
-| `CARDDEMO_SERVER_TLS_KEY_ALIAS` | Listener key alias | has a default |
+| `CARDDEMO_SERVER_TLS_KEYSTORE` | Keystore location | `file:/tmp/carddemo-tls/listener.p12` |
+| `CARDDEMO_SERVER_TLS_KEY_ALIAS` | Listener key alias | `carddemo-listener` |
 | `CARDDEMO_COGNITO_ADMIN_GROUP_NAME` | Group mapped to the administrator authority | `carddemo-admin` |
 | `CARDDEMO_COGNITO_USER_GROUP_NAME` | Group mapped to the ordinary-user authority | `carddemo-user` |
-| `CARDDEMO_DB_SSL_ROOT_CERT` | Trust anchor for the database connection | has a default |
+| `CARDDEMO_AUTH_TEMPORARY_PASSWORD_LENGTH` | Characters in a generated temporary password | `24` |
+| `CARDDEMO_AUTH_COGNITO_API_CALL_TIMEOUT_MS` | Whole-call budget for one identity-provider call | `10000` |
+| `CARDDEMO_AUTH_COGNITO_API_CALL_ATTEMPT_TIMEOUT_MS` | Per-attempt budget inside that whole-call budget | `4000` |
+| `CARDDEMO_LOG_CONSOLE_FORMAT` | Console layout | `ecs`, declared in the shared defaults |
+| `CARDDEMO_ENVIRONMENT` | Environment tag on every log record, metric series and span | `unspecified`, declared in the shared defaults |
+| `CARDDEMO_DB_SSL_ROOT_CERT` | Trust anchor for the database connection. `sslmode` is fixed at `verify-full` in `application.yml` and **no overlay relaxes it**, so a local run must point this at the CA of a TLS-serving instance; the default names the bundle path only the deployed image carries | `/etc/ssl/certs/carddemo-rds-ca-bundle.pem` |
+| `SERVER_PORT` | Listener port. Every one of the eight services defaults to the same 8080, so a second one started on this host needs it | `8080`, set in `application.yml` |
 | `SERVER_SSL_ENABLED` | Whether the listener is encrypted; set `false` for a loopback-only local run | `true`, set in `application.yml` |
 
-The twelve marked `none` have **no fallback on purpose**, rather than letting the
+The **fourteen** marked `none` have **no fallback on purpose**, rather than letting the
 service come up bound to a default that happens to be wrong. What a missing one looks
 like is set out in the launch note in §4: for the framework-bound values the failure
 names the symptom rather than the key, because the binder leaves an unresolvable
 placeholder as its own literal text.
+
+Assumptions: this table is the **only** enumeration of the required set in this file, and
+every count elsewhere in it — §4's create step and §4's launch note — refers here rather
+than restating the list. The required set is derivable in two commands rather than trusted:
+`grep -ohE '[$][{][A-Z0-9_]+[}]' src/main/resources/application*.yml | sort -u` returns the
+thirteen no-default placeholders, and `CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY` is the
+fourteenth for the reason given below. Anything with a `:default` inside the braces has a
+fallback and is not in that set. Assumptions: three of the rows above are declared in
+the imported shared defaults rather than here — `CARDDEMO_LOG_CONSOLE_FORMAT`,
+`CARDDEMO_ENVIRONMENT` and `CARDDEMO_VERSION`, at
+`common-lib/src/main/resources/carddemo-common-defaults.yml` L123, L587 and L588 — so a
+grep of this module's own profiles does not print them, which is why they are listed here
+rather than left for a reader to hunt for. Trade-offs: an enumerated table drifts when the profiles
+change, and the two commands above are the compensation — they cost one line to run and
+they settle the question this file otherwise answers from memory.
 
 Refactoring Rationale: three of the rows above were absent from this table, and two of
 them are **required**. `CARDDEMO_PAGINATION_CURSOR_SIGNING_KEY` and
@@ -442,6 +627,22 @@ requires the cursor key by name and makes the gate name biconditional for the se
 workloads, so a root that drops either fails at `plan`. `CARDDEMO_VERSION` is the third:
 it has a fallback here and the service module refuses that fallback, because a task
 labelled `unspecified` produces telemetry no release can be attributed to.
+
+Refactoring Rationale: a later audit found the table still short by
+`CARDDEMO_AUTH_CREDENTIAL_SECRET_PREFIX` and `CARDDEMO_AUTH_CREDENTIAL_SECRET_KMS_KEY_ARN`,
+both of which *are* written as `${...}` placeholders in `application.yml` with no default —
+so unlike the three above they were visible to exactly the audit that missed them, which is
+why the whole set is now derived by command rather than reviewed by eye. Omitting them was
+not cosmetic: they are the two inputs that decide **where** a created user's one-time
+credential is written and **which key** encrypts it, so an operator who set every key this
+file previously named could not start the process at all, and a reader planning a deployment
+had no way to learn that a customer-managed key is required rather than the account's
+default. Four more rows with defaults were added in the same pass —
+`CARDDEMO_AUTH_TEMPORARY_PASSWORD_LENGTH`, the two identity-provider call budgets and
+`SERVER_PORT` — because a table that lists *some* defaulted inputs and not others invites
+the reader to treat absence as evidence that no such setting exists. Trade-offs: the table
+is longer, and the compensation is that it is now the complete set of what this module reads
+from its environment rather than a selection from it.
 
 **Where the values come from.** Every one arrives from **Terraform outputs by way
 of Parameter Store and Secrets Manager**, injected by the ECS task definition and
@@ -553,20 +754,34 @@ rather than either implementation.
 
 **One operation in that table answers with a shape carrying material no other
 returns.** `POST /api/v1/auth/users` answers `201` with `CreatedUserResponse`, which
-is the five properties of `UserResponse` plus `credentialSecretName` — the name of the
-managed-secret entry holding the one-time credential the pool account was created
-with. `Refactoring Rationale:` the body carries the entry's **name and not its
-value**, because a credential in a response body is copied into every proxy log and
-browser history on the path. Collect the value from that entry: the account lands in
-the provider's force-change state, so presenting it at `POST /api/v1/auth/signon`
-yields the `NEW_PASSWORD_REQUIRED` challenge that `POST /api/v1/auth/challenge`
-answers, and the pool issues tokens only once a permanent credential has replaced it.
-The name is derived from the identifier, so it is recomputable rather than
-irrecoverable. See
-[D-4](#d-4--the-plaintext-credential-field-is-not-carried-forward) for why the value
-is created here rather than delivered by the provider, and
+is the five properties of `UserResponse` plus **two** members no other response
+carries: `oneTimeCredential`, the generated value the pool account was created with,
+and `credentialSecretName`, the name of the managed-secret entry that same value was
+published to. The response declares `Cache-Control: no-store`.
+
+`Refactoring Rationale:` the body carries the value **and** the locator, and the
+pairing is the point rather than a redundancy. The value is the only thing an
+administrator working in a browser can act on — this pool declares no email or phone
+attribute over which a reset could be delivered, no reset operation exists in this
+service, and the seed-user bootstrap runs only inside `terraform apply` — so a
+response carrying the locator alone left every runtime-created account unusable by
+the person who created it. The locator is the durable copy and the audit trail: it
+survives a response the caller lost, and it is the record that a credential was
+issued at all. `Trade-offs:` a value in a response body is a value on the path, and
+that is bought down rather than wished away — `no-store` on the response, no
+persistence in this schema, no appearance in any log (`ProvisionedIdentity` and
+`CreatedUserResponse` both override their generated rendering to withhold it), and a
+lifetime of exactly one sign-on. `Assumptions:` the value is single-use because the
+account lands in the provider's force-change state, so presenting it at
+`POST /api/v1/auth/signon` yields the `NEW_PASSWORD_REQUIRED` challenge that
+`POST /api/v1/auth/challenge` answers, and the pool issues tokens only once a
+permanent credential has replaced it.
+
+See [D-4](#d-4--the-plaintext-credential-field-is-not-carried-forward) for why the
+value is created here rather than delivered by the provider, and
 `FirstSignOnHandoverTest` for the end-to-end evidence that the value a creation
-returns is the value that account's first sign-on accepts.
+returns is the value that account's first sign-on accepts and that no line emitted
+along the way contains it.
 
 ### 8.1 Keyset pagination on the user list
 
@@ -576,7 +791,7 @@ baseline's own screen array — and one extra row is read per page so the
 next-page indicator can be set by discovering a row that does not fit, which is
 exactly how the COBOL sets it.
 
-Request parameters are `cursor` and `direction`. The response envelope is
+Request parameters are `cursor`, `direction` and `startKey`. The response envelope is
 `PageResponse<T>` from `common-lib`, and it has **four** components:
 
 | Component | Meaning |
@@ -615,6 +830,43 @@ shifts every later row by one — whereas the baseline's `STARTBR` / `READNEXT` 
 key column preserves the observable page boundaries; offset paging would change
 them, and would do so only under concurrency, which is the hardest condition in
 which to notice.
+
+**`startKey` opens a browse; the cursors continue one.** The baseline does not scan
+the page it is holding — it issues one `STARTBR ... RIDFLD(SEC-USR-ID)` at
+`app/cbl/COUSR00C.cbl` L588–L595 and positions the file **at or after** the
+identifier typed, with a blank entry seeded to `LOW-VALUES` at L219 opening at the
+start. `startKey` is that parameter: an **opening position**, not a filter, an
+offset, a page number or a sealed token. It is canonicalised the way every other
+supplied identifier in this service is — trimmed, then folded to upper case, then
+checked against the printable single-byte domain and the eight-position width — and a
+blank one is read as "open at the start", identically to its absence.
+
+`Assumptions:` the position is **inclusive** and the cursors are **exclusive**, and
+the asymmetry is the baseline's own: `STARTBR` positions at-or-after, while the
+priming read that consumes the cursor row at L289 is guarded at L288 so it does not
+run on the opening turn. So a key that exists is the first row returned, while a page
+turn does not repeat the row it moved from. `UserRepository` therefore declares a
+**second forward query** for it rather than reusing the strict one with an adjusted
+key — adjusting the key to fake inclusivity would skip an exact match on any key
+whose predecessor does not exist, which is most of them.
+
+`Assumptions:` `startKey` and `cursor` are **mutually exclusive** — supplying both is
+a `400` naming `startKey` in `fieldErrors`, never a silent precedence rule. One
+reopens a browse and the other continues one, so a request carrying both states two
+incompatible intentions, and the baseline agrees by zeroing its page ordinal at L227
+the moment a key is applied. A page opened at a position issues ordinary cursors, so
+forward and backward paging works from the new anchor exactly as it does from the
+start of the file.
+
+`Alternatives Considered:` leaving the positioning in the browser, which is what an
+earlier revision did — it retained the rows of the page already delivered that sorted
+at or after the key. Rejected because a page carries ten rows, so filtering it can
+only narrow ten to ten or fewer: an identifier on any later page produced an **empty
+table** while the operator's key was reported as honoured, and the behaviour agreed
+with the baseline only when the target happened to be on the first page. Also
+considered: paging forward from the start until the key is reached. Rejected because
+it turns one keystroke into a number of round trips that grows with the file, where
+the baseline issues a single `STARTBR`.
 
 ### 8.2 Delete requires explicit confirmation
 
@@ -908,12 +1160,12 @@ Secrets Manager, so no credential value appears in source at any point.
 > `POST /api/v1/auth/users` previously created the pool account with delivery
 > suppressed and no supplied credential, so the provider minted one internally and
 > sent it nowhere, and the account was unusable by anyone. The service now generates a
-> policy-compliant one-time value, supplies it to the pool, and publishes it to a
-> per-user Secrets Manager entry encrypted with the customer-managed key; the response
-> carries that entry's `credentialSecretName` and never the value. The pool
-> declares no email or phone attribute over which a reset could be delivered, no
-> reset operation exists in this reactor, and the seed-user bootstrap runs only
-> inside `terraform apply` — so the response was the only place the value could
+> policy-compliant one-time value, supplies it to the pool, publishes it to a
+> per-user Secrets Manager entry encrypted with the customer-managed key, and returns
+> it **once** in the creation response beside that entry's `credentialSecretName`. The
+> pool declares no email or phone attribute over which a reset could be delivered, no
+> reset operation exists in this service, and the seed-user bootstrap runs only
+> inside `terraform apply` — so the response is the only place the value can
 > reach its owner. `Assumptions:` the returned value is single-use (the account is
 > in the provider's force-change state, so it buys exactly one sign-on and must be
 > replaced through `POST /api/v1/auth/challenge`), never persisted (there is no

@@ -65,7 +65,7 @@ counts below were read from the files rather than rounded from memory.
 | `DEFINE PROGRAM` stanzas | **18** | same file |
 | `DEFINE LIBRARY` stanzas | **2** | same file |
 | `TDQUEUE` definitions | **1** (`JOBS`) | same file |
-| Programs in `app/cbl` | **31** — **12** batch `CB*`, **18** online `CO*`, **1** date utility (`CSUTLDTC`) | `app/cbl` |
+| Programs in `app/cbl` | **31** — **13** batch, **17** online, **1** date utility (`CSUTLDTC`) | `app/cbl` |
 | Programs across `app/**` | **44** — the 31 above plus **13** in the three extension trees | `app/**` |
 | Copybooks | **30** in `app/cpy`, **62** across `app/**` | `app/cpy` and the extension trees |
 | JCL jobs | **38** in `app/jcl`, **46** across `app/**`, **55** repository-wide | `app/jcl`, the extension trees, and the sibling `samples/**` tree |
@@ -99,8 +99,28 @@ argument.
 Assumptions: these counts are the decomposition's input, so the ADR states them
 as measurements with their source rather than as approximations. A boundary
 argument that rests on "roughly thirty programs" cannot be checked; one that
-rests on 12 batch, 18 online and 1 utility can be, and a reader who recounts and
+rests on 13 batch, 17 online and 1 utility can be, and a reader who recounts and
 disagrees has found a defect in this record.
+
+⚠️ Refactoring Rationale: the batch/online split read **12 batch and 18 online**, on
+the ground that a `CB*` prefix names a batch program and a `CO*` prefix names an
+online one. The prefix is a convention, not a classification, and **one program breaks
+it**: [`app/cbl/COBSWAIT.cbl`](../../app/cbl/COBSWAIT.cbl) declares
+`Type : BATCH COBOL Program` in its own header, issues **zero** `EXEC CICS` commands,
+`ACCEPT`s its wait interval `FROM SYSIN` and `CALL`s the supervisor wait service, and
+it is driven by a job step — `//WAIT EXEC PGM=COBSWAIT` at
+[`app/jcl/WAITSTEP.jcl`](../../app/jcl/WAITSTEP.jcl) **L22**. It appears in no
+`DEFINE TRANSACTION` and no `DEFINE PROGRAM` stanza of the CSD, so no terminal can
+reach it. Counting it as online overstated the online surface this decomposition has
+to place by one and understated the batch surface by one, which matters because the
+two halves are assigned to different service groups below. Trade-offs: the split is
+now stated by **behaviour** rather than by prefix, so a reader reconciling it against
+`ls app/cbl/CO*` will find 18 files and 17 online programs; the difference is this one
+program and no other, and it is named here so the arithmetic is checkable rather than
+surprising. The **18** `DEFINE TRANSACTION` and **18** `DEFINE PROGRAM` rows above are
+unaffected — `COBSWAIT` is in neither, and the eighteenth CSD program entry is the
+dangling `PROGRAM(COCRDSEC)` recorded further down this record, which has no `.cbl` at
+all.
 
 ### There is no module boundary inside the region, and that is a property of the model
 
@@ -198,7 +218,7 @@ graph TB
         REFS["reference-service<br/>schema: reference"]
         BATCH["batch-service<br/>schema: batch"]
         AUTHZ["authorization-service<br/>schema: authorization"]
-        RPT["reporting-service<br/>schema: reporting<br/>reads 7 views, no readable table"]
+        RPT["reporting-service<br/>schema: reporting<br/>reads 8 views, no readable table"]
     end
 
     CICS -.->|"business rules extracted;<br/>baseline stays byte-identical"| TGT
@@ -207,17 +227,22 @@ graph TB
     TRAN -->|reads card and account context| CARD
     ACCT -->|reads lookup codes| REFS
     BATCH -->|reads rates| REFS
+    BATCH -.->|"SELECT only — the export's card phase"| CARD
     BATCH ==>|"scoped cross-schema WRITE<br/>ledger + account only"| TRAN
     BATCH ==> ACCT
-    RPT -.->|"7 SELECT-only views"| TRAN
+    RPT -.->|"8 SELECT-only views"| TRAN
     RPT -.-> ACCT
     RPT -.-> REFS
 %% Dashed = read-only. Double arrow = the one deliberate cross-schema WRITE exception.
 %% These are the TARGET dependency edges this record decides, not a delivered-state
 %% inventory -- see the note immediately below the diagram.
-%% Every other context reads and writes only its own schema.
+%% Every context other than BATCH and RPT reads and writes only its own schema.
+%% The BATCH->CARD edge is drawn because that grant IS exercised:
+%% com.carddemo.batch.domain.Card maps card.cards for the export's card phase. An
+%% edge is drawn for a grant with a call site and withheld for one without, which is
+%% the same rule the reporting edges follow below.
 %% The reporting edges are drawn to the three schemas the eight views actually read
-%% -- ledger, account and reference. No view reads the card schema, so no edge is
+%% -- ledger, account and reference. No view reads the card schema, so no RPT edge is
 %% drawn to CARD even though the NOLOGIN owner role holds a read grant there; an
 %% edge for an unexercised grant would overstate the coupling this diagram is for.
 ```
@@ -348,7 +373,7 @@ commit and nothing here adds a new distributed transaction.
 | `reference-service` | `COTRTLIC`, `COTRTUPC`, `COBTUPDT`, `CODATE01`, `CSUTLDTC` | the `reference` schema (transaction types, categories, disclosure groups, lookup tables) |
 | `batch-service` | `CBTRN01C`, `CBTRN02C`, `CBACT04C`, `CBEXPORT`, `CBIMPORT` | the `batch` schema, plus the scoped grants described below |
 | `authorization-service` | `COPAUS0C`, `COPAUS1C`, `COPAUS2C`, `COPAUA0C`, `CBPAUP0C`, `PAUDBLOD`, `PAUDBUNL`, `DBUNLDGS` | the `authorization` schema |
-| `reporting-service` | `CORPT00C`, `CBTRN03C`, `CBSTM03A`, `CBSTM03B` | the `reporting` schema, in which its own role can read **no table** — only 7 `SELECT`-only views, all owned by a separate `NOLOGIN` role |
+| `reporting-service` | `CORPT00C`, `CBTRN03C`, `CBSTM03A`, `CBSTM03B` | the `reporting` schema, in which its own role can read **no table** — only **8** `SELECT`-only views, all owned by a separate `NOLOGIN` role |
 
 ### 2. Ownership follows data, which makes the boundary checkable
 
@@ -663,9 +688,9 @@ sections 4 and 5.
 
 | Principal | Kind | Own schema | `ledger` | `account` | `card` | `reference` | `reporting` |
 |---|---|---|---|---|---|---|---|
-| `carddemo_batch` | service, `LOGIN` | `batch`: `SELECT, INSERT, UPDATE` on all tables, sequences, `CREATE` revoked | `USAGE` + **`SELECT, INSERT, UPDATE` on all tables** + sequences + future defaults | `USAGE` + `SELECT` on all tables; `UPDATE` revoked schema-wide, then **re-granted on `account.accounts` alone** | — | `USAGE` + `SELECT` only | — |
-| `carddemo_reporting` | service, `LOGIN` | none it can read — see decision 4 | all privileges revoked, table and schema level | revoked | revoked | revoked | `USAGE` + `SELECT` on the 7 views; `CREATE` revoked; `card_grouping_key` revoked by name |
-| `carddemo_reporting_owner` | owner, **`NOLOGIN`** | owns `reporting` | `USAGE` + `SELECT` on all tables | `USAGE` + `SELECT` | `USAGE` + `SELECT` | `USAGE` + `SELECT` | owns the table and all 7 views |
+| `carddemo_batch` | service, `LOGIN` | `batch`: `SELECT, INSERT, UPDATE` on all tables, sequences, `CREATE` revoked | `USAGE` + **`SELECT, INSERT, UPDATE` on all tables** + sequences + future defaults | `USAGE` + `SELECT` on all tables; `UPDATE` revoked schema-wide, then **re-granted on `account.accounts` alone** | `USAGE` + `SELECT` only, plus a future-table default | `USAGE` + `SELECT` only, plus a future-table default | — |
+| `carddemo_reporting` | service, `LOGIN` | none it can read — see decision 4 | all privileges revoked, table and schema level | revoked | revoked | revoked | `USAGE` + `SELECT` on the 8 views; `CREATE` revoked; `card_grouping_key` revoked by name |
+| `carddemo_reporting_owner` | owner, **`NOLOGIN`** | owns `reporting` | `USAGE` + `SELECT` on all tables | `USAGE` + `SELECT` | `USAGE` + `SELECT` | `USAGE` + `SELECT` | owns the table and all 8 views |
 | `carddemo_auth`, `carddemo_account`, `carddemo_card`, `carddemo_ledger`, `carddemo_reference`, `carddemo_authorization` | service, `LOGIN` | `SELECT, INSERT, UPDATE` on all tables of its own schema, sequences, `CREATE` revoked | — | — | — | — | — |
 
 Three things follow from that table, and each of them is narrower than the sentence
@@ -684,7 +709,7 @@ Refactoring Rationale: this section previously read "The grant is narrow — two
 schemas, and write access only where a write actually occurs … every other context
 reads and writes only its own schema". Each clause was wrong in a different
 direction, which is why the matrix replaces the prose rather than trimming it.
-`carddemo_batch` reaches **three** schemas, not two — it reads `reference`
+`carddemo_batch` reaches **four** schemas, not two — it reads `card` and `reference`
 as well. Write access is **not** confined to where a write occurs: the `ledger`
 grant is `ON ALL TABLES` plus a future-table default, so it covers
 `ledger.daily_transactions`, which posting only reads. And "every other context"
@@ -693,24 +718,55 @@ A privilege claim carried as an adjective cannot be checked; a matrix naming
 principal, schema and action can be diffed against the SQL, which is what this ADR
 needs a reader to be able to do.
 
-Refactoring Rationale: the `carddemo_batch` row's `card` cell read
-`USAGE` + `SELECT` only, and this section counted the role's reach as four schemas.
-Both were reduced to three when the grant itself was removed from
-`V0__schemas_and_roles.sql`. The grant had been justified on the reading that
-pre-posting validation reads the card master, and that reading does not survive the
-baseline: `app/cbl/CBTRN01C.cbl` opens `CARD-FILE` at `:309` and closes it at
-`:417` without ever issuing a READ, its three reads being the daily feed at `:203`,
-the cross-reference at `:229` and the account at `:243` — and the cross-reference is
-`CVACT03Y`, which `batch-service` maps to `account.card_xref` under the `account`
-grant this matrix already lists. Trade-offs: an unused `SELECT` on the schema
-holding the primary account number and the card verification value is not a
-harmless surplus, so the grant went rather than the row. This also brings the matrix
-into line with the plan's data-ownership section, which scopes the cross-schema
-exception to `ledger.*` and `account.*`; a standing `card` read was the one entry
-here that had no counterpart in that specification.
+⚠️ Refactoring Rationale: the `carddemo_batch` row's `card` cell has been through two
+revisions and this is the second. It first read `USAGE` + `SELECT` on the strength of a
+claim that **pre-posting validation reads the card master**, and that claim does not
+survive the baseline: [`app/cbl/CBTRN01C.cbl`](../../app/cbl/CBTRN01C.cbl) opens
+`CARD-FILE` at **`:309`** and closes it at **`:417`** without ever issuing a `READ`, its
+three reads being the daily feed at `:203`, the cross-reference at `:229` and the
+account at `:243` — and the cross-reference is `CVACT03Y`, which `batch-service` maps
+to `account.card_xref` under the `account` grant this matrix already lists. That
+withdrawal was correct on its own terms and the cell went to `—`.
+
+**It is now `USAGE` + `SELECT` again, on an entirely different and independently
+checkable justification — the export job's card phase.**
+[`app/cbl/CBEXPORT.cbl`](../../app/cbl/CBEXPORT.cbl) **L513** reads the card master
+sequentially and **L527–L545** emit one 500-byte export record per card — card number,
+account identifier, card verification value, embossed name, expiration date and active
+status — with no write verb anywhere against that file. In the target, that phase is
+served by `com.carddemo.batch.domain.Card`, which maps `card.cards` with
+`@Table(name = "cards", schema = "card")` and is annotated `@Immutable`, so read-only
+`SELECT` is not a concession to convenience but the exact privilege the mapping needs
+and the whole of it. The grant is therefore **exercised**, which the withdrawn version
+was not — that is the substantive difference between the two revisions, and it is why
+restoring the cell is not a regression to the position the withdrawal rejected.
+
+Assumptions: the grant is paired with a future-table default —
+`ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_card_owner IN SCHEMA card GRANT SELECT ON
+TABLES TO carddemo_batch` — so a table the card context's migration creates after this
+script runs is readable without a second provisioning pass. Both statements are at
+[`data-migration/sql/V0__schemas_and_roles.sql`](../../data-migration/sql/V0__schemas_and_roles.sql)
+**L1301–L1303**, with the schema `USAGE` at **L1175**.
+
+Trade-offs: `card.cards` holds the primary account number and the card verification
+value, so a `SELECT` over it is not a harmless surplus and is not defended as one. What
+makes it acceptable is that the read is named, the privilege is read-only, the entity is
+`@Immutable`, and the export record the phase produces carries those fields by baseline
+contract — [`app/cpy/CVEXPORT.cpy`](../../app/cpy/CVEXPORT.cpy) declares them — so
+withholding the grant would not withhold the exposure, it would only move the failure
+into the nightly window. Alternatives Considered: routing the card phase through
+`card-service` over HTTP, so that `batch-service` held no `card` privilege at all.
+Rejected: it converts a sequential full-master read into a paged remote traversal inside
+a batch step, adds a synchronous dependency from a job to an online service on the
+critical path of the export, and moves the same field set across a network hop instead
+of leaving it inside one transaction — a strictly larger exposure for a narrower grant.
+
 [`CrossSchemaPrivilegeContractTest`](../../services/common-lib/src/test/java/com/carddemo/common/architecture/CrossSchemaPrivilegeContractTest.java)
-now fails the build if a schema is granted to a service role that the service's own
-`search_path` does not name, so this row cannot silently reacquire a fourth schema.
+holds this row in **both** directions: a schema granted to a service role whose own
+mapped entities do not reach it fails the build, and so does a mapped entity whose
+schema carries no grant. That is what makes the cell above a contract rather than a
+recollection, and it is why the next revision of it — in either direction — has to
+change the SQL and the entity set together or fail.
 
 Assumptions: the schema-wide `ledger` grant is deliberate and is **not** narrowed to
 the three tables posting writes. The target design fixes that shape — the plan's own
@@ -1096,7 +1152,7 @@ adjective would have skipped while going stale invisibly.
 - **Eight schemas, one owner each, and one context that can read no table.** All
   eight contexts own a schema, so the ownership rule has no exception at the schema
   level. Seven of those schemas hold the tables their context reads and writes. The
-  eighth, `reporting`, holds one table and seven `security_barrier` views over three
+  eighth, `reporting`, holds one table and **eight** `security_barrier` views over three
   source schemas — `ledger`, `account` and `reference` — and its one table is revoked
   from the reporting service role by name, so that context addresses no table
   directly. The schema list and its per-table detail are in

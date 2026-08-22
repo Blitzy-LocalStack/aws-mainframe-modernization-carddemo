@@ -10,9 +10,47 @@
 The baseline remains available and unchanged. The target trees are additive:
 `services/`, `ui/`, `data-migration/`, and `infra/`.
 
-Assumptions: commands run from the repository root after
-`. /etc/profile.d/00-carddemo-toolchain.sh`; Python commands also activate the
-repository `.venv`.
+Assumptions: every command below runs **from the repository root**. Check the toolchain first rather
+than assuming a profile script put it on `PATH`.
+
+```bash
+# WHAT: prove each tool this guide invokes resolves, and name any that does not.
+# WHY : Refactoring Rationale: this used to read `. /etc/profile.d/00-carddemo-toolchain.sh`, and no
+#       such file exists -- not under that name and not under `carddemo-toolchain.sh` either. A
+#       `.`-source of a missing file fails the shell immediately under `set -e` and, worse, is
+#       commonly written with a `|| true` that hides it, leaving a session that looks prepared and
+#       has nothing on PATH. Checking the tools directly tests the property that actually matters,
+#       and it holds however they were installed.
+# WHY : Assumptions: each name is resolved with `command -v` rather than by running it with
+#       `--version`. Resolution is the question -- a tool that resolves but is the wrong major
+#       version is reported by the version block in
+#       docs/runbooks/deploy.md, which is where that belongs.
+# WHY : Assumptions: `aws` is listed but `ruff` is not. `ruff` is a dependency of the ETL environment
+#       built under "Migrate Data" below and is invoked from it by path, so it is deliberately not
+#       expected on PATH; `aws` may come from a system package or from an environment-specific
+#       install, so it is checked here and its absence is a real prerequisite failure.
+# WHY : Assumptions: `psql` is required, not optional. It is the only client that can send the three
+#       multi-statement operator SQL files in docs/runbooks/deploy.md Step 4d -- two of them carry
+#       dollar-quoted blocks, and the Data API used everywhere else takes one statement per call.
+# WHY : Trade-offs: the check is a FUNCTION returning non-zero rather than a bare `exit 1`. It has to
+#       satisfy two callers with opposite needs: pasted into an interactive shell, `exit` would close
+#       the terminal; run as a script, printing FAIL and exiting 0 would let a pipeline continue with
+#       a missing tool. A function's return status becomes the script's exit status when it is the
+#       last command, and merely sets `$?` interactively -- so both callers get what they need.
+carddemo_check_toolchain() {
+  missing=""
+  for tool in java mvn node npm python3 terraform docker jq aws psql; do
+    command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+  done
+  if [ -z "$missing" ]; then
+    echo "OK   toolchain resolved"
+    return 0
+  fi
+  printf 'FAIL not on PATH:%s -- install or activate these before continuing\n' "$missing" >&2
+  return 1
+}
+carddemo_check_toolchain
+```
 
 ## Build
 
@@ -43,26 +81,60 @@ npm run build
 cd ..
 ```
 
+The ETL gets an environment **of its own**, and the reason is a hard conflict rather than a
+preference: `tests/requirements-test.txt` pins `cryptography==49.0.0` for the COBOL parity suite while
+`data-migration/requirements.txt` pins `cryptography==50.0.0`, and both are installed with
+`--require-hashes`. One interpreter cannot satisfy both, so installing either closure into the other's
+environment silently replaces a hash-locked pin the other depends on.
+
 ```bash
-# WHAT: validate and package the Python migration support code.
-# WHY : Assumptions: the hash-locked development manifest reproduces the CI
-#       versions of runtime, lint, and test dependencies.
-source .venv/bin/activate
-python -m pip install --require-hashes -r data-migration/requirements-dev.txt
-ruff check data-migration
-python -m compileall -q data-migration/src
-python -m pytest -v --tb=short data-migration/tests
+# WHAT: create the ETL's own environment, install its hash-locked closures, install the package, and
+#       run its gates.
+# WHY : Assumptions: `--without-pip` is required, not preferred. The interpreter on the reviewed image
+#       ships without the `ensurepip` payload, so a plain `python3 -m venv` aborts with
+#       "Command '... -m ensurepip ...' returned non-zero exit status 1" and leaves an unusable
+#       directory. Creating the environment without pip and bootstrapping it explicitly works with or
+#       without `ensurepip`.
+# WHY : Assumptions: the package install is LAST and carries `--no-build-isolation --no-deps`.
+#       `data-migration/pyproject.toml` puts no source directory on pytest's import path on purpose --
+#       the suite imports the INSTALLED distribution -- and the package is src-layout, so without this
+#       step there is no importable `carddemo_migration` and no `carddemo-migrate` script at all.
+#       `--no-build-isolation` makes the build use the backend just pinned by digest instead of
+#       resolving one from the network; `--no-deps` stops the install re-resolving a closure the two
+#       hash-locked manifests already fixed.
+# WHY : Trade-offs: `.venv` is gitignored at any depth, so this directory cannot be committed. It sits
+#       inside `data-migration/` rather than in a temporary directory so that this guide,
+#       docs/runbooks/deploy.md and docs/runbooks/data-migration.md can all name one path.
+python3 -m venv data-migration/.venv --without-pip
+curl -sSf https://bootstrap.pypa.io/get-pip.py | data-migration/.venv/bin/python -
+data-migration/.venv/bin/python -m pip install --require-hashes -r data-migration/requirements-dev.txt
+data-migration/.venv/bin/python -m pip install --require-hashes -r data-migration/requirements-build.txt
+data-migration/.venv/bin/python -m pip install --no-build-isolation --no-deps ./data-migration
+
+data-migration/.venv/bin/ruff check data-migration
+data-migration/.venv/bin/python -m compileall -q data-migration/src
+data-migration/.venv/bin/python -m pytest -v --tb=short data-migration/tests
+data-migration/.venv/bin/carddemo-migrate --help
 ```
 
 ## Deploy
 
 Follow [the deployment runbook](docs/runbooks/deploy.md). The order is:
 
-1. validate the repository and build immutable artifacts;
-2. apply `infra/bootstrap`;
-3. configure the selected environment backend;
-4. review and apply the environment plan;
-5. publish the SPA and verify service health.
+1. apply `infra/bootstrap`, then resolve the four partial-backend values it publishes;
+2. run the language gates, and export the twelve root inputs the environment declares without defaults;
+3. initialise the environment backend and apply **only** `module.ecr`, because the ten repositories
+   the images are pushed to are Terraform-managed and do not exist on a clean account;
+4. build, push and capture the digest of each of the ten images, then export the nine-entry digest map
+   the environment consumes;
+5. review and apply the full environment plan;
+6. bring the database to its cutover state, then load and verify the data;
+7. narrow the content-security policy to the resolved API origin, publish the SPA with its runtime
+   `config.json`, and verify service health.
+
+Assumptions: steps 3 and 4 are in that order and not the other way round. The registry has to exist
+before an image can be pushed to it, and it is created by Terraform rather than by hand so the full
+plan in step 5 does not discover unmanaged resources.
 
 No long-lived AWS credential belongs in a file or command. CI deployment uses
 OIDC; interactive deployment uses an approved short-lived ambient identity.
@@ -78,9 +150,32 @@ After deployment, read endpoints from the selected environment:
 ```bash
 # WHAT: display the browser and API entry points without copying account-specific values into docs.
 # WHY : Assumptions: outputs are the reviewed contract between Terraform and operators.
+# WHY : Refactoring Rationale: this read `output -raw cloudfront_domain_name` and
+#       `output -raw api_endpoint_url`, and neither output exists. `infra/envs/<env>/outputs.tf`
+#       publishes eighteen GROUPED outputs -- one aggregate per module -- and records that choice
+#       explicitly, so a scalar read fails with `Output "cloudfront_domain_name" not found` after a
+#       successful deployment, which reads as a broken deployment rather than as a wrong command.
+#       The members are `spa`.`distribution_domain_name` and `api_gateway`.`api_endpoint_url`.
+# WHY : Assumptions: read with `output -json <group>` piped through `jq -er`. `-e` makes a missing or
+#       null member exit non-zero, so a renamed member is reported here rather than printing `null`
+#       into whatever consumes it.
+# WHY : Assumptions: the API value is the stage invoke URL and is NOT what the browser client is
+#       given. Every published route key carries an `/api/v1` prefix, so the SPA's `apiBaseUrl` is
+#       this value with that prefix appended -- which docs/runbooks/deploy.md Step 6 derives and
+#       validates. Handing the bare endpoint to the SPA produces a 404 on every call.
 ENVIRONMENT=dev
-terraform -chdir="infra/envs/${ENVIRONMENT}" output -raw cloudfront_domain_name
-terraform -chdir="infra/envs/${ENVIRONMENT}" output -raw api_endpoint_url
+terraform -chdir="infra/envs/${ENVIRONMENT}" output -json spa | jq -er '.distribution_domain_name'
+terraform -chdir="infra/envs/${ENVIRONMENT}" output -json api_gateway | jq -er '.api_endpoint_url'
+```
+
+```bash
+# WHAT: read the two values the SPA publication step needs, from the aggregate that carries both.
+# WHY : Assumptions: `spa_publication` exists precisely so a publication step reads one output rather
+#       than three, and it spells the distribution member `spa_distribution_id` -- not
+#       `cloudfront_distribution_id`. docs/runbooks/deploy.md Step 6 owns the publication itself; this
+#       is here so the values can be inspected without opening it.
+terraform -chdir="infra/envs/${ENVIRONMENT}" output -json spa_publication \
+  | jq -er '{bucket: .spa_bucket_name, distribution: .spa_distribution_id}'
 ```
 
 Operate the nightly and ad-hoc workflows through
@@ -134,14 +229,28 @@ extracts it reads are the ones the runbook's `aws s3 sync` publishes under the
 dataset bucket's source-extract prefix; nothing is mounted and no filesystem is
 provisioned for them.
 
-**One step sits between the last load and enabling writes: `reconcile-sequences`.**
+**Two steps sit between the last load and using the system: `reconcile-sequences` and
+`refresh-card-identity`.** Both close the same class of hazard — a derived value
+positioned by a migration that ran before the data existed — and each is a runbook step
+of its own.
+
 `ledger.transaction_id_seq` — the allocator the interactive transaction-add and
 bill-payment paths draw from — has its starting position derived by its own Flyway
 migration from the rows `ledger.transactions` held when that migration ran, which on
 a cutover is none. Once the extract is loaded the allocator points into an occupied
-range, so the first interactive write would fail on the primary key. The command
+range, so the first interactive write would fail on the primary key. `reconcile-sequences`
 advances it past every loaded identifier, only ever forward, and is a no-op on a
-deployment whose ledger was never loaded. The runbook states it as its own step.
+deployment whose ledger was never loaded.
+
+`reporting.card_identity` — the per-card identity relation every card-bearing reporting
+projection joins, and what makes a per-card statement read an indexed one — is created
+and backfilled by `data-migration/sql/V1__reporting_views.sql`, which on a cutover also
+runs before the cross-reference is loaded. `refresh-card-identity` reconciles it with
+`account.card_xref`, and it has to run before any statement or report run. Its omission
+is the one failure in the cutover that reports nothing at all: a card absent from the
+relation is absent from `reporting.v_card_xref`, so the statement run simply produces no
+document for that cardholder and completes normally. The command is a delta insert plus a
+delta delete, so a repeat run writes nothing.
 
 Three conditions still gate a cutover, and the runbook's cutover-gate section numbers
 each. **One:** the load must have resolved the keys of the environment the application
@@ -191,11 +300,19 @@ Run the target-stack gates:
 # WHAT: execute the Java, UI, Python, and Terraform static validation suites.
 # WHY : Assumptions: each package has a language-specific gate, while the
 #       combined run detects cross-package drift before review.
+# WHY : Assumptions: the two Python gates run from `data-migration/.venv`, built under "Build"
+#       above, and NOT from the repository `.venv`. The repository environment belongs to the COBOL
+#       parity suite invoked further down this section; it holds a different `cryptography` pin and
+#       ships no `ruff`, so `ruff check` from it fails as "No such file or directory" -- which reads
+#       as a missing tool rather than as the wrong environment.
+# WHY : Assumptions: the Lambda archives are built before the Terraform loop. Both `validate` and
+#       `plan` evaluate `filebase64sha256` over the three archives, which are build output rather
+#       than tracked files, so a fresh checkout fails `validate` on a path it cannot read.
 mvn -B -f services/pom.xml clean verify
 (cd ui && npm run typecheck && npm run lint && npm test && npm run build)
-source .venv/bin/activate
-ruff check data-migration
-python -m pytest -v --tb=short data-migration/tests
+data-migration/.venv/bin/ruff check data-migration
+data-migration/.venv/bin/python -m pytest -v --tb=short data-migration/tests
+python3 infra/lambda/build_packages.py
 terraform fmt -check -recursive infra/
 for root in infra/bootstrap infra/envs/dev infra/envs/prod; do
   terraform -chdir="$root" init -backend=false -lockfile=readonly -input=false

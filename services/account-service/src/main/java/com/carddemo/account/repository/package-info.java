@@ -4,8 +4,15 @@
  *
  * <p>Every path by which the reference system reaches an account, a customer or a card
  * cross-reference arrives here as a typed method on an interface. The four rulings below are stated once
- * in this descriptor so that a member interface can cite them rather than re-argue them, which is why two
- * of the three interfaces declare no method of their own at all beyond what they inherit.</p>
+ * in this descriptor so that a member interface can cite them rather than re-argue them.</p>
+ *
+ * <p>Refactoring Rationale: that sentence used to end "which is why two of the three interfaces declare
+ * no method of their own at all beyond what they inherit", and no interface here is in that state:
+ * {@code AccountRepository} and {@code CustomerRepository} each declare their own derived keyset reads,
+ * and {@code CardXrefRepository} declares five reads and inherits nothing at all. The claim is withdrawn
+ * rather than recounted, because a count of methods is not what the rulings are for -- they exist so that
+ * each interface can cite one argument instead of restating it, which holds however many members it
+ * declares.</p>
  *
  * <h2>The three interfaces</h2>
  *
@@ -187,9 +194,15 @@
  *
  * <h2>Ruling four: no table name is qualified here</h2>
  *
- * <p>Assumptions: no member of this package qualifies a table name, and no member declares query text
- * in which it could. Every read is either inherited from the Spring Data interface or derived from a
- * method name, and both resolve against whatever search path the connection already carries.
+ * <p>Assumptions: no member of this package qualifies a table name. Members that declare query text DO
+ * exist -- {@code CardXrefRepository} carries three JPQL reads and {@code InquiryReplyLedger} declares
+ * native statements -- and every one of them names an entity or an unqualified relation and never a
+ * schema. Whether derived from a method name or written out, each resolves against whatever search path
+ * the connection already carries.
+ * Refactoring Rationale: this ruling used to add "and no member declares query text in which it could",
+ * asserting that every read is inherited or derived. That was false when written and the ruling never
+ * needed it: what matters is that no query text here carries a schema prefix, which a reader can check by
+ * reading the query text, whereas "there is no query text" invited a reader to stop looking.
  * {@code com.carddemo.account.config.DataSourceConfig} pins that search path on every pooled
  * connection and verifies the pin, so it is the single owner of the question; restating its answer here
  * would give one setting two definitions that could drift apart, and the drift would surface as a

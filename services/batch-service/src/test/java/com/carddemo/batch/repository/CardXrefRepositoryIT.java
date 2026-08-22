@@ -84,18 +84,32 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * {@code findFirstByAccountIdOrderByCardNumAsc}, and this class is where the difference is demonstrated
  * rather than asserted in prose.</p>
  *
- * <h2>The multi-card fixture is CONSTRUCTED, and no golden pins it</h2>
+ * <h2>The multi-card fixture is CONSTRUCTED, and no vector available here supplies it</h2>
  *
  * <p>Assumptions: the one-account-to-many-cards case that {@code app/jcl/XREFFILE.jcl:75} explicitly
- * ADMITS does not occur anywhere in the repository's data, so this class builds it. That was measured
- * rather than assumed: {@code app/data/ASCII/cardxref.txt} holds 50 rows, and grouping the account
- * identifier at offset 25 for 11 bytes yields 50 distinct values with a count of exactly one for every
- * one of them. The two parity fixtures agree --
- * {@code tests/fixtures/interest/happy_path/cardxref.txt} holds two rows under two different accounts
- * and each {@code tests/fixtures/posting/} cross-reference fixture holds a single row. <b>There is no
- * golden master and no fixture for a multi-card account anywhere in this repository</b>, and a reader
- * looking for the vector that pins the determinism case below will not find one. The citation carried
- * instead is the declaration that admits the case.</p>
+ * ADMITS occurs in none of the data this class can draw on, so this class builds it. That was measured
+ * rather than assumed, across all three bodies of data available to it. The baseline seed
+ * {@code app/data/ASCII/cardxref.txt} holds 50 rows, and grouping the account identifier at offset 25
+ * for 11 bytes yields 50 distinct values with a count of exactly one for every one of them. The parity
+ * vectors under {@code tests/fixtures/} contribute eighteen cross-reference files and not one of them
+ * maps an account to two cards -- the largest hold five rows under five accounts, the three interest
+ * scenarios hold two rows under two accounts, and every posting and preflight scenario holds a single
+ * row. This module's OWN test classpath mirrors sixteen of those files under
+ * {@code src/test/resources/fixtures/} and is one-to-one in every one of them. And
+ * {@code tests/golden/} carries no cross-reference expectation at all, so <b>nothing pins the
+ * determinism case below</b>, whatever data it were arranged from. The citation carried instead is the
+ * declaration that admits the case.</p>
+ *
+ * <p>Refactoring Rationale: this section claimed there was "no golden master and no fixture for a
+ * multi-card account anywhere in this repository", and that sweep is no longer true --
+ * {@code services/reporting-service/src/test/resources/fixtures/xreffile.txt} holds 88 rows of which
+ * 84 are the cards of one account, arranged for the card-ordered statement view that module owns. It
+ * is not on this module's test classpath and it is not a by-account vector: a statement fixture pins
+ * the rows a card walk emits, not which card a by-account read is required to pick. So the reason for
+ * constructing the arrangement here is unchanged, and the claim is NARROWED to what is measured rather
+ * than deleted -- a reader still has to know the arrangement is deliberate. What is dropped is the
+ * repository-wide sweep, which asserted something about files this class never consults and which the
+ * first multi-card fixture added anywhere else falsified.</p>
  *
  * <p>Assumptions: that absence is the entire reason this proof is worth writing, rather than a weakness
  * in it. A naive unordered, unbounded by-account finder passes against every row that ships and against
@@ -129,7 +143,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * misses, belong to {@code PostingValidationServiceTest}; this class proves the lookup and says nothing
  * about the reject a miss produces. The interest job's control-break structure and its business-date
  * parameter belong to {@code CalculateInterestJobTest}. ALL interest arithmetic belongs to
- * {@code InterestCalculationServiceTest}, including the rounding mode the divide truncates with, and no
+ * {@code InterestCalculationServiceTest}, including the {@code HALF_UP} mode the divide reduces with, and no
  * arithmetic of any kind appears below.</p>
  *
  * <p>Assumptions: the secondary index this class reads through is neither created nor asserted here.
@@ -475,12 +489,15 @@ class CardXrefRepositoryIT {
      * separate data definitions, the base cluster at {@code app/jcl/INTCALC.jcl:29-30} and the
      * alternate-index path at {@code app/jcl/INTCALC.jcl:31-32}.</p>
      *
-     * <p>Assumptions: the four-row arrangement is CONSTRUCTED and no fixture or golden supplies it. The
-     * shipped seed is strictly one card per account -- 50 rows and 50 distinct account identifiers in
-     * {@code app/data/ASCII/cardxref.txt} -- and both parity fixtures are one-to-one as well, so the
-     * multiplicity that {@code app/jcl/XREFFILE.jcl:75} admits appears in no data in this repository. A
-     * reader should not go looking for the vector behind this case; the declaration that permits the
-     * case IS the citation.</p>
+     * <p>Assumptions: the four-row arrangement is CONSTRUCTED and nothing available to this class
+     * supplies it. The shipped seed is strictly one card per account -- 50 rows and 50 distinct account
+     * identifiers in {@code app/data/ASCII/cardxref.txt} -- every cross-reference vector under
+     * {@code tests/fixtures/} is one-to-one, including the sixteen this module mirrors onto its own test
+     * classpath, and {@code tests/golden/} holds no cross-reference expectation to pin this case with at
+     * all. So the multiplicity that {@code app/jcl/XREFFILE.jcl:75} admits is arranged here rather than
+     * loaded. A reader should not go looking for the vector behind this case; the declaration that
+     * permits the case IS the citation. The class-level section above records the one multi-card
+     * arrangement that does exist elsewhere in the repository, and why it cannot serve here.</p>
      *
      * <p>Alternatives Considered: arranging the rows in card-number order, which is the arrangement a
      * fixture builder reaches for first. Rejected because it cannot distinguish the query's ordering

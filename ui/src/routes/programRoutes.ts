@@ -19,54 +19,53 @@
  * route is a target-side decision with no line to cite. Mixing one into the catalog would make it
  * impossible to tell transcription from design.
  *
- * Assumptions: this map is DELIBERATELY partial, and the partiality is the delivery boundary rather
- * than an oversight. It names only the programs whose screens this delivery carries. An option whose
- * program is absent here is answered with the baseline's own not-installed sentence, which is exactly
- * what `app/cbl/COMEN01C.cbl` L147-L168 does for a program the CICS region does not hold: it
- * performs `EXEC CICS INQUIRE PROGRAM(...)` and, when the answer is not `NORMAL`, composes
- * `'This option ' <name> ' is not installed...'`. Reusing that sentence means the boundary is stated
- * in the operator's own vocabulary rather than appearing as a broken navigation.
- */
-
-import { ADMIN_MENU_ROUTE, MAIN_MENU_ROUTE } from './navigation';
-
-/**
- * Route the user-maintenance screen is reached at with no user selected.
+ * Assumptions: an option whose program is absent from this map is answered with the baseline's own
+ * not-installed sentence, which is exactly what `app/cbl/COMEN01C.cbl` L147-L168 does for a program
+ * the CICS region does not hold: it performs `EXEC CICS INQUIRE PROGRAM(...)` and, when the answer is
+ * not `NORMAL`, composes `'This option ' <name> ' is not installed...'`. Reusing that sentence means
+ * a delivery boundary is stated in the operator's own vocabulary rather than appearing as a broken
+ * navigation.
  *
- * Assumptions: the identifier segment is OMITTED rather than left empty. `app/cbl/COUSR02C.cbl`
- * L99-L104 tests its selection carrier against `SPACES AND LOW-VALUES` before using it and otherwise
- * leaves the screen waiting for a typed identifier, so arriving with no selection is a first-class
- * baseline arrival and not a degenerate one. `ui/src/router.tsx` declares the path with an optional
- * segment so both arrivals match one declaration.
+ * ⚠️ Refactoring Rationale: that sentence no longer answers any MAIN-MENU option, and saying so is the
+ * point of this paragraph. The map was described as "deliberately partial" while it omitted programs
+ * whose screens this delivery does carry, so the not-installed sentence was reporting a delivered
+ * workflow as absent -- which is the one thing it must never do, because an operator cannot tell that
+ * answer from a screen nobody wrote. Every one of the eleven programs `app/cpy/COMEN02Y.cpy` names now
+ * resolves to a route, and the two that reach a screen only through a selector enter the browse where
+ * the selector is acquired rather than reporting themselves missing. The arm is retained as reference
+ * parity for a program name this map does not carry -- `app/cbl/COMEN01C.cbl` evaluates its
+ * `INQUIRE PROGRAM` on every dispatch -- and it is now unreachable from the live option table, exactly
+ * as the transcribed `DUMMY`-prefix and administrator-only arms beside it are.
  */
-export const USER_UPDATE_UNSELECTED_ROUTE = '/users/edit';
 
-/** Route the account-enquiry screen is reached at. */
-export const ACCOUNT_VIEW_ROUTE = '/account/view';
-
-/** Route the account-maintenance screen is reached at. */
-export const ACCOUNT_UPDATE_ROUTE = '/account/update';
-
-/** Route the card browse is reached at, which is also where a card number is entered. */
-export const CARD_LIST_ROUTE = '/cards';
-
-/** Route the transaction-capture screen is reached at. */
-export const TRANSACTION_ADD_ROUTE = '/transactions/new';
-
-/** Route the pending-authorization summary is reached at. */
-export const AUTH_SUMMARY_ROUTE = '/authorizations';
-
-/** Route the transaction-type browse is reached at. */
-export const REF_TYPE_LIST_ROUTE = '/reference/transaction-types';
-
-/** Route the bill payment screen is reached at, which main-menu option 10 transfers to. */
-export const BILL_PAY_ROUTE = '/billpay';
-
-/** Route the transaction browse is reached at, which main-menu option 6 transfers to. */
-export const TRANSACTION_LIST_ROUTE = '/transactions';
-
-/** Route the transaction-report submission screen is reached at, which option 9 transfers to. */
-export const REPORTS_ROUTE = '/reports';
+/*
+ * ⚠️ Refactoring Rationale: every route below is IMPORTED from `ui/src/routes/navigation.ts`, where
+ * ten of them were declared as literals in this module. That module already owned the two menu routes
+ * for the reason its own docstring gives -- a second declaration is a second place for a path to drift
+ * -- and the same reason applies to the rest of them with one addition: the origin census that decides
+ * which route a screen's exit key may return to lives there, so a path declared here could be
+ * navigated to and simultaneously refused as an origin. `/users` was exactly that: this module sent
+ * the two user-maintenance options to it while the census could not see it, so the deletion screen's
+ * exit returned an administrator to the administrative menu instead of to the browse they came from.
+ * Importing keeps this module what its title says it is -- the program-to-route MAP -- and leaves the
+ * paths themselves in one place.
+ */
+import {
+  ACCOUNT_UPDATE_ROUTE,
+  ACCOUNT_VIEW_ROUTE,
+  ADMIN_MENU_ROUTE,
+  AUTHORIZATION_SUMMARY_ROUTE,
+  BILL_PAY_ROUTE,
+  CARD_LIST_ROUTE,
+  MAIN_MENU_ROUTE,
+  REFERENCE_TYPE_ADD_ROUTE,
+  REFERENCE_TYPE_LIST_ROUTE,
+  REPORTS_ROUTE,
+  TRANSACTION_ADD_ROUTE,
+  TRANSACTION_LIST_ROUTE,
+  USER_ADD_ROUTE,
+  USER_LIST_ROUTE,
+} from './navigation';
 
 /**
  * Reference program name to the browser route this delivery reaches it at.
@@ -80,9 +79,15 @@ export const REPORTS_ROUTE = '/reports';
  * returns. Sending these two options there puts the operator at the control that opens the card they
  * want, which is what the baseline's own empty detail screen did with its account and card fields.
  *
- * Assumptions: `COUSR02C` resolves to the unselected form of its route for the reason recorded on
- * {@link USER_UPDATE_UNSELECTED_ROUTE} — an administrator reaching it from the menu has selected
- * nobody, so the screen prompts for an identifier exactly as the reference does.
+ * ⚠️ Refactoring Rationale: `COUSR02C` resolves to the user BROWSE, where it resolved to a
+ * selector-free `/users/edit`. That path was a twenty-second screen route -- AAP section 0.4.1.4
+ * enumerates the twenty-one this migration delivers and names `/users/:id/edit` as the only
+ * user-update route -- so it existed only to give a menu option a destination. The browse resolves it
+ * for the same reason the two card options resolve to the card browse: the screen is addressable only
+ * with a user identifier, a menu option carries none, and the browse is the turn that acquires one.
+ * `ui/src/screens/userList/index.tsx` navigates to `/users/:id/edit` for a row marked `U`, which is
+ * what `app/cbl/COUSR00C.cbl` L187-L209 does when it transfers to `COUSR02C` with the selected
+ * identifier.
  */
 export const PROGRAM_ROUTES: Readonly<Record<string, string>> = Object.freeze({
   COACTVWC: ACCOUNT_VIEW_ROUTE,
@@ -98,16 +103,22 @@ export const PROGRAM_ROUTES: Readonly<Record<string, string>> = Object.freeze({
    *       answered the baseline's not-installed sentence, which was correct for a screen that did not
    *       exist and became wrong the moment one did: it would refuse an operator two delivered flows the
    *       acceptance criteria name among those that must work end to end.
-   * WHY : Assumptions: `COTRN01C` is deliberately NOT registered alongside them even though
-   *       `ui/src/router.tsx` mounts its screen. Its route is `/transactions/:id`, which cannot be
-   *       navigated to without a transaction identifier, and a menu option carries no selection -- the
-   *       reference's own first turn of that program sends an empty map and waits for a key
-   *       (`app/cbl/COTRN01C.cbl` L109). Registering a pattern here would send an operator to a literal
-   *       `:id` segment, so main-menu option 7 keeps the not-installed sentence, which is the delivery
-   *       boundary this map's docstring describes rather than a fault. `COUSR03C` is absent from the
-   *       administrative menu's own map for exactly the same reason.
+   * WHY : ⚠️ Refactoring Rationale: `COTRN01C` is registered to the BROWSE, where it was previously left
+   *       out of this map so that main-menu option 7 answered the not-installed sentence. That sentence
+   *       was false: the transaction-view screen is mounted at `/transactions/:id` and the operation it
+   *       reads, `GET /api/v1/transactions/{transactionId}`, is delivered, so the option was reporting a
+   *       workflow the delivery carries as one it does not. The previous rationale was right that a menu
+   *       option carries no identifier and that navigating to a literal `:id` segment would be worse
+   *       than the sentence -- and wrong that those were the only two options. The browse is the
+   *       identifier-acquisition turn: `ui/src/screens/transactionList/index.tsx` marks a row `S` and
+   *       navigates to `/transactions/:id` with the identifier that row carries, which is what
+   *       `app/cbl/COTRN00C.cbl` L183-L195 does when it transfers to `COTRN01C` with the selected
+   *       identifier. Option 7 therefore enters the same browse option 6 enters, which is one
+   *       destination shared by two options -- the identical trade already accepted for the three card
+   *       options above, and recorded as `D-CARD-SELECTOR` there.
    */
   COTRN00C: TRANSACTION_LIST_ROUTE,
+  COTRN01C: TRANSACTION_LIST_ROUTE,
   CORPT00C: REPORTS_ROUTE,
   /*
    * WHY : Refactoring Rationale: this entry names a route where the program was previously ABSENT from
@@ -123,9 +134,50 @@ export const PROGRAM_ROUTES: Readonly<Record<string, string>> = Object.freeze({
    *       disagree about which screens the delivery carries.
    */
   COBIL00C: BILL_PAY_ROUTE,
-  COPAUS0C: AUTH_SUMMARY_ROUTE,
-  COTRTLIC: REF_TYPE_LIST_ROUTE,
-  COUSR02C: USER_UPDATE_UNSELECTED_ROUTE,
+  COPAUS0C: AUTHORIZATION_SUMMARY_ROUTE,
+  COTRTLIC: REFERENCE_TYPE_LIST_ROUTE,
+  COUSR02C: USER_LIST_ROUTE,
+  /*
+   * WHY : Refactoring Rationale: the three administrative programs below are registered here because
+   *       `ui/src/router.tsx` mounts each of them at a path that needs no selection -- `COUSR00C` at
+   *       `/users` and `COUSR01C` at `/users/new`, both from `app/cpy/COADM02Y.cpy` L26-L34, and
+   *       `COTRTUPC` at the add sentinel of its dynamic route, option 6 of the same copybook. They
+   *       were resolvable only through the administrative menu's own hand-written copy of this
+   *       mapping, so `routeForProgram` answered `null` for a screen the delivery carries and the
+   *       copy answered a route: two tables disagreeing about the delivery boundary, which is the
+   *       drift that made the copy a finding.
+   * WHY : Assumptions: `COTRTUPC` resolves to the CONCRETE add path rather than to the dynamic
+   *       pattern its screen is mounted under, for the reason recorded on {@link REFERENCE_TYPE_ADD_ROUTE}
+   *       -- an option carries no type code, and the sentinel segment is the arrival the screen
+   *       treats as an add.
+   */
+  COUSR00C: USER_LIST_ROUTE,
+  COUSR01C: USER_ADD_ROUTE,
+  COTRTUPC: REFERENCE_TYPE_ADD_ROUTE,
+  /*
+   * WHY : ⚠️ Refactoring Rationale: `COUSR03C` resolves to the user BROWSE where it was ABSENT from
+   *       this map, and the absence made administrative option 4 answer the not-installed sentence for
+   *       a screen this delivery carries. That sentence is the baseline's answer for a program the
+   *       region cannot LOAD (`app/cbl/COADM01C.cbl` L141-L157 for a `DUMMY` target and its `PGMIDERR`
+   *       handler at L270-L283 for a load failure), so spending it on a mounted screen reported a
+   *       delivery gap that does not exist -- `ui/src/router.tsx` mounts user deletion at
+   *       `/users/:id/delete`. AAP section 0.1.3.1 keeps the reachability graph of the eighteen
+   *       transactions, and an administrator has no other way in: the session is memory-only, so any
+   *       hard load of an administrative route bounces to sign-on.
+   * WHY : Assumptions: it resolves to the browse for the SAME reason `COUSR02C` and `COTRN01C` do
+   *       above, which makes all three one rule rather than three workarounds -- the screen is
+   *       addressed only per record and a menu option carries no selection, which is exactly the state
+   *       the reference's own first turn paints. `app/cbl/COUSR03C.cbl` L99-L104 pre-fills the
+   *       identifier only when its selection carrier arrives non-blank and otherwise leaves the screen
+   *       waiting for a typed key, and the browse is the reference's own caller for it:
+   *       `app/cbl/COUSR00C.cbl` L192-L207 transfers there naming itself in `CDEMO-FROM-PROGRAM`, so
+   *       the screen's PF3 returns to the list it was selected from.
+   * WHY : Alternatives Considered: a placeholder identifier such as `/users/0/delete`, which would have
+   *       kept one uniform parameterised shape per option. Rejected because it asks the receiving
+   *       screen to read a record the operator never selected, and on this option that record would
+   *       arrive under a live delete trigger.
+   */
+  COUSR03C: USER_LIST_ROUTE,
 });
 
 /**

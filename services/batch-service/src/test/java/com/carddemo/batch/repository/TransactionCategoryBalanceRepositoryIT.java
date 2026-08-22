@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.carddemo.batch.domain.TransactionCategoryBalance;
 import com.carddemo.batch.domain.TransactionCategoryBalance.TransactionCategoryBalanceId;
+import com.carddemo.batch.service.CategoryBalanceService;
 import com.carddemo.common.money.Money;
 import jakarta.persistence.EntityManager;
 import java.math.BigDecimal;
@@ -22,6 +23,7 @@ import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.persistence.autoconfigure.EntityScan;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.annotation.Bean;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
@@ -59,16 +61,40 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  *   <li><b>The keyed read and the two additive arms.</b> {@code app/cbl/CBTRN02C.cbl:467} opens the
  *       paragraph, {@code :481} accepts a not-found status alongside success, {@code :495} branches on
  *       the result, and the arms at {@code :503-524} and {@code :526-542} both ADD the posted amount --
- *       differing only in an initialisation and in write against rewrite.</li>
+ *       differing only in an initialisation and in write against rewrite. Both arms are reached by
+ *       CALLING {@link CategoryBalanceService#accumulate}, which is the production member the posting
+ *       job reaches them through, so the branch that selects between them is evaluated by production
+ *       code against a real table rather than chosen by the case.</li>
  * </ul>
+ *
+ * <p>Refactoring Rationale: those two arms used to be performed by two private helpers in this file
+ * that opened a transaction, applied the addition and saved the row themselves. Every assertion below
+ * passed, and none of them could fail for the reason that matters: a production service that ASSIGNED
+ * the posted amount instead of adding it, or that saved the wrong instance, or whose arm-selecting read
+ * matched the wrong row, was never executed by this class at all. The helpers agreed with themselves.
+ * They are gone, and the cases now invoke the production service against the production repository, so
+ * the arithmetic, the arm selection and the save are all the ones the nightly job performs.</p>
+ *
+ * <p>Trade-offs: driving the production service means this class boots one more bean than a pure
+ * repository test needs, and a defect in the service now fails cases in two classes at once -- here and
+ * in {@code CategoryBalanceServiceTest}. That duplication is accepted because the two are asking
+ * different questions: the unit test asks whether the arms compute the right figure over a substitute,
+ * and these cases ask whether the figure the production arms compute SURVIVES a real column at its
+ * declared precision and scale, which no substitute can answer. What is not accepted is a third answer
+ * computed by this file itself, which is what was here before.</p>
  *
  * <h2>What this class does NOT assert, and who does</h2>
  *
- * <p>{@code PostingUnitOfWorkIT} beside this file is the SOLE owner of the three-write atomicity proof
- * -- commit-all-or-none and rollback-all-or-none across {@code ledger} and {@code account} in one
- * transaction, in the baseline order {@code app/cbl/CBTRN02C.cbl:440-442} establishes, with no saga, no
- * two-phase commit and no compensating reversal. The category-balance write is the FIRST of those three,
- * so this class is a natural place to reach for a second atomicity test; it deliberately carries none.</p>
+ * <p>The atomicity proof belongs to two siblings and to neither of them by halves, and NOT to this
+ * class. {@code PostingUnitOfWorkIT} beside this file owns commit-all-or-none and rollback-all-or-none
+ * across {@code ledger} and {@code account} in one transaction, in the baseline order
+ * {@code app/cbl/CBTRN02C.cbl:440-442} establishes and refused at the LAST of those writes, with no
+ * saga, no two-phase commit and no compensating reversal. {@code AccountRepositoryIT} owns the same
+ * property over the PRODUCTION per-record unit, where the accepted record's four durable effects --
+ * this table, the account, the posted row and the feed watermark -- are asserted invisible to another
+ * session until the commit, and a refusal at each write position is shown to leave nothing behind. The
+ * category-balance write is the FIRST write in both, so this class is a natural place to reach for a
+ * third atomicity test; it deliberately carries none.</p>
  *
  * <p>Trade-offs: citing that owner rather than re-proving atomicity here accepts that a reader meets the
  * category-balance table in two files. The alternative -- a rollback case here as well -- would put one
@@ -294,6 +320,24 @@ class TransactionCategoryBalanceRepositoryIT {
     /** The interface under test, injected as the production repository rather than reconstructed. */
     @Autowired
     private TransactionCategoryBalanceRepository repository;
+
+    /**
+     * The production service whose two arms every accumulation case below goes through.
+     *
+     * <p>Assumptions: it is the REAL {@link CategoryBalanceService} over the real repository above,
+     * constructed by this class's context exactly as the posting job's context constructs it, and it is
+     * never stubbed. That is the whole point of injecting it: the arm selection at
+     * {@code app/cbl/CBTRN02C.cbl:495}, the initialisation at {@code :504} and the two unconditional
+     * additions at {@code :508} and {@code :527} are then performed by the code the nightly run
+     * performs them with, so a defect in any of them fails a case here.</p>
+     *
+     * <p>Assumptions: the service declares no transaction of its own, so every call below is wrapped in
+     * this class's {@link #transactionTemplate}. That mirrors production, where the per-record unit of
+     * work is called inside the boundary the tasklet step opens, and it is what lets a case flush and
+     * clear afterwards so the read-back is a genuine select rather than a first-level cache hit.</p>
+     */
+    @Autowired
+    private CategoryBalanceService accumulation;
 
     /** The persistence context, flushed and cleared so a read-back is a real select. */
     @Autowired
@@ -606,8 +650,9 @@ class TransactionCategoryBalanceRepositoryIT {
     //     app/cbl/CBTRN02C.cbl:504 is load-bearing: the failed READ leaves the previous iteration's
     //     bytes in the group item, so without it the ADD at :508 would accumulate onto a stale balance
     //     carried over from another key. CategoryBalanceServiceTest owns that reasoning at the service
-    //     layer; what is asserted here is only the observable database outcome, which is that the
-    //     stored balance equals the posted amount and not a penny more.
+    //     layer; what is asserted here is the observable database outcome of the PRODUCTION arm -- that
+    //     the arm reported is the create arm and that the stored balance equals the posted amount and
+    //     not a penny more.
     @Test
     @DisplayName("the create arm stores exactly the posted amount")
     void theCreateArmStoresExactlyThePostedAmount() {
@@ -618,8 +663,17 @@ class TransactionCategoryBalanceRepositoryIT {
                         + " create arm at app/cbl/CBTRN02C.cbl:495")
                 .isEmpty();
 
-        this.createArm(key, Money.of(POSTED_AMOUNT));
+        CategoryBalanceService.Outcome outcome =
+                this.accumulateThroughProduction(key, Money.of(POSTED_AMOUNT));
 
+        assertThat(outcome.arm())
+                .as("the arm the production service reports for a key no row occupied, which the"
+                        + " committed vector tests/fixtures/posting/zero_balance/tcatbal.txt arranges")
+                .isEqualTo(CategoryBalanceService.Arm.CREATED);
+        assertThat(outcome.balance())
+                .as("the balance the production service returned, which its caller logs and which"
+                        + " must agree with what the column then holds")
+                .isEqualByComparingTo(new BigDecimal(POSTED_AMOUNT));
         this.assertBalanceIs(key, POSTED_AMOUNT);
     }
 
@@ -643,12 +697,22 @@ class TransactionCategoryBalanceRepositoryIT {
         TransactionCategoryBalanceId key = keyOf(ACCOUNT_ID, TYPE_CD, CATEGORY_CD);
         this.insertRow(key, OPENING_BALANCE);
 
-        TransactionCategoryBalance existing = this.read(key)
-                .orElseThrow(() -> new AssertionError(
-                        "the arranged row was not readable under " + maskedLabel(key)));
+        assertThat(this.read(key))
+                .as("the arm-selecting read, occupied here, which is what sends the production"
+                        + " service down the update arm at app/cbl/CBTRN02C.cbl:495")
+                .isPresent();
 
-        this.updateArm(existing, Money.of(POSTED_AMOUNT));
+        CategoryBalanceService.Outcome outcome =
+                this.accumulateThroughProduction(key, Money.of(POSTED_AMOUNT));
 
+        assertThat(outcome.arm())
+                .as("the arm the production service reports for an occupied key, which the committed"
+                        + " vector tests/fixtures/posting/happy_path/tcatbal.txt arranges")
+                .isEqualTo(CategoryBalanceService.Arm.UPDATED);
+        assertThat(outcome.balance())
+                .as("the balance the production service returned, which must be the golden figure and"
+                        + " not the posted amount alone")
+                .isEqualByComparingTo(new BigDecimal(ACCUMULATED_BALANCE));
         this.assertBalanceIs(key, ACCUMULATED_BALANCE);
         assertThat(this.rowCount())
                 .as("rows present afterwards; the update arm rewrites the row it read rather than"
@@ -674,8 +738,16 @@ class TransactionCategoryBalanceRepositoryIT {
         TransactionCategoryBalanceId key = keyOf(ACCOUNT_ID, TYPE_CD, CATEGORY_CD);
         this.insertRow(key, OPENING_BALANCE);
 
-        this.updateArm(this.requireRow(key), Money.of(POSTED_AMOUNT));
-        this.updateArm(this.requireRow(key), Money.of(SECOND_POSTED_AMOUNT));
+        CategoryBalanceService.Outcome first =
+                this.accumulateThroughProduction(key, Money.of(POSTED_AMOUNT));
+        CategoryBalanceService.Outcome second =
+                this.accumulateThroughProduction(key, Money.of(SECOND_POSTED_AMOUNT));
+
+        assertThat(List.of(first.arm(), second.arm()))
+                .as("the arms the production service reported; both applications found the row"
+                        + " occupied, so neither may report the create arm")
+                .containsExactly(CategoryBalanceService.Arm.UPDATED,
+                        CategoryBalanceService.Arm.UPDATED);
 
         BigDecimal bothApplied = Money.of(OPENING_BALANCE)
                 .plus(Money.of(POSTED_AMOUNT))
@@ -713,9 +785,15 @@ class TransactionCategoryBalanceRepositoryIT {
         TransactionCategoryBalanceId key = keyOf(ACCOUNT_ID, TYPE_CD, CATEGORY_CD);
         this.insertRow(key, OPENING_BALANCE);
 
-        this.updateArm(this.requireRow(key), Money.of(NEGATIVE_AMOUNT));
+        CategoryBalanceService.Outcome outcome =
+                this.accumulateThroughProduction(key, Money.of(NEGATIVE_AMOUNT));
 
         BigDecimal expected = Money.of(OPENING_BALANCE).plus(Money.of(NEGATIVE_AMOUNT)).amount();
+
+        assertThat(outcome.balance())
+                .as("the balance the production service returned for a negative amount, which must"
+                        + " carry the sign rather than the magnitude")
+                .isEqualByComparingTo(expected);
 
         assertThat(expected)
                 .as("the constructed expectation, which must itself be negative or this case would"
@@ -788,44 +866,36 @@ class TransactionCategoryBalanceRepositoryIT {
     }
 
     /**
-     * Performs the create arm: a row that did not exist is written carrying only the posted amount.
+     * Accumulates one posted amount onto one key by CALLING the production service.
      *
-     * @param key the identifier no row currently occupies; must not be {@code null}
-     * @param amount the posted amount, which becomes the whole of the new balance
+     * @param key the composite identifier the amount posts against, which the service reads before it
+     *     decides which arm to take; must not be {@code null}
+     * @param amount the posted amount, added to whatever balance the key holds -- zero when the key
+     *     holds no row at all; must not be {@code null}
+     * @return the outcome the production service reported, naming the arm it took and the balance the
+     *     row now carries, never {@code null}
      */
-    // Assumptions: the new row is built from the single-argument entity constructor, which opens the
-    //     balance at zero, and the amount is then ADDED to it. That mirrors app/cbl/CBTRN02C.cbl:504
-    //     followed by :508 rather than short-cutting to a constructor that takes the amount directly:
-    //     the two forms reach the same stored value, but only this one makes the create arm visibly the
-    //     same unconditional addition as the update arm, which is the property this class owns.
-    private void createArm(TransactionCategoryBalanceId key, Money amount) {
-        this.transactionTemplate.executeWithoutResult(status -> {
-            TransactionCategoryBalance created = new TransactionCategoryBalance(key);
-            created.setBalance(Money.of(created.getBalance()).plus(amount).amount());
-            this.repository.save(created);
+    // Refactoring Rationale: this replaces two private helpers that performed the arms THEMSELVES --
+    //     one building a row and adding to it, one adding to a row the case had read -- and so agreed
+    //     with themselves whatever the production service did. A service that assigned instead of
+    //     adding, or saved a detached copy, or read under the wrong key, would have left every
+    //     assertion in this class passing. The arms are production behaviour, so production performs
+    //     them and this helper only supplies the boundary and the read-back.
+    // Assumptions: the call sits inside this class's transaction template because the service declares
+    //     no transaction of its own -- the boundary belongs to its caller, which in production is the
+    //     per-record unit the tasklet step drives. Wrapping it here is therefore mirroring production
+    //     rather than working around a missing annotation.
+    // Assumptions: the context is flushed and cleared before the boundary closes, so every assertion
+    //     that follows reads the row back out of the engine. Without the clear, the service's own
+    //     managed instance would answer the read and a mapping that never reached a column would still
+    //     satisfy it.
+    private CategoryBalanceService.Outcome accumulateThroughProduction(
+            TransactionCategoryBalanceId key, Money amount) {
+        return this.transactionTemplate.execute(status -> {
+            CategoryBalanceService.Outcome outcome = this.accumulation.accumulate(key, amount);
             this.entityManager.flush();
             this.entityManager.clear();
-        });
-    }
-
-    /**
-     * Performs the update arm: the posted amount is added to the balance already read.
-     *
-     * @param existing the row the arm-selecting read returned, whose stored balance is the addend's
-     *     counterpart; must not be {@code null}
-     * @param amount the posted amount to add to that stored balance
-     */
-    // Assumptions: this reads the balance off the row the caller already read and adds to it, which is
-    //     what makes the operation a read-modify-write rather than an overwrite. app/cbl/CBTRN02C.cbl
-    //     :527 adds to the record the READ at :474 populated, so an implementation that formed the new
-    //     balance from the amount alone would be a different program even where the arithmetic happened
-    //     to agree.
-    private void updateArm(TransactionCategoryBalance existing, Money amount) {
-        this.transactionTemplate.executeWithoutResult(status -> {
-            existing.setBalance(Money.of(existing.getBalance()).plus(amount).amount());
-            this.repository.save(existing);
-            this.entityManager.flush();
-            this.entityManager.clear();
+            return outcome;
         });
     }
 
@@ -849,9 +919,10 @@ class TransactionCategoryBalanceRepositoryIT {
      *     than the behaviour under test has failed
      */
     // Assumptions: an arrangement failure is raised as an assertion error naming the masked key rather
-    //     than surfacing later as a null. The two cases that use this read the same row twice, so a
-    //     silent absence would otherwise fail on the second read and point at the accumulation instead
-    //     of at the arrangement.
+    //     than surfacing later as a null. It backs the balance reader below, which every accumulation
+    //     assertion goes through, so a row that the arrangement failed to store would otherwise
+    //     surface as a null pointer inside a comparison and point at the accumulation instead of at
+    //     the arrangement.
     private TransactionCategoryBalance requireRow(TransactionCategoryBalanceId key) {
         return this.read(key).orElseThrow(() -> new AssertionError(
                 "expected an arranged row under " + maskedLabel(key)));
@@ -1046,5 +1117,23 @@ class TransactionCategoryBalanceRepositoryIT {
     @EntityScan("com.carddemo.batch.domain")
     @EnableJpaRepositories("com.carddemo.batch.repository")
     static class CategoryBalancePersistenceTestApplication {
+
+        /**
+         * Registers the production accumulation service over the production repository.
+         *
+         * <p>Assumptions: it is constructed here rather than discovered by a component scan, because
+         * this context deliberately scans only the entity and repository packages -- scanning the
+         * service package would pull in the message listener and the scheduled work this class has no
+         * transport for. Declaring the one service the cases need keeps the context narrow while still
+         * making the accumulation arms production code.</p>
+         *
+         * @param balances the repository the service reads and writes the row through, which is the
+         *     same instance the assertions read back through; must not be {@code null}
+         * @return the production service, never {@code null}
+         */
+        @Bean
+        CategoryBalanceService categoryBalanceService(TransactionCategoryBalanceRepository balances) {
+            return new CategoryBalanceService(balances);
+        }
     }
 }

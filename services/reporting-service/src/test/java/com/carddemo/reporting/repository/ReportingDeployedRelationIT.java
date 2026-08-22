@@ -1,6 +1,7 @@
 package com.carddemo.reporting.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.carddemo.common.codec.CopybookLayout;
@@ -148,6 +149,16 @@ class ReportingDeployedRelationIT {
      * The SELECT-only login role the deployed reporting context authenticates as.
      */
     private static final String REPORTING_ROLE = "carddemo_reporting";
+
+    /**
+     * The SQLSTATE the engine returns when a privilege is insufficient, {@code 42501}.
+     *
+     * <p>Assumptions: the code is asserted rather than the message text because the code is defined by
+     * the standard and by the engine's error-code table, while the wording of "permission denied for
+     * table ..." is a property of the server's locale and release. A privilege assertion that matches
+     * on prose passes or fails on a translation.</p>
+     */
+    private static final String INSUFFICIENT_PRIVILEGE_SQLSTATE = "42501";
 
     /**
      * The fabricated credential given to {@link #REPORTING_ROLE} inside the throwaway container.
@@ -666,6 +677,47 @@ class ReportingDeployedRelationIT {
     }
 
     /**
+     * Confirms the identity relation gives the reporting role its two ordering columns and no card
+     * number.
+     *
+     * <p>Assumptions: this case exists because the identity relation is the one place in the reporting
+     * schema that stores a WHOLE card number, and the reporting role reads from it directly rather than
+     * through a masking projection -- the statement heading walk selects its two ordered columns so the
+     * walk can be served by an index, which no barrier projection can offer. The masking control over
+     * that relation is therefore a COLUMN-LEVEL privilege rather than a view body, and a column-level
+     * privilege is exactly the kind that a later blanket grant silently widens. Asserting both halves
+     * -- the two columns readable, the card number refused -- is what makes the widening visible
+     * here.</p>
+     *
+     * <p>Assumptions: the refusal is asserted by SQLSTATE rather than by message text, because 42501
+     * is the code the engine documents for an insufficient privilege while the message wording is a
+     * property of the server's locale and version.</p>
+     *
+     * <p>This method takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the reporting role reads the identity relation's two ordering columns and no card")
+    void theReportingRoleReadsTheIdentityOrderingColumnsAndNoCard() {
+        assertThatCode(() -> executeAsReportingRole(
+                "select card_fingerprint, card_num_masked from reporting.card_identity"))
+                .as("the heading walk reads these two columns directly, so both must be readable or"
+                        + " every statement run stops")
+                .doesNotThrowAnyException();
+
+        assertThatThrownBy(() -> executeAsReportingRole(
+                "select card_num from reporting.card_identity"))
+                .withFailMessage("the whole card number stored beside the token must be refused: the"
+                        + " column grant in data-migration/sql/V1__reporting_views.sql names two"
+                        + " columns and the guarded repair in"
+                        + " data-migration/sql/V0__schemas_and_roles.sql rebuilds that grant after"
+                        + " the blanket schema grant, so a success here means one of the two is"
+                        + " conveying the whole relation")
+                .isInstanceOf(SQLException.class)
+                .extracting(cause -> ((SQLException) cause).getSQLState())
+                .isEqualTo(INSUFFICIENT_PRIVILEGE_SQLSTATE);
+    }
+
+    /**
      * Reads the whole published corpus in one request, in the projection's declared order.
      *
      * @return every row the cross-reference projection publishes, never {@code null}
@@ -948,7 +1000,12 @@ class ReportingDeployedRelationIT {
     }
 
     /**
-     * Loads {@code cardxref.txt} into the card cross-reference.
+     * Loads {@code cardxref.txt} into the card cross-reference and refreshes the derived identity.
+     *
+     * <p>Assumptions: the derived identity relation is refreshed here as part of the load, because a
+     * card the cross-reference carries but that relation does not is absent from
+     * {@code reporting.v_card_xref} and unresolvable by {@code reporting.resolve_card}. The adjacent
+     * comment records why the refresh is a call rather than a trigger.</p>
      *
      * @param connection an open connection able to write the account schema; must not be {@code null}
      * @throws SQLException if any row cannot be inserted
@@ -964,6 +1021,25 @@ class ReportingDeployedRelationIT {
                 insert.addBatch();
             }
             insert.executeBatch();
+        }
+        // WHY : Assumptions: the identity relation is brought level with the rows just inserted, and
+        //       this is the SAME step the load path performs rather than an arrangement convenience.
+        //       reporting.card_identity holds one row per card and is backfilled when
+        //       data-migration/sql/V1__reporting_views.sql creates it, so every card inserted after
+        //       that script ran -- which is every card here, because the migrations are applied before
+        //       the fixture -- has no identity row until the maintenance procedure runs, and a card
+        //       with no identity row is absent from reporting.v_card_xref and unresolvable by
+        //       reporting.resolve_card. The omission is silent, which is why it is closed in the load.
+        //       data-migration/src/carddemo_migration/loaders/aurora.py publishes the same step as
+        //       refresh_card_identity(connection), to be run after its cross-reference load.
+        // WHY : Alternatives Considered: a trigger on account.card_xref maintaining the row as part of
+        //       the write, which would make this call unnecessary. Rejected because
+        //       data-migration/sql/V1__reporting_views.sql runs under
+        //       SET LOCAL ROLE carddemo_reporting_owner and that role holds no TRIGGER privilege on a
+        //       relation the account context owns; granting it would widen a cross-context boundary
+        //       and would make an account-context write fail whenever reporting maintenance failed.
+        try (Statement refresh = connection.createStatement()) {
+            refresh.execute("call reporting.refresh_card_identity()");
         }
     }
 

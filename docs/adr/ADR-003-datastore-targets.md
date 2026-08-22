@@ -951,9 +951,48 @@ ownership consequence and the rejection of saga are recorded.
 One prefix family per baseline generation base — six for the ledger domain, three
 for reference data, one for reporting — each with a lifecycle rule retaining five
 noncurrent versions, and a generation addressed by a `dt=`/`gen=` prefix under its
-family. Two further prefixes carry the statement artifacts, which are not
-generation datasets and are listed separately so the count of ten stays a count of
-generation families. The batch steps that write and read these prefixes belong to
+family.
+
+**Three further prefixes carry the reporting artifacts**, declared in
+[`infra/modules/s3-datasets/variables.tf`](../../infra/modules/s3-datasets/variables.tf)
+as `non_generation_prefixes`, whose validation admits exactly these three keys and
+nothing else:
+
+| Artifact | Key prefix | Baseline dataset it replaces |
+| --- | --- | --- |
+| `statements` | `statements/` | `AWS.M2.CARDDEMO.STATEMNT.PS` and `.HTML`, written by `CBSTM03A` — both objects live under the one prefix, distinguished by name as `statements.txt` and `statements.html` |
+| `transaction-detail-report` | `reports/transaction-detail/` | the 133-column output at [`app/jcl/TRANREPT.jcl`](../../app/jcl/TRANREPT.jcl) **L80** |
+| `category-balance-report` | `reports/category-balance/` | `AWS.M2.CARDDEMO.TCATBALF.REPT`, the sorted 40-byte output of the DFSORT step at [`app/jcl/PRTCATBL.jcl`](../../app/jcl/PRTCATBL.jcl) **L52–L63** |
+
+They are held in their own variable so they can never be counted as an eleventh
+generation family. Assumptions: the reason each one qualifies is **not** uniform, and
+flattening that is how the count drifted. `statements` and `category-balance-report`
+have no `GENERATIONDATAGROUP` base anywhere in the baseline — an exhaustive search for
+that statement matches four files and none of them defines a base for either — so they
+are plain sequential datasets with fixed keys. `transaction-detail-report` is different:
+its output **does** have a generation base, provisioned as the `tranrept` family among
+the ten, and the nightly run publishes to **both** paths. This prefix is the
+range-addressed one a report request and the runbooks resolve; the generation prefix is
+the one carrying the `LIMIT(5) SCRATCH` analogue.
+
+Trade-offs: bucket versioning cannot be enabled per prefix, so these three acquire
+noncurrent versions and a noncurrent-version rule as a consequence. That rule is
+ordinary version hygiene and is **not** the retention analogue — reading it as a
+generation limit would invent a generation contract the baseline never gave these
+datasets. Counting the whole bucket, it carries **fourteen** prefixes: these three, the
+ten generation families, and `source_extract_prefix`, the one prefix that is an input
+rather than an output. Only **ten** of the fourteen are generation families, and that
+is the count this heading states.
+
+⚠️ Refactoring Rationale: this paragraph said "**Two** further prefixes carry the
+**statement** artifacts". Both halves were wrong. There are three, and only one of the
+three is a statement artifact — the other two are the transaction-detail and
+category-balance reports, which the sentence omitted entirely. The module's validation
+has required exactly those three keys by name, so the record was contradicted by the
+contract it describes. The three are named individually rather than summarised, because
+a bare count is what allowed one artifact's name to stand in for three.
+
+The batch steps that write and read these prefixes belong to
 [ADR-005](ADR-005-batch-orchestration.md) and
 [`docs/architecture/batch-orchestration.md`](../architecture/batch-orchestration.md).
 

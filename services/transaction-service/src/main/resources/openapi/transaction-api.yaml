@@ -1798,16 +1798,28 @@ components:
       examples:
         - "2022-06-10"
 
+    # WHY : ⚠️ Refactoring Rationale: this note cites the shape's owner by CONSTANT
+    #       NAME where it used to cite line numbers, and the change is the fix for
+    #       what those numbers did. It read 'VERSION "v1" at L81, a maximum length
+    #       of 256 at L92, and the accepted shape as a compiled pattern at L121 to
+    #       L122' - and by then the constant said v2, every one of the three lines
+    #       had moved, and the pattern published below already read v2, so the note
+    #       contradicted the schema three lines under it. A name survives an edit
+    #       above it and a line number does not, so nothing here is cited by line.
     # WHY : Assumptions: the shape is fixed by
     #       services/common-lib/src/main/java/com/carddemo/common/web/CursorToken.java,
-    #       which declares VERSION "v1" at L81, a maximum length of 256 at L92,
-    #       and the accepted shape as a compiled pattern at L121 to L122. The
-    #       token is SEALED, not a raw key: L172 to L179 of PageResponse.java
-    #       records that an earlier design let the raw composite key serve as the
-    #       cursor, which would have serialised a primary account number into
-    #       every page of a browse and handed it to the client to replay. Its
-    #       payload is bound with an HMAC to the query and the subject it was
-    #       issued for, so a client cannot construct, decode or retarget one.
+    #       whose VERSION is "v2", whose MAX_TOKEN_LENGTH is 256 and whose
+    #       SEALED_SHAPE_PATTERN composes that version with the two base64url
+    #       segments below - so maxLength and pattern here restate that constant
+    #       rather than deciding anything, and TransactionApiContractTest compares
+    #       the two so they cannot drift apart again.
+    # WHY : Assumptions: the token is SEALED, not a raw key. The "opaque now means
+    #       SEALED" rationale on the PageResponse type itself records that an
+    #       earlier design let the raw composite key serve as the cursor, which
+    #       would have serialised a primary account number into every page of a
+    #       browse and handed it to the client to replay. Its payload is bound
+    #       with an HMAC to the query and the subject it was issued for, so a
+    #       client cannot construct, decode or retarget one.
     CursorToken:
       type: string
       description: >-
@@ -2117,6 +2129,42 @@ components:
         #       which reports "You are already at the top of the page..." at
         #       app/cbl/COTRN00C.cbl L248 rather than withholding the key.
 
+    # WHY : ⚠️ Refactoring Rationale: this schema and the four other externally
+    #       authored PIC X schemas below now publish a CHARACTER PATTERN, and this
+    #       block records the derivation once for all five so that four of them can
+    #       cite it rather than restate it. Every one of them previously published a
+    #       width and nothing else, so the contract described a domain wider than
+    #       anything this system can carry: TRAN-DESC PIC X(100) at
+    #       app/cpy/CVTRA05Y.cpy L9 admits every character of its code page, but
+    #       that code page is SINGLE-BYTE and the reference's only writer of these
+    #       fields is a 3270 field - TDESC at app/bms/COTRN02.bms L161 and its four
+    #       siblings - so neither a supplementary Unicode code point nor a C0
+    #       control was ever an accepted value. Publishing the pattern restores a
+    #       bound the terminal enforced physically.
+    # WHY : Assumptions: the admitted span is printable US-ASCII, code points 0x20
+    #       to 0x7E inclusive, and it is derived from the encoder these values are
+    #       written through rather than chosen. FixedWidthCodec encodes US-ASCII and
+    #       refuses text its charset cannot round-trip, so a code point above 0x7E
+    #       cannot reach a fixed-width record at all; everything below 0x20, and
+    #       0x7F, round-trips intact and is therefore copied verbatim into the
+    #       plain-text statement's 80-column bands and the transaction report's
+    #       133-column records, neither of which has an escaping mechanism - so one
+    #       stored line feed becomes two records that no reader can tell from real
+    #       ones. The span between the two is exactly what survives the codec and
+    #       carries no structural meaning at the sink.
+    # WHY : Trade-offs: the space is INSIDE the span, so a merchant name keeps its
+    #       ampersand, apostrophe, hyphen, period, comma, solidus and spaces -
+    #       measured across all 300 records of app/data/ASCII/dailytran.txt, the
+    #       only bytes present in these five spans are the space, apostrophe, comma,
+    #       hyphen, digits and letters. What is refused is an accented letter or an
+    #       emoji, and refusing it here is the only place the refusal can still name
+    #       a field: stored, the same value fails inside a later batch run where it
+    #       is neither attributable to a request nor refusable.
+    # WHY : Assumptions: the expression is the anchored form of
+    #       TransactionAddRequest.PRINTABLE_TEXT, which the request record applies
+    #       at its boundary and the service applies again to a capture assembled
+    #       from a stored row. TransactionApiContractTest compares the two, so the
+    #       published domain and the enforced domain cannot drift apart.
     TransactionDescription:
       type: string
       description: >-
@@ -2124,7 +2172,13 @@ components:
         TRAN-DESC PIC X(100) at app/cpy/CVTRA05Y.cpy L9, stored as description
         VARCHAR(100) at V1__ledger.sql L166. The view screen renders 60
         characters of it and the list row 26, both narrower than the record.
+        Restricted to printable US-ASCII, code points 0x20 to 0x7E inclusive: a
+        value outside that span is refused with "Description must be printable
+        text..." because a control character would inject a record into the
+        fixed-width statement and report artifacts, and a wider code point cannot
+        be encoded by the fixed-width codecs those artifacts are written with.
       maxLength: 100
+      pattern: "^[\\x20-\\x7E]*$"
       examples:
         - "BILL PAYMENT - ONLINE"
 
@@ -2181,6 +2235,10 @@ components:
       examples:
         - "0001"
 
+    # WHY : Assumptions: the character pattern is the one derived on
+    #       TransactionDescription above and is restated here only because a schema
+    #       cannot inherit a keyword from a sibling. The space is inside the span,
+    #       which this field needs: the baseline's own value is "POS TERM".
     TransactionSource:
       type: string
       description: >-
@@ -2188,7 +2246,11 @@ components:
         at app/cpy/CVTRA05Y.cpy L8 and stored as source CHAR(10) at
         V1__ledger.sql L156. The baseline writes POS TERM for both an added
         transaction's default and a bill payment, at app/cbl/COBIL00C.cbl L222.
+        Restricted to printable US-ASCII, code points 0x20 to 0x7E inclusive; a
+        value outside that span is refused with "Source must be printable
+        text...".
       maxLength: 10
+      pattern: "^[\\x20-\\x7E]*$"
       examples:
         - "POS TERM"
 
@@ -2212,6 +2274,68 @@ components:
       pattern: "^[0-9]{9}$"
       examples:
         - "800000000"
+
+    # WHY : ⚠️ Refactoring Rationale: the three merchant TEXT fields are named schemas
+    #       here, where each was declared inline at all THREE of its uses - the
+    #       detail response, the create request and the copied-source object - so one
+    #       field had three independent declarations and adding the character pattern
+    #       would have created nine copies of one rule. That is precisely how a
+    #       contract comes to disagree with itself, which the sibling MerchantId
+    #       above already avoids by being named. Each use site keeps its own
+    #       description, and the two request-side sites keep their own minLength,
+    #       because what differs between them is presence and provenance rather than
+    #       the domain.
+    # WHY : Assumptions: minLength is NOT declared on these three schemas and is left
+    #       to the use site. A detail response may legitimately render a stored value
+    #       that is blank, whereas a request body must not omit one - the reference
+    #       refuses that with its own sentence at app/cbl/COTRN02C.cbl L302, L308 and
+    #       L314 - so a shared minimum would either refuse a readable row or admit an
+    #       empty submission. That is the same split TransactionDescription above
+    #       already uses.
+    # WHY : Assumptions: the character pattern is the one derived on
+    #       TransactionDescription above, unchanged. The ordinary punctuation of a
+    #       merchant name is inside its span, so nothing a producer legitimately
+    #       sends is refused.
+    MerchantName:
+      type: string
+      description: >-
+        The merchant's name, at the record's declared width. Declared
+        TRAN-MERCHANT-NAME PIC X(50) at app/cpy/CVTRA05Y.cpy L12 and stored as
+        merchant_name VARCHAR(50) at V1__ledger.sql L195. Restricted to printable
+        US-ASCII, code points 0x20 to 0x7E inclusive; a value outside that span is
+        refused with "Merchant Name must be printable text...".
+      maxLength: 50
+      pattern: "^[\\x20-\\x7E]*$"
+      examples:
+        - "BILL PAYMENT"
+
+    MerchantCity:
+      type: string
+      description: >-
+        The merchant's city, at the record's declared width. Declared
+        TRAN-MERCHANT-CITY PIC X(50) at app/cpy/CVTRA05Y.cpy L13 and stored as
+        merchant_city VARCHAR(50) at V1__ledger.sql L199. Restricted to printable
+        US-ASCII, code points 0x20 to 0x7E inclusive; a value outside that span is
+        refused with "Merchant City must be printable text...".
+      maxLength: 50
+      pattern: "^[\\x20-\\x7E]*$"
+      examples:
+        - "N/A"
+
+    MerchantZip:
+      type: string
+      description: >-
+        The merchant's postal code, at the record's declared width. Declared
+        TRAN-MERCHANT-ZIP PIC X(10) at app/cpy/CVTRA05Y.cpy L14 and stored as
+        merchant_zip CHAR(10) at V1__ledger.sql L206. Restricted to printable
+        US-ASCII, code points 0x20 to 0x7E inclusive; a value outside that span is
+        refused with "Merchant Zip must be printable text...". It is not held to a
+        postal-code grammar of any kind: the committed extract writes N/A in this
+        field, so a shape constraint would refuse the reference's own data.
+      maxLength: 10
+      pattern: "^[\\x20-\\x7E]*$"
+      examples:
+        - "N/A"
 
     # WHY : Assumptions: the fourteen members and their names mirror the
     #       already-authored
@@ -2297,36 +2421,25 @@ components:
             The merchant identifier, moved to the screen at app/cbl/COTRN01C.cbl
             L187.
         merchantName:
-          type: string
+          allOf:
+            - $ref: "#/components/schemas/MerchantName"
           description: >-
-            The merchant's name, at the record's declared width. Declared
-            TRAN-MERCHANT-NAME PIC X(50) at app/cpy/CVTRA05Y.cpy L12 and stored
-            as merchant_name VARCHAR(50) at V1__ledger.sql L195. Moved to the
-            screen at app/cbl/COTRN01C.cbl L188, where MNAMEI PIC X(30) at
-            app/cpy-bms/COTRN01.CPY L126 renders 30 of the 50.
-          maxLength: 50
-          examples:
-            - "BILL PAYMENT"
+            The merchant's name, moved to the screen at app/cbl/COTRN01C.cbl L188,
+            where MNAMEI PIC X(30) at app/cpy-bms/COTRN01.CPY L126 renders 30 of
+            the record's 50.
         merchantCity:
-          type: string
+          allOf:
+            - $ref: "#/components/schemas/MerchantCity"
           description: >-
-            The merchant's city, at the record's declared width. Declared
-            TRAN-MERCHANT-CITY PIC X(50) at app/cpy/CVTRA05Y.cpy L13 and stored
-            as merchant_city VARCHAR(50) at V1__ledger.sql L199. Moved to the
-            screen at app/cbl/COTRN01C.cbl L189, where MCITYI PIC X(25) at
-            app/cpy-bms/COTRN01.CPY L132 renders 25 of the 50.
-          maxLength: 50
-          examples:
-            - "N/A"
+            The merchant's city, moved to the screen at app/cbl/COTRN01C.cbl L189,
+            where MCITYI PIC X(25) at app/cpy-bms/COTRN01.CPY L132 renders 25 of
+            the record's 50.
         merchantZip:
-          type: string
+          allOf:
+            - $ref: "#/components/schemas/MerchantZip"
           description: >-
-            The merchant's postal code. Declared TRAN-MERCHANT-ZIP PIC X(10) at
-            app/cpy/CVTRA05Y.cpy L14 and stored as merchant_zip CHAR(10) at
-            V1__ledger.sql L206. Moved to the screen at app/cbl/COTRN01C.cbl L190.
-          maxLength: 10
-          examples:
-            - "N/A"
+            The merchant's postal code, moved to the screen at
+            app/cbl/COTRN01C.cbl L190 at its full record width.
         cardNumber:
           allOf:
             - $ref: "#/components/schemas/MaskedCardNumber"
@@ -2576,30 +2689,26 @@ components:
             can NOT be empty..." verbatim from app/cbl/COTRN02C.cbl L296, and a
             non-numeric one with "Merchant ID must be Numeric..." from L432.
         merchantName:
-          type: string
+          allOf:
+            - $ref: "#/components/schemas/MerchantName"
           description: >-
-            The merchant's name, at the width TRAN-MERCHANT-NAME PIC X(50) declares
-            at app/cpy/CVTRA05Y.cpy L12. An absent value is refused with "Merchant
-            Name can NOT be empty..." verbatim from app/cbl/COTRN02C.cbl L302.
+            The merchant's name. An absent value is refused with "Merchant Name
+            can NOT be empty..." verbatim from app/cbl/COTRN02C.cbl L302.
           minLength: 1
-          maxLength: 50
         merchantCity:
-          type: string
+          allOf:
+            - $ref: "#/components/schemas/MerchantCity"
           description: >-
-            The merchant's city, at the width TRAN-MERCHANT-CITY PIC X(50) declares
-            at app/cpy/CVTRA05Y.cpy L13. An absent value is refused with "Merchant
-            City can NOT be empty..." verbatim from app/cbl/COTRN02C.cbl L308.
+            The merchant's city. An absent value is refused with "Merchant City
+            can NOT be empty..." verbatim from app/cbl/COTRN02C.cbl L308.
           minLength: 1
-          maxLength: 50
         merchantZip:
-          type: string
+          allOf:
+            - $ref: "#/components/schemas/MerchantZip"
           description: >-
-            The merchant's postal code, at the width TRAN-MERCHANT-ZIP PIC X(10)
-            declares at app/cpy/CVTRA05Y.cpy L14. An absent value is refused with
-            "Merchant Zip can NOT be empty..." verbatim from app/cbl/COTRN02C.cbl
-            L314.
+            The merchant's postal code. An absent value is refused with "Merchant
+            Zip can NOT be empty..." verbatim from app/cbl/COTRN02C.cbl L314.
           minLength: 1
-          maxLength: 10
         # WHY : (1) Assumptions: the member is OPTIONAL where the bill-payment body
         #       requires its own, and the asymmetry is the baseline's rather than a
         #       preference. app/cbl/COTRN02C.cbl L169 to L172 writes only for 'Y' or
@@ -2999,23 +3108,23 @@ components:
             because the map field is nine characters wide and the reference moves a
             zoned display field into it.
         merchantName:
-          type: string
+          allOf:
+            - $ref: "#/components/schemas/MerchantName"
           minLength: 1
-          maxLength: 50
           description: >-
             The copied merchant name, from L490; TRAN-MERCHANT-NAME PIC X(50) at
             app/cpy/CVTRA05Y.cpy L12.
         merchantCity:
-          type: string
+          allOf:
+            - $ref: "#/components/schemas/MerchantCity"
           minLength: 1
-          maxLength: 50
           description: >-
             The copied merchant city, from L491; TRAN-MERCHANT-CITY PIC X(50) at
             app/cpy/CVTRA05Y.cpy L13.
         merchantZip:
-          type: string
+          allOf:
+            - $ref: "#/components/schemas/MerchantZip"
           minLength: 1
-          maxLength: 10
           description: >-
             The copied merchant postal code, from L492; TRAN-MERCHANT-ZIP PIC X(10) at
             app/cpy/CVTRA05Y.cpy L14.

@@ -69,10 +69,8 @@ import {
 import type { PendingAuthDetailScreen } from '../../api/authorization';
 import { isApiRequestError } from '../../api/client';
 import type { ApprovalStatus, FraudAction } from '../../api/types';
-import { MessageBand } from '../../layout/MessageBand';
+import { useShellSlot } from '../../layout/AppShell';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
-import { PfKeyBar } from '../../layout/PfKeyBar';
-import { ScreenHeader } from '../../layout/ScreenHeader';
 import { usePfKeys } from '../../layout/usePfKeys';
 import {
   INVALID_KEY_PRESSED,
@@ -768,6 +766,69 @@ interface ScreenAnnouncement {
 }
 
 /**
+ * The authorization a fraud confirmation was opened on, sealed at the moment it opened.
+ *
+ * Assumptions: the two members are everything the write needs -- the selector it is addressed to and
+ * the direction it moves the row in -- and both are captured when the prompt OPENS rather than read
+ * when it is confirmed. Both are `readonly` and the value is replaced rather than mutated, so a
+ * captured target cannot drift while a reviewer is reading the prompt.
+ *
+ * ⚠️ Alternatives Considered: capturing the whole {@link PendingAuthDetailScreen} the prompt was
+ * opened over and comparing records at confirmation time. Rejected because the write is addressed by
+ * the selector and carries only the action, so a captured record would be twenty-eight members of
+ * potentially superseded data sitting where a control could read it -- the same defect this type
+ * exists to close, one level down. The record on the glass stays the single rendering, and this value
+ * carries only what the request is composed from.
+ */
+export interface FraudConfirmationTarget {
+  /** Sealed selector of the authorization the prompt was opened on, as the route named it. */
+  readonly selector: string;
+  /** Transition resolved from that authorization's own fraud mark when the prompt opened. */
+  readonly action: FraudAction;
+}
+
+/**
+ * Reports whether a captured fraud target still describes the authorization on the glass.
+ *
+ * Purpose: this is the check that turns a stale confirmation into a REFUSAL rather than into a write
+ * against whichever authorization has since arrived. It is asked twice -- once while rendering, so a
+ * prompt whose target no longer matches is closed rather than silently retargeted, and once
+ * immediately before the request, so a confirmation that raced past the render still cannot write.
+ *
+ * ⚠️ Refactoring Rationale: the direction is re-verified as well as the address, because the two fail
+ * independently. A selector change alone is what a step to the next authorization produces; a mark
+ * change alone is what a re-read of the SAME authorization produces -- another reviewer's write, or
+ * this screen's own re-read -- and that one inverts the transition without changing the address, so
+ * an address-only check would let a confirmation the reviewer read as "mark this" submit a removal.
+ *
+ * Assumptions: the direction is re-derived through {@link nextFraudAction} from the rendered mark
+ * rather than remembered, which is how the reference itself decides it --
+ * `app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl` L230 declares `MARK-AUTH-FRAUD`, L234 re-reads
+ * the row and L236 to L241 branch on the tag it has just read. Agreement between that derivation and
+ * the captured action is therefore agreement with the reference's own test, evaluated against the
+ * record the reviewer was shown.
+ * @param {FraudConfirmationTarget | null} target - The captured target, or `null` when no
+ *   confirmation is pending.
+ * @param {string | undefined} selector - The selector the route currently names, `undefined` when it
+ *   names none.
+ * @param {PendingAuthDetailScreen | null} detail - The rendering currently on the glass, `null` while
+ *   no record is rendered.
+ * @returns {boolean} `true` only when a target is pending, is addressed to the current selector, has
+ *   a record to act on, and still asks for the transition that record's mark implies. Narrows the
+ *   target to a value so a caller may compose the request from it.
+ */
+export function isFraudTargetCurrent(
+  target: FraudConfirmationTarget | null,
+  selector: string | undefined,
+  detail: PendingAuthDetailScreen | null,
+): target is FraudConfirmationTarget {
+  if (target === null || selector === undefined || detail === null) {
+    return false;
+  }
+  return target.selector === selector && target.action === nextFraudAction(detail.fraudMark);
+}
+
+/**
  * Renders one pending authorization and the two transitions a reviewer may make from it.
  * @returns {ReactElement} The authorization detail screen, or a bounded result when the route names no
  *   authorization.
@@ -800,20 +861,42 @@ export function AuthDetailScreen(): ReactElement {
   const [severity, setSeverity] = useState<MessageBandSeverity>('error');
   const [busy, setBusy] = useState(false);
   /*
-   * WHY : ⚠️ Refactoring Rationale: whether the fraud confirmation is showing is STATE here, where the
-   *       `Popconfirm` used to manage its own visibility from its trigger. Browser validation found the
-   *       consequence: the confirmation guarded only the one button it wrapped, while the function-key
-   *       bar's own F5 button -- equally pointer-activatable, and carrying the identical accessible
-   *       name -- wrote immediately, as did the F5 key. Two controls with one name and two different
-   *       safety semantics is worse than either alone, and it contradicted this screen's own recorded
-   *       reason for the guard: that a POINTER can activate a control by accident. Lifting the
-   *       visibility into state lets every entry point open the same prompt, so there is exactly one
-   *       write path and it is guarded. Alternatives Considered: giving the bar's F5 an empty label so
-   *       it renders no button, leaving the wrapped one as the only pointer path. Rejected because the
-   *       mapset paints `F5=Mark/Remove Fraud` on row 24 and dropping it would lose a legend field the
-   *       terminal shows.
+   * WHY : Assumptions: the fraud confirmation's pending state is held by this SCREEN rather than by the
+   *       `Popconfirm`'s own trigger, and that is what gives the screen one write path. Browser
+   *       validation measured the alternative: a component-managed prompt guarded only the button it
+   *       wrapped, while the function-key bar's own F5 button -- equally pointer-activatable, and
+   *       carrying the identical accessible name -- wrote immediately, as did the F5 key. Two controls
+   *       with one name and two safety semantics is worse than either alone, and it contradicted the
+   *       recorded reason for the guard: that a POINTER can activate a control by accident. Every
+   *       entry point therefore opens the same prompt through {@link openFraudPrompt}.
+   *       Alternatives Considered: giving the bar's F5 an empty label so it renders no button, leaving
+   *       the wrapped one as the only pointer path. Rejected because the mapset paints
+   *       `F5=Mark/Remove Fraud` on row 24 and dropping it would lose a legend field the terminal
+   *       shows.
+   * WHY : ⚠️ Refactoring Rationale: what this state holds is the TARGET the confirmation was opened on,
+   *       and it held a bare `boolean` -- which recorded that a prompt was showing and nothing about
+   *       which authorization it was showing for. This screen's own PF8 changes only the route
+   *       PARAMETER, so the component stays mounted across the step and a bare flag survived it: a
+   *       prompt opened on one authorization was still open once the next one had been read, and the
+   *       confirmation composed its request from whatever `selector` and `detail` were current by then
+   *       -- so it wrote against the authorization that ARRIVED, and, because the direction is derived
+   *       from the rendered mark, a marked record arriving under a prompt opened on an unmarked one
+   *       inverted the write as well as retargeting it. On a fraud-marking screen that is the worst
+   *       class of defect available, because both outcomes are plausible rather than visibly broken.
+   *       Capturing {@link FraudConfirmationTarget} at the moment of opening closes it: the request is
+   *       composed from the captured value, and {@link isFraudTargetCurrent} refuses -- rather than
+   *       retargets -- the moment the capture stops describing the record on the glass.
+   *       Alternatives Considered: keeping the flag and disabling PF8 and the other keys for as long as
+   *       the prompt was open. Rejected because it closes one route to the retarget and not the class:
+   *       a browser Back or Forward, an edited address bar or a re-read that changed the mark all reach
+   *       the same confirmation with different data, and none of them passes through a key this screen
+   *       can disable. Alternatives Considered: closing the prompt from an effect keyed on the selector
+   *       alone. Rejected because it corrects only what is VISIBLE -- the confirmed write would still
+   *       compose its address and its direction from render state, so any transition the effect did not
+   *       observe would still write; the capture makes the request independent of render state and the
+   *       verification makes a mismatch a refusal.
    */
-  const [fraudPromptOpen, setFraudPromptOpen] = useState(false);
+  const [fraudTarget, setFraudTarget] = useState<FraudConfirmationTarget | null>(null);
 
   const load = useCallback(
     /**
@@ -855,6 +938,27 @@ export function AuthDetailScreen(): ReactElement {
      */
     (rowKey: string, announce?: ScreenAnnouncement): void => {
       setLoading(true);
+      /*
+       * WHY : ⚠️ Refactoring Rationale: the rendered record is ERASED for the duration of the read, and
+       *       it used to survive one -- so between asking for a row and receiving it, every control on
+       *       this screen could still read the PREVIOUS row: the fifth key stayed enabled, and the
+       *       transition it derives comes from the rendered mark. Erasing is also the reference's own
+       *       order rather than an addition: `PROCESS-ENTER-KEY` at
+       *       `app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl` L208 moves LOW-VALUES into the whole
+       *       symbolic map at L210, BEFORE the `READ-AUTH-RECORD` at L216, and `POPULATE-AUTH-DETAILS`
+       *       repopulates it only on the no-error arm -- which is why a failed read leaves the record
+       *       erased here as it does there. Nothing new is shown for it: `loading` already short-circuits this screen's
+       *       render to the shared spinner, so the erase is covered for as long as it lasts and the
+       *       reviewer sees the same treatment this screen has always given a read.
+       * WHY : Assumptions: a pending fraud confirmation is discarded at every transition that can
+       *       change what is on the glass rather than only at the ones a reader can enumerate, which
+       *       is why the discard is repeated at both settle arms below and at the step and the write
+       *       instead of being reasoned about once. The invariant is that a captured target never
+       *       outlives the record it was captured over; asserting it at each transition keeps that
+       *       true without depending on an argument about which of them can overlap.
+       */
+      setDetail(null);
+      setFraudTarget(null);
       getPendingAuthorizationScreen(rowKey).then(
         /**
          * Publishes the rendering, together with the announcement or the row's own sentence.
@@ -862,6 +966,7 @@ export function AuthDetailScreen(): ReactElement {
          * @returns {void} Completion is represented by this screen's own state.
          */
         (screen) => {
+          setFraudTarget(null);
           setDetail(screen);
           setMessage(announce === undefined ? screen.message : announce.text);
           setSeverity(announce === undefined ? 'error' : announce.severity);
@@ -873,6 +978,7 @@ export function AuthDetailScreen(): ReactElement {
          * @returns {void} Completion is represented by this screen's own state.
          */
         (failure: unknown) => {
+          setFraudTarget(null);
           setMessage(detailFailureMessage(failure));
           setSeverity('error');
           setLoading(false);
@@ -884,10 +990,21 @@ export function AuthDetailScreen(): ReactElement {
 
   useEffect(
     /**
-     * Reads the addressed authorization on mount, and again when the route names a different one.
+     * Discards a pending confirmation and reads the authorization the route addresses.
+     *
+     * Assumptions: this runs on mount and again whenever the route names a different authorization,
+     * which is the transition this screen's own eighth key performs -- it changes the route PARAMETER,
+     * so the component is not remounted and nothing else observes the change.
      * @returns {void} Completion is represented by this screen's own state.
      */
     function loadAddressedAuthorization(): void {
+      /*
+       * WHY : Assumptions: the discard sits ABOVE the branch so it also covers the arm that performs no
+       *       read at all. A route that names no authorization renders this screen's dead end, and a
+       *       target captured before that transition would otherwise be the one value that outlived
+       *       every record -- reachable again if the reviewer navigated back to a detail route.
+       */
+      setFraudTarget(null);
       if (selector === undefined) {
         setLoading(false);
         return;
@@ -907,11 +1024,25 @@ export function AuthDetailScreen(): ReactElement {
    * @returns {void} Completion is represented by this screen's own state.
    */
   function submitFraudTransition(): void {
-    if (selector === undefined || detail === null || busy) {
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the request is composed from the target CAPTURED when the prompt
+     *       opened, and it used to be composed from `selector` and `detail` as they stood at
+     *       confirmation time -- which is how a confirmation opened on one authorization came to write
+     *       against another. The capture is read once into a local so the guard below and the request
+     *       cannot see two different values, and it is discarded before the guard runs so that every
+     *       exit from here -- refusal, rejection or success -- leaves no target behind.
+     * WHY : Assumptions: the verification is a REFUSAL and not a correction. Nothing here re-derives a
+     *       target from current state when the captured one has gone stale, because the reviewer read a
+     *       specific sentence about a specific authorization and consented to that; substituting the
+     *       row that has since arrived would write something nobody was asked about, which is the
+     *       defect rather than its remedy. A refused confirmation costs a reviewer one keystroke.
+     */
+    const target = fraudTarget;
+    setFraudTarget(null);
+    if (busy || !isFraudTargetCurrent(target, selector, detail)) {
       return;
     }
     setBusy(true);
-    setFraudPromptOpen(false);
     /*
      * WHY : ⚠️ Refactoring Rationale: exactly ONE call is issued, where the reference issues two writes
      *       against two resource managers. `MARK-AUTH-FRAUD` replaces the authorization detail segment
@@ -928,9 +1059,13 @@ export function AuthDetailScreen(): ReactElement {
      *       L91 to L101 derives the date from `EXEC CICS FORMATTIME` and its SQL uses `CURRENT DATE`,
      *       so the stamp is the server's; accepting one from a caller would let a browser decide when a
      *       fraud report was made.
+     * WHY : Assumptions: both arguments come from the verified capture rather than from render state,
+     *       which is what makes the request the one the reviewer consented to. Re-deriving the action
+     *       here from `detail` would read the same value on the ordinary path and a different one on
+     *       exactly the path this guard exists for, so the two would agree in every test that did not
+     *       matter.
      */
-    const action = nextFraudAction(detail.fraudMark);
-    setAuthorizationFraudState(selector, { action }).then(
+    setAuthorizationFraudState(target.selector, { action: target.action }).then(
       /**
        * Reports the reference program's own confirmation for the submitted transition and re-reads.
        * @returns {void} Completion is represented by this screen's own state.
@@ -938,13 +1073,17 @@ export function AuthDetailScreen(): ReactElement {
       () => {
         setBusy(false);
         /*
-         * WHY : Assumptions: the severity is `success`, the one place on this screen a non-error
-         *       severity is used, because `COPAUS1C.cbl` L531 to L538 reaches those two sentences only
-         *       from the `STATUS-OK` arm after taking a syncpoint -- they report a completed write
-         *       rather than a refusal. The sentence itself is chosen by `fraudOutcomeMessage`, whose
-         *       block records why the service's own outcome sentence is deliberately not painted.
+         * WHY : Assumptions: the severity is `success`, which is the only non-error severity a WRITE
+         *       reports on this screen, because `COPAUS1C.cbl` L531 to L538 reaches those two sentences
+         *       only from the `STATUS-OK` arm after taking a syncpoint -- they report a completed write
+         *       rather than a refusal. ⚠️ Refactoring Rationale: this note used to claim `success` was
+         *       the one place on the screen a non-error severity was used at all, which the end-of-set
+         *       boundary contradicts -- `stepToNextAuthorization` reports `info` for the reason argued
+         *       at its own site. The claim is narrowed to the write path, which is what the cited
+         *       paragraphs actually establish. The sentence itself is chosen by `fraudOutcomeMessage`,
+         *       whose block records why the service's own outcome sentence is deliberately not painted.
          */
-        load(selector, { text: fraudOutcomeMessage(action), severity: 'success' });
+        load(target.selector, { text: fraudOutcomeMessage(target.action), severity: 'success' });
       },
       /**
        * Reports a refused transition on the message line, leaving the rendering as it was.
@@ -960,18 +1099,47 @@ export function AuthDetailScreen(): ReactElement {
   }
 
   /**
-   * Opens the fraud confirmation, which is the single guarded entry to the write.
+   * Opens the fraud confirmation on the authorization currently on the glass.
+   *
+   * Purpose: this is the single guarded entry to the write and the single place a target is captured.
+   * The button beside the record, the function-key bar's button and the fifth key all reach the prompt
+   * by this one call rather than one relying on the component's own trigger and the others on state.
+   *
+   * ⚠️ Assumptions: the transition is resolved HERE, from the record the reviewer is looking at, and
+   * sealed into the captured target. That timing is the whole point: the prompt's question -- report
+   * this authorization, or take an existing report back -- is answered by the mark on the glass at the
+   * moment it is asked, so resolving it again at confirmation time would let the answer change under a
+   * reviewer who had already read the question.
    *
    * Assumptions: a named declaration rather than an inline arrow, because the documentation gate
-   * requires a block on a function expression in any position. It exists at all so the button beside
-   * the record and the function-key bar's button reach the prompt by the same call rather than one
-   * relying on the component's own trigger and the other on this screen's state.
+   * requires a block on a function expression in any position.
    * @returns {void} Completion is represented by this screen's own state.
    */
   function openFraudPrompt(): void {
-    if (detail !== null && !busy) {
-      setFraudPromptOpen(true);
+    if (selector === undefined || detail === null || busy) {
+      return;
     }
+    setFraudTarget({ selector, action: nextFraudAction(detail.fraudMark) });
+  }
+
+  /**
+   * Discards the captured target when the confirmation is dismissed, and captures one when it opens.
+   *
+   * Assumptions: the component's own open requests are routed back through {@link openFraudPrompt}
+   * rather than satisfied by setting a flag, so a prompt raised by the wrapped trigger captures its
+   * target exactly as the key and the bar's button do -- one capture site, whichever control asked.
+   * A dismissal, whether by the cancel control, the Escape key or a click away, discards the capture:
+   * a prompt the reviewer has walked away from must not leave a target that a later confirmation
+   * could act on.
+   * @param {boolean} next - Whether the confirmation is being opened, as antd reports it.
+   * @returns {void} Completion is represented by this screen's own state.
+   */
+  function handleFraudPromptOpenChange(next: boolean): void {
+    if (next) {
+      openFraudPrompt();
+      return;
+    }
+    setFraudTarget(null);
   }
 
   /**
@@ -987,6 +1155,16 @@ export function AuthDetailScreen(): ReactElement {
     if (selector === undefined || busy) {
       return;
     }
+    /*
+     * WHY : ⚠️ Assumptions: a pending confirmation is discarded the moment a step is REQUESTED rather
+     *       than when the next authorization arrives, and this is the transition the defect this guard
+     *       closes was found on: the step changes only the route parameter, so the component survives
+     *       it and anything left open survives with it. Discarding on request rather than on arrival
+     *       also covers the arm that never navigates -- the end of the account's set, where the screen
+     *       stays on the row it is showing -- because a reviewer who asked to move on has stopped
+     *       answering the question the prompt asked.
+     */
+    setFraudTarget(null);
     setBusy(true);
     getNextPendingAuthorization(selector).then(
       /**
@@ -1071,12 +1249,15 @@ export function AuthDetailScreen(): ReactElement {
          * button beside the record all reach the write through one guarded path. The reference's PF5
          * writes immediately; the confirmation is the documented browser addition, and it applies here
          * too because a screen cannot tell an intended key press from a mistaken one either.
+         *
+         * Refactoring Rationale: the key delegates to {@link openFraudPrompt} rather than setting the
+         * prompt's state itself. It set it directly while the state was a flag, which meant the key had
+         * its own idea of what opening involved; now that opening CAPTURES the authorization being
+         * acted on, a second site would be a second capture free to disagree with the first.
          * @returns {void} Completion is represented by this screen's own state.
          */
         onInvoke: () => {
-          if (detail !== null && !busy) {
-            setFraudPromptOpen(true);
-          }
+          openFraudPrompt();
         },
         label: AUTH_DETAIL_KEY_LABELS.PFK05,
         disabled: detail === null || busy,
@@ -1110,6 +1291,69 @@ export function AuthDetailScreen(): ReactElement {
         setSeverity('error');
       },
     },
+  );
+
+  /*
+   * WHY : Refactoring Rationale: ⚠️ the two persistent zones this screen carries -- the rows 1-2 title
+   *       band and the row-24 key legend -- together with the row-23 message line are DELEGATED to the
+   *       one `AppShell` that `ui/src/App.tsx` mounts, where this screen composed all three itself. The
+   *       local composition produced no duplicate zone, because the shell paints a zone only when a
+   *       screen delegates it -- but it tied the frame's lifetime to the screen's, so a route change or
+   *       a failed lazy chunk took the title band and the legend away with the content on this screen
+   *       alone, where the eighteen delegating screens keep theirs.
+   * WHY : Assumptions: the publication is made unconditionally and ABOVE both early returns, and WHAT it
+   *       publishes is what varies. A hook called after an early return changes hook order between
+   *       renders, which React reports as a broken component rather than as a missing band, so the call
+   *       site cannot move; the ternary is the only place the distinction can live. This is the same
+   *       arrangement `ui/src/screens/cardDetail/index.tsx` records for the same problem.
+   * WHY : Assumptions: BOTH erased states publish an empty key list rather than omitting the member, so
+   *       the two arms differ only in which zones carry content. `PfKeyBar` renders `null` for an empty
+   *       list, so the rendered result is identical either way and the arms stay comparable.
+   * WHY : Assumptions: the rendered result of all three states is UNCHANGED by the move. The dead end
+   *       below still paints its bounded result with no frame around it -- there is no record, no valid
+   *       selector and nothing the function keys could act on, so a frame would imply a usable screen
+   *       behind it -- and the read in flight still paints a bare spinner. Only the owner of the three
+   *       zones moves; nothing about when they appear does.
+   * WHY : Assumptions: the header's two identifiers come from the SERVICE's rendering rather than from
+   *       the constants above or from a client clock. This is the one screen whose contract publishes
+   *       them -- `PendingAuthDetailScreen` carries `transactionName`, `programName`, `currentDate` and
+   *       `currentTime` -- because the reference program populates those six header slots itself. The
+   *       exported constants are the same values for a caller that needs them without a reading, and
+   *       the delegation prefers the service's so a screen and its service cannot disagree about which
+   *       program is on the glass.
+   * WHY : Assumptions: `now` is deliberately NOT delegated. `ScreenHeader` renders its own date and
+   *       time from that instant, and this service already rendered both into `currentDate` and
+   *       `currentTime`; the two are shown as the service's own values in the record block rather than
+   *       being re-derived, so handing the shell an instant as well would paint two clocks on one
+   *       screen. `ScreenHeader` degrades to the browser clock in its absence, which that module
+   *       records as a registered divergence.
+   * WHY : Assumptions: the shared band is used at its own 75-character contract even though this map's
+   *       `ERRMSG` is `LENGTH=78` at L284 to L287 and the program's `WS-MESSAGE` is `PIC X(80)` at L37.
+   *       The band implements the `CCARD-ERROR-MSG` / `CCARD-RETURN-MSG` width that
+   *       `app/cpy/CVCRD01Y.cpy` L38 to L40 declares, which is the width the majority of these screens
+   *       carry, and this mapset's name is delegated with the text so the band accounts for the
+   *       difference in one place. Forking a second band for three characters would give one contract
+   *       two implementations free to drift apart, and no sentence this screen paints approaches even
+   *       75 characters.
+   * WHY : ⚠️ Assumptions: `'RPT DT: '` is deliberately absent from everything this band can show.
+   *       `cbl/COPAUS1C.cbl` L523 emits it with a COBOL `DISPLAY`, which writes to the job log and not
+   *       to the map -- `ERRMSG` is only ever loaded from `WS-MESSAGE` at L377 -- so it is an
+   *       operator-side diagnostic of the service rather than screen text. Its datum is not lost to the
+   *       reader: the report date arrives inside the composed `fraudMark` value the record block
+   *       renders. Routing it to the band would put text on the glass the reference never displays
+   *       there.
+   */
+  useShellSlot(
+    selector === undefined || loading
+      ? { pfKeys: { keys: [], onInvoke: invoke } }
+      : {
+          screen: {
+            transactionId: detail?.transactionName ?? AUTH_DETAIL_TRANSACTION_ID,
+            programName: detail?.programName ?? AUTH_DETAIL_PROGRAM_NAME,
+          },
+          message: { text: message, severity, mapset: AUTH_DETAIL_MAPSET },
+          pfKeys: { keys: bindings, onInvoke: invoke },
+        },
   );
 
   /*
@@ -1158,23 +1402,6 @@ export function AuthDetailScreen(): ReactElement {
 
   return (
     <Flex vertical gap="large">
-      {/*
-        Assumptions: the band's two identifiers and its instant all come from the SERVICE's rendering
-        rather than from constants here or from a client clock. This is the one screen whose contract
-        publishes them -- `PendingAuthDetailScreen` carries `transactionName`, `programName`,
-        `currentDate` and `currentTime` -- because the reference program populates those six header
-        slots itself. The exported constants above are the same values for a caller that needs them
-        without a reading, and the rendering prefers the service's so a screen and its service cannot
-        disagree about which program is on the glass.
-        Assumptions: `now` is deliberately NOT passed. `ScreenHeader` renders its own date and time from
-        that instant, and this service already rendered both into `currentDate` and `currentTime`; the
-        two are shown as the service's own values in the record below rather than being re-derived, so
-        passing an instant here as well would paint two clocks on one screen.
-      */}
-      <ScreenHeader
-        transactionId={detail?.transactionName ?? AUTH_DETAIL_TRANSACTION_ID}
-        programName={detail?.programName ?? AUTH_DETAIL_PROGRAM_NAME}
-      />
       {/*
         Assumptions: the caption is rendered through `ScreenTitle` and carries the mapset's own
         `COLOR=NEUTRAL`, which the shared component would not apply on its own.
@@ -1230,13 +1457,18 @@ export function AuthDetailScreen(): ReactElement {
             second write. The design-system mapping assigns `Popconfirm` to exactly this role.
             Assumptions: the control's label is the mapset's own row-24 legend text, so no new wording
             is introduced for it.
+            ⚠️ Assumptions: the prompt is rendered as open only while the captured target still
+            describes this record, which is the rendered half of the guard `isFraudTargetCurrent`
+            states. A target that has stopped matching CLOSES the prompt instead of pointing it at
+            whatever arrived: an open confirmation names one authorization to the reviewer, so keeping
+            it open over a different one would be the screen asking about A and holding B.
           */}
           <Flex gap="small">
             <Popconfirm
               title={AUTH_DETAIL_KEY_LABELS.PFK05}
               okType="danger"
-              open={fraudPromptOpen}
-              onOpenChange={setFraudPromptOpen}
+              open={isFraudTargetCurrent(fraudTarget, selector, detail)}
+              onOpenChange={handleFraudPromptOpenChange}
               onConfirm={submitFraudTransition}
             >
               <Button danger disabled={busy} onClick={openFraudPrompt}>
@@ -1249,23 +1481,6 @@ export function AuthDetailScreen(): ReactElement {
           </Flex>
         </>
       )}
-      {/*
-        Assumptions: the shared band is used at its own 75-character contract even though this map's
-        `ERRMSG` is `LENGTH=78` at L284 to L287 and the program's `WS-MESSAGE` is `PIC X(80)` at L37.
-        The band implements the `CCARD-ERROR-MSG` / `CCARD-RETURN-MSG` width that `app/cpy/CVCRD01Y.cpy`
-        L38 to L40 declares, which is the width the majority of these screens carry, and it is passed
-        this mapset's name so it can account for the difference in one place. Forking a second band for
-        three characters would give one contract two implementations free to drift apart, and no
-        sentence this screen paints approaches even 75 characters.
-        ⚠️ Assumptions: `'RPT DT: '` is deliberately absent from everything this band can show.
-        `cbl/COPAUS1C.cbl` L523 emits it with a COBOL `DISPLAY`, which writes to the job log and not to
-        the map -- `ERRMSG` is only ever loaded from `WS-MESSAGE` at L377 -- so it is an operator-side
-        diagnostic of the service rather than screen text. Its datum is not lost to the reader: the
-        report date arrives inside the composed `fraudMark` value the record block renders. Routing it
-        to the band would put text on the glass that the reference never displays there.
-      */}
-      <MessageBand mapset={AUTH_DETAIL_MAPSET} message={message} severity={severity} />
-      <PfKeyBar keys={bindings} onInvoke={invoke} />
     </Flex>
   );
 }

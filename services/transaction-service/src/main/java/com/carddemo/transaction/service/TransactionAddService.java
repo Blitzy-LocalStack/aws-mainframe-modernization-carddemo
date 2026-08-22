@@ -878,6 +878,14 @@ public class TransactionAddService {
      * have. That is a documented divergence from a case the reference cannot represent, chosen over the
      * alternative of substituting a zero or a blank, which would append a row the operator never saw.</p>
      *
+     * <p>Assumptions: the copied text is carried VERBATIM and is not repaired, so a stored row whose
+     * source, description or merchant fields hold a character outside
+     * {@code TransactionAddRequest.PRINTABLE_TEXT} is refused by
+     * {@link #requirePrintableTextFields(TransactionAddRequest)} rather than silently rewritten. A
+     * capture built here never passes through Bean Validation, which is why that block exists at all;
+     * refusing is preferred to sanitising because a repaired value would append a row differing from the
+     * one the operator asked to copy, and the operator can re-key the field the answer names.</p>
+     *
      * @param request the submission whose key fields and confirmation are carried forward; must not be
      *     {@code null}
      * @param latest the stored row whose eleven data fields are copied; must not be {@code null}
@@ -1092,7 +1100,8 @@ public class TransactionAddService {
     }
 
     /**
-     * Runs the eight validation blocks of the data-field paragraph in the order they are written.
+     * Runs the eight validation blocks of the data-field paragraph in the order they are written, then
+     * the one added block that has no counterpart there.
      *
      * <p>This transcribes {@code VALIDATE-INPUT-DATA-FIELDS} at lines 235 to 437 of
      * {@code app/cbl/COTRN02C.cbl}, whose body is eight consecutive blocks. Each block below is its own
@@ -1104,12 +1113,21 @@ public class TransactionAddService {
      * lines 530 to 534 terminates the task. Each method below therefore raises rather than returning a
      * verdict, which is what makes the order load-bearing instead of decorative.</p>
      *
+     * <p>⚠️ Refactoring Rationale: {@link #requirePrintableTextFields(TransactionAddRequest)} is an ADDED
+     * block with no counterpart in the paragraph, and it runs LAST rather than beside the composition
+     * blocks it resembles. Position is the whole of the decision: a submission carrying both a defect the
+     * reference names and a character the reference's terminal could not have keyed must still answer
+     * with the reference's own sentence for the reference's own defect, and any earlier position would
+     * have let the added block pre-empt one. Running it last means it can only ever be reached by a
+     * submission every transcribed block already accepted, so no transcribed precedence changes.</p>
+     *
      * @param request the submitted capture, whose eleven data fields are validated; must not be
      *     {@code null}
      * @return the canonical amount the sixth block derives, which is the value every answer on this path
      *     echoes back, never {@code null}
-     * @throws ClientInputException if any data field carries a value the reference refuses, naming that
-     *     one field and carrying that one sentence
+     * @throws ClientInputException if any data field carries a value the reference refuses, or a
+     *     free-text field carries a character outside the record's printable domain, naming that one
+     *     field and carrying that one sentence
      */
     private static Money validateInputDataFields(TransactionAddRequest request) {
         requireEveryMandatoryDataField(request);
@@ -1119,6 +1137,7 @@ public class TransactionAddService {
         Money canonicalAmount = canonicaliseAmount(request);
         requireCalendarValidDates(request);
         requireNumericMerchantId(request);
+        requirePrintableTextFields(request);
 
         return canonicalAmount;
     }
@@ -1228,6 +1247,78 @@ public class TransactionAddService {
     private static void requireNumericMerchantId(TransactionAddRequest request) {
         requireAllDigits(request.merchantId(), FIELD_MERCHANT_ID,
                 TransactionAddRequest.MERCHANT_ID_NOT_NUMERIC);
+    }
+
+    /**
+     * Requires the five externally authored text fields to hold printable characters only.
+     *
+     * <p>This block has NO counterpart in {@code app/cbl/COTRN02C.cbl}, because the reference has no
+     * condition to test: its only writer of these fields is a 3270 field on a single-byte code page --
+     * {@code TRNSRC} at line 148 of {@code app/bms/COTRN02.bms} and its four siblings -- so a
+     * supplementary code point or a C0 control never reached the program. The HTTP boundary can carry
+     * both, and two sinks turn either into damage that cannot be attributed back to a request: a
+     * carriage return or line feed is copied verbatim into the plain-text statement's fixed-width bands
+     * and the transaction report's 133-column records, splitting one stored value into two records that
+     * no reader can tell from real ones; and a code point US-ASCII cannot represent is stored
+     * successfully and then refused by {@code FixedWidthCodec} on a later batch or reporting run.
+     * {@code TransactionAddRequest.PRINTABLE_TEXT} carries the derivation of the admitted span.</p>
+     *
+     * <p>Assumptions: this repeats a constraint the request shape already declares, and the repetition is
+     * load-bearing rather than defensive. {@link #copiedSubmission} builds a capture from a STORED row on
+     * the copy-last path, and a capture built in this process never passes through Bean Validation, so
+     * the boundary constraint cannot see it. Without this block a row written before the domain existed
+     * would be copied forward and re-persisted unexamined -- which is the one path by which a value the
+     * boundary now refuses could still enter the ledger.</p>
+     *
+     * <p>Assumptions: the predicate is {@code TransactionAddRequest.isPrintableText}, so the expression
+     * this block applies and the expression the boundary constraint applies are the same characters
+     * rather than two copies of one rule.</p>
+     *
+     * <p>Assumptions: the fields are inspected in the reference's own presence order -- source,
+     * description, merchant name, merchant city, merchant postal code, from the arms at lines 266, 272,
+     * 302, 308 and 314 -- so that a submission with two inadmissible values names the same field the
+     * reference would have named for two absent ones. There is no reference order to copy for this
+     * block, so borrowing the neighbouring one is what keeps the screen's field precedence single.</p>
+     *
+     * @param request the submitted capture, whose five text fields are inspected; must not be
+     *     {@code null}
+     * @throws ClientInputException naming the first of the five fields to carry a character outside the
+     *     printable domain
+     */
+    private static void requirePrintableTextFields(TransactionAddRequest request) {
+        requirePrintableText(request.source(), FIELD_SOURCE,
+                TransactionAddRequest.SOURCE_NOT_PRINTABLE);
+        requirePrintableText(request.description(), FIELD_DESCRIPTION,
+                TransactionAddRequest.DESCRIPTION_NOT_PRINTABLE);
+        requirePrintableText(request.merchantName(), FIELD_MERCHANT_NAME,
+                TransactionAddRequest.MERCHANT_NAME_NOT_PRINTABLE);
+        requirePrintableText(request.merchantCity(), FIELD_MERCHANT_CITY,
+                TransactionAddRequest.MERCHANT_CITY_NOT_PRINTABLE);
+        requirePrintableText(request.merchantZip(), FIELD_MERCHANT_ZIP,
+                TransactionAddRequest.MERCHANT_ZIP_NOT_PRINTABLE);
+    }
+
+    /**
+     * Refuses one field whose value carries a character outside the record's printable domain.
+     *
+     * <p>Assumptions: the rejected-value state is carried rather than the blank one, unlike
+     * {@link #requirePresent(String, String, String)}, because the field HAS a value and the marker
+     * {@code app/cpy/CSSETATY.cpy} lines 23 to 25 write is for a field left empty. A value refused for
+     * its characters is the same kind of fault as one refused for not being numeric, and reports the
+     * same way.</p>
+     *
+     * @param value the submitted value, already known to be present by the block above; must not be
+     *     {@code null}
+     * @param field the request member the value came from; must not be {@code null}
+     * @param message the sentence authored for that member; must not be {@code null}
+     * @throws ClientInputException if the value holds any character outside the inclusive span from the
+     *     space to the tilde
+     */
+    private static void requirePrintableText(String value, String field, String message) {
+        if (!TransactionAddRequest.isPrintableText(value)) {
+            throw new ClientInputException(ApiError.CODE_VALIDATION, field,
+                    FieldValidationFlag.NOT_OK, message);
+        }
     }
 
     /**

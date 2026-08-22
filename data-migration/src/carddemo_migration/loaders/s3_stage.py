@@ -469,13 +469,13 @@ class S3StagingClient(Protocol):
         """
 
     def get_object(self, **kwargs: Any) -> Any:
-        """Read one object's body, for a generation claim record or for a delivered extract.
+        """Read one object's body, for a generation-allocation record or a delivered extract.
 
         Purpose
         -------
-        Serve the module's two reads: the execution token stored in a claim, so a retried
-        staging step can recognise the claim its own first attempt created, and the bytes of a
-        source extract, so a task with no operator filesystem can stage and load one.
+        Serve the module's two reads: the generation number stored in an execution's allocation
+        record, so a retried staging step replays the generation its first attempt took, and the
+        bytes of a source extract, so a task with no operator filesystem can stage and load one.
         :func:`fetch_object_to_path`, :func:`fetch_dataset_extract` and :func:`fetch_extract` all
         stream an extract to a local path before it is staged and decoded; the digest this package
         published with the object is additionally checked where it carries one.
@@ -490,8 +490,9 @@ class S3StagingClient(Protocol):
         Returns
         -------
         Any
-            The service response mapping. A claim read consumes ``Body`` whole; an extract read
-            consumes ``Body`` in bounded chunks and additionally reads ``ContentLength``, and
+            The service response mapping. An allocation-record read consumes ``Body`` whole; an
+            extract read consumes ``Body`` in bounded chunks and additionally reads
+            ``ContentLength``, and
             ``ChecksumSHA256`` and ``Metadata`` where the object carries them. Refactoring
             Rationale: this description previously said the bodies read here are claim tokens of
             a few tens of bytes and never dataset content, which the extract fetches made
@@ -508,8 +509,8 @@ class S3StagingClient(Protocol):
         -----
         Assumptions: the extract read consumes ``Body`` in bounded chunks rather than calling
         ``read()`` with no argument, because the extracts run to hundreds of kilobytes each and a
-        whole-body read would make peak memory scale with the dataset. The claim read is a few
-        tens of bytes and goes through the same loop, so there is one path and not two.
+        whole-body read would make peak memory scale with the dataset. The allocation-record read
+        is a few tens of bytes and goes through the same loop, so there is one path and not two.
         """
 
     def delete_objects(self, **kwargs: Any) -> Any:
@@ -1725,7 +1726,50 @@ def next_generation(
     return highest + 1
 
 
-_CLAIM_SEGMENT: Final[str] = "_claims/"
+#: Object name, INSIDE a ``gen=NNNN/`` prefix, whose existence means that number is taken.
+#:
+#: THIS IS ONE HALF OF A CROSS-LANGUAGE CONTRACT and the spelling is shared, not local. The
+#: batch tier declares the same literal as ``DatasetGenerationService.CLAIM_OBJECT_NAME``, under
+#: ``services/batch-service/src/main/java/com/carddemo/batch/service/``, and
+#: ``tests/test_s3_stage.py`` reads that declaration and asserts the two are equal, so the pair
+#: cannot drift silently.
+#:
+#: Refactoring Rationale: this module reserved a generation at
+#: ``dt=<date>/_claims/gen=NNNN`` -- a SIBLING of the generation prefixes -- while the batch
+#: tier reserved the same number at ``dt=<date>/gen=NNNN/_generation.claim``, INSIDE it. Neither
+#: namespace was visible to the other implementation, so a Python staging branch and a Java
+#: batch step could each conclude that the same number was free, both create their own claim,
+#: and both write a generation over one prefix. The batch tier's form is adopted here because it
+#: is the only one that makes a claimed number visible to BOTH implementations through the
+#: listing each already performs: a marker under ``gen=NNNN/`` makes that prefix a listed common
+#: prefix, so :func:`list_generation_prefixes` reports a claimed-but-unstaged generation as
+#: present without any knowledge of claims at all. The ``_claims/`` sibling defeated exactly that
+#: property, which is why the rationale that argued for it is withdrawn rather than reworded.
+#:
+#: Trade-offs: the accepted cost is one object of a few bytes per generation, and that object is
+#: removed with the generation it belongs to -- :func:`delete_generation_prefix` deletes every
+#: version beneath the ``gen=`` prefix, which now includes the marker, so claims no longer
+#: accumulate outside any retention rule the way the sibling form's did.
+_CLAIM_OBJECT_NAME: Final[str] = "_generation.claim"
+#: Top-level prefix holding the per-run replay records, outside every family root.
+#:
+#: THE SECOND HALF OF THE SAME CROSS-LANGUAGE CONTRACT, and here THREE artifacts must agree:
+#: this constant, ``DatasetGenerationService.RUN_CLAIM_ROOT`` in the batch tier, and
+#: ``local.generation_claim_prefix`` in ``infra/modules/s3-datasets/main.tf``, which is published
+#: as the ``generation_claim_prefix`` output the environment roots scope their task-role grant
+#: and their lifecycle rule to. A test in this suite reads both of the other two and asserts all
+#: three are the same string, because a grant or a lifecycle rule naming a prefix nothing writes
+#: to fails only at run time, and only for the run that needed it.
+#:
+#: Assumptions: the prefix is TOP-LEVEL, outside every ``<domain>/<dataset>/`` root, so that no
+#: family listing can return it. A bookkeeping prefix appearing among a family's date partitions
+#: would be a candidate :func:`_parse_generation_prefix` and its Java counterpart would each have
+#: to reject, and a parser that rejects is a parser that can be made to accept by mistake.
+_RUN_CLAIM_ROOT: Final[str] = "_generation-claims/"
+#: Literal opening the run segment of a replay record's key.
+_RUN_CLAIM_RUN_MARKER: Final[str] = "run="
+#: Separator between the run segment and the family segment of a replay record's key.
+_RUN_CLAIM_FAMILY_SEPARATOR: Final[str] = "/family="
 #: Service error codes a conditional create returns when another writer already claimed the key.
 #: ``PreconditionFailed`` is S3's 412 answer to an unsatisfied ``If-None-Match``;
 #: ``ConditionalRequestConflict`` is the 409 answer when two conditional writes race each other.
@@ -1736,59 +1780,6 @@ _CLAIM_CONFLICT_CODES: Final[frozenset[str]] = frozenset(
 )
 
 
-def _claim_prefix(
-    settings: DatasetStagingSettings, domain: str, dataset: str, business_date: date
-) -> str:
-    """Build the prefix holding one business date's generation claims for one family.
-
-    Purpose
-    -------
-    Place claim records in a sibling of the ``gen=`` prefixes under the same business date, so a
-    claim is discoverable from the family and date alone without colliding with a generation.
-
-    Parameters
-    ----------
-    settings : DatasetStagingSettings
-        Validated bucket settings carrying the canonical prefix builder.
-    domain : str
-        Bounded-context segment.
-    dataset : str
-        Dataset-family segment.
-    business_date : date
-        The business date whose claims are wanted.
-
-    Returns
-    -------
-    str
-        The claim prefix, ending in a forward slash.
-
-    Raises
-    ------
-    ConfigurationError
-        If a path segment or the business date is unacceptable to the prefix builder.
-    """
-    # WHY : Alternatives Considered: the claim prefix is derived by TRUNCATING a real generation
-    #   prefix at its ``gen=`` component rather than being composed from the segments here. The
-    #   composed form was rejected because it would restate the layout -- domain, dataset, the
-    #   ``dt=`` spelling and the ISO date format -- in a second place, and the two spellings would
-    #   then be free to drift. Deriving keeps one builder authoritative for the whole layout, the
-    #   same technique :func:`family_prefix` already uses to obtain the family root.
-    # WHY : Assumptions: claims sit in a ``_claims/`` SIBLING of the ``gen=NNNN/`` prefixes rather
-    #   than inside one, and two consequences follow that a reader should not have to discover.
-    #   First, they are invisible to generation discovery: :func:`_parse_generation_prefix` refuses
-    #   the segment, so a claim can never be mistaken for a staged generation. Second, and stated
-    #   plainly because it is a real operational cost, :func:`prune_generations` does NOT remove
-    #   them -- it deletes generation prefixes, and a claim is not one -- so claims accumulate at
-    #   roughly one small object per staging step per family. Pruning them alongside generations
-    #   was considered and rejected: a claim outliving its generation is harmless, whereas deleting
-    #   a claim whose execution may still retry would hand that retry a fresh generation and
-    #   reintroduce the duplicate this mechanism exists to prevent. The bucket's lifecycle
-    #   configuration is the right place to expire them, since it can do so on age rather than on
-    #   a guess about whether an execution has finished.
-    generation_prefix = settings.generation_prefix(domain, dataset, business_date, MIN_GENERATION)
-    return f"{generation_prefix.split('gen=', 1)[0]}{_CLAIM_SEGMENT}"
-
-
 def _claim_key(
     settings: DatasetStagingSettings,
     domain: str,
@@ -1796,7 +1787,7 @@ def _claim_key(
     business_date: date,
     generation: int,
 ) -> str:
-    """Build the key of the claim record for one generation of one family and business date.
+    """Build the key of the claim marker for one generation of one family and business date.
 
     Purpose
     -------
@@ -1819,59 +1810,102 @@ def _claim_key(
     Returns
     -------
     str
-        The claim record's key. It is an object key, not a prefix, so it has no trailing slash.
+        The marker's key. It is an object key, not a prefix, so it has no trailing slash.
 
     Raises
     ------
     ConfigurationError
         If a path segment or the business date is unacceptable to the prefix builder.
     """
-    prefix = _claim_prefix(settings, domain, dataset, business_date)
-    return f"{prefix}gen={generation:0{GENERATION_DIGITS}d}"
+    # WHY : Assumptions: the key is the generation's OWN prefix with the shared marker name
+    #   appended, so the whole layout -- domain, dataset, the ``dt=`` spelling, the ISO date and
+    #   the four-digit ``gen=`` component -- comes from the one canonical builder and nothing is
+    #   restated here. The marker therefore lands INSIDE the prefix it reserves, which is what
+    #   makes the reservation visible to generation discovery on both sides of the migration.
+    prefix = settings.generation_prefix(domain, dataset, business_date, generation)
+    return f"{prefix}{_CLAIM_OBJECT_NAME}"
 
 
-def _claimed_generation(key: str, claim_prefix: str) -> int | None:
-    """Read the generation number out of a claim key, or report that it is not one.
+def _run_claim_family_token(dataset: str) -> str:
+    """Render the family segment of a replay record's key for one dataset segment.
 
     Purpose
     -------
-    Keep claim-key parsing in one place, so a stray object under the claim prefix is ignored
-    rather than being mistaken for a claim and skewing allocation.
+    Produce the same family token the batch tier writes, so a replay record created by either
+    implementation is found by the other.
 
     Parameters
     ----------
-    key : str
-        A key discovered under the claim prefix.
-    claim_prefix : str
-        The claim prefix the key was listed under.
+    dataset : str
+        The dataset path segment, for example ``transact-bkup``.
 
     Returns
     -------
-    int or None
-        The generation the claim names, or ``None`` when the key is not a well-formed claim.
+    str
+        The token, for example ``TRANSACT_BKUP``.
 
     Raises
     ------
     None
-        An unparseable key yields ``None``, because refusing the whole allocation over one
-        unrecognised object would let anything written under the prefix block staging outright.
+        The transformation is total over any string; an unregistered segment yields a token that
+        simply names no family either implementation writes.
     """
-    if not key.startswith(claim_prefix):
-        return None
-    remainder = key[len(claim_prefix) :]
-    matched = re.fullmatch(rf"gen=(\d{{{GENERATION_DIGITS}}})", remainder)
-    if matched is None:
-        return None
-    number = int(matched.group(1))
-    if number < MIN_GENERATION or number > MAX_GENERATION:
-        return None
-    return number
+    # WHY : Assumptions: the batch tier keys its replay record on the NAME OF THE ENUM CONSTANT
+    #   that declares the family -- ``DatasetFamily.TRANSACT_BKUP`` -- and every one of the ten
+    #   constant names is this module's registry key upper-cased with each hyphen replaced by an
+    #   underscore, which is the only difference between a Java identifier and a path segment.
+    #   Deriving the token rather than transcribing ten more literals keeps the registry above the
+    #   single inventory; the ten pairs are asserted against the Java enum declarations in
+    #   ``tests/test_s3_stage.py``, so a family added on one side without the other fails a test
+    #   instead of producing a replay record the other implementation never looks for.
+    # WHY : Alternatives Considered: keying the record on the ``<domain>/<dataset>/`` prefix, which
+    #   needs no transformation at all. Rejected because it puts a forward slash inside the family
+    #   segment, so one run's records would no longer be one flat listing under its ``run=``
+    #   prefix -- which is what lets an operator inspect or remove a single run's bookkeeping.
+    return dataset.upper().replace("-", "_")
 
 
-def _existing_claim(
-    client: S3StagingClient, bucket: str, claim_prefix: str, execution_token: str
-) -> int | None:
-    """Find the generation this execution already claimed for a family and business date.
+def _run_claim_key(execution_token: str, dataset: str) -> str:
+    """Build the key of the replay record for one execution and one family.
+
+    Purpose
+    -------
+    Name the object that answers "which generation did this execution already take for this
+    family", which is what a retried branch reads instead of allocating a second number.
+
+    Parameters
+    ----------
+    execution_token : str
+        Token identifying the orchestrator execution, which is the state-machine execution name
+        the batch tasks receive as ``CARDDEMO_BATCH_RUN_ID``.
+    dataset : str
+        The dataset path segment the reservation is keyed on.
+
+    Returns
+    -------
+    str
+        The record's key, beneath :data:`_RUN_CLAIM_ROOT`.
+
+    Raises
+    ------
+    None
+        Composition cannot fail; a blank token is refused by :func:`reserve_generation` before
+        this function is reached.
+    """
+    # WHY : Assumptions: the execution token is used AS SUPPLIED and is not escaped or hashed. The
+    #   orchestrator supplies a state-machine execution name, whose character set is already a
+    #   subset of what an object key accepts, so escaping would rewrite a valid value and make the
+    #   key a reader sees differ from the identifier the same reader finds in a log line. The
+    #   batch tier states the same assumption at its own key builder, and the two keys must be
+    #   byte-identical for a replay to cross the language boundary at all.
+    return (
+        f"{_RUN_CLAIM_ROOT}{_RUN_CLAIM_RUN_MARKER}{execution_token}"
+        f"{_RUN_CLAIM_FAMILY_SEPARATOR}{_run_claim_family_token(dataset)}"
+    )
+
+
+def _recorded_allocation(client: S3StagingClient, bucket: str, run_claim_key: str) -> int | None:
+    """Read the generation this execution already recorded for a family, if it recorded one.
 
     Purpose
     -------
@@ -1881,106 +1915,187 @@ def _existing_claim(
     Parameters
     ----------
     client : S3StagingClient
-        S3 client used for the listing and the claim reads.
+        S3 client used for the record read.
     bucket : str
-        Dataset bucket holding the claims.
-    claim_prefix : str
-        Prefix under which this family and business date keep their claims.
-    execution_token : str
-        Token identifying the orchestrator execution whose claim is wanted.
+        Dataset bucket holding the replay records.
+    run_claim_key : str
+        Key of the replay record, as built by :func:`_run_claim_key`.
 
     Returns
     -------
     int or None
-        The generation already claimed by this execution, or ``None`` if it holds none.
+        The generation this execution already holds for the family, or ``None`` when it holds
+        none.
 
     Raises
     ------
     GenerationDiscoveryError
-        If a claim record exists but cannot be read.
+        If the record exists but cannot be read, or holds something other than a generation
+        number in range.
     """
-    # WHY : Alternatives Considered: the replay lookup LISTS the claims and reads each one, rather
-    #   than deriving a key from the execution token and fetching it directly. A token-keyed
-    #   record would be one request instead of N, and it was rejected because it cannot make the
-    #   generation itself exclusive: two executions would each create their own token-keyed record
-    #   and both could name the same generation, which is precisely the collision this function
-    #   exists to prevent. Keying the record BY GENERATION is what makes the conditional create
-    #   below a mutual exclusion, and the cost of that choice is this bounded scan. It is bounded
-    #   by the number of generations one business date holds, which the family retention limit
-    #   keeps small -- five for every one of the ten provisioned families.
-    candidates: dict[int, str] = {}
-    for page in _paginate(
-        client,
-        "list_objects_v2",
-        "the generation-claim listing",
-        Bucket=bucket,
-        Prefix=claim_prefix,
-    ):
-        for item in page.get("Contents", []):
-            key = item.get("Key")
-            if not isinstance(key, str):
-                continue
-            number = _claimed_generation(key, claim_prefix)
-            if number is not None:
-                candidates[number] = key
-    for number in sorted(candidates):
-        try:
-            response = client.get_object(Bucket=bucket, Key=candidates[number])
-            holder = response["Body"].read()
-        except Exception as exc:  # noqa: BLE001 - re-raised below as a named staging failure
-            # WHY : Refactoring Rationale: this interpolated `{exc}`, so a refused or failed claim
-            #   read published the SDK's own text -- the assumed-role ARN, the account identifier
-            #   and the request identifier -- into a message `cli.py` writes to a container log.
-            #   The metadata is now allow-listed and the provider exception is suppressed with
-            #   `from None`, so nothing logging `exc_info` can recover the original text.
-            raise GenerationDiscoveryError(
-                _provider_failure("the generation-claim read", bucket, candidates[number], exc)
-            ) from None
-        # WHY : Assumptions: the stored token is compared as BYTES decoded strictly rather than
-        #   being trusted as text. A claim body this process did not write -- anything else that
-        #   put an object under the prefix -- may not be valid UTF-8 at all, and a lenient decode
-        #   would turn those bytes into replacement characters that could never match any token
-        #   and would silently be treated as another execution's claim. Refusing to match on an
-        #   undecodable body reaches the same conclusion honestly.
-        try:
-            recorded = holder.decode("utf-8")
-        except UnicodeDecodeError:
-            continue
-        if recorded == execution_token:
-            return number
-    return None
+    # WHY : Refactoring Rationale: replay was a LISTING of every generation-keyed claim under one
+    #   date followed by a body read of each, looking for the one whose body matched this
+    #   execution. It is now a single direct read of a key derived from the execution and family,
+    #   which is the shape the batch tier already used. The scan was not merely slower: it could
+    #   only find a claim it had written itself, in its own ``_claims/`` namespace, so a generation
+    #   already allocated to this same execution by the batch tier was invisible to it and a
+    #   retried mixed-language step allocated a second number for the same logical work. Answering
+    #   from the shared record is what makes the replay cross the language boundary.
+    try:
+        response = client.get_object(Bucket=bucket, Key=run_claim_key)
+        recorded = response["Body"].read()
+    except Exception as exc:  # noqa: BLE001 - classified by service code, then re-raised sanitized
+        # WHY : Assumptions: absence is recognised by the service's own ERROR CODE through the
+        #   published reader, not by exception type, and an absent record is the ordinary
+        #   first-attempt outcome rather than a fault. Catching botocore's `ClientError` by type
+        #   would import the SDK into a module that deliberately stays importable without it, and
+        #   would make this path unreachable from a test using this module's own client protocol.
+        #   This is the same discipline `_staged_digest` and `_claim_generation` already apply.
+        if config.error_code(exc) in _ABSENT_OBJECT_CODES:
+            return None
+        # WHY : Refactoring Rationale: the read failure that this replaced interpolated the SDK
+        #   exception directly, so a refused or failed record read published the assumed-role ARN,
+        #   the account identifier and the request identifier into a message `cli.py` writes to a
+        #   container log. The metadata is allow-listed by `_provider_failure` and the provider
+        #   exception is suppressed with `from None`, so nothing logging `exc_info` can recover it.
+        raise GenerationDiscoveryError(
+            _provider_failure("the generation-allocation record read", bucket, run_claim_key, exc)
+        ) from None
+
+    # WHY : Assumptions: the body is decoded STRICTLY and a body that is not valid UTF-8 is a
+    #   failure rather than a miss. This differs from the claim-body handling it replaced, which
+    #   skipped an undecodable body and moved on, and the difference is deliberate: a key derived
+    #   from this execution and family can only have been written by this mechanism, so
+    #   unreadable content there means the record is corrupt and continuing would allocate a
+    #   second generation for work that already has one.
+    try:
+        digits = recorded.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise GenerationDiscoveryError(
+            f"the generation-allocation record at {run_claim_key} does not hold text this run "
+            f"can read, so the generation it names cannot be recovered"
+        ) from exc
+
+    # WHY : Assumptions: the body is trimmed before parsing and is an UNPADDED decimal number,
+    #   which is what the batch tier writes -- `Integer.toString` of the generation number, not
+    #   the four-digit key component. Accepting the padded spelling too would be harmless here but
+    #   would make two spellings valid, and the next writer would have no way to tell which one is
+    #   the contract; `int` accepts leading zeroes anyway, so the strict reading costs nothing.
+    try:
+        number = int(digits)
+    except ValueError as exc:
+        raise GenerationDiscoveryError(
+            f"the generation-allocation record at {run_claim_key} does not hold a generation "
+            f"number this run can address"
+        ) from exc
+    if number < MIN_GENERATION or number > MAX_GENERATION:
+        raise GenerationDiscoveryError(
+            f"the generation-allocation record at {run_claim_key} names generation {number}, "
+            f"which is outside the addressable range "
+            f"{MIN_GENERATION}-{MAX_GENERATION}"
+        )
+    return number
 
 
-def _claim_generation(client: S3StagingClient, bucket: str, key: str, execution_token: str) -> bool:
-    """Attempt to claim one generation with a single conditional create.
+def _record_allocation(
+    client: S3StagingClient, bucket: str, run_claim_key: str, generation: int
+) -> int:
+    """Record the generation this execution allocated for a family, and report the agreed number.
 
     Purpose
     -------
-    Turn "is this generation free, and may I have it?" into one atomic service operation, so two
-    concurrent allocators cannot both conclude the same number is available.
+    Publish the allocation under a key any later attempt of the same execution can find, so a
+    retry replays rather than allocating again, and so two concurrent workers of one execution
+    return one number instead of two.
+
+    Parameters
+    ----------
+    client : S3StagingClient
+        S3 client used for the conditional write and the read-back.
+    bucket : str
+        Dataset bucket holding the replay records.
+    run_claim_key : str
+        Key of the replay record, as built by :func:`_run_claim_key`.
+    generation : int
+        The generation this call claimed and wants to record.
+
+    Returns
+    -------
+    int
+        The recorded generation. This is ``generation`` unless a concurrent worker of the same
+        execution recorded a different number first, in which case it is that number.
+
+    Raises
+    ------
+    StagingServiceError
+        If the record cannot be written for a reason other than one already existing.
+    GenerationDiscoveryError
+        If a record written by a concurrent worker exists but cannot be read back.
+    """
+    # WHY : Assumptions: the write is conditional on ABSENCE, so a worker that loses the race does
+    #   not overwrite the winner's number, and the loss is not an error -- the record is re-read
+    #   and both workers return whichever number was recorded. Re-reading is therefore not
+    #   redundant with the write: it is the only thing that makes two workers of one execution
+    #   agree, and the batch tier resolves the identical race the identical way.
+    # WHY : Trade-offs: the losing worker's per-generation marker is deliberately LEFT IN PLACE
+    #   rather than removed. Deleting it would recycle the number, and the accepted cost of not
+    #   deleting it is one abandoned generation number per lost race -- an empty prefix that
+    #   retention rolls off like any other. Deleting it was rejected because a marker cannot be
+    #   proved unused: between the claim and the delete, the losing worker may already have staged
+    #   bytes under that prefix, and recycling the number would then hand a later run a prefix that
+    #   is not empty.
+    if _claim_generation(client, bucket, run_claim_key, str(generation)):
+        return generation
+    replayed = _recorded_allocation(client, bucket, run_claim_key)
+    if replayed is not None:
+        return replayed
+    # WHY : Assumptions: a record that refused the conditional write and then read back as absent
+    #   means it was deleted between the two calls, which no part of this system does. The locally
+    #   claimed number is returned rather than raising, because the per-generation marker for it
+    #   was created successfully and is exclusive on its own -- the replay record only decides
+    #   which of two workers of ONE execution wins, and there is demonstrably no other worker.
+    return generation
+
+
+def _claim_generation(client: S3StagingClient, bucket: str, key: str, body: str) -> bool:
+    """Attempt one step of a generation reservation with a single conditional create.
+
+    Purpose
+    -------
+    Turn "is this key free, and may I have it?" into one atomic service operation, so two
+    concurrent allocators cannot both conclude the same generation is available and two workers
+    of one execution cannot both record a different allocation.
 
     Parameters
     ----------
     client : S3StagingClient
         S3 client used for the conditional write.
     bucket : str
-        Dataset bucket holding the claims.
+        Dataset bucket holding the reservation objects.
     key : str
-        The claim record's key, naming the generation being claimed.
-    execution_token : str
-        Token recorded as the claim's body, identifying the holder.
+        The object key being created. Either a per-generation marker built by :func:`_claim_key`
+        or a replay record built by :func:`_run_claim_key`.
+    body : str
+        The content recorded at that key: the execution token for a marker, the decimal
+        generation number for a replay record.
 
     Returns
     -------
     bool
-        True when this call created the claim, False when it already existed.
+        True when this call created the object, False when it already existed or a concurrent
+        conditional write held it.
 
     Raises
     ------
-    Exception
-        Any service failure other than a conditional-write conflict is re-raised unchanged,
-        because only a conflict is an expected outcome of the allocation loop.
+    StagingServiceError
+        If the write failed for any reason other than the key already being taken.
     """
+    # WHY : Refactoring Rationale: the body is now a PARAMETER where it was always the execution
+    #   token, because a reservation is two conditional creates with different contents -- the
+    #   marker records who holds the number, the replay record records which number the holder
+    #   got. Duplicating the conflict-code handling into a second function was the alternative and
+    #   was rejected: the classification below is the subtle part, and two copies of it would drift
+    #   the moment one of the two service codes was revised in only one of them.
     # WHY : Refactoring Rationale: allocation is a CONDITIONAL CREATE, replacing a
     #   list-then-take-the-maximum-then-add-one sequence. That sequence had no atomicity at any
     #   point: two allocators listing the same prefix both read the same highest generation, both
@@ -1991,7 +2106,7 @@ def _claim_generation(client: S3StagingClient, bucket: str, key: str, execution_
         client.put_object(
             Bucket=bucket,
             Key=key,
-            Body=execution_token.encode("utf-8"),
+            Body=body.encode("utf-8"),
             ContentType="text/plain; charset=utf-8",
             IfNoneMatch="*",
         )
@@ -2016,7 +2131,7 @@ def _claim_generation(client: S3StagingClient, bucket: str, key: str, execution_
         #   the SDK's own text. It is now reported through allow-listed metadata like every other
         #   provider failure in this module, and the original is suppressed rather than chained.
         raise StagingServiceError(
-            _provider_failure("the generation claim", bucket, key, exc)
+            _provider_failure("the generation reservation write", bucket, key, exc)
         ) from None
     return True
 
@@ -2037,10 +2152,23 @@ def reserve_generation(
     retried execution reuses the number its first attempt took, rather than consuming a fresh
     generation for a second copy of the same bytes.
 
+    Notes
+    -----
+    Assumptions: the reservation is TWO objects and both spellings are shared verbatim with the
+    batch tier's ``DatasetGenerationService``, which allocates the same generations for the same
+    families from Java. The per-generation marker
+    ``<domain>/<dataset>/dt=<date>/gen=NNNN/_generation.claim`` carries the execution token and
+    makes the number exclusive; the replay record
+    ``_generation-claims/run=<token>/family=<FAMILY>`` carries the decimal generation number and
+    makes a retry idempotent. Because either implementation may hold a number the other must
+    respect, agreement on both spellings is not a convention but the mechanism: a marker written
+    by one is a listed common prefix the other's discovery already skips, and a replay record
+    written by one is read directly by the other.
+
     Parameters
     ----------
     client : S3StagingClient
-        S3 client used for claim discovery and the conditional claim writes.
+        S3 client used for the replay-record read and the conditional reservation writes.
     settings : DatasetStagingSettings
         Validated bucket settings and the canonical prefix builder.
     domain : str
@@ -2064,7 +2192,10 @@ def reserve_generation(
     GenerationRetentionError
         If the execution token is blank, or a discovered prefix carries an invalid business date.
     GenerationDiscoveryError
-        If the generation space for that business date is exhausted, or a claim cannot be read.
+        If the generation space for that business date is exhausted, or the replay record exists
+        but cannot be read.
+    StagingServiceError
+        If a reservation object cannot be written for a reason other than already existing.
     ConfigurationError
         If a path segment or the business date is unacceptable to the prefix builder.
     """
@@ -2077,25 +2208,29 @@ def reserve_generation(
     if not isinstance(execution_token, str) or not execution_token.strip():
         raise GenerationRetentionError("generation reservation requires a non-blank token")
 
-    claim_prefix = _claim_prefix(settings, domain, dataset, business_date)
-    replayed = _existing_claim(client, settings.bucket, claim_prefix, execution_token)
+    run_claim_key = _run_claim_key(execution_token, dataset)
+    replayed = _recorded_allocation(client, settings.bucket, run_claim_key)
     if replayed is not None:
         return replayed
 
-    # WHY : Assumptions: the search starts from the highest number that is either already STAGED
-    #   or already CLAIMED, so the two sources are considered together. Starting from the staged
-    #   generations alone would re-offer a number another execution has claimed but not yet
-    #   written, and starting from the claims alone would re-offer a number staged before claims
-    #   existed. Taking the maximum of both is what makes the allocator correct across a bucket
-    #   that predates this mechanism.
-    staged = next_generation(client, settings, domain, dataset, business_date)
-    claimed = _claimed_generations(client, settings.bucket, claim_prefix)
-    candidate = max(staged, max(claimed) + 1 if claimed else MIN_GENERATION)
+    # WHY : Refactoring Rationale: the search starts from the staged generations ALONE, where it
+    #   previously took the maximum of the staged numbers and a separate listing of claim records.
+    #   The second listing is gone because it is no longer a second namespace: a marker now lives
+    #   INSIDE the ``gen=NNNN/`` prefix it reserves, so that prefix is returned as a common prefix
+    #   by the very listing `next_generation` performs, and a claimed-but-unstaged number is
+    #   already counted as present. One source is not merely tidier -- the two sources could
+    #   disagree, and reconciling them was the seam through which a number claimed by the batch
+    #   tier stayed invisible here.
+    candidate = next_generation(client, settings, domain, dataset, business_date)
 
     while candidate <= MAX_GENERATION:
         claim_key = _claim_key(settings, domain, dataset, business_date, candidate)
         if _claim_generation(client, settings.bucket, claim_key, execution_token):
-            return candidate
+            # WHY : Assumptions: the replay record is written AFTER the marker, never before. The
+            #   marker is what makes the number exclusive, so recording a number this worker had
+            #   not yet won would publish an allocation another worker could still take -- and a
+            #   retry replaying that record would then address a prefix belonging to someone else.
+            return _record_allocation(client, settings.bucket, run_claim_key, candidate)
         # WHY : Trade-offs: a refused claim advances to the NEXT number rather than re-listing the
         #   prefix. Re-listing would cost a request per collision and could still be stale by the
         #   time the next claim is attempted, so the loop would be no more correct and slower.
@@ -2104,57 +2239,11 @@ def reserve_generation(
         candidate += 1
 
     raise GenerationDiscoveryError(
-        f"the generation space for {claim_prefix} on {business_date.isoformat()} is exhausted at "
+        f"the generation space for {family_prefix(settings, domain, dataset)} on "
+        f"{business_date.isoformat()} is exhausted at "
         f"gen={MAX_GENERATION:0{GENERATION_DIGITS}d}; no further generation can be reserved "
         f"for that business date"
     )
-
-
-def _claimed_generations(
-    client: S3StagingClient, bucket: str, claim_prefix: str
-) -> tuple[int, ...]:
-    """List the generation numbers already claimed under one claim prefix.
-
-    Purpose
-    -------
-    Report which numbers are spoken for but possibly not yet staged, so the allocator does not
-    offer a number another execution is in the middle of writing.
-
-    Parameters
-    ----------
-    client : S3StagingClient
-        S3 client used for the listing.
-    bucket : str
-        Dataset bucket holding the claims.
-    claim_prefix : str
-        Prefix under which this family and business date keep their claims.
-
-    Returns
-    -------
-    tuple[int, ...]
-        The claimed generation numbers in ascending order, empty when none are claimed.
-
-    Raises
-    ------
-    None
-        An unparseable key under the prefix is ignored rather than failing the listing.
-    """
-    numbers: set[int] = set()
-    for page in _paginate(
-        client,
-        "list_objects_v2",
-        "the generation-claim listing",
-        Bucket=bucket,
-        Prefix=claim_prefix,
-    ):
-        for item in page.get("Contents", []):
-            key = item.get("Key")
-            if not isinstance(key, str):
-                continue
-            number = _claimed_generation(key, claim_prefix)
-            if number is not None:
-                numbers.add(number)
-    return tuple(sorted(numbers))
 
 
 def _delete_batch(

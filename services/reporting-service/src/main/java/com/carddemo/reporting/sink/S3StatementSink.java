@@ -22,13 +22,16 @@ import java.util.Objects;
  * {@code app/jcl/CREASTMT.JCL}. The two are separate destinations, so a markup record can never reach the
  * plain-text artifact and the interleaving between them is not observable in either.</p>
  *
- * <p>Assumptions: each artifact is written by its own {@link S3ArtifactWriter}, so each is bounded to one
- * part buffer and each becomes visible only when it is complete. The reference deletes the previous run's
- * output before generating, at L66 of {@code app/jcl/CREASTMT.JCL}; that step is deliberately NOT
- * reproduced as a deletion, because completing an upload over the same key replaces the previous object
- * while a failed run leaves the last good artifact in place, whereas deleting first and failing would
- * leave a reader with nothing. {@link #replaceArtifacts()} therefore asserts the destination rather than
- * clearing it, and the reasoning is recorded on the writer.</p>
+ * <p>⚠️ Assumptions: each artifact is written by its own {@link S3ArtifactWriter} to a key that carries
+ * the run's identifier, so each is bounded to one part buffer, each becomes visible only when it is
+ * complete, and NEITHER replaces anything. The reference deletes the previous run's output before
+ * generating, at L66 of {@code app/jcl/CREASTMT.JCL}; that step is deliberately not reproduced as a
+ * deletion, and it is no longer reproduced as an overwrite either. The overwrite reading was the one
+ * recorded here before, and a review found the cost of it: three objects replaced one at a time are
+ * three separate moments at which a reader sees a mixture of two runs. The previous run is now left
+ * entirely alone and the new one is disclosed by a single manifest write in
+ * {@code GenerateStatementsTask}, so {@link #replaceArtifacts()} asserts the destination rather than
+ * clearing it and nothing this class writes is ever mutated.</p>
  *
  * <p>Trade-offs: a checked write failure is converted to an unchecked one at this boundary, because the
  * seam's two record methods declare no checked exception -- deliberately, so that the generator's body
@@ -86,19 +89,19 @@ public final class S3StatementSink implements StatementService.StatementSink, Au
      * Asserts the destination the run will publish to.
      *
      * <p>Assumptions: nothing is deleted and nothing is truncated, for the reason recorded on the class:
-     * an artifact is replaced by the completion of a new upload over the same key, which leaves the last
-     * good artifact readable for the whole of a run and replaces it in one step at the end. This method
-     * exists on the seam because the reference has a discrete deletion step, and it is honoured here by
-     * the replacement semantics rather than by a deletion.</p>
+     * this run writes to keys of its own that hold no previous object, so there is nothing at the
+     * destination to clear and the previous run stays readable throughout. This method exists on the seam
+     * because the reference has a discrete deletion step, and it is honoured here by writing somewhere
+     * else rather than by emptying somewhere.</p>
      */
     @Override
     public void replaceArtifacts() {
         // WHY : Assumptions: the body is deliberately empty rather than unwritten, and the emptiness is
         //       the decision. The reference's deletion step exists because its writes append to a dataset
-        //       that would otherwise still hold the previous night's records; an object store has no
-        //       append, so the equivalent of that step is the overwrite the completion performs. Deleting
-        //       here would introduce a window in which no artifact exists and a failed run would leave
-        //       that window permanent, which is strictly worse than the state it was clearing.
+        //       that would otherwise still hold the previous night's records; this run's keys are new, so
+        //       there are no previous records at them to clear. Deleting anything reachable from here
+        //       would mean deleting the run a reader is currently resolving against, which is the state
+        //       the manifest scheme exists to keep intact until a whole new run has landed.
     }
 
     /**
@@ -147,16 +150,30 @@ public final class S3StatementSink implements StatementService.StatementSink, Au
      */
     @Override
     public void close() throws IOException {
+        // WHY : Assumptions: publication is an explicit `complete()` and close() only releases, which
+        //       is why this method does both rather than relying on the close alone. S3ArtifactWriter
+        //       publishes on complete() and ABORTS an upload that was never completed, so a pass that
+        //       failed part way leaves the previous object standing instead of overwriting it with a
+        //       truncated one. Closing without completing would therefore publish nothing at all.
+        // WHY : Assumptions: both writers are completed, the second failure is suppressed onto the
+        //       first, and both are closed in a finally on every path. Returning after the first
+        //       failure would leave the other artifact's upload in flight with no abort, which charges
+        //       storage for parts that nothing will ever complete.
         try {
-            plainText.close();
-        } catch (IOException plainTextFailure) {
             try {
-                markup.close();
-            } catch (IOException markupFailure) {
-                plainTextFailure.addSuppressed(markupFailure);
+                plainText.complete();
+            } catch (IOException plainTextFailure) {
+                try {
+                    markup.complete();
+                } catch (IOException markupFailure) {
+                    plainTextFailure.addSuppressed(markupFailure);
+                }
+                throw plainTextFailure;
             }
-            throw plainTextFailure;
+            markup.complete();
+        } finally {
+            plainText.close();
+            markup.close();
         }
-        markup.close();
     }
 }

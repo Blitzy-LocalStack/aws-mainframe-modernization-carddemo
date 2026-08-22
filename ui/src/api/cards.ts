@@ -307,7 +307,14 @@ export async function listCards(query: CardListQuery = {}): Promise<PageResponse
   // Refactoring Rationale: ⚠️ the pair is established by `keysetPagingMembers`, which refuses a
   //   direction supplied without a cursor. This block used to DROP it, so a caller asking to step
   //   backward from no position received the opening page of the unfiltered set and could not tell the
-  //   two apart -- while the contract answers that same combination with a 400 keyed on the direction.
+  //   two apart. The refusal is this CLIENT's, and the note here used to claim it was the contract's:
+  //   `card-api.yaml` publishes the opposite for this operation, answering that same pair with the
+  //   opening page, because the reference does -- `app/cbl/COCRDLIC.cbl` L444-L454 answers the
+  //   backward paging key pressed on the first page by reading FORWARD and adds only the sentence at
+  //   L901-L904. Refusing before dispatch is still right, for the reason `keysetPagingMembers` records:
+  //   the seven contracts of this migration do not answer that pair alike, so one screen calling
+  //   several of them would otherwise see one caller mistake behave several ways. What is not right is
+  //   telling a reader the server would have refused it.
   const paging = keysetPagingMembers(query.cursor, query.direction);
   if (paging !== undefined) {
     body.cursor = paging.cursor;

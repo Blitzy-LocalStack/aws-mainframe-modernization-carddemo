@@ -76,16 +76,35 @@
  * is one mapper per persistence entity, which would make six files rather than
  * three, because {@code domain} holds four entities. It is not available, and
  * the reason is a fact about the sibling package rather than a preference here.
- * The {@code dto} package is a closed inventory of fourteen files, eleven of them
- * records -- all eleven authored -- and those eleven serve
- * the four migrated online screens only. Four of the eleven need no mapper of their own.
+ * The {@code dto} package is a closed inventory of fifteen files -- eleven records, two
+ * sealed alternatives, one plain key interface and its own charter -- and its own charter
+ * is the authority for that roster. The eleven records serve
+ * the four migrated online screens only, and SIX of them are what the two mappers here
+ * convert: {@code TransactionDetailResponse}, {@code TransactionListItemResponse},
+ * {@code TransactionAddRequest} and {@code TransactionAddResponse} through
+ * {@code TransactionMapper}, and {@code BillPaymentRequest} with
+ * {@code BillPaymentResponse} through {@code BillPaymentMapper}. The remaining five need no
+ * mapper of their own, for three separate reasons.
+ * {@code TransactionListRequest} is a filter and a cursor rather than a record image: the
+ * controller binds it, the service reads it, and nothing converts it to or from a stored row --
+ * only its nested paging direction reaches this package, as an argument to
+ * {@code TransactionMapper.orderForDisplay}.
  * Two are the preview shapes the two write screens answer their non-writing turns with:
  * neither converts a stored row, because on those turns no row exists, so each is composed
- * directly by the service from the value its own validation derived. The other two are the
- * copy-last request and its copied draft, and their exclusion is for a different reason --
- * the draft is composed from the COPIED SUBMISSION the service has already built and
+ * directly by the service from the value its own validation derived. The last two are the
+ * copy-last request and its copied data, and their exclusion is for a different reason -- the
+ * request carries a key and a confirmation and no record image at all, and the copied data is
+ * composed from the COPIED SUBMISSION the service has already built and
  * validated, not from the stored row a second time, because reading the row again is
- * precisely the divergence the draft exists to remove. No
+ * precisely the divergence that shape exists to remove.
+ *
+ * <p>Assumptions: the two sealed alternatives and the key interface are not candidates for a
+ * mapper at all, so they are excluded from the arithmetic above rather than counted among the
+ * records that decline one. Nothing serialises any of the three: each alternative names WHICH of
+ * two already-declared shapes a caller received -- one arm the response this package converts, the
+ * other the preview the service composes -- and the key interface is the target of one constraint
+ * validator. A mapper method over any of them would have to invent a far side, which
+ * is the one thing this package's charter says a mapper must not do. No
  * transfer object exists for {@code DailyTransaction}, for
  * {@code TransactionCategoryBalance} or for {@code TransactionReject}, so a
  * mapper for any of the three would have nothing on the far side to map to and
@@ -106,14 +125,24 @@
  *
  * <p>Assumptions: three counts of a small number meet in this module and are
  * kept textually distinct throughout. The module holds eight Java packages and
- * therefore eight package charters. The {@code dto} package holds fourteen files,
+ * therefore eight package charters. The {@code dto} package holds fifteen files,
  * which is a different quantity that once happened to share a digit and no longer
  * does -- that quantity moved to twelve when each write screen's non-writing turn
- * gained its own shape and then to fourteen when the copy-last operation gained its own
- * request shape and its own draft, while the package count did not move at all. This package
+ * gained its own shape and then to fifteen when the copy-last operation gained its own
+ * request shape, its own copied-data shape and the key interface one validator is declared
+ * over, while the package count did not move at all. This package
  * holds three files. None of the three figures is derivable from either of the
  * others, so each is stated where it is owned rather than restated here, and each is
  * verified against its own directory rather than inherited.
+ *
+ * <p>Refactoring Rationale: this paragraph and the one above read fourteen for that package, and
+ * fourteen was the tally of its eleven records, its two sealed alternatives and its own charter --
+ * a sum that silently omitted the key interface sitting in the same directory. Both figures are
+ * re-measured here by listing that directory rather than by adjusting the arithmetic, because this
+ * charter QUOTES the sibling roster to justify how many mappers exist: a figure short by one leaves
+ * a reader unable to tell a type that declines a mapper from a type nobody enumerated, which is the
+ * same defect in the opposite direction from the one the sibling charter's own duplicate entries
+ * caused.
  *
  * <h2>Why two mappers and not one</h2>
  *

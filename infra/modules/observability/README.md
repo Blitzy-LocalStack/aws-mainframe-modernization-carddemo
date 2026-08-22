@@ -45,16 +45,18 @@ those signals are brought together:
   routes undeliverable schedule invocations to the SQS **error queue**, because its
   `dead_letter_arn` input validates the value against an SQS queue ARN and rejects
   anything else, and both environment roots pass `module.sqs.error_queue_arn`;
-- `ecs-service` owns each service's log group, and the meters those services
-  export through Micrometer surface on this module's dashboard;
+- `ecs-service` owns each service's log group, and this module's dashboard reads
+  those groups' records; it also **searches** for the meters those services expose
+  through Micrometer, in a namespace that currently has no publisher — see §11 for
+  why the panel is kept and what is missing behind it;
 - `network`, `api-gateway-http`, `alb`, `sqs`, `aurora-postgresql` and
   `cloudfront-spa` each publish metrics or log records that this module's
   widgets and alarms read.
 
-What it owns outright is narrower than what it displays: one dashboard, thirteen
+What it owns outright is narrower than what it displays: one dashboard, fourteen
 metric alarms, one SNS topic with its policy and optional subscriptions, one
-shared access-log bucket, and a log group **only** for a producer that owns no
-group resource of its own.
+shared access-log bucket, one metric filter over a state machine's execution log,
+and a log group **only** for a producer that owns no group resource of its own.
 
 It is a reusable **module**, not a Terraform root. It declares no `provider` and
 no `backend`, and it is never applied on its own — see
@@ -443,7 +445,7 @@ module "observability" {
 
   # Assumptions: every monitored identifier is a variable the ROOT supplies from
   # a producer module's output. See the generated Inputs table in section 7 for
-  # the twelve required inputs and the seventeen that carry defaults.
+  # the twelve required inputs and the twenty-one that carry defaults.
 }
 ```
 
@@ -619,7 +621,7 @@ a variable, an output, a version constraint or a resource — the command is in
 |------|-------------|
 | <a name="output_access_log_bucket_arn"></a> [access\_log\_bucket\_arn](#output\_access\_log\_bucket\_arn) | ARN of that same access-log destination, for an IAM policy Resource element -- granting an operator or a log-analysis task read access to the delivered records without granting it across every bucket in the account. The two producer modules take the bucket name output instead, because an IAM Resource element does not accept a bare bucket name and an S3 destination argument does not accept an ARN. No Terraform block in this repository reads this output: it is published for the operator or log-analysis grant described above, which is written outside this repository. |
 | <a name="output_access_log_bucket_name"></a> [access\_log\_bucket\_name](#output\_access\_log\_bucket\_name) | Name of the shared terminal access-log destination this module owns. A calling root passes it into the alb module's access\_logs\_bucket input and the s3-datasets module's access\_log\_bucket\_name input, so both delivery services write into one destination whose public-access block, encryption, versioning, lifecycle rules and exact-source bucket policy are reviewed together. Both of those arguments take a bucket name and reject an ARN. |
-| <a name="output_alarm_arns"></a> [alarm\_arns](#output\_alarm\_arns) | Map of alarm ARNs covering all THIRTEEN alarm families this module creates, keyed <family>/<instance> for the eight families iterated per service, per queue, per rotation function or per terminal batch outcome, and by bare family name for the five single-instance alarms. Three of those five are unconditional (api\_5xx, aurora\_cpu, aurora\_capacity); the remaining two are present only when their gate is open -- aurora\_connections when database\_connection\_threshold is set, and cloudfront\_5xx when a distribution id is supplied and the region is us-east-1 -- so their keys are absent rather than null when they are not created. A caller composes a composite alarm over a chosen subset of families, attaches an action beyond this module's notification topic, or scopes an IAM Resource element to these alarms -- each of which needs the ARN and none of which then has to rediscover an alarm by its composed name. No Terraform block in this repository reads this output today -- every alarm here already routes to this module's own notification topic, so no root has needed to attach a second action -- which makes it a discovery contract: it is how an incident responder enumerates what this environment actually alarms on without reading main.tf. |
+| <a name="output_alarm_arns"></a> [alarm\_arns](#output\_alarm\_arns) | Map of alarm ARNs covering all FOURTEEN alarm families this module creates, keyed <family>/<instance> for the nine families iterated per service, per queue, per rotation function or per terminal batch outcome, and by bare family name for the five single-instance alarms. Three of those five are unconditional (api\_5xx, aurora\_cpu, aurora\_capacity); the remaining two are present only when their gate is open -- aurora\_connections when database\_connection\_threshold is set, and cloudfront\_5xx when a distribution id is supplied and the region is us-east-1 -- so their keys are absent rather than null when they are not created. A caller composes a composite alarm over a chosen subset of families, attaches an action beyond this module's notification topic, or scopes an IAM Resource element to these alarms -- each of which needs the ARN and none of which then has to rediscover an alarm by its composed name. No Terraform block in this repository reads this output today -- every alarm here already routes to this module's own notification topic, so no root has needed to attach a second action -- which makes it a discovery contract: it is how an incident responder enumerates what this environment actually alarms on without reading main.tf. |
 | <a name="output_dashboard_arn"></a> [dashboard\_arn](#output\_dashboard\_arn) | ARN of that dashboard, for an IAM policy Resource element granting a read-only operator access to this board alone rather than to every dashboard in the account. A deep-link and an API call both take the name output instead, so neither form makes the other redundant. No Terraform block reads this output: the read-only grant it exists for is authored outside this repository, so it is an operator contract rather than wiring. |
 | <a name="output_dashboard_name"></a> [dashboard\_name](#output\_dashboard\_name) | Name of the operations dashboard main.tf composes, which is the argument both a console deep-link and the CloudWatch GetDashboard call take. It is the identifier a deploy or batch-operations procedure uses to send a reader to the board, because a console URL would carry an account identifier and a region and neither may be committed to this repository. No Terraform block reads this output; the runbook step that needs the board is its consumer, which is exactly why the name is published rather than left to be constructed. |
 | <a name="output_managed_log_group_arns"></a> [managed\_log\_group\_arns](#output\_managed\_log\_group\_arns) | Map of the same producer keys to log-group ARNs, published without the all-streams :* suffix so a caller appends it unconditionally. Both environment roots index this map inside their lambda\_logs IAM policy document to scope logs:CreateLogStream and logs:PutLogEvents to one group per function role rather than to every group in the account, which is what makes least privilege reachable at log-group granularity instead of by wildcard. Keys match managed\_log\_group\_names exactly, so the two maps are indexed with one key set. |
@@ -676,21 +678,30 @@ flag. Four of them need a paragraph the table has no room for.
 
 ## 9. Outputs and their consumers
 
-Rule 1 asks what a module returns and what the caller does with it. Of the nine
-outputs, **three are read by an environment root and six are not** — and the split
-is stated first because it is the thing a reader most easily gets wrong. Nine
+Rule 1 asks what a module returns and what the caller does with it. Of the eleven
+outputs, **three are read by an environment root and eight are not** — and the split
+is stated first because it is the thing a reader most easily gets wrong. Eleven
 outputs beside a warning that renaming one breaks both roots invites the
-inference that all nine are wired. Only `notification_topic_arn`,
-`access_log_bucket_name` and `managed_log_group_arns` are; the other six are
+inference that all eleven are wired. Only `notification_topic_arn`,
+`access_log_bucket_name` and `managed_log_group_arns` are; the other eight are
 **operator and discovery contracts** whose audience is a human running
 `terraform output`, a runbook step, or an IAM policy authored outside this
 repository.
 
 The counts below are measured, not asserted: `grep -c '^output "'
-outputs.tf` gives nine, and `grep -rn 'module\.observability\.' --include=*.tf
-infra/` gives four call sites across the two roots — `access_log_bucket_name`
-twice in each root, `notification_topic_arn` and `managed_log_group_arns` once
-each.
+outputs.tf` gives eleven, and `grep -rn 'module\.observability\.' --include=*.tf
+infra/envs/` gives four references in each root and eight in total —
+`access_log_bucket_name` twice in each root, `notification_topic_arn` and
+`managed_log_group_arns` once each.
+
+Refactoring Rationale: this section said nine outputs, with six unwired, and its
+table carried nine rows. The two per-state-machine outputs were absent from all
+three figures although `outputs.tf` declares them, so a reader enumerating what
+this module returns would have missed exactly the pair that reports on the nightly
+batch chain. The counts are now taken from the same command the paragraph quotes,
+and the two rows are added below rather than the figures alone being incremented —
+an inventory that agrees on a total while omitting a member is the defect this
+correction is for.
 
 | Output | Read by a root? | Audience, and why that form |
 |---|---|---|
@@ -703,8 +714,10 @@ each.
 | `dashboard_arn` | No | An IAM policy `Resource` element granting a read-only operator this board alone rather than every dashboard in the account |
 | `alarm_arns` | No — every alarm already routes to this module's own topic, so no root has needed a second action | A composite alarm over a chosen subset of families, an additional action beyond this module's topic, or an IAM `Resource` element scoped to these alarms — none of which should have to rediscover an alarm by reconstructing its composed name. It is also how an incident responder enumerates what this environment actually alarms on without reading main.tf |
 | `access_log_bucket_arn` | No | An IAM policy `Resource` element granting read access to the delivered records without granting it across every bucket in the account |
+| `state_machine_metric_filter_names` | No | The name a `DescribeLogGroups`/`DescribeMetricFilters` call or a runbook step uses to confirm that the filter counting terminal `ExecutionFailed` and `ExecutionTimedOut` events is present on the machine's log group. Empty when the root composes no state machine, which is why it is a map and not a string |
+| `state_machine_execution_failure_alarm_names` | No | The alarm name an operator scopes a composite alarm or an escalation to, keyed by the same state-machine key as the filter map, so the two are indexed together rather than joined by a naming convention |
 
-- Trade-offs: **the six unwired outputs are kept deliberately.** Deleting them
+- Trade-offs: **the eight unwired outputs are kept deliberately.** Deleting them
   would make the output set exactly the wiring surface, which is tidier and would
   let an unused-declaration check speak for the whole file. They stay because a
   module whose dashboard and alarms cannot be named from outside forces every
@@ -753,14 +766,22 @@ Each omission names the alternative that was rejected and what specifically
 would be worse. An absence with no recorded reason is indistinguishable from an
 oversight.
 
-- **No self-managed metrics or dashboard server.** Metrics are exported from
-  inside each service by its Micrometer registry and collected by CloudWatch.
+- **No self-managed metrics or dashboard server.** Meters are recorded inside each
+  service by its Micrometer registry and exposed on the Actuator endpoint of the
+  seven that publish one; the collector that would carry them into CloudWatch is
+  the piece this stack is missing, and the bullet on tracing below states that gap
+  in full — batch-service's health-only surface included — rather than leaving this
+  sentence to imply collection that does not happen.
   Alternatives Considered: a self-hosted Prometheus plus Grafana pair. It was
   rejected because it adds **two stateful services** to operate, patch, back up
   and scale — each with its own storage, retention and access control — to a
   package whose guiding principle prefers a managed service unless cost or a hard
-  constraint dictates otherwise, and neither would answer a question the
-  collected metrics do not already answer here.
+  constraint dictates otherwise. Trade-offs: it is the more tempting option while
+  no collector exists, because it would scrape the endpoint that is already there;
+  it is still the wrong one, because the missing piece is a scraper and this pair
+  answers it with two servers to run, a dashboard estate parallel to the one this
+  module already publishes, and the infrastructure metrics moved off the namespace
+  the alarms address.
 - **No cache tier.** Alternatives Considered: adding Redis or a managed
   equivalent, with its hit-rate and eviction metrics on the dashboard. Rejected
   because the baseline has no cache tier, so introducing one would create a cache
@@ -797,18 +818,76 @@ oversight.
   Alternatives Considered: cross-region dashboards and alarm replication.
   Rejected because the deployment topology is single-region, so a cross-region
   alarm would monitor infrastructure that does not exist.
-- **No tracing resources in this module.** Tracing is in the package's scope, and
-  this is a module-boundary decision rather than an absence of tracing; the
-  treatment is in
-  [`docs/architecture/observability.md`](../../../docs/architecture/observability.md).
-  Alternatives Considered: authoring the collector here, alongside the dashboard
-  that displays what it produces. Rejected because the collector shares the
-  **task** lifecycle, not the dashboard lifecycle — it is a sidecar that must
-  start before the application container in the same task definition, and a
-  resource created in this module cannot participate in another module's task
-  definition. Placing it here would split one task's definition across two
-  modules, so a task revision would depend on which module applied last. It is
-  therefore authored in `ecs-service` beside the container it instruments.
+- **No tracing resources in this module — and no span-export path anywhere in the
+  package.** Refactoring Rationale: this bullet used to say the collector "is
+  therefore authored in `ecs-service` beside the container it instruments". It is
+  not, and it no longer exists: the AWS Distro for OpenTelemetry sidecar — its
+  receiver/processor/exporter pipeline, the `OTEL_*` variables pointing the
+  application at loopback, the scratch volume, the X-Ray export statement on the
+  task role and the container dependency ordering the two — was **withdrawn** from
+  that module, and the withdrawal record is at
+  [`infra/modules/ecs-service/main.tf`](../ecs-service/main.tf) L135–L171. Pointing
+  a reader at a sidecar to find the tracing implementation now sends them to a
+  resource that is not there, which is worse than recording the gap.
+- **What is delivered for this concern, stated exactly.** Assumptions: spans **are**
+  produced — [`services/common-lib/pom.xml`](../../../services/common-lib/pom.xml)
+  pulls `spring-boot-starter-opentelemetry`, so every service carries the SDK and
+  its instrumentation — and no exporter target is configured for them anywhere.
+  [`carddemo-common-defaults.yml`](../../../services/common-lib/src/main/resources/carddemo-common-defaults.yml)
+  leaves `management.tracing.export.otlp.enabled` false, and with the sidecar
+  withdrawn that default is now the effective setting in **every** environment
+  rather than one a task override replaces. So what this module and `ecs-service`
+  deliver between them is **one** signal end to end and **half** of a second.
+  Delivered whole: **container logs** to the customer-key-encrypted service log
+  group, carrying **end-to-end request correlation** from `common-lib`'s
+  `CorrelationIdFilter`, which puts `correlationId` and `requestId` into the mapped
+  diagnostic context and onto the response. Those two travel beside the `traceId`
+  and `spanId` Micrometer tracing contributes, because all four are named by the
+  structured encoder and by the fallback console pattern in
+  `carddemo-common-defaults.yml`, so a unit of work is followable across services
+  in the logs and a line can be pivoted to its trace identity **within** them.
+  Delivered by half: **metrics**, whose producer is real — all eight services
+  register `micrometer-registry-prometheus` and stamp `MetricsConfig`'s three
+  common tags (`service`, `environment`, `version`) on every meter, and the seven
+  request-serving ones publish the scrape endpoint at `/actuator/prometheus`. The
+  eighth, `batch-service`, narrows its actuator surface to `health` on purpose: a
+  run-and-exit task can finish between scrape intervals, so a pull endpoint would
+  be an undependable record of it, and the durable `batch_run` ledger plus the
+  container logs carry that role instead. What is absent is on the collecting side
+  in either case — nothing scrapes the seven endpoints that do exist. The
+  application-meter widget in [`main.tf`](main.tf) L1078–L1099 records that in its
+  own rationale: the sidecar that was to scrape the endpoint went out with the
+  tracing exporter, so the `CardDemo` namespace this module searches has **no
+  publisher** until a scraper is introduced that fits the specification's endpoint
+  and repository counts. Assumptions: the widget is kept rather than deleted
+  precisely so that gap is visible to an operator — an empty panel states an
+  absence a deleted panel would hide. What is missing for tracing, by contrast, is
+  narrower than a collector: the spans exist in process, and only their **export**
+  to a managed backend is absent.
+- **That absence is an unresolved gap against AAP §0.9.3, and is registered as
+  one.** Trade-offs: the specification names centralized logging, metrics **and
+  tracing** as cross-cutting concerns, and two of the three are delivered. The gap
+  is span export. What is **not** missing is the network path: `network` provisions
+  an `xray` interface endpoint as the ninth of its ten, justified in place by that
+  same tracing requirement, so a private route to the trace API already exists.
+  What is missing is the two ends of it — no exporter target is configured in any
+  service profile, and the span-submission statement on the task role went out with
+  the sidecar — so closing the gap is a deliberate change in `ecs-service` and in
+  the shared configuration rather than a correction to this document. The one
+  closure that is **not** available is the withdrawn sidecar, which needed an
+  eleventh ECR repository to mirror its public image into, against the ten
+  §0.4.1.6 fixes. What is lost concretely is a per-request latency breakdown across
+  service hops; what is retained is the ability to follow one request through the
+  logs by its correlation identifier, which is the question a failed unit of work
+  actually raises. Alternatives Considered: authoring a collector **here**, beside the
+  dashboard that would display what it produces. Rejected on lifecycle as well as
+  scope — a collector is a container in another module's task definition, so a
+  resource created here could not participate in it, and one task's definition
+  would end up split across two modules with its revision depending on which
+  applied last. The gap's own treatment is in
+  [`docs/architecture/observability.md`](../../../docs/architecture/observability.md),
+  which owns it; this module records it so a reader auditing tracing does not
+  conclude from a silent absence that it was overlooked.
 - **No log group for the resource-definition deployment audit trail.**
   Refactoring Rationale: the baseline's equivalent record was the `OUTDD` and
   `SYSPRINT` spool of a deployment job, and the target's deployment is a CI job

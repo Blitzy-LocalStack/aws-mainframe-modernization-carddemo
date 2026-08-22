@@ -283,10 +283,22 @@
  *       the outcome a launcher chose to report.</li>
  *   <li><b>Condition-code inversion.</b> A JCL {@code COND} is a SKIP predicate and a state-machine
  *       choice is a RUN predicate, so every gate is translated with its sense inverted;
- *       {@code app/jcl/TRANBKP.jcl:51} is the baseline's only {@code COND=(4,LT)} and becomes the
- *       explicit soft-warn continuation. Assumptions: an {@code INCLUDE COND=} inside a sort step is a
- *       RECORD-selection predicate and becomes a {@code WHERE} clause, never a choice state; the two
- *       forms share a keyword and conflating them is the hazard this contract exists to name.</li>
+ *       {@code app/jcl/TRANBKP.jcl:51} is the baseline's only {@code COND=(4,LT)} and is therefore the
+ *       one place the reference demonstrates the inverted sense of a threshold comparison.
+ *       Assumptions: that clause supplies the FORM and never a data path, and the distinction decides
+ *       where a reader looks for the other end of the contract. A job-control condition is evaluated
+ *       against earlier steps of its OWN job, so it gates {@code TRANBKP}'s {@code STEP10} and cannot
+ *       observe posting, which runs as {@code app/jcl/POSTTRAN.jcl}'s single {@code STEP15} under no
+ *       condition parameter. The soft-warn continuation is consequently a TARGET contract:
+ *       {@code app/cbl/CBTRN02C.cbl:229-230} produces the tier and the {@code CheckPostingExitCode}
+ *       choice state in {@code infra/modules/step-functions-batch/main.tf} admits it -- the same file
+     *       recording at {@code L121}-{@code L133} that the {@code TRANBKP} gate itself becomes NO
+     *       state, retiring with the delete-and-redefine mechanism it protected -- so
+ *       {@code PostTransactionsJobTest} asserts the target predicate rather than a cross-job baseline
+ *       dependency the reference does not have. Assumptions: an {@code INCLUDE COND=} inside a sort
+ *       step is a RECORD-selection predicate and becomes a {@code WHERE} clause, never a choice state;
+ *       the two forms share a keyword and conflating them is the hazard this contract exists to
+ *       name.</li>
  *   <li><b>The business-date token.</b> Required, refused when absent, opaque, ten characters, never
  *       clock-derived, and accepted in both committed forms -- which is what makes a rerun
  *       reproducible.</li>

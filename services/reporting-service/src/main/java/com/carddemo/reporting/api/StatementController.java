@@ -1,6 +1,7 @@
 package com.carddemo.reporting.api;
 
 import com.carddemo.common.control.OnlineWriteGateExempt;
+import com.carddemo.common.security.JwtRoleConverter;
 import com.carddemo.common.security.OpaqueIdentifier;
 import com.carddemo.reporting.dto.StatementDocument;
 import com.carddemo.reporting.dto.StatementRequest;
@@ -16,6 +17,8 @@ import org.springframework.core.io.InputStreamResource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -215,18 +218,29 @@ public class StatementController {
     }
 
     /**
-     * Describes one card's statement: its heading figures, its total, and the location of each
-     * rendered artifact the store actually holds.
+     * Describes one card's statement: its heading figures, its total, and -- for an operator -- the
+     * location of each rendered artifact the store holds.
+     *
+     * <p>⚠️ Assumptions: what this answer may disclose is decided from the caller's own claims and not
+     * from the request, because the artifacts it would otherwise point at are RUN-WIDE. A review found
+     * this operation handing every caller entitled to one card's statement the selectors of the objects
+     * holding the whole portfolio's statements; the audience derived below is the request edge's half of
+     * the fix, and the group rule on the collection route in {@code SecurityConfig} is the other half.
+     * Neither alone is sufficient: without the audience an ordinary caller is told an address it is
+     * refused at, and without the rule the address works.
      *
      * @param request the card whose statement is wanted, and optionally the account it is expected to
      *     belong to; validated declaratively before this method is entered
+     * @param authentication the validated authentication the chain established, supplied by the
+     *     framework; {@code null} when no authentication is present, which is treated as the narrowest
+     *     audience
      * @return the statement description, carrying the protective response headers
      * @throws NoSuchElementException if the card has no cross-reference, customer or account row
      */
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<StatementResponse> generateStatement(
-            @Valid @RequestBody StatementRequest request) {
-        return protectively(statements.describe(request));
+            @Valid @RequestBody StatementRequest request, Authentication authentication) {
+        return protectively(statements.describe(request, audienceOf(authentication)));
     }
 
     /**
@@ -265,18 +279,26 @@ public class StatementController {
      *
      * @param request the card whose statement is wanted, and optionally the account it is expected to
      *     belong to; validated declaratively before this method is entered
+     * @param authentication the validated authentication the chain established, supplied by the
+     *     framework; {@code null} when no authentication is present, which is treated as the narrowest
+     *     audience
      * @return the statement's transactions, carrying the protective response headers
      * @throws NoSuchElementException if the card has no cross-reference, customer or account row
      */
     @PostMapping(path = TRANSACTIONS_PATH, consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<StatementTransactionCollection> listStatementTransactions(
-            @Valid @RequestBody StatementRequest request) {
+            @Valid @RequestBody StatementRequest request, Authentication authentication) {
         // WHY : Assumptions: the transactions are taken from the composed document rather than read
         //       separately, so the rows this operation returns are the rows the rendered artifacts were
         //       built from. A second, independent query would be able to return a row the rendered
         //       statement does not contain, and a caller reconciling the two would have no way to tell
         //       which one was the statement.
-        StatementDocument document = statements.compose(request);
+        // WHY : Assumptions: the audience is passed even though this operation returns no artifact
+        //       location of its own, because the composed document carries the heading the summary
+        //       operation returns and the run-wide reads behind it are the reads a cardholder request
+        //       must not perform. Passing the widest audience here would make this operation the way
+        //       round the rule the summary operation applies.
+        StatementDocument document = statements.compose(request, audienceOf(authentication));
         // WHY : Refactoring Rationale: the card's TRUE transaction count is now published beside the
         //       rows, and it costs no extra read -- the composed document already carries the heading
         //       the summary operation returns, and this method was discarding it. Without it this
@@ -327,10 +349,17 @@ public class StatementController {
      * from an artifact the store does not hold -- the reasoning for the asymmetry is on
      * {@link #SELECTOR_PATTERN}.
      *
-     * @param selector the opaque selector taken from a statement response
+     * <p>⚠️ Assumptions: this operation is admitted to the ADMINISTRATIVE group alone, and the rule
+     * enforcing that lives in {@code SecurityConfig} where every other rule of this surface lives. The
+     * two artifacts it serves hold every cardholder's statement in the run, so admitting an ordinary
+     * group claim here made one card's entitlement a handle on the whole portfolio -- which is what a
+     * review found. No check is performed in this method: the chain refuses before the handler is
+     * entered, and a second check here would either restate the rule or drift from it.
+     *
+     * @param selector the opaque selector taken from an operator's statement response
      * @return the artifact bytes, carrying the protective response headers
-     * @throws NoSuchElementException if the selector names no artifact, or names one the store does not
-     *     hold -- rendered as 404 by the shared handler
+     * @throws NoSuchElementException if the selector names no artifact of the published run, or names
+     *     one the store does not hold -- rendered as 404 by the shared handler
      */
     @GetMapping(path = ARTIFACTS_PATH, produces = MediaType.APPLICATION_OCTET_STREAM_VALUE)
     public ResponseEntity<InputStreamResource> collectArtifact(
@@ -340,6 +369,38 @@ public class StatementController {
                 .contentType(MediaType.APPLICATION_OCTET_STREAM)
                 .contentLength(artifact.sizeBytes())
                 .body(new InputStreamResource(artifact.content()));
+    }
+
+    /**
+     * Decides how much of a statement run an answer to this caller may disclose.
+     *
+     * <p>Assumptions: the administrative group authority is the operator audience and everything else is
+     * the cardholder audience, which matches the group rule on the collection route exactly -- so a
+     * caller is only ever told about an artifact it is admitted to collect. The two group names are the
+     * migration of the reference's two user kinds, the {@code 'A'} and {@code 'U'} values that
+     * {@code app/cpy/COCOM01Y.cpy} L27 and L28 name, and the authority strings come from the shared
+     * converter rather than being spelled here so the edge and the chain cannot disagree about them.
+     *
+     * <p>Assumptions: an ABSENT authentication is the cardholder audience. It cannot occur behind the
+     * deployed chain, which authenticates every business address, so the value chosen decides only what
+     * a context without the chain does -- and the narrowest answer is the only safe default for a
+     * question about disclosure. Alternatives Considered: refusing outright when no authentication is
+     * present, which would move an authorization decision out of the chain and into a handler and would
+     * duplicate a refusal the chain already renders with this contract's error shape.
+     *
+     * @param authentication the authentication the chain established, or {@code null} when none is
+     * @return the audience this caller's answer is assembled for; never {@code null}
+     */
+    private static StatementService.ArtifactAudience audienceOf(Authentication authentication) {
+        if (authentication == null || !authentication.isAuthenticated()) {
+            return StatementService.ArtifactAudience.CARDHOLDER;
+        }
+        for (GrantedAuthority authority : authentication.getAuthorities()) {
+            if (JwtRoleConverter.ADMIN_AUTHORITY.equals(authority.getAuthority())) {
+                return StatementService.ArtifactAudience.OPERATOR;
+            }
+        }
+        return StatementService.ArtifactAudience.CARDHOLDER;
     }
 
     /**

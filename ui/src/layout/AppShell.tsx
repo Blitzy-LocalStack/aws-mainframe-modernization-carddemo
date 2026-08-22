@@ -11,28 +11,34 @@
  * `ui/src/layout/ScreenHeader.tsx`, `ui/src/layout/MessageBand.tsx` and
  * `ui/src/layout/PfKeyBar.tsx`. The bindings the legend renders are a screen's own, built
  * by `ui/src/layout/usePfKeys.ts` at that screen and delegated here; this shell calls that
- * hook nowhere, and installs no keyboard listener of its own, for the reason recorded
- * under "Where it is mounted" below.
- *
- * Where it is mounted
- * -------------------
- * `ui/src/router.tsx` mounts this component as the layout element of the authenticated
- * branch of the route tree, inside `RequireSignOn`, so every guarded screen renders into
- * the `Outlet` below and inherits this frame. `ui/src/App.tsx` renders that router inside
- * the single `ConfigProvider`. Refactoring Rationale: the mount is stated here because it
- * used to be absent - this module was imported by neither of those two files, so the frame
- * the migration plan requires existed as a component and rendered on no screen, and the
- * delegation API below had publishers and consumers only within this file. A shell that is
- * not mounted cannot be shown to be wrong by any test that renders a screen.
+ * hook nowhere, and installs no keyboard listener of its own, for the reason recorded at
+ * {@link SHELL_SIGN_OFF_LABEL}.
  *
  * Where it is mounted, and how a screen reaches it
- * ----------------------------------------------
- * Assumptions: `ui/src/router.tsx` mounts this component EXACTLY ONCE, as the element of a
- * LAYOUT route, and it is mounted nowhere else. `ui/src/App.tsx` renders the route table
- * inside the single `ConfigProvider` and composes no frame at all. Every screen inside the
- * layout route therefore renders through the `Outlet` in the body zone and inherits this
- * frame; the `children` prop below is the fallback, kept so the same component can also be
- * rendered directly by a test that wants one screen inside the frame without a router.
+ * -----------------------------------------------
+ * One model, stated once, and every other statement in this file is held to it.
+ *
+ * - `ui/src/router.tsx` mounts this component EXACTLY ONCE, as the element of the OUTERMOST
+ *   layout route of the tree it publishes as `CARD_DEMO_ROUTES`, and nowhere else.
+ * - That layout route wraps BOTH the sign-on route and the guarded subtree. `RequireSignOn`
+ *   is reached through a PATHLESS route nested INSIDE this one, so the frame is above the
+ *   guard rather than beneath it: sign-on is framed and unguarded, and every other screen is
+ *   framed and guarded. The administrative screens sit behind a further nested guard inside
+ *   that, so they are framed, guarded and group-checked.
+ * - Two routes are deliberately left OUTSIDE the frame: the root redirect and the not-found
+ *   screen. Neither stands for a mapset, so neither gets a 24-row terminal frame.
+ * - `ui/src/App.tsx` composes NO frame. It renders the single `ConfigProvider` and, inside
+ *   it, the single `RouterProvider` built from that route tree - nothing else.
+ * - The production mount therefore reaches the body zone through react-router's `Outlet`.
+ *   The `children` prop below is the FALLBACK, kept so a test can render the frame around
+ *   one screen without standing up a router.
+ *
+ * ⚠ Refactoring Rationale: this section replaces two sections that contradicted each other
+ * and the router. One said the shell was mounted "inside `RequireSignOn`", which inverts the
+ * nesting - the guard is inside the shell route, which is what lets sign-on be framed at all,
+ * and a reader who trusted the old sentence would look for the frame in the wrong subtree.
+ * The other said `ui/src/App.tsx` renders `<AppShell><CardDemoRouter /></AppShell>`; that
+ * component no longer exists and `App.tsx` mounts no shell.
  *
  * ⚠ Refactoring Rationale: BOTH mounts existed for a time - one above the router taking
  * `children`, and one layout route inside it - and the two composed. `{children ?? <Outlet />}`
@@ -53,8 +59,10 @@
  * second frame out of generic `Layout` primitives, and every screen either composed its own
  * chrome or, in two cases, omitted it on the stated ground that this shell supplied it. Both
  * halves of the integration now exist: the single mount above, and a `useShellSlot` call in
- * each of the ten delivered screens. A statement about integration is only ever as true as
- * the call sites, so the specific facts are named here rather than asserted in the abstract.
+ * every one of the twenty-one delivered screens. A statement about integration is only ever
+ * as true as the call sites, so the specific facts are named here rather than asserted in the
+ * abstract -- and `ui/src/layout/screenHeaderClock.test.tsx` asserts them over a population it
+ * discovers from the filesystem, so the count above cannot quietly stop being the whole of it.
  *
  * Provenance
  * ----------
@@ -153,7 +161,7 @@
  * resource client. The distinction is the one worth stating, because it is what the
  * original sentence was reaching for: this module calls no endpoint, holds no query, and
  * names no path. Its whole use of `useAuth` is two members - `signedOn`, which conditions
- * the sign-off key, and `signOut`, which ends the session - and the transitive reach into
+ * the rendered sign-off control, and `signOut`, which ends the session - and the transitive reach into
  * `ui/src/api/**` is `useAuth`'s own, because that hook exchanges credentials.
  *
  * Assumptions: the paint instant is nonetheless threaded IN through the slot rather than
@@ -259,15 +267,25 @@ export const SKIP_TO_CONTENT_LABEL = 'Skip to screen content';
  *
  * Refactoring Rationale: the shell's sign-off used to be a FUNCTION KEY - `PFK12`, legended
  * `F12=Sign off` - and it is a rendered control now because the key form could not survive
- * this shell being mounted. `usePfKeys` installs one document listener per call site, and
- * every screen under `ui/src/screens/**` calls it, so a shell that bound a key of its own
- * would sit alongside the mounted screen's listener and both would receive every keypress.
- * Three screens bind PF12 as `Cancel` - measured at `ui/src/screens/accountUpdate/index.tsx`,
- * `ui/src/screens/cardUpdate/index.tsx` and `ui/src/screens/userUpdate/index.tsx` - so on
- * those screens one keypress would have BOTH cancelled the operator's edit and ended the
- * session. The file already warned about that hazard at the binding site; what it could not
- * do was avoid it, because the stand-down condition it used - "no screen has delegated a key
- * legend" - is true of every screen that owns its own legend, which is all of them.
+ * this shell being mounted. `usePfKeys` installs one document listener per call site, and all
+ * 21 screen modules call it, so a shell that bound a key of its own would sit alongside the
+ * mounted screen's listener and both would receive every keypress. FOUR screens bind PF12 as
+ * `Cancel` - measured at `ui/src/screens/accountUpdate/index.tsx`,
+ * `ui/src/screens/cardUpdate/index.tsx`, `ui/src/screens/refTypeEdit/index.tsx` and
+ * `ui/src/screens/userUpdate/index.tsx` - so on those screens one keypress would have BOTH
+ * cancelled the operator's edit and ended the session. The file already warned about that
+ * hazard at the binding site; what it could not do was avoid it, because the shell's own
+ * stand-down condition - "no screen has delegated a key legend" - is never satisfied here.
+ *
+ * ⚠ Assumptions: that condition is decided per screen, and the census does NOT split - all 21
+ * screens delegate a legend, so the shell would stand down on every one of them and offer no
+ * sign-off anywhere. That is the arm the census actually selects, and it is not the behaviour
+ * wanted: it removes the exit from every screen an operator spends the session on. The opposite
+ * arm - the shell binding its own key because some screen owns its legend - would reintroduce a
+ * second document listener on exactly the screens that already installed one, and it is
+ * unreachable only because no screen owns its legend today, which is not a property the shell
+ * can rely on staying true. A rendered control needs neither arm, and it is the only form that
+ * is available identically on all 21 screens.
  *
  * Assumptions: nothing of the baseline is lost by this, because the shell's PF12 was never a
  * baseline behaviour. Sign-off in the reference application belongs to the MENU programs:
@@ -410,6 +428,33 @@ export interface ShellSlot {
    * degrades to the browser clock, which that module records as a registered divergence.
    */
   readonly now?: Date | undefined;
+  /**
+   * Whether the delegating screen has a write in flight, which holds the frame's own
+   * sign-off control shut for the duration.
+   *
+   * Assumptions: a 3270 keyboard LOCKS from the moment a turn is transmitted until the
+   * region replies, so the reference could not accept any input at all mid-turn -- not the
+   * screen's own keys and not a control belonging to the surrounding chrome, because there
+   * was no surrounding chrome to belong to. A browser has no such lock, and the two writing
+   * screens that publish this member disable their own keys and inputs for the turn
+   * (`ui/src/screens/billPay/index.tsx`, `ui/src/screens/userAdd/index.tsx`); the sign-off
+   * control is the one remaining way off those screens while a payment or a user creation is
+   * still committing, and it is the most damaging one, because it discards the session
+   * locally while the request that already carries its token completes at the service.
+   *
+   * Trade-offs: the lock is published by the SCREEN rather than inferred by the frame, which
+   * means a mutating screen that omits it keeps the old behaviour. Inferring it was the
+   * alternative and there is nothing to infer it from -- the shell sees a message, an
+   * identity and a legend, none of which distinguishes a read from a write -- so the frame
+   * would have had to reach into each screen's transport state to find out. Publishing it
+   * alongside the three zones the screen already delegates keeps the direction of knowledge
+   * the same as every other member here.
+   *
+   * Assumptions: omitting the member means "not writing", so the control behaves exactly as
+   * it did for every screen that does not publish it. That keeps this additive rather than a
+   * change every screen has to opt out of.
+   */
+  readonly busy?: boolean | undefined;
 }
 
 /*
@@ -616,15 +661,24 @@ const HEADER_INSTANT_GRANULARITY_MS = 1000;
  *
  * Assumptions: this is a wasted-work correction and NOT a fix for a render cycle, and the distinction is
  * worth stating because the shell renders the very screen that publishes to it, which looks like a
- * cycle. It is not one: `children` is an element built by `ui/src/App.tsx`, which does not re-render, so
- * React sees a referentially identical element with identical props and bails out of that subtree.
- * `appShellIntegration.test.tsx` pins that bailout, because a change that rebuilt the child's props -
- * cloning the element, or spreading it into a new one - would turn the wasted work into an unbounded
- * loop.
+ * cycle. It is not one, and the reason is the element IDENTITY of the body rather than anything this
+ * comparison does. In production the body is `<Outlet />`, and the element it returns is the one the
+ * route context holds - built once when `ui/src/router.tsx` created the route table - so a re-render of
+ * this shell does not rebuild it, and React compares a referentially identical element with identical
+ * props and bails out of that subtree. In an isolated render the same holds for the `children` element
+ * the caller built once. `appShellIntegration.test.tsx` bounds the screen's render count, which is what
+ * would fail if a change rebuilt the body element on each shell render - cloning it, or spreading it
+ * into a new one to add a prop - because that turns the wasted work into an unbounded loop.
+ *
+ * ⚠ Refactoring Rationale: this paragraph said `children` is "an element built by `ui/src/App.tsx`".
+ * That file builds no such element and mounts no shell; the body arrives through the layout route's
+ * outlet. The mechanism the paragraph relies on is unchanged, so only the source of the element is
+ * corrected.
  *
  * Alternatives Considered: memoising the instant in each screen so the same `Date` is republished until
- * something else changes. Rejected because it moves a shell-internal concern into ten call sites, and
- * because it would make the displayed time a mount-time reading rather than a paint-time one, which is
+ * something else changes. Rejected because it moves a shell-internal concern into the twenty
+ * delegating call sites, and because it would make the displayed time a mount-time reading rather than a
+ * paint-time one, which is
  * the fidelity property the clock hook exists to provide. Excluding `now` from the comparison entirely
  * was also rejected: the band would then never repaint its clock at all.
  *
@@ -655,7 +709,15 @@ function areSlotsRenderEquivalent(previous: ShellSlot, next: ShellSlot): boolean
     areScreensEquivalent(previous.screen, next.screen) &&
     areMessagesEquivalent(previous.message, next.message) &&
     arePfKeySlotsEquivalent(previous.pfKeys, next.pfKeys) &&
-    areInstantsEquivalent(previous.now, next.now)
+    areInstantsEquivalent(previous.now, next.now) &&
+    // WHY : Assumptions: the write-in-flight flag is part of this comparison because it is part of
+    //       the RENDERED output -- it decides whether the frame's sign-off control is disabled. A
+    //       member left out here is a member whose change never notifies a subscriber, so the shell
+    //       would keep the snapshot it already had and the lock would take effect only if some other
+    //       member happened to change in the same commit. Both sides are normalised with `?? false`
+    //       so an omitted member and an explicit `false` compare equal and neither produces a
+    //       notification the rendered frame cannot show.
+    (previous.busy ?? false) === (next.busy ?? false)
   );
 }
 
@@ -786,14 +848,20 @@ export function publishShellSlot(slot: ShellSlot): () => void {
  * or key legend, instead of rendering those bands itself. Omit a member to keep that zone
  * unpainted; the shell renders a band if and only if it has been delegated one.
  *
- * Assumptions: the delegation contract is opt-in, and every one of the ten screens delivered
- * under `ui/src/screens/**` opts in - each publishes its transaction identifier, program
- * name, paint instant, message and resolved key bindings here, and none composes a
- * `ScreenHeader`, a row-23 `MessageBand` or a `PfKeyBar` of its own. THREE screens keep a band
- * inside their body -- the account view, the account update and the card detail -- and each one is
- * the INFORMATIONAL field its mapset declares separately from the row-23 error line this shell owns,
- * at row 22 on the two account mapsets and row 20 on `COCRDSL`; `ui/src/screens/accountView/index.tsx`
- * documents that split at its own render site.
+ * Assumptions: the delegation contract is opt-in, and every one of the twenty-one screens
+ * delivered under `ui/src/screens/**` opts in - each publishes its transaction identifier,
+ * program name, message and resolved key bindings here, and none composes a `ScreenHeader`,
+ * a row-23 `MessageBand` or a `PfKeyBar` of its own. FIVE screens keep a band inside their body
+ * -- the account view, the account update, the card detail, the card update and the reference-type
+ * edit -- and each one is the INFORMATIONAL field its mapset declares separately from the row-23
+ * error line this shell owns, at row 22 on the two account mapsets and row 20 on `COCRDSL`;
+ * `ui/src/screens/accountView/index.tsx` documents that split at its own render site.
+ *
+ * Assumptions: the paint instant is the ONE member not published by every screen. Twenty screens
+ * delegate it; the authorization detail does not, because its own service contract renders
+ * `currentDate` and `currentTime` and the screen shows the service's values -- so delegating an
+ * instant as well would paint two clocks on one screen. That single exemption is asserted to be
+ * the only one, in both directions, by `ui/src/layout/screenHeaderClock.test.tsx`.
  *
  * Refactoring Rationale: opt-in is what it is for a reason worth keeping even now that every
  * screen opts in. Publication is the signal a zone is wanted, so a shell that painted its
@@ -818,7 +886,7 @@ export function publishShellSlot(slot: ShellSlot): () => void {
  * @returns {void} Nothing; the delegation is withdrawn when the caller unmounts.
  */
 export function useShellSlot(slot: ShellSlot): void {
-  const { screen, message, pfKeys, now } = slot;
+  const { screen, message, pfKeys, now, busy } = slot;
   const [owner] = useState(createSlotOwner);
 
   /*
@@ -845,7 +913,7 @@ export function useShellSlot(slot: ShellSlot): void {
      * @returns {void} Nothing; the publication is withdrawn by the effect below.
      */
     function publishDelegatedZones(): void {
-      publishShellSlotFor(owner, { screen, message, pfKeys, now });
+      publishShellSlotFor(owner, { screen, message, pfKeys, now, busy });
     },
   );
 
@@ -888,11 +956,23 @@ export interface AppShellProps {
   /**
    * Body content, used instead of the routed outlet.
    *
-   * Assumptions: this is the member the production mount uses. `ui/src/App.tsx` renders
-   * `<AppShell><CardDemoRouter /></AppShell>`, so the body region is the route tree passed
-   * here; react-router's `Outlet` is the fallback when the member is absent, which keeps the
-   * same component usable as a layout route and lets a test render the frame without standing
-   * up a router. A value here replaces the outlet rather than sitting beside it.
+   * ⚠️ Assumptions: the production mount does NOT use this member, and an earlier revision of this
+   * note said it did -- that `ui/src/App.tsx` renders `<AppShell><CardDemoRouter /></AppShell>` so
+   * the body region is a route tree passed here. It does not: `App.tsx` renders a single
+   * `<RouterProvider router={cardDemoRouter} />` and mounts no shell, and `ui/src/router.tsx` declares
+   * the frame as `element: <AppShell />` on TWO SIBLING layout routes -- one holding the public screen
+   * and one the guarded subtree -- so in production the body region is react-router's `Outlet` and this
+   * member is absent. The distinction is not cosmetic: the outlet form is what lets sign-on keep the
+   * frame while sitting OUTSIDE the guarded subtree, and what lets the boundary in
+   * `ui/src/layout/ShellContentBoundary.tsx` sit between each frame and the routed screen, neither of
+   * which a `children` mount above the whole table can express. Both arrangements are
+   * asserted against the source text by `ui/src/layout/appShellIntegration.test.tsx`, which requires
+   * the layout-route form in the router and NO shell element in `App.tsx` at all, and counted there as
+   * two sibling mounts with none nested inside another.
+   *
+   * Assumptions: the member is kept because a test renders the frame without standing up a router,
+   * which is what keeps the shell's own suites from depending on the route table. A value here
+   * replaces the outlet rather than sitting beside it.
    */
   readonly children?: ReactNode | undefined;
   /** Title-band identity, overriding any delegated by the mounted screen. */
@@ -903,6 +983,14 @@ export interface AppShellProps {
   readonly pfKeys?: ShellPfKeySlot | undefined;
   /** Server-anchored instant for the title band, overriding any delegated value. */
   readonly now?: Date | undefined;
+  /**
+   * Whether a write is in flight, overriding any value delegated by the mounted screen.
+   *
+   * Assumptions: this mirrors the four members above so an isolated render can exercise the
+   * locked chrome without standing up a screen and a transport to produce the state. See
+   * {@link ShellSlot.busy} for what the lock is for and why the screen owns the decision.
+   */
+  readonly busy?: boolean | undefined;
   /*
    * WHY : ⚠️ Refactoring Rationale: there is NO `ownsFunctionKeys` prop here any more, and the prop this
    *       note replaces was a correct diagnosis with a weaker remedy. It let a mount site declare whether
@@ -916,10 +1004,11 @@ export interface AppShellProps {
    *       isolated test renders passed it. See {@link SHELL_SIGN_OFF_LABEL} for what the rendered control
    *       costs and what it does not.
    * WHY : Assumptions: the property the prop existed to protect is asserted from the outside rather than
-   *       configured -- `routerReachability.test.tsx > the frame paints one function-key legend only`
-   *       renders the production table and asserts one legend region and no `F12=Sign off` control, which
-   *       holds unconditionally under this design and held only for a correctly-configured mount site
-   *       under the other.
+   *       configured -- `routerReachability.test.tsx > production route table > paints exactly one
+   *       function-key legend around a screen` renders the production table at `/menu`, one of the three
+   *       screens that owns its own legend, and asserts one legend region and no `F12=Sign off` control.
+   *       That holds unconditionally under this design and held only for a correctly-configured mount
+   *       site under the other.
    */
 }
 
@@ -930,7 +1019,9 @@ export interface AppShellProps {
  * legend in the order the baseline always showed them, so that all 21 migrated screens
  * inherit one frame instead of each rebuilding it. Zone content comes from the mounted
  * screen's delegation - see {@link useShellSlot} - or from this component's own props,
- * which win where both are present.
+ * which win where both are present. A zone reached by neither stays unpainted, which is how
+ * the authorization detail screen - the one screen that delegates no paint instant, because
+ * its own service contract supplies the date and time it shows - avoids getting a second clock.
  *
  * Assumptions: no `ConfigProvider` is instantiated here, and this is the one decision in
  * the file whose violation would be invisible. `ui/src/App.tsx` is the sole theming
@@ -956,7 +1047,7 @@ export interface AppShellProps {
  *   {@link SHELL_SIGN_OFF_LABEL} for why the sign-off control is not a function key.
  */
 export function AppShell(props: AppShellProps): ReactElement {
-  const { children, screen, message, pfKeys, now } = props;
+  const { children, screen, message, pfKeys, now, busy } = props;
 
   /*
    * Refactoring Rationale: the token map is read here to correct a measured rendering
@@ -1133,6 +1224,15 @@ export function AppShell(props: AppShellProps): ReactElement {
   const activeMessage = message ?? delegated.message;
   const activePfKeys = pfKeys ?? delegated.pfKeys;
   const activeNow = now ?? delegated.now;
+  /*
+   * WHY : Assumptions: the frame's own sign-off control is held shut while the mounted screen
+   *       reports a write in flight, for the reason recorded on {@link ShellSlot.busy} -- the
+   *       terminal's keyboard lock covered every control on the display, and this is the only
+   *       control on these screens the screen itself cannot reach. `?? false` rather than a
+   *       truthiness test on the member, so a screen that publishes nothing is indistinguishable
+   *       from one that publishes `false` and neither is treated as locked.
+   */
+  const activeBusy = busy ?? delegated.busy ?? false;
 
   const signOffFromShell = useCallback(
     /**
@@ -1148,13 +1248,14 @@ export function AppShell(props: AppShellProps): ReactElement {
   );
 
   /*
-   * Refactoring Rationale: this shell now installs NO keyboard listener of its own, where it
+   * Refactoring Rationale: this shell installs NO keyboard listener of its own, where it
    * previously called `usePfKeys` with a sign-off handler whenever no screen had delegated a
-   * legend. The condition could not hold: `usePfKeys` installs one document listener per call
-   * site, every screen calls it, and no screen delegates its legend - so "no screen has
-   * delegated one" was true on every screen, and the shell's PF12 would have arrived alongside
-   * the three screens that bind PF12 as `Cancel`. Sign-off is a rendered control instead; see
-   * {@link SHELL_SIGN_OFF_LABEL} for what that costs and what it does not.
+   * legend. That condition is not a safe basis for binding a key: `usePfKeys` installs one
+   * document listener per call site and all 21 screens call it. The condition is FALSE on every
+   * one of them, because all 21 delegate a legend, so the shell would have offered no exit
+   * anywhere; and were any screen to stop delegating, the shell's listener would then sit
+   * beside that screen's own and both would receive every keypress. Sign-off is a rendered control instead; see {@link SHELL_SIGN_OFF_LABEL} for the
+   * per-screen census, what the control costs and what it does not.
    *
    * Assumptions: the legend region is therefore driven entirely by delegation. A screen that
    * publishes its bindings has them painted here and its activations forwarded back through
@@ -1254,12 +1355,16 @@ export function AppShell(props: AppShellProps): ReactElement {
             of the migrated title band, instead of being interleaved with it. `justify` keeps
             the sign-off control at the trailing edge without a positioned element, which
             design gap G1 forbids.
-            Assumptions: the sign-off control is rendered only while a session is held. An
-            operator with no session has nothing to end, and the sign-on screen is outside
-            this shell entirely, so an always-rendered control would offer an action that
-            could not apply. `size="small"` and `type="link"` keep it chrome rather than a
-            primary action of whatever screen is mounted; both are antd variants and neither
-            introduces a value of its own.
+            Assumptions: the sign-off control is rendered only while a session is held, and the
+            guard is load bearing rather than tidy - the sign-on route is INSIDE this frame,
+            mounted as a child of the same layout route above the authentication guard, so an
+            always-rendered control would offer "Sign off" to an operator who has not signed on
+            yet. ⚠️ Refactoring Rationale: the reason recorded here was that "the sign-on screen
+            is outside this shell entirely", which inverted the topology; the condition it
+            justified is right for the other reason, so the condition stands and the reason is
+            corrected. `size="small"` and `type="link"` keep it chrome rather than a primary
+            action of whatever screen is mounted; both are antd variants and neither introduces
+            a value of its own.
           */}
           <Flex align="center" justify="space-between" gap="small">
             <Typography.Link href={`#${SHELL_CONTENT_ELEMENT_ID}`} style={skipLinkStyle}>
@@ -1270,6 +1375,7 @@ export function AppShell(props: AppShellProps): ReactElement {
                 data-testid={SHELL_SIGN_OFF_CONTROL_TEST_ID}
                 type="link"
                 size="small"
+                disabled={activeBusy}
                 onClick={signOffFromShell}
               >
                 {SHELL_SIGN_OFF_LABEL}
@@ -1320,13 +1426,24 @@ export function AppShell(props: AppShellProps): ReactElement {
         so a screen-level message is not announced from inside `contentinfo`, which is for
         information about the document rather than the outcome of an action.
         Assumptions: the line is rendered only when a message SLOT exists, which is not the
-        same test as whether that slot carries text. Every one of the 21 mapset screens
-        publishes a slot on every turn - empty when it has nothing to say - so each of them
-        reserves the row unconditionally and gets the no-layout-shift guarantee the band
-        exists for. The `undefined` arm is reached only by a surface with no message field in
-        the reference at all, of which the router's own not-found page is the one instance:
-        reserving a 3270 message row on a screen no mapset declares would assert a contract
-        that has no source.
+        same test as whether that slot carries text. All 21 screens publish a message slot on
+        every turn - an object whose `text` is `null` when the screen has nothing to say - so
+        each of them reserves the row unconditionally and gets the no-layout-shift guarantee
+        the band exists for.
+        ⚠️ Refactoring Rationale: two earlier readings of the `undefined` arm were both wrong
+        and are corrected together, because each was measured against a tree that no longer
+        exists. It is NOT reached by the router's not-found page: that page is a sibling of the
+        frame -- a top-level sibling of BOTH `<AppShell />` mounts in `ui/src/router.tsx`,
+        outside either one -- so it is never mounted inside this shell. Nor is it reached by any screen that composes its own message zone, because
+        no screen does - every one of the 21 passes a `message` object literal to
+        `useShellSlot`, the five that also keep a band inside their body doing so IN ADDITION
+        to delegating this row, not instead of it. What remains is the only reachable case:
+        `EMPTY_SLOT` carries no `message` member, so the arm is taken whenever the frame is
+        mounted with nothing published - a screen's first render pass before its
+        `useLayoutEffect` publishes, which a layout effect keeps off the screen rather than
+        merely brief, and any direct render of this component in a test. Rendering nothing
+        there is correct rather than tolerated: reserving a row for a screen that may never
+        publish one would reintroduce the shift the reservation exists to prevent.
       */}
       {activeMessage === undefined ? null : (
         <MessageBand

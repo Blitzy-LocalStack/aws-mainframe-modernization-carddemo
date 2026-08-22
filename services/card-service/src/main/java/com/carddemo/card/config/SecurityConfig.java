@@ -211,11 +211,14 @@ public class SecurityConfig {
     /**
      * The metric scrape path, reachable only from inside the task.
      *
-     * <p>Assumptions: the only configured consumer is TASK-LOCAL. The collector sidecar scrapes
-     * {@code 127.0.0.1:<container-port>} at {@code metrics_path: /actuator/prometheus} --
-     * {@code infra/modules/ecs-service/main.tf} lines 154 to 172 -- and that scrape configuration
-     * carries no authorization header at all, so it can present no token. Any rule requiring a token
-     * would therefore break the scrape rather than secure it.</p>
+     * <p>Assumptions: any consumer of this path is TASK-LOCAL, and none is configured today. A
+     * scraper would reach {@code 127.0.0.1:<container-port>} at {@code /actuator/prometheus} from
+     * inside the task's own network namespace and would carry no authorization header, so it could
+     * present no token, and any rule requiring one would break the scrape rather than secure it.
+     * Refactoring Rationale: this named a collector sidecar in
+     * {@code infra/modules/ecs-service/main.tf} as that consumer. The sidecar is WITHDRAWN -- it sat
+     * outside the frozen specification -- so the surface is published with nothing collecting from
+     * it, and the loopback restriction is what makes publishing it safe either way.</p>
      */
     public static final String METRIC_SCRAPE_PATH = "/actuator/prometheus";
 

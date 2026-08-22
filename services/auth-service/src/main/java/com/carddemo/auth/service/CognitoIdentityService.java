@@ -1,5 +1,6 @@
 package com.carddemo.auth.service;
 
+import com.carddemo.auth.domain.User;
 import com.carddemo.auth.dto.SignOnChallenge;
 import com.carddemo.auth.dto.SignOnChallengeRequest;
 import com.carddemo.auth.dto.SignOnOutcome;
@@ -10,6 +11,7 @@ import com.carddemo.auth.dto.TokenRefreshRequest;
 import com.carddemo.auth.repository.UserRepository;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
+import com.carddemo.common.security.JwtRoleConverter;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
@@ -17,9 +19,13 @@ import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.time.Duration;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.Function;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import org.slf4j.Logger;
@@ -59,8 +65,19 @@ import software.amazon.awssdk.services.cognitoidentityprovider.model.UserNotFoun
  * had no notion of, a bearer token expires where a terminal session did not, and a session that outlives
  * the terminal it was opened from has to be endable at the pool rather than at the screen.
  * The baseline paragraph issues one keyed read and then classifies its outcome three ways; this class
- * performs one local existence probe and one provider exchange and classifies the outcome against the
+ * performs one provider exchange and one keyed local read and classifies the outcome against the
  * published contract at {@code services/auth-service/src/main/resources/openapi/auth-api.yaml}.
+ *
+ * <h2>Which local row a token belongs to</h2>
+ *
+ * <p>Assumptions: every exchange here that ends in a usable token set resolves its row through
+ * {@code auth.users.cognito_sub}, the pool subject the identity token carries, and refuses unless the
+ * row's key, the token's user-name claim and the identifier the caller submitted are one identifier and
+ * the token's group membership is the one the row's stored type entails. {@link #bindPoolIdentity} is the
+ * single place that happens and carries the reasoning. ⚠️ Refactoring Rationale: each exchange used to
+ * probe only that SOME row carried the identifier the CALLER named, which is not a statement about the
+ * pool account the token was minted for -- the pool permits a user name to be reassigned and never
+ * reissues a subject, so the durable link the schema declares was the one thing none of them read.
  *
  * <h2>The credential field is not carried forward</h2>
  *
@@ -150,8 +167,8 @@ import software.amazon.awssdk.services.cognitoidentityprovider.model.UserNotFoun
  * pool publishes no password grant and the corresponding configuration key was withdrawn; see the
  * exchange helper. The two credential failures are answered uniformly rather than distinguishably,
  * because the pool is provisioned to answer them identically; see the refusal helper. And the local
- * probe runs in the transaction the repository opens rather than one this method declares; see the
- * probe helper. Each of the three is settled by a sibling-owned artifact that names this class or this
+ * reads run in the transaction the repository opens rather than one each public method declares; see
+ * the membership helper, whose rationale the identity binding shares. Each of the three is settled by a sibling-owned artifact that names this class or this
  * operation explicitly, so the artifact is the authority and the brief is not.
  */
 @Service
@@ -259,7 +276,7 @@ public class CognitoIdentityService {
     private static final String CHALLENGE_PARAM_NEW_PASSWORD = "NEW_PASSWORD";
 
     /**
-     * The identity-token claim carrying the pool user name a renewed token set was issued for.
+     * The identity-token claim carrying the pool user name a token set was issued for.
      *
      * <p>Refactoring Rationale: this claim is read because the renewal exchange lost the binding that
      * used to make the submitted identifier verifiable. The previous flow sent a keyed digest computed
@@ -267,16 +284,38 @@ public class CognitoIdentityService {
      * belonged to -- so a token replayed under another identifier was refused by the pool itself. The
      * rotation-compatible operation this class now issues accepts the client secret directly and no user
      * name at all, so nothing in the request or the response ties the submitted identifier to the
-     * subject unless this claim is read. Without it the local membership gate below could be satisfied
-     * by naming ANY still-present identifier while renewing a different user's session, which defeats
-     * the one control that gate exists to apply.
+     * subject unless this claim is read.
      *
-     * <p>Assumptions: {@code cognito:username} rather than {@code sub}, because {@code sub} is the
-     * pool's own subject identifier and the key of {@code auth.users} is the eight-character
-     * {@code SEC-USR-ID} the baseline declares at {@code app/cpy/CSUSR01Y.cpy} line 18. Comparing
-     * against {@code sub} would compare two different identifier spaces and refuse every renewal.
+     * <p>⚠️ Refactoring Rationale: this claim used to be read on the RENEWAL alone and is now read on
+     * every exchange that ends in a token set, and the paragraph that stood here rejected reading
+     * {@code sub} outright on the ground that it names a different identifier space from the key of
+     * {@code auth.users}. That reasoning was wrong about this schema. The subject is exactly what
+     * {@code auth.users.cognito_sub} stores -- {@code V1__auth.sql} declares it {@code UUID NOT NULL
+     * UNIQUE} and {@code UserRepository#findByCognitoSub} resolves a row by it -- so the two spaces are
+     * joined by a column, and the name claim alone cannot establish which ROW a token belongs to: the
+     * pool's user name is not the durable link, it is a mutable attribute of a pool account. Both claims
+     * are therefore read and both are checked, at {@link #bindPoolIdentity}: the subject decides which
+     * row, and this name has to agree with that row's key and with what the caller submitted.
      */
     private static final String ID_TOKEN_USERNAME_CLAIM = "cognito:username";
+
+    /**
+     * The identity-token claim carrying the pool's durable subject reference for the user it was issued
+     * for.
+     *
+     * <p>Purpose: this is the value {@code auth.users.cognito_sub} holds, and it is the only durable
+     * link between a pool account and a row of this context. A pool user name can be changed at the pool
+     * without this service being told; the subject is minted once per account and never reissued, which
+     * is why the schema constrains it unique and why the row is resolved through it rather than through
+     * the name.
+     *
+     * <p>Assumptions: the claim is the standard {@code sub} of an OpenID Connect identity token, and the
+     * pool issues it as the canonical text form of a UUID. It is parsed as a UUID rather than compared
+     * as text, because the column is the native {@code uuid} type and text comparison would make two
+     * spellings of one subject -- differing in letter case or in hyphenation -- two different values;
+     * {@code UserRepository#findByCognitoSub} takes a {@code UUID} for the same reason and records it.
+     */
+    private static final String ID_TOKEN_SUBJECT_CLAIM = "sub";
 
     /** The number of dot-separated segments a compact-serialised identity token carries. */
     private static final int ID_TOKEN_SEGMENT_COUNT = 3;
@@ -288,8 +327,9 @@ public class CognitoIdentityService {
      * The reader that turns an identity token's claim segment into addressable claims.
      *
      * <p>Assumptions: one instance is shared because the type is safe for concurrent use once
-     * configured, and nothing here configures it after construction. Creating one per renewal would
-     * rebuild a serialiser cache on the critical path of a caller mid-session for no benefit.
+     * configured, and nothing here configures it after construction. Creating one per exchange would
+     * rebuild a serialiser cache on the critical path of every sign-on, challenge answer and renewal for
+     * no benefit -- all three read an identity token now, where only the renewal did.
      */
     private static final ObjectMapper CLAIM_READER = new ObjectMapper();
 
@@ -425,8 +465,9 @@ public class CognitoIdentityService {
      *
      * @param provider the identity-provider client the credential exchange is issued through; must not
      *     be {@code null}
-     * @param users the repository onto {@code auth.users} the local existence probe reads; must not be
-     *     {@code null}
+     * @param users the repository onto {@code auth.users} the local reads use -- the subject lookup that
+     *     binds an issued token set to a row and the existence check the challenge branch makes; must not
+     *     be {@code null}
      * @param clientId the pool app-client identifier the exchange is issued under, read from
      *     {@code carddemo.auth.cognito.client-id}; must not be {@code null} or blank
      * @param clientSecret the confidential app-client secret the request proof is keyed with, read
@@ -488,12 +529,12 @@ public class CognitoIdentityService {
      * recorded on the refusal helper below.
      *
      * <p>Trade-offs: no transaction is declared on this method, and the omission is deliberate. The
-     * read-only transaction the probe needs is the one Spring Data opens around the repository call
+     * read-only transaction the local read needs is the one Spring Data opens around the repository call
      * itself, which is narrower than this method and opens only after the provider exchange has already
      * returned. Declaring one here would instead hold a pooled connection for the duration of an
      * outbound network exchange -- {@code application.yml} sizes this service's pool at ten -- so a slow
-     * pool would consume connections with no query to run. What is given up is that the probe and the
-     * exchange are not one atomic unit, which costs nothing here because the probe only reads and the
+     * pool would consume connections with no query to run. What is given up is that the local read and
+     * the exchange are not one atomic unit, which costs nothing here because the read is a read and the
      * method writes nothing at all.
      *
      * <p>Trade-offs: the target's read-only transaction is stricter than the baseline's file access,
@@ -526,13 +567,17 @@ public class CognitoIdentityService {
      * @throws NullPointerException if {@code request} is {@code null}
      * @throws ClientInputException if the identifier or the credential is absent or blank, carrying the
      *     baseline sentence for the earlier of the two fields and that field's key
-     * @throws BadCredentialsException if the pool refused the pair, or if this context holds no record
-     *     for the identifier, carrying the baseline refusal sentence and no field key
+     * @throws BadCredentialsException if the pool refused the pair, if this context holds no record for
+     *     the identifier, or if the token set the pool issued does not bind to such a record -- its
+     *     subject resolving no row, the row disagreeing with the identifier, or its group membership
+     *     disagreeing with the row's stored type -- carrying the baseline refusal sentence and no field
+     *     key in every case
      * @throws IllegalStateException if the credential could not be evaluated at all -- the pool being
      *     unreachable or answering a fault, the request proof being rejected, the local store being
      *     unreadable, the pool answering with a challenge this contract publishes no answer path for,
-     *     or the pool answering with a token set that is incomplete -- carrying the baseline sentence
-     *     for an unevaluable credential and no provider diagnostic
+     *     the pool answering with a token set that is incomplete, or the pool answering with an identity
+     *     token that carries no readable subject or user name -- carrying the baseline sentence for an
+     *     unevaluable credential and no provider diagnostic
      */
     public SignOnOutcome authenticate(SignOnRequest request) {
 
@@ -551,24 +596,30 @@ public class CognitoIdentityService {
         //       indistinguishable in work as well as in wording.
         InitiateAuthResponse answer = exchangeCredential(userId, request.password());
 
-        // WHY : Assumptions: the probe stands in for the keyed read at app/cbl/COSGN00C.cbl lines 211 to
-        //       219, which carries no UPDATE option and so is a plain positioned read rather than a read
-        //       for update. Nothing here acquires a lock for the same reason: no row is written.
+        // WHY : Assumptions: the local decision stands in for the keyed read at app/cbl/COSGN00C.cbl
+        //       lines 211 to 219, which carries no UPDATE option and so is a plain positioned read
+        //       rather than a read for update. Nothing here acquires a lock for the same reason: no row
+        //       is written.
         // WHY : Assumptions: it still runs, and running it AFTER the exchange changes nothing about what
         //       it decides. This context owns auth.users, so a pool identity with no local row is not a
         //       user of this system and must not receive a token set -- the pool and the local table are
         //       provisioned together and a row removed from one is meant to end access through the
         //       other. What moved is only when the answer is known.
+        // WHY : ⚠️ Refactoring Rationale: the decision itself has moved INTO the classifier below, and it
+        //       used to be a membership probe on the submitted identifier made here, before the answer's
+        //       shape was known. It moved because the two shapes the pool can answer with cannot be held
+        //       to the same check: an answer carrying a token set carries the subject the token was
+        //       minted for, so the row can be resolved through the one durable link the schema declares
+        //       and the caller's identifier verified against it, while a challenge carries no token at
+        //       all and therefore no subject to resolve anything through. Deciding both cases here would
+        //       have meant applying the weaker of the two checks to the case that admits the stronger
+        //       one, which is the defect being corrected.
         // WHY : Trade-offs: reaching this line means the pool ACCEPTED the credential, so a locally
         //       absent row is refused after the provider has done its work rather than before. The cost
         //       is one provider call for an identifier that cannot sign on either way; what it buys is
         //       that the timing of this refusal says nothing about which identifiers exist. No token
-        //       reaches the caller on this path, and nothing the pool minted here is usable by anyone,
+        //       reaches the caller on that path, and nothing the pool minted is usable by anyone,
         //       because the response is discarded before it is rendered.
-        if (!isKnownLocally(userId)) {
-            throw refusedCredential("local-record-absent");
-        }
-
         return outcomeFrom(answer, userId);
     }
 
@@ -587,11 +638,13 @@ public class CognitoIdentityService {
      * credential that must be changed before use. The divergence is registered as
      * {@code D-PASSWORD-CHALLENGE} in {@code docs/architecture/cobol-to-service-traceability.md}.
      *
-     * <p>Assumptions: the local existence probe runs here exactly as it does on sign-on, and it is not
-     * redundant just because the caller is holding a session this service issued. A session is minted by
-     * the pool and this context owns its own membership: a row deleted between the sign-on and the
-     * answer must not be able to complete an exchange that ends in a usable token set for a user this
-     * context no longer holds.
+     * <p>Assumptions: the token set this exchange returns is bound to a row of {@code auth.users} through
+     * the pool subject its identity token carries, exactly as an authenticated sign-on's is, and the
+     * binding is not redundant just because the caller is holding a session this service issued. A
+     * session is minted by the pool and this context owns its own membership: a row deleted between the
+     * sign-on and the answer must not be able to complete an exchange that ends in a usable token set for
+     * a user this context no longer holds, and a session held for one pool account must not be answerable
+     * in the name of another. {@link #bindPoolIdentity} carries the reasoning for what is compared.
      *
      * <p>Trade-offs: the answer returns the AUTHENTICATED shape only, never another challenge, so this
      * exchange cannot loop. The pool issues tokens once the new password is accepted, and a second
@@ -609,12 +662,15 @@ public class CognitoIdentityService {
      *     proposed credential under its own password policy, carrying the pool's own reason in the
      *     latter case rather than a restatement of the policy
      * @throws SessionRefusedException if the session was expired, already used, altered or issued for a
-     *     different identifier, or if this context holds no record for the identifier, carrying the
-     *     sign-on-again sentence and no field key
+     *     different identifier, or if the token set the pool issued does not bind to a record of this
+     *     context -- its subject resolving no row, the row disagreeing with the identifier, or its group
+     *     membership disagreeing with the row's stored type -- carrying the sign-on-again sentence and no
+     *     field key
      * @throws IllegalStateException if the exchange could not be evaluated at all -- the pool being
      *     unreachable or answering a fault, the request proof being rejected, the local store being
-     *     unreadable, the pool raising a further challenge, or the pool answering with a token set that
-     *     is incomplete
+     *     unreadable, the pool raising a further challenge, the pool answering with a token set that is
+     *     incomplete, or the pool answering with an identity token that carries no readable subject or
+     *     user name
      */
     public SignOnResponse answerChallenge(SignOnChallengeRequest request) {
 
@@ -624,12 +680,13 @@ public class CognitoIdentityService {
 
         String userId = normaliseUserId(request.userId());
 
-        // WHY : ⚠️ Refactoring Rationale: the pool is asked first here too, and the probe follows. The
-        //       previous order refused a locally-absent identifier without a network call, which is the
-        //       same timing oracle the sign-on exchange carried: a caller needs no session to submit a
-        //       guessed identifier with a made-up one, so this operation was as usable for enumeration
+        // WHY : ⚠️ Refactoring Rationale: the pool is asked first here too, and the local read follows.
+        //       The previous order refused a locally-absent identifier without a network call, which is
+        //       the same timing oracle the sign-on exchange carried: a caller needs no session to submit
+        //       a guessed identifier with a made-up one, so this operation was as usable for enumeration
         //       as sign-on was. The reordering is the same fix and is argued once, above the resilience
-        //       bounds.
+        //       bounds. It is also what makes the stronger binding below possible at all: the subject it
+        //       resolves the row through exists only once the pool has answered with a token set.
         RespondToAuthChallengeResponse answer =
                 answerNewPasswordChallenge(userId, request.session(), request.newPassword());
 
@@ -643,21 +700,26 @@ public class CognitoIdentityService {
             throw unableToVerify("further-challenge-" + answer.challengeNameAsString());
         }
 
-        // WHY : Assumptions: the probe is not redundant just because the caller holds a session this
+        // WHY : Assumptions: the binding is not redundant just because the caller holds a session this
         //       service issued: a row deleted between the sign-on and the answer must not be able to
         //       complete an exchange that ends in a usable token set.
+        // WHY : ⚠️ Refactoring Rationale: this was a membership probe on the SUBMITTED identifier and is
+        //       now the full binding. A probe answered only "some row carries this key", which the caller
+        //       chose; it never compared the subject the pool minted the token for with the subject the
+        //       row records, so a caller holding a session for one pool account could name any other
+        //       still-present identifier and be issued a token set the local table says belongs to
+        //       somebody else. The token set the pool has just returned carries that subject, so the
+        //       stronger check costs the same single read the probe cost.
         // WHY : Trade-offs: the pool has by now ACCEPTED the proposed password and stored it, so a
-        //       locally-absent row is refused after a state change the caller asked for has already
-        //       happened. That is accepted because the caller reaching this line held a pool-minted
-        //       session for that identity, so it had already authenticated with the temporary credential
-        //       the session was issued against -- setting the permanent one grants it nothing it could
-        //       not already do, and the token set the pool issued is discarded here rather than
-        //       returned.
-        if (!isKnownLocally(userId)) {
-            throw refusedSession("local-record-absent");
-        }
+        //       refusal here follows a state change the caller asked for. That is accepted because the
+        //       caller reaching this line held a pool-minted session for that identity, so it had already
+        //       authenticated with the temporary credential the session was issued against -- setting the
+        //       permanent one grants it nothing it could not already do, and the token set the pool
+        //       issued is discarded here rather than returned.
+        String bound = bindPoolIdentity(answer.authenticationResult().idToken(), userId,
+                CognitoIdentityService::refusedSession);
 
-        return tokensFrom(answer.authenticationResult(), userId);
+        return tokensFrom(answer.authenticationResult(), bound);
     }
 
     /**
@@ -720,12 +782,13 @@ public class CognitoIdentityService {
      * @throws NullPointerException if {@code request} is {@code null}
      * @throws ClientInputException if either submitted value is absent or blank
      * @throws SessionRefusedException if the refresh token was expired, revoked, already rotated away,
-     *     or issued for an identifier other than the one submitted, or if this context holds no record
-     *     for that identifier, carrying the sign-on-again sentence and no field key
+     *     or renewed a token set that does not bind to a record of this context -- its subject resolving
+     *     no row, the row disagreeing with the submitted identifier, or its group membership disagreeing
+     *     with the row's stored type -- carrying the sign-on-again sentence and no field key
      * @throws IllegalStateException if the renewal could not be evaluated at all -- the pool being
      *     unreachable or answering a fault, the local store being unreadable, the pool answering with no
      *     token set, the pool answering with a token set that is incomplete, or the issued identity token
-     *     carrying no subject to bind the submitted identifier against
+     *     carrying no readable subject or user name to bind the submitted identifier against
      */
     public SignOnResponse refresh(TokenRefreshRequest request) {
 
@@ -752,28 +815,28 @@ public class CognitoIdentityService {
             throw unableToVerify("refresh-no-result");
         }
 
-        // WHY : Assumptions: the subject the pool issued for is compared with the identifier submitted,
-        //       and a mismatch is refused as a refused session rather than answered. This is the binding
-        //       the withdrawn keyed digest used to provide: without it a caller holding one user's
-        //       refresh token could name ANY other still-present identifier, satisfy the membership gate
-        //       below with that name, and renew the first user's session -- so the gate would be
-        //       trivially bypassable by exactly the party it exists to stop.
-        // WHY : Assumptions: the comparison is against the FOLDED submitted value, because the identifier
-        //       is folded before it is used as a key and the pool stores the user name in the form it was
-        //       created with. normaliseUserId applies the same fold to the claim, so the two sides are
-        //       compared in one form.
-        String subject = normaliseUserId(subjectOfIdentityToken(answer.authenticationResult().idToken()));
-        if (!subject.equals(userId)) {
-            throw refusedSession("refresh-subject-mismatch");
-        }
-
-        // WHY : Assumptions: the probe is what stops a token minted for a user this context has since
-        //       removed from being renewed into a fresh one, and it is applied to the subject the pool
-        //       reported rather than to the value the caller sent -- the two are equal by the check above,
-        //       and reading the pool's value keeps that the case if the check is ever relaxed.
-        if (!isKnownLocally(subject)) {
-            throw refusedSession("local-record-absent");
-        }
+        // WHY : Assumptions: the identity the pool issued for is resolved from the token and compared
+        //       with the identifier submitted, and any disagreement is refused as a refused session
+        //       rather than answered. This is the binding the withdrawn keyed digest used to provide:
+        //       without it a caller holding one user's refresh token could name ANY other still-present
+        //       identifier, satisfy a membership check with that name, and renew the first user's
+        //       session -- so the check would be trivially bypassable by exactly the party it exists to
+        //       stop.
+        // WHY : ⚠️ Refactoring Rationale: this was two steps -- compare the token's user-name claim with
+        //       the submitted identifier, then probe that the identifier exists locally -- and is now one
+        //       call that resolves the ROW through the token's subject and holds all three of the row's
+        //       key, the token's name claim and the submitted identifier to agreement. The two steps
+        //       shared one weakness: neither read cognito_sub, so neither could tell a token minted for
+        //       one pool account from a token minted for another account that had since been given the
+        //       first one's user name. The pool permits a user name to be reassigned; it never reissues a
+        //       subject, which is why the schema constrains that column unique and why the row is now
+        //       resolved through it.
+        // WHY : Trade-offs: the refusal reason is coarser than the pair of reasons it replaces, and
+        //       deliberately so -- the sentence the caller receives is the same in every case, so the
+        //       only thing a finer reason could distinguish is what a log reader sees, and the binding
+        //       records its own reason there.
+        String subject = bindPoolIdentity(answer.authenticationResult().idToken(), userId,
+                CognitoIdentityService::refusedSession);
 
         return tokensFrom(answer.authenticationResult(), subject);
     }
@@ -949,6 +1012,14 @@ public class CognitoIdentityService {
     /**
      * Reports whether this bounded context holds a record for the folded identifier.
      *
+     * <p>Purpose: this serves the ONE outcome that carries no token -- the sign-on the pool answered with
+     * a challenge. Every outcome that carries a token set is bound through {@link #bindPoolIdentity}
+     * instead, which resolves the row by the token's subject and is strictly stronger. ⚠️ Refactoring
+     * Rationale: this method used to serve all four, and the reason it no longer does is that a probe on
+     * the identifier the CALLER named cannot say which pool account a token was minted for; where a
+     * subject is available it must be used. A challenge makes no subject available, because no token has
+     * been issued yet, so on that branch the identifier is all there is to check.
+     *
      * <p>Assumptions: this stands in for the keyed read at {@code app/cbl/COSGN00C.cbl} lines 211 to
      * 219, which reads {@code USRSEC} by {@code RIDFLD} and carries no {@code UPDATE} option. The
      * relational successor is {@code auth.users}, whose primary key is the same eight-character
@@ -956,11 +1027,13 @@ public class CognitoIdentityService {
      * no index beyond the one the migration already declares.
      *
      * <p>Alternatives Considered: loading the whole row through {@code findById} rather than testing
-     * for its existence. Rejected because nothing on the row is used: the response carries the
-     * identifier the caller already supplied, the authority comes from the token's group claim rather
-     * than from the stored type, and the stored subject reference is not needed to authenticate. An
-     * existence check states that, and it lets the store answer from the primary-key index without
-     * materialising columns this method would discard.
+     * for its existence. Rejected because nothing on the row is used ON THIS BRANCH: a challenge body
+     * carries the identifier the caller already supplied, the session to answer with, and no authority of
+     * any kind, so neither the stored type nor the stored subject reference has anything to decide here.
+     * An existence check states that, and it lets the store answer from the primary-key index without
+     * materialising columns this method would discard. The token branches, which DO need the stored type
+     * and the stored subject, load the row -- and are the reason this rationale is scoped to a branch
+     * rather than stated of the class.
      *
      * <p>Assumptions: the read-only transaction this needs is the one Spring Data opens around the
      * call, rather than one declared on the public method; the reason that boundary was chosen is
@@ -1167,23 +1240,49 @@ public class CognitoIdentityService {
      * it -- the answer operation cannot be performed without one -- so a body carrying the name and no
      * session would tell a caller to do something it has been given no way to do.
      *
+     * <p>⚠️ Refactoring Rationale: this method also carries the local-record decision the caller used to
+     * make before calling it, and it makes a DIFFERENT one on each branch. That is the whole reason the
+     * decision moved here. An answer carrying a token set carries the subject the pool minted it for, so
+     * the row can be resolved through the one durable link {@code auth.users} declares and the caller's
+     * identifier held to it -- {@link #bindPoolIdentity} does that. A challenge carries no token at all,
+     * so there is no subject to resolve anything through, and the only local statement available is that
+     * some row carries the submitted key. Deciding both cases at the call site meant applying the weaker
+     * of the two checks to the case that admits the stronger one. Trade-offs: the challenge branch is
+     * therefore still bound by name alone, which is weaker than the token branch and is accepted because
+     * nothing usable leaves on it: a challenge is answerable only with the temporary credential the pool
+     * has already verified, and the answer exchange binds by subject before any token reaches the caller.
+     *
      * @param answer the pool's answer to the exchange, carrying either an authentication result or a
      *     challenge; must not be {@code null}
      * @param userId the folded identifier the exchange was performed for, echoed onto whichever shape is
-     *     returned
+     *     returned, and the value the pool's own identity claims are held to
      * @return the token set as {@link SignOnResponse} when the pool issued one, or the challenge as
      *     {@link SignOnChallenge} when it raised the one this contract publishes an answer path for;
      *     never {@code null}
+     * @throws BadCredentialsException if the pool issued a token set whose identity does not bind to a
+     *     row of this context, or raised a challenge for an identifier this context holds no row for,
+     *     carrying the baseline's wrong-password sentence in either case
      * @throws IllegalStateException if the pool raised a challenge this contract publishes no answer path
-     *     for, if it raised the published one without a session, or if it answered with a token set that
-     *     is incomplete
+     *     for, if it raised the published one without a session, if it answered with a token set that is
+     *     incomplete or carries no bindable identity, or if the local store could not be read
      */
-    private static SignOnOutcome outcomeFrom(InitiateAuthResponse answer, String userId) {
+    private SignOnOutcome outcomeFrom(InitiateAuthResponse answer, String userId) {
 
         AuthenticationResultType issued = answer.authenticationResult();
 
         if (issued != null) {
-            return tokensFrom(issued, userId);
+            return tokensFrom(issued, bindPoolIdentity(issued.idToken(), userId,
+                    CognitoIdentityService::refusedCredential));
+        }
+
+        // WHY : Assumptions: the probe runs before the challenge is examined, so an identifier this
+        //       context holds no row for is refused whichever challenge the pool raised. That order is
+        //       what the call site applied before this decision moved here, and it is kept because the
+        //       two answers rank differently: a caller told a challenge is unpublished learns something
+        //       about the pool's configuration, and it should not learn it by naming an identifier that
+        //       is not a user of this system.
+        if (!isKnownLocally(userId)) {
+            throw refusedCredential("local-record-absent");
         }
 
         String challengeName = answer.challengeNameAsString();
@@ -1762,60 +1861,168 @@ public class CognitoIdentityService {
     }
 
     /**
-     * Reads the pool user name out of an identity token the pool has just issued.
+     * Resolves the row an issued token set belongs to and holds the caller's identifier to it.
      *
-     * <p>Purpose: this recovers the subject a renewed token set belongs to, so the submitted identifier
-     * can be checked against it rather than trusted. It exists because the rotation-compatible renewal
-     * operation accepts no user name and therefore verifies none; see the renewal exchange above.
+     * <p>Purpose: this is the single place a pool identity becomes a local identity, and it is what every
+     * exchange that ends in a usable token set passes through -- the sign-on that issued a token set, the
+     * challenge answer, and the renewal. It resolves {@code auth.users} through the token's subject
+     * claim, and then refuses unless the row's key, the token's user-name claim and the identifier the
+     * caller submitted are the same identifier, and the token's group membership is the one the row's
+     * stored type entails.
+     *
+     * <p>⚠️ Refactoring Rationale: each of the three exchanges used to make a weaker check of its own,
+     * and none of them read the subject. Sign-on and the challenge answer probed that SOME row carried
+     * the submitted key; the renewal additionally compared the token's user-name claim with the submitted
+     * key. What all three missed is that neither the submitted key nor the name claim identifies a POOL
+     * ACCOUNT: {@code auth.users.cognito_sub} is the durable link, declared {@code UUID NOT NULL UNIQUE}
+     * by {@code V1__auth.sql} and documented as such on {@code UserRepository#findByCognitoSub}, and a
+     * pool user name is a mutable attribute that the pool permits to be reassigned. A token minted for
+     * one pool account whose name had since been given to another account satisfied every one of the old
+     * checks. The subject is minted once per account and never reissued, which is why the row is resolved
+     * through it here and why the column is constrained unique.
+     *
+     * <p>Assumptions: the row's key is returned rather than the submitted value, so what is echoed onto
+     * the response and used downstream is the identifier the STORE holds. The three are equal by the
+     * comparisons below, so this changes no value; it means that if a comparison is ever relaxed the
+     * value carried forward is still the store's own.
+     *
+     * <p>Assumptions: three things separate a REFUSAL from an UNEVALUABLE answer here, and the split is
+     * deliberate. A token this service cannot read -- absent, not three segments, not base-64url, not a
+     * JSON object, carrying no subject, carrying a subject that is not a UUID, carrying no user name --
+     * is a fault of the pool or of this deployment, says nothing about the caller, and is answered as
+     * unevaluable exactly as it was before. A subject that resolves no row, an identifier that disagrees
+     * with the row, and a group set that disagrees with the stored type are statements about the identity
+     * being asserted, and each is refused. A store that cannot be read is unevaluable, on the same
+     * grounds recorded at the membership probe.
+     *
+     * <p>Assumptions: no refusal here says WHICH comparison failed. The caller receives the one sentence
+     * its exchange publishes and nothing else, because the sentences are reachable by an unauthenticated
+     * caller on sign-on and a finer answer would let one enumerate identifiers, subjects or authorities
+     * by reading which refusal came back. The distinguishing reason is recorded in the log alone.
+     *
+     * <p>Alternatives Considered: calling the provider's get-user operation with the issued access token
+     * rather than reading the claims. Rejected because it puts a second network round trip on every
+     * exchange -- including a renewal a user is waiting on mid-session -- and adds a failure mode to
+     * paths whose purpose is to keep a working session working, to learn what the token already carries.
+     *
+     * <p>Alternatives Considered: comparing the subject as text rather than parsing it as a UUID.
+     * Rejected because the column is the native {@code uuid} type and text comparison would make two
+     * spellings of one subject, differing in letter case or in hyphenation, two different values.
+     *
+     * @param idToken the identity token from the answer being processed; may be {@code null} or blank,
+     *     which is unevaluable
+     * @param submittedUserId the folded identifier the caller named for this exchange
+     * @param refusal the refusal this exchange publishes, applied to an internal reason -- the credential
+     *     refusal for a sign-on and the session refusal for a challenge answer or a renewal
+     * @return the folded identifier held by the row the token's subject resolved; never {@code null}
+     * @throws BadCredentialsException if the subject resolves no row, if the row's key, the token's user
+     *     name and the submitted identifier are not one identifier, or if the token's group membership is
+     *     not the one the row's stored type entails -- carrying the sentence the supplied refusal builds
+     *     and no indication of which comparison failed
+     * @throws IllegalStateException if the token cannot be read, carries no subject, carries a subject
+     *     that is not a UUID, carries no user name, or if {@code auth.users} could not be read
+     */
+    private String bindPoolIdentity(String idToken, String submittedUserId,
+            Function<String, BadCredentialsException> refusal) {
+
+        JsonNode claims = claimsOfIdentityToken(idToken);
+
+        UUID subject = subjectClaim(claims);
+        String claimedUserId = normaliseUserId(usernameClaim(claims));
+
+        User row;
+        try {
+            row = users.findByCognitoSub(subject).orElse(null);
+
+            // WHY : Assumptions: the caught type is the persistence abstraction's own root and the answer
+            //       is unevaluable rather than refused, for the reasons recorded at the membership probe:
+            //       Spring Data translates every driver and provider fault into that hierarchy before a
+            //       repository method returns, and a store that could not be read says nothing about the
+            //       identity being asserted.
+        } catch (DataAccessException unreadable) {
+            throw unableToVerify("local-store-" + unreadable.getClass().getSimpleName());
+        }
+
+        // WHY : Assumptions: an unresolved subject is refused rather than reported as a missing record.
+        //       A pool account with no row of this context is not a user of this system -- the pool and
+        //       the table are provisioned together, and a row removed from one is meant to end access
+        //       through the other -- so this is the same condition the membership probe answers, reached
+        //       through the durable link instead of through a key the caller chose.
+        if (row == null) {
+            throw refusal.apply("subject-unresolved");
+        }
+
+        // WHY : Assumptions: the row's key is folded before it is compared, because the column is
+        //       fixed-width CHAR(8) and the driver returns it blank-padded to that width, so an
+        //       unfolded comparison would fail for every identifier shorter than eight characters.
+        //       normaliseUserId trims and folds, which is the same form the submitted value and the
+        //       name claim are held in, so all three sides are compared in one form.
+        String boundUserId = normaliseUserId(row.getUserId());
+
+        // WHY : Assumptions: both comparisons are made and neither is inferable from the other. The
+        //       first states that the pool account this token was minted for still carries the name the
+        //       row is keyed by, which is what a reassigned pool user name would break; the second
+        //       states that the caller named that same identifier, which is what a token replayed under
+        //       another identifier would break. Dropping either one restores a defect this method exists
+        //       to close.
+        if (!boundUserId.equals(claimedUserId)) {
+            throw refusal.apply("subject-name-drift");
+        }
+        if (!boundUserId.equals(submittedUserId)) {
+            throw refusal.apply("submitted-identifier-drift");
+        }
+
+        // WHY : Assumptions: the authority the token asserts is held to the authority the row stores,
+        //       because the two are provisioned as one act and are meant never to diverge --
+        //       CognitoUserProvisioningService writes the row's type and places the pool account in the
+        //       matching group in the same operation. A token whose groups disagree with the stored type
+        //       means one half of that pair was changed without the other, and continuing would let the
+        //       stale half decide what the holder may do: every authorisation downstream is decided from
+        //       the group claim by the shared JwtRoleConverter, so an administrative group on a row typed
+        //       ordinary is an escalation and an ordinary group on a row typed administrative is an
+        //       outage. Refusing sends the holder back through sign-on, which is where a corrected pool
+        //       group takes effect.
+        if (!recognisedGroups(claims).equals(Set.of(expectedGroupFor(row.getUserType(), refusal)))) {
+            throw refusal.apply("group-membership-drift");
+        }
+
+        return boundUserId;
+    }
+
+    /**
+     * Decodes the claim segment of an identity token the pool has just issued.
      *
      * <p>Assumptions: the token is NOT validated here and does not need to be, which is the one point a
      * reader is most likely to challenge. Signature, issuer and expiry validation exist to establish that
      * a token presented by an untrusted party is genuine; this token was not presented by anyone -- it is
      * the body of the response to an outbound call this service just made to the pool over TLS, so its
      * provenance is the call itself. Verifying it here would re-derive a fact already established and
-     * would put key retrieval on the renewal path. Tokens arriving from a CALLER are validated, by the
+     * would put key retrieval on the sign-on path. Tokens arriving from a CALLER are validated, by the
      * resource-server filter chain in {@code com.carddemo.auth.config.SecurityConfig}, which is a
      * different direction and a different trust question.
      *
      * <p>Assumptions: only the claim segment is decoded, with the URL-safe alphabet and without padding,
-     * which is the compact serialisation's own encoding. A token that does not carry exactly three
-     * segments, or whose claim segment is not base-64url, or whose claims are not an object, or which
-     * carries no user-name claim, is treated as an unevaluable answer rather than as a refusal: the pool
-     * issuing a token this service cannot read is a fault of the deployment and says nothing about the
-     * caller's credential.
+     * which is the compact serialisation's own encoding.
      *
-     * <p>Alternatives Considered: calling the provider's get-user operation with the issued access token,
-     * which reports the user name authoritatively and needs no parsing. Rejected because it puts a second
-     * network round trip on every renewal -- doubling the latency of an operation a user is waiting on
-     * mid-session -- and adds a failure mode to a path whose whole purpose is to keep a working session
-     * working. The claim is already in hand.
-     *
-     * <p>Alternatives Considered: reading the {@code sub} claim instead. Rejected because it is the
-     * pool's own subject identifier, a UUID, while the key of {@code auth.users} is the eight-character
-     * identifier the baseline declares -- comparing the two identifier spaces would refuse every renewal.
-     *
-     * @param idToken the identity token the pool issued in the answer being processed; may be
-     *     {@code null} or blank, which is refused
-     * @return the user name the token was issued for, exactly as the claim carries it; never
-     *     {@code null} and never blank
-     * @throws IllegalStateException if the token is absent, is not a three-segment compact
-     *     serialisation, cannot be base-64url decoded, does not decode to a JSON object, or carries no
-     *     user-name claim -- each of which leaves the renewal unevaluable rather than refused
+     * @param idToken the identity token from the answer being processed; may be {@code null} or blank
+     * @return the decoded claims; never {@code null}
+     * @throws IllegalStateException if the token is absent, is not a three-segment compact serialisation,
+     *     or its claim segment cannot be base-64url decoded and read as JSON -- each of which leaves the
+     *     exchange unevaluable rather than refused
      */
-    private static String subjectOfIdentityToken(String idToken) {
+    private static JsonNode claimsOfIdentityToken(String idToken) {
 
         if (idToken == null || idToken.isBlank()) {
-            throw unableToVerify("refresh-id-token-absent");
+            throw unableToVerify("id-token-absent");
         }
 
         String[] segments = idToken.split("\\.");
         if (segments.length != ID_TOKEN_SEGMENT_COUNT) {
-            throw unableToVerify("refresh-id-token-segments-" + segments.length);
+            throw unableToVerify("id-token-segments-" + segments.length);
         }
 
-        JsonNode claims;
         try {
-            claims = CLAIM_READER.readTree(
+            return CLAIM_READER.readTree(
                     Base64.getUrlDecoder().decode(segments[ID_TOKEN_CLAIM_SEGMENT_INDEX]));
 
             // WHY : Assumptions: both faults are caught together because both mean the same thing to
@@ -1827,15 +2034,130 @@ public class CognitoIdentityService {
             //       from a byte array. The exception's class is recorded in the internal reason and its
             //       message, which could quote the undecodable material, is not.
         } catch (IOException | IllegalArgumentException unreadable) {
-            throw unableToVerify("refresh-id-token-" + unreadable.getClass().getSimpleName());
+            throw unableToVerify("id-token-" + unreadable.getClass().getSimpleName());
         }
+    }
 
-        JsonNode subject = claims.path(ID_TOKEN_USERNAME_CLAIM);
+    /**
+     * Reads the pool's durable subject reference out of decoded identity-token claims.
+     *
+     * @param claims the decoded claims of an identity token the pool issued
+     * @return the subject the token was minted for, as the UUID {@code auth.users.cognito_sub} holds;
+     *     never {@code null}
+     * @throws IllegalStateException if the claim is absent, blank or not the text form of a UUID, which
+     *     leaves the exchange unevaluable rather than refused because a pool that issues a token this
+     *     service cannot bind is a fault of the deployment
+     */
+    private static UUID subjectClaim(JsonNode claims) {
+
+        JsonNode subject = claims.path(ID_TOKEN_SUBJECT_CLAIM);
         if (!subject.isTextual() || subject.asText().isBlank()) {
-            throw unableToVerify("refresh-id-token-subject-absent");
+            throw unableToVerify("id-token-subject-absent");
         }
 
-        return subject.asText();
+        try {
+            return UUID.fromString(subject.asText().trim());
+
+            // WHY : Assumptions: the offending text is not recorded. It identifies a pool account, and
+            //       an application log holding subject references links log access to identity records
+            //       for no operational gain -- the class of the failure is what an operator acts on.
+        } catch (IllegalArgumentException malformed) {
+            throw unableToVerify("id-token-subject-malformed");
+        }
+    }
+
+    /**
+     * Reads the pool user name out of decoded identity-token claims.
+     *
+     * @param claims the decoded claims of an identity token the pool issued
+     * @return the user name the token was issued for, exactly as the claim carries it; never {@code null}
+     *     and never blank
+     * @throws IllegalStateException if the claim is absent or blank, which leaves the exchange
+     *     unevaluable rather than refused for the reason recorded on the subject claim
+     */
+    private static String usernameClaim(JsonNode claims) {
+
+        JsonNode userName = claims.path(ID_TOKEN_USERNAME_CLAIM);
+        if (!userName.isTextual() || userName.asText().isBlank()) {
+            throw unableToVerify("id-token-username-absent");
+        }
+
+        return userName.asText();
+    }
+
+    /**
+     * Reads the group memberships an identity token asserts, keeping only the two this system recognises.
+     *
+     * <p>Assumptions: memberships this system does not recognise are DISCARDED rather than refused, which
+     * matches how they are treated everywhere else: the shared {@code JwtRoleConverter} maps the two
+     * recognised groups onto authorities and ignores every other member of the claim, so a pool group
+     * added for an unrelated purpose grants nothing and must not stop a sign-on either. What is held to
+     * agreement is therefore the recognised subset, not the raw claim.
+     *
+     * <p>Assumptions: an absent, empty or non-array claim yields an EMPTY set rather than a failure, so
+     * it reaches the caller's comparison and is refused there. That is the fail-closed reading: a row of
+     * {@code auth.users} always carries a type, every type entails exactly one group, and a token
+     * asserting no recognised group therefore disagrees with the row whatever the row says. A textual
+     * claim is read as a single membership, because a one-element list is the one shape a provider might
+     * reasonably flatten.
+     *
+     * @param claims the decoded claims of an identity token the pool issued
+     * @return the recognised memberships the claim asserts, possibly empty; never {@code null}
+     */
+    private static Set<String> recognisedGroups(JsonNode claims) {
+
+        JsonNode groups = claims.path(JwtRoleConverter.GROUPS_CLAIM);
+        Set<String> asserted = new HashSet<>();
+
+        if (groups.isTextual()) {
+            asserted.add(groups.asText().trim());
+        } else if (groups.isArray()) {
+            groups.forEach(member -> {
+                if (member.isTextual()) {
+                    asserted.add(member.asText().trim());
+                }
+            });
+        }
+
+        asserted.retainAll(Set.of(JwtRoleConverter.ADMIN_AUTHORITY, JwtRoleConverter.USER_AUTHORITY));
+        return asserted;
+    }
+
+    /**
+     * Names the single pool group a stored user type entails.
+     *
+     * <p>Assumptions: the mapping is the one {@code CognitoUserProvisioningService} applies when it
+     * creates the pool account, and the two type values are the only ones {@code auth.users} admits --
+     * {@code V1__auth.sql} constrains the column to {@code 'A'} or {@code 'U'}, transcribing the
+     * condition names at {@code app/cpy/COCOM01Y.cpy} lines 41 and 42. The group names are the shared
+     * kernel's own constants rather than literals retyped here, so the group this method expects cannot
+     * drift from the group the authorisation converter reads.
+     *
+     * @param userType the stored type of the row the subject resolved, as {@code auth.users} holds it
+     * @param refusal the refusal this exchange publishes, applied if the stored type is neither admitted
+     *     value
+     * @return the group name a token for that row must assert; never {@code null}
+     * @throws BadCredentialsException if the stored type is neither admitted value, which the column's
+     *     own constraint makes unreachable and which is therefore refused rather than assumed benign
+     */
+    private static String expectedGroupFor(String userType,
+            Function<String, BadCredentialsException> refusal) {
+
+        String stored = userType == null ? "" : userType.trim().toUpperCase(Locale.ROOT);
+
+        if (CognitoUserProvisioningService.USER_TYPE_ADMIN.equals(stored)) {
+            return JwtRoleConverter.ADMIN_AUTHORITY;
+        }
+        if (CognitoUserProvisioningService.USER_TYPE_USER.equals(stored)) {
+            return JwtRoleConverter.USER_AUTHORITY;
+        }
+
+        // WHY : Trade-offs: a stored type outside the two admitted values is refused rather than mapped
+        //       to the lesser authority. Mapping it would let a row the constraint should have rejected
+        //       decide an authority by falling through, and the row cannot be repaired from this path;
+        //       refusing states that the row is unusable until it is corrected, which is what an
+        //       operator has to act on. It is unreachable while the constraint holds.
+        throw refusal.apply("stored-user-type-unrecognised");
     }
 
     /**

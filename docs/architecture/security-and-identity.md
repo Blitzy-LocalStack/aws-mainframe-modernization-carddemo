@@ -290,28 +290,37 @@ above; it does not own the verification rule or a stored verifier.
 Seed identities are one of two populations. The other is created while the system is
 running, by `POST /api/v1/auth/users`, and its credential handover is a different
 mechanism that has to be stated separately — because for that population there is no
-`terraform apply` in progress and no Secrets Manager entry being written.
+`terraform apply` in progress, and the operator performing the create is a browser
+session rather than a Terraform run.
 
 `CognitoUserProvisioningService.provision` generates a policy-compliant one-time
 credential, supplies it to the pool as the created account's temporary password, and
 publishes it to a per-user Secrets Manager entry encrypted with the customer-managed
-key. The response names that entry in the `credentialSecretName` property of
-`CreatedUserResponse` and never carries the credential itself, so the value reaches its
-owner through a store that already has an audit trail and a rotation story. The account lands in the provider's force-change state, so the
-credential buys one sign-on and no more: presenting it yields the
+key. The 201 response then carries **both** the credential, in
+`CreatedUserResponse.oneTimeCredential`, and the name of that entry, in
+`credentialSecretName`. The credential is what the administrator hands over; the entry is
+how an administrator whose response was lost — a closed tab, a connection dropped after
+the commit — recovers it, under the store's own audit trail. Neither substitutes for the
+other, which is why both are carried. The account lands in the provider's force-change
+state, so the credential buys one sign-on and no more: presenting it yields the
 `NEW_PASSWORD_REQUIRED` challenge that `POST /api/v1/auth/challenge` answers, and the
 pool issues tokens only once a permanent credential has replaced it. The whole
 journey — create, present, be challenged, answer, receive tokens — is asserted end to
 end by `FirstSignOnHandoverTest`, over one substituted pool shared by both halves.
 
-Three properties, and not the absence of a credential, are what make this defensible.
+Four controls, and not the absence of a credential, are what make this defensible.
 It is **single-use**, by the force-change state above. It is **never persisted**:
 there is no password column in the `auth` schema to persist it into, which is the same
-fact the delegation argument below rests on. And it is **never logged**: both
+fact the delegation argument below rests on. It is **never logged**: both
 `ProvisionedIdentity` and `CreatedUserResponse` override their generated `toString`
 so that a record rendered into a diagnostic line cannot carry it, and
 `FirstSignOnHandoverTest` asserts that no line emitted anywhere during the journey
-contains it — an assertion verified to fail when a leak is deliberately introduced.
+contains it — an assertion verified to fail when a leak is deliberately introduced. And
+it is **never cached**: `UserController.createUser` marks the response
+`Cache-Control: no-store`, the published contract declares that header required, and the
+one client that renders the value — `ui/src/screens/userAdd/index.tsx` — holds it in
+component state alone, writes it to no storage, URL or route parameter, and clears it on
+dismissal or unmount.
 
 > ⚠️ Refactoring Rationale: an earlier revision created these accounts with delivery
 > suppressed, **no supplied temporary password**, and answered with the read
@@ -327,18 +336,35 @@ contains it — an assertion verified to fail when a leak is deliberately introd
 > credential is now created here and handed back once, which is why this subsection
 > exists at all.
 
-> Alternatives Considered: writing each runtime credential to Secrets Manager, as the
-> seed path does, and having the administrator read it from there. Rejected on two
-> grounds. An administrator using this contract holds a browser session, not a grant
-> on a secrets store, so the handover would cross an authorization boundary the
-> operation does not have — and granting the service write access to a secrets path
-> would give a compromised service the ability to author credentials the operator
-> trusts. Second, the number of secrets would grow with the number of users, each
-> needing its own deletion, where the seed population is fixed and small.
+> ⚠️ Refactoring Rationale: the fix for that was itself corrected, and this paragraph
+> records the second correction because it failed in the same place for a different
+> reason. The first fix generated the credential, published it to a per-user Secrets
+> Manager entry, and returned that entry's **name** alone — on the reasoning that a
+> credential must never travel in a response body, and that the value would reach its
+> owner through a store with an audit trail and a rotation story. That reasoning was
+> sound about the transport and wrong about the outcome. Reading the entry needs
+> `secretsmanager:GetSecretValue` and a grant on the customer-managed key; the task
+> role holds both and the administrator's browser session holds neither. So the one
+> principal obliged to hand the credential over was the one principal who could not
+> obtain it, and creating a user again produced an account nobody could sign on to.
+> The credential is therefore returned in the response, and the managed-secret entry
+> is kept beside it rather than replaced by it.
+
+> Alternatives Considered: keeping the locator-only response and granting the browser
+> client the secret-store read action so it could collect the value itself. Rejected as
+> a strictly **larger** disclosure than one value in one response: that grant outlives
+> the handover, spans every entry its policy admits, and is exercisable by anything
+> holding the session, where the response is delivered once to the caller that asked
+> for it. Alternatives Considered: returning the value and dropping the per-user
+> managed-secret entry, which would remove a stored copy and one secret per user.
+> Rejected because a response is delivered once: an operator who lost it would then
+> have no recovery and no audit trail, and the remaining option would be to delete the
+> account and create another.
 > Trade-offs: the credential travels in a response body, which a client may hold
-> in memory for as long as the calling view lives, and a caller that discards it
-> strands the account — nothing stores it, so the account must be provisioned again.
-> That is the accepted cost of the three properties above.
+> in memory for as long as the calling view lives, and a proxy configured to log
+> bodies would capture it. That is the accepted cost of the four controls above, and
+> what it buys is that onboarding needs no privileged read — the operation is
+> completable by the principal the contract already authorises to perform it.
 
 ### A note on the anonymised clone
 

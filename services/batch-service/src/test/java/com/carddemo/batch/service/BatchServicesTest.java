@@ -559,6 +559,12 @@ class BatchServicesTest {
          * is what the uniqueness constraint forces. A redrive cannot insert a second row for the same run
          * and step, so re-opening the recorded one is the only available shape and the attempt counter is
          * the only record that the step was tried more than once.</p>
+         *
+         * <p>Assumptions: the start time is asserted to be the NEW attempt's, not the first attempt's,
+         * because that is what an operator reading a recovered night asks the row for. This assertion is
+         * the in-memory half of the contract; the durable half, which is what the column mapping decides,
+         * is asserted against PostgreSQL by
+         * {@code BatchRunRepositoryIT.theAttemptCounterIsDurableAcrossAReopen}.</p>
          */
         @Test
         @DisplayName("count the attempt and clear the previous outcome when a failed row is re-opened")
@@ -568,10 +574,14 @@ class BatchServicesTest {
                     (short) BatchReturnCode.HARD_FAILURE.numericValue());
             assertThat(row.getAttempt()).isEqualTo(1);
 
-            row.reopen(LocalDateTime.now(FIXED));
+            LocalDateTime secondAttemptStart = LocalDateTime.now(FIXED).plusMinutes(30);
+            row.reopen(secondAttemptStart);
 
             assertThat(row.getAttempt()).isEqualTo(2);
             assertThat(row.getStatus()).isEqualTo(BatchRun.BatchRunStatus.STARTED);
+            assertThat(row.getStartedAt())
+                    .as("a re-opened row must carry the start of the attempt it now describes")
+                    .isEqualTo(secondAttemptStart);
             assertThat(row.getFinishedAt()).isNull();
             assertThat(row.getReturnCode()).isNull();
         }

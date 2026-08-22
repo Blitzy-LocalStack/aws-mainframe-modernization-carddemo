@@ -1,6 +1,6 @@
 /**
- * JPA keyed operations, two POSITIONED keyset browse queries plus the unpositioned opening read, and
- * the identity-synchronisation ledger's own constraints. No offset paging.
+ * JPA keyed operations, four keyset browse queries in two directions, and the
+ * identity-synchronisation ledger's own constraints. No offset paging.
  *
  * <h2>The data contract this package is built on</h2>
  *
@@ -34,25 +34,32 @@
  * context shares the sign-overpunch and packed-decimal concerns that the money-bearing contexts
  * genuinely do have.</p>
  *
- * <h2>Why two browse queries and not a page number</h2>
+ * <h2>Why four browse queries and not a page number</h2>
  *
  * <p>The reference user list transaction browses its file rather than paging by ordinal.
  * {@code app/cbl/COUSR00C.cbl} declares its screen array as {@code 02 USER-REC OCCURS 10 TIMES.} at
  * line 57 and drives the file through four paragraphs: {@code STARTBR-USER-SEC-FILE.} at line 586,
  * {@code READNEXT-USER-SEC-FILE.} at line 619, {@code READPREV-USER-SEC-FILE.} at line 653 and
- * {@code ENDBR-USER-SEC-FILE.} at line 687. Only two of those four survive as queries, the forward
- * read and the backward read, which is what the summary above means by exactly two keyset browse
- * queries. The browse open and the browse close have no target counterpart because a query carries
- * its cursor position in its own predicate instead of in a server-side handle, so there is no handle
- * to open or to release.</p>
+ * {@code ENDBR-USER-SEC-FILE.} at line 687. Three of those four survive as queries. The two reads
+ * become the two continuations, one per direction. The browse OPEN becomes two queries rather than
+ * one, because line 218 gives it either of two values -- {@code LOW-VALUES} when the search field is
+ * blank, at line 219, or the identifier typed into it, at line 221 -- and those are the unpositioned
+ * opening read and the positioned one. The browse CLOSE has no target counterpart at all, because a
+ * query carries its cursor position in its own predicate instead of in a server-side handle, so there
+ * is no handle to release.</p>
  *
- * <p>Refactoring Rationale: a THIRD query joined the contract after this section was written, and it is
- * recorded here rather than left to contradict the two the paragraph above counts. Both positioned queries
- * take a key and the first page has none, so opening the browse was expressible only by passing a value
- * chosen to sort below every stored key -- which leans on a collation detail to mean "before every key" and
- * would silently omit a row whose identifier were blank. The opening read has no reference VERB counterpart,
- * because the baseline establishes its browse position before its first read rather than passing a key it
- * was given, so the count of POSITIONED queries is still two and the count of queries is three.</p>
+ * <p>⚠️ Refactoring Rationale: this section counted TWO queries, then three, and now four, and neither
+ * later figure was reached by incrementing the earlier one -- each was re-measured from the interface.
+ * The third was the unpositioned opening read: both continuations take a key and the first page has
+ * none, so opening the browse was expressible only by passing a value chosen to sort below every
+ * stored key, which leans on a collation detail to mean "before every key" and would silently omit a
+ * row whose identifier were blank. The fourth is the POSITIONED opening read, and this section's own
+ * earlier wording is what delayed it: it recorded the browse open as having no reference counterpart,
+ * on the ground that the baseline establishes its position before its first read rather than being
+ * passed a key. That is true of the value only when the search field is blank. When it is not, the
+ * key the seek uses is the caller's, and serving it needed a query that compares INCLUSIVELY -- the
+ * continuation's comparison is strict and would hide the row whose identifier was typed, which is the
+ * row the reference puts at the top of the screen.</p>
  *
  * <p>An ordinal offset is deliberately not part of the contract. An offset recomputed against a
  * table that another transaction has inserted into or deleted from skips and repeats rows, whereas a
@@ -95,11 +102,18 @@
  * to 28, where {@code CDEMO-USER-TYPE PIC X(01)} carries {@code 88 CDEMO-USRTYP-ADMIN VALUE 'A'.}
  * and {@code 88 CDEMO-USRTYP-USER VALUE 'U'.} as its only two condition names.</p>
  *
- * <p>Assumptions: this package depends on five contracts that it does not own. Flyway applies
- * exactly one migration for this service, {@code V1__auth.sql}, and that migration contains exactly
- * one executable statement, the {@code CREATE TABLE auth.users} that declares the {@code CHAR(8)}
- * primary key, the two name columns, the constrained type column and {@code cognito_sub}; there is
- * no second table, no view, no trigger, no sequence and no seed insert for a test here to lean on.
+ * <p>Assumptions: this package depends on five contracts that it does not own. Flyway applies EIGHT
+ * migrations for this service, {@code V1__auth.sql} through {@code V8__auth_addressable_user_id.sql},
+ * of which two create a relation -- {@code V1} the {@code CREATE TABLE auth.users} that declares the
+ * {@code CHAR(8)} primary key, the two name columns, the constrained type column and
+ * {@code cognito_sub}, and {@code V2} the synchronisation ledger described below. The other six add
+ * constraints to those two tables and nothing else: there is no third table, no view, no trigger, no
+ * sequence and no seed insert for a test here to lean on.
+ * ⚠️ Refactoring Rationale: this said ONE migration carrying ONE statement, which was true when this
+ * package was written and had been false for six revisions by the time it was read -- the ledger this
+ * same document describes two sections below arrived in the second of them. The figure is now taken
+ * from the migration directory, and the integration test asserts the resulting SHAPE, namely two
+ * tables and no other relation, which is the invariant that matters rather than the file count.
  * Hibernate runs with {@code ddl-auto: validate}, so the entity mapping is asserted against the
  * Flyway-applied schema rather than generated from it, and a drift between the entity and the
  * migration therefore fails at application context startup rather than diverging silently while

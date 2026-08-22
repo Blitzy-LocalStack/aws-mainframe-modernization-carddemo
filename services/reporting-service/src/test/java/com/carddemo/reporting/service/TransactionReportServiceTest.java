@@ -92,12 +92,19 @@ import org.springframework.data.domain.Limit;
  *
  * <p>Assumptions: the emission assertions govern the PADDED record the service hands its sink, which is
  * {@link ReportBandLayouts#REPORT_RECORD_LENGTH} bytes on every band. The shipped oracle
- * {@code tests/golden/reporting/e2e_full_cycle_report.expected} is NOT fixed width, because GnuCOBOL
- * line-sequential output right-trims trailing blanks: its measured line-length distribution is 14 lines
+ * {@code tests/golden/reporting/e2e_full_cycle_report.expected} is NOT fixed width, and the reason is
+ * the TEST HARNESS rather than the runtime. The reference writes fixed 133-byte records --
+ * {@code FD-REPTFILE-REC PIC X(133)} at L85 of {@code app/cbl/CBTRN03C.cbl} against
+ * {@code DCB=(LRECL=133,...)} at L78 of {@code app/jcl/TRANREPT.jcl} -- and it is
+ * {@code tests/e2e/test_full_batch_cycle.py} that frames them for storage, its {@code _frame_report}
+ * slicing the stream at the record length and right-stripping each slice at L516, with
+ * {@code tests/helpers/golden_compare.py} right-stripping each line again at L930 when the artifact is
+ * loaded. The measured line-length distribution of the stored file is therefore 14 lines
  * of 0 bytes, 546 of 112, 14 of 115 and 283 of 133, so only the all-hyphen separator survives at the
- * declared length. Any comparison against that artifact therefore right-trims the emitted record first,
- * and an assertion that a golden LINE is 133 bytes long could never pass. The padding requirement is not
- * loosened to accommodate the oracle; the comparison is normalised instead.
+ * declared length. Any comparison against that artifact therefore applies the harness's own framing to
+ * the emitted record first, and an assertion that a stored golden LINE is 133 bytes long could never
+ * pass. The padding requirement is not loosened to accommodate the oracle; the comparison is normalised
+ * instead.
  *
  * <p>Assumptions: this class consults no clock and proves that the service declares none.
  * {@code app/jcl/TRANREPT.jcl} hard-codes its two bounds as DFSORT symbols at its L43 and L44,
@@ -1094,15 +1101,44 @@ class TransactionReportServiceTest {
     }
 
     /**
-     * Right-trims one emitted record the way GnuCOBOL line-sequential output trims a written record.
+     * Resolves the repository root by walking up from the working directory.
+     *
+     * <p>Assumptions: located by the presence of {@code services/pom.xml} rather than by a count of
+     * parent steps, so this class runs identically from the reactor root and from the module directory.
+     * That is the same rule the module's integration tests use to reach repository-level files, and a
+     * relative path would resolve differently between those two invocations.</p>
+     *
+     * @return the repository root; never {@code null}
+     * @throws IllegalStateException if no ancestor carries the reactor descriptor
+     */
+    private static Path repositoryRoot() {
+        Path candidate = Path.of("").toAbsolutePath();
+        while (candidate != null) {
+            if (Files.isRegularFile(candidate.resolve("services/pom.xml"))) {
+                return candidate;
+            }
+            candidate = candidate.getParent();
+        }
+        throw new IllegalStateException(
+                "no ancestor of the working directory carries services/pom.xml");
+    }
+
+    /**
+     * Right-trims one emitted record the way the harness trims a record before storing it in a golden.
      *
      * <p>Assumptions: the shipped oracle
      * {@code tests/golden/reporting/e2e_full_cycle_report.expected} stores 14 lines of 0 bytes, 546 of
-     * 112, 14 of 115 and 283 of 133 -- a measured distribution, not an estimate -- because the runtime
-     * drops trailing blanks on the way out. Normalising the EMITTED record down to that form is the only
-     * way a comparison against the artifact can hold, and it is done here rather than by relaxing the
-     * padding requirement: the service still has to emit the full declared width, and the separate
-     * emission cases assert exactly that.</p>
+     * 112, 14 of 115 and 283 of 133 -- a measured distribution, not an estimate -- and the trim that
+     * produces it is the TEST HARNESS's rather than the runtime's. The reference writes fixed 133-byte
+     * records: {@code FD-REPTFILE-REC PIC X(133)} at L85 of {@code app/cbl/CBTRN03C.cbl} against
+     * {@code DCB=(LRECL=133,...)} at L78 of {@code app/jcl/TRANREPT.jcl}. It is
+     * {@code tests/e2e/test_full_batch_cycle.py} that frames those records before the artifact is
+     * stored, slicing the stream at the record length and right-stripping each slice in
+     * {@code _frame_report} at L516, and {@code tests/helpers/golden_compare.py} right-strips each line
+     * again at L930 when the artifact is loaded. Normalising the EMITTED record down to the stored form
+     * is the only way a comparison against the artifact can hold, and it is done here rather than by
+     * relaxing the padding requirement: the service still has to emit the full declared width, and the
+     * separate emission cases assert exactly that.</p>
      *
      * @param record the emitted record, a {@code byte[]} of the declared report length
      * @return the record rendered with its trailing blanks removed; never {@code null}
@@ -2662,14 +2698,116 @@ class TransactionReportServiceTest {
      * them is stated here once so that no case is written against the wrong one.</p>
      *
      * <p>Assumptions: {@code tests/golden/reporting/e2e_full_cycle_report.expected} stores 14 lines of 0
-     * bytes, 546 of 112, 14 of 115 and 283 of 133 -- measured on the shipped file, not estimated -- because
-     * GnuCOBOL line-sequential output drops trailing blanks as it writes. The emitted record is normalised
-     * DOWN to that form for any comparison; the padding requirement itself is never relaxed, which the
+     * bytes, 546 of 112, 14 of 115 and 283 of 133 -- measured on the shipped file, not estimated --
+     * because the harness right-strips each fixed record as it frames the runtime's output for storage,
+     * in {@code _frame_report} at L516 of {@code tests/e2e/test_full_batch_cycle.py}. The runtime itself
+     * drops nothing: the reference writes fixed 133-byte records. The emitted record is normalised DOWN
+     * to the stored form for any comparison; the padding requirement itself is never relaxed, which the
      * emitted-stream cases assert separately.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: this suite CONSULTS the artifact, where it previously asserted only
+     * that an emitted stream's line-length distribution fell into the artifact's four width classes.
+     * Those classes are a consequence of each band's content reaching a particular column, so a report
+     * with the wrong labels, the wrong band order, the wrong descriptions or a missing page satisfies
+     * every one of them -- which is to say the old form of this suite could not see systematic content
+     * drift at all, and its name claimed otherwise. The width cases are kept, because they state a
+     * property the byte comparison cannot: the comparison normalises the emitted record, so a generator
+     * that stopped padding would still match. The two together are what the artifact is worth.</p>
      */
     @Nested
     @DisplayName("comparing an emitted stream against the shipped oracle")
     class GoldenCorroboration {
+
+        /** The shipped baseline artifact, relative to the repository root. */
+        private static final String ORACLE = "tests/golden/reporting/e2e_full_cycle_report.expected";
+
+        /** How many lines the shipped artifact holds, measured on the file. */
+        private static final int ORACLE_LINES = 857;
+
+        /** How many of the artifact's 256 card groups it closes with a card-break band. */
+        private static final int ORACLE_CLOSED_GROUPS = 255;
+
+        /** Leading literal of the title band, {@code REPT-SHORT-NAME} at L5 and L6 of the copybook. */
+        private static final String TITLE_LITERAL = "DALYREPT";
+
+        /** Leading literal of the column-heading band, L34 and L35 of the copybook. */
+        private static final String HEADINGS_LITERAL = "Transaction ID";
+
+        /** Leading literal of the card-break total band, L57 and L58 of the copybook. */
+        private static final String ACCOUNT_TOTAL_LITERAL = "Account Total";
+
+        /** Leading literal of the page total band, L51 and L52 of the copybook. */
+        private static final String PAGE_TOTAL_LITERAL = "Page Total";
+
+        /** Leading literal of the grand total band, L63 and L64 of the copybook. */
+        private static final String GRAND_TOTAL_LITERAL = "Grand Total";
+
+        /** Zero-based start column of {@code TRAN-REPORT-TRANS-ID}, L16 of the copybook. */
+        private static final int DETAIL_ID_OFFSET = 0;
+
+        /** Declared width of {@code TRAN-REPORT-TRANS-ID}. */
+        private static final int DETAIL_ID_WIDTH = 16;
+
+        /** Zero-based start column of {@code TRAN-REPORT-ACCOUNT-ID}, L18 of the copybook. */
+        private static final int DETAIL_ACCOUNT_OFFSET = 17;
+
+        /** Declared width of {@code TRAN-REPORT-ACCOUNT-ID}. */
+        private static final int DETAIL_ACCOUNT_WIDTH = 11;
+
+        /** Zero-based start column of {@code TRAN-REPORT-TYPE-CD}, L20 of the copybook. */
+        private static final int DETAIL_TYPE_OFFSET = 29;
+
+        /** Declared width of {@code TRAN-REPORT-TYPE-CD}. */
+        private static final int DETAIL_TYPE_WIDTH = 2;
+
+        /** Zero-based start column of {@code TRAN-REPORT-TYPE-DESC}, L22 of the copybook. */
+        private static final int DETAIL_TYPE_DESC_OFFSET = 32;
+
+        /** Declared width of {@code TRAN-REPORT-TYPE-DESC}. */
+        private static final int DETAIL_TYPE_DESC_WIDTH = 15;
+
+        /** Zero-based start column of {@code TRAN-REPORT-CAT-CD}, L24 of the copybook. */
+        private static final int DETAIL_CATEGORY_OFFSET = 48;
+
+        /** Declared width of {@code TRAN-REPORT-CAT-CD}. */
+        private static final int DETAIL_CATEGORY_WIDTH = 4;
+
+        /** Zero-based start column of {@code TRAN-REPORT-CAT-DESC}, L26 of the copybook. */
+        private static final int DETAIL_CATEGORY_DESC_OFFSET = 53;
+
+        /** Declared width of {@code TRAN-REPORT-CAT-DESC}. */
+        private static final int DETAIL_CATEGORY_DESC_WIDTH = 29;
+
+        /** Zero-based start column of {@code TRAN-REPORT-SOURCE}, L28 of the copybook. */
+        private static final int DETAIL_SOURCE_OFFSET = 83;
+
+        /** Declared width of {@code TRAN-REPORT-SOURCE}. */
+        private static final int DETAIL_SOURCE_WIDTH = 10;
+
+        /**
+         * Zero-based start column of the money item every money-bearing band carries.
+         *
+         * <p>⚠️ Trade-offs: transcribed here rather than read from {@link ReportBandLayouts}, which
+         * publishes the same 97. Restating it is what keeps this suite an INDEPENDENT reader of the
+         * shipped artifact: reading the artifact through the layout the subject writes through would let
+         * this suite and the subject agree on a wrong column, and the whole purpose of comparing against
+         * a file produced by another implementation is that the two do not share a definition. The cost
+         * is that a legitimate change to the report's geometry has to be made in two places, and that is
+         * the intended cost -- the second place is a shipped file this suite may not modify.</p>
+         */
+        private static final int AMOUNT_OFFSET = 97;
+
+        /** Declared width of the {@code -ZZZ,ZZZ,ZZZ.ZZ} and {@code +ZZZ,ZZZ,ZZZ.ZZ} masks. */
+        private static final int AMOUNT_WIDTH = 15;
+
+        /** Zero-based start column of {@code REPT-START-DATE}, L11 of the copybook. */
+        private static final int TITLE_START_DATE_OFFSET = 91;
+
+        /** Zero-based start column of {@code REPT-END-DATE}, L13 of the copybook. */
+        private static final int TITLE_END_DATE_OFFSET = 105;
+
+        /** Declared width of each of the title band's two date items. */
+        private static final int DATE_WIDTH = 10;
 
         /**
          * Asserts the right-trim normalisation reproduces the oracle's stored width classes.
@@ -2744,6 +2882,460 @@ class TransactionReportServiceTest {
                             + " classes describe content rather than a contract")
                     .isLessThan(ReportBandLayouts.AMOUNT_COLUMN_OFFSET);
         }
-    }
 
+        // WHY : Assumptions: the WHOLE stream is compared and only three lines are exempted, each by an
+        //       arithmetic identity asserted separately below. The two cases above assert width CLASSES,
+        //       which a report with the wrong labels, the wrong band order or a missing page would
+        //       satisfy exactly -- so on their own they cannot see systematic content drift. This case
+        //       is what makes every one of the oracle's 857 lines an assertion.
+        /**
+         * Asserts the whole emitted stream is the shipped oracle, line for line, bar the two divergences.
+         *
+         * <p>This case takes no parameter and yields no value.</p>
+         */
+        @Test
+        @DisplayName("the whole emitted stream is the shipped oracle, line for line")
+        void theWholeEmittedStreamIsTheShippedOracle() {
+            List<String> oracle = oracleLines();
+            EmissionRun run = emit(inputDerivedFrom(oracle));
+
+            assertThat(emittedStream(run)).isEqualTo(expectedStream(oracle));
+        }
+
+        // WHY : ⚠️ Trade-offs: the two divergent figures are pinned by an ARITHMETIC identity against the
+        //       oracle's own bytes rather than by a widened comparison. A comparison loosened to admit
+        //       them -- ignoring the amount column on total bands, say, or comparing only line counts --
+        //       would simultaneously stop asserting the 255 account totals, the 13 correct page totals
+        //       and the 262 detail amounts that the same mask renders and that the oracle pins exactly.
+        //       A registered divergence has to cost only itself.
+        /**
+         * Asserts each divergent total differs from the oracle's by exactly the last transaction's amount.
+         *
+         * <p>Assumptions: the identity is register entry {@code D-REPORT-GRAND-TOTAL} stated as
+         * arithmetic. The reference's end-of-file branch at L200 and L201 of
+         * {@code app/cbl/CBTRN03C.cbl} adds the last record area's amount into the page and grand
+         * accumulators a second time, after L287 and L288 had already added it while writing the detail
+         * line, so the oracle's final page figure and its grand figure each carry that amount twice. The
+         * emitted figures carry it once, so each differs by exactly that amount and by nothing else --
+         * which this case asserts on values parsed out of the emitted bytes by this class's own reader,
+         * not by re-rendering through the mask under test.</p>
+         *
+         * <p>This case takes no parameter and yields no value.</p>
+         */
+        @Test
+        @DisplayName("each divergent total differs from the oracle's by exactly the last amount, twice"
+                + " counted")
+        void theDivergentTotalsDifferByExactlyTheLastAmount() {
+            List<String> oracle = oracleLines();
+            EmissionRun run = emit(inputDerivedFrom(oracle));
+            List<String> emitted = trimmedRecordsOf(run);
+
+            Money lastDetail = amountOf(lastOfKind(oracle, "DETAIL"));
+            assertThat(lastDetail)
+                    .as("the oracle's final detail row carries the amount the reference counts twice")
+                    .isEqualTo(Money.of("603.22"));
+
+            assertThat(amountOf(lastOfKind(emitted, "PAGE_TOTAL")))
+                    .as("the emitted closing page figure counts the last amount once")
+                    .isEqualTo(amountOf(lastOfKind(oracle, "PAGE_TOTAL")).minus(lastDetail));
+            assertThat(amountOf(lastOfKind(emitted, "GRAND_TOTAL")))
+                    .as("and so does the emitted grand figure")
+                    .isEqualTo(amountOf(lastOfKind(oracle, "GRAND_TOTAL")).minus(lastDetail));
+
+            // WHY : Assumptions: the emitted grand figure is additionally held to the SUM of the emitted
+            //       page figures, which is the property the divergence exists to restore and which the
+            //       oracle itself fails. Asserting only the difference from the oracle would be satisfied
+            //       by a stream that had moved the same error somewhere else.
+            Money pageFigures = Money.ZERO;
+            for (String line : emitted) {
+                if (kindOf(line).equals("PAGE_TOTAL")) {
+                    pageFigures = pageFigures.plus(amountOf(line));
+                }
+            }
+            assertThat(amountOf(lastOfKind(emitted, "GRAND_TOTAL")))
+                    .as("the emitted grand figure is exactly the sum of the emitted page figures")
+                    .isEqualTo(pageFigures);
+        }
+
+        /**
+         * Asserts the closing card-break band is the only band the oracle does not carry.
+         *
+         * <p>Assumptions: this is register entry {@code D-REPORT-CLOSING-TOTAL} stated as a count. The
+         * reference writes the card-break band only from the break at L181 of
+         * {@code app/cbl/CBTRN03C.cbl}, which fires when the NEXT card arrives and so cannot fire for
+         * the last group, and its end-of-file branch at L198 to L203 performs the page and grand
+         * paragraphs alone. The emitted stream closes the last group as it closes every other, so it
+         * carries one more card-break band -- and, because {@code writeAccountTotals} emits the declared
+         * rule after every card-break band without exception, the rule that goes with it. Two lines, both
+         * at the end, and the case asserts the count exactly rather than asserting the stream is
+         * longer.</p>
+         *
+         * <p>This case takes no parameter and yields no value.</p>
+         */
+        @Test
+        @DisplayName("the closing card-break band and its rule are the only lines the oracle lacks")
+        void theClosingCardBreakBandIsTheOnlyAddition() {
+            List<String> oracle = oracleLines();
+            EmissionRun run = emit(inputDerivedFrom(oracle));
+            List<String> emitted = trimmedRecordsOf(run);
+
+            assertThat(emitted)
+                    .as("two lines more than the oracle: the closing card-break band and its rule")
+                    .hasSize(oracle.size() + 2);
+            assertThat(countOfKind(emitted, "ACCOUNT_TOTAL"))
+                    .as("one card-break band more than the oracle's 255, for the 256th group")
+                    .isEqualTo(countOfKind(oracle, "ACCOUNT_TOTAL") + 1);
+            assertThat(countOfKind(emitted, "SEPARATOR"))
+                    .isEqualTo(countOfKind(oracle, "SEPARATOR") + 1);
+            for (String kind : List.of("DETAIL", "TITLE", "BLANK", "HEADINGS", "PAGE_TOTAL",
+                    "GRAND_TOTAL")) {
+                assertThat(countOfKind(emitted, kind))
+                        .as("the %s band count is untouched by the divergence", kind)
+                        .isEqualTo(countOfKind(oracle, kind));
+            }
+
+            // WHY : Assumptions: the added band's own figure is asserted to be the final group's sum,
+            //       because a band added at the right position carrying the wrong figure would satisfy
+            //       every count above.
+            assertThat(amountOf(lastOfKind(emitted, "ACCOUNT_TOTAL")))
+                    .as("the added band closes the final group with that group's own sum")
+                    .isEqualTo(amountOf(lastOfKind(oracle, "DETAIL")));
+        }
+
+        /**
+         * Reads the shipped baseline artifact as its stored lines.
+         *
+         * <p>Assumptions: the artifact is REFERENCE. It is read and never written, and nothing here
+         * regenerates it -- an oracle a test may rewrite asserts nothing at all.</p>
+         *
+         * @return the stored lines, in file order, with the file's trailing newline dropped; never
+         *     {@code null}
+         * @throws UncheckedIOException if the artifact cannot be read, which is a broken checkout rather
+         *     than a failure of the subject
+         */
+        private List<String> oracleLines() {
+            Path file = repositoryRoot().resolve(ORACLE);
+            try {
+                List<String> lines = Files.readAllLines(file, StandardCharsets.US_ASCII);
+                assertThat(lines)
+                        .as("the shipped artifact holds the 857 lines every figure here is measured on")
+                        .hasSize(ORACLE_LINES);
+                return lines;
+            } catch (IOException unreadable) {
+                throw new UncheckedIOException(
+                        "the shipped baseline artifact could not be read", unreadable);
+            }
+        }
+
+        /**
+         * Rebuilds the report's input from the oracle's own detail and card-break bands.
+         *
+         * <p>⚠️ Alternatives Considered: driving this from the module's own fixtures. Rejected: the
+         * shipped artifact was produced by a full batch cycle over the repository's end-to-end inputs --
+         * posting and interest accrual first -- so no fixture in this module holds the 262 rows it
+         * reports, and a comparison between two reports over different inputs could only assert whatever
+         * the two had in common. Reconstructing the input from the artifact's own printed fields makes
+         * every one of its lines comparable.</p>
+         *
+         * <p>Assumptions: the GROUPING is read off the artifact's card-break bands rather than guessed. A
+         * card-break band closes a group, so the detail rows between two of them are one card's rows, and
+         * that partition is asserted below against each band's own figure -- 255 closed groups, every one
+         * of whose detail rows sum to the figure the artifact stores for it. The card number itself is
+         * not printed anywhere in the report and cannot be recovered, so a synthetic one is derived per
+         * group; only its ORDER matters, because the emitter breaks on a change of grouping key and never
+         * on the key's content.</p>
+         *
+         * <p>Assumptions: the printed fields are read at column positions transcribed here from
+         * {@code app/cpy/CVTRA07Y.cpy} L16 to L31, and NOT through {@link ReportBandLayouts}. That is
+         * deliberate and is the one place in this file where an offset is restated: an oracle read
+         * through the layout under test would let a uniform column move round-trip invisibly, because the
+         * same wrong offset would be used to read the artifact and to write the comparison.</p>
+         *
+         * @param oracle the artifact's stored lines; must not be {@code null}
+         * @return the resolved lines the emitter must be driven with, in artifact order; never
+         *     {@code null}
+         */
+        private List<TransactionReportRepository.ReportLine> inputDerivedFrom(List<String> oracle) {
+            List<TransactionReportRepository.ReportLine> lines = new ArrayList<>();
+            List<Money> groupRows = new ArrayList<>();
+            int group = 0;
+            int closedGroups = 0;
+
+            for (String line : oracle) {
+                String kind = kindOf(line);
+                if (kind.equals("DETAIL")) {
+                    Money amount = amountOf(line);
+                    groupRows.add(amount);
+                    lines.add(resolvedLine(
+                            field(line, DETAIL_ID_OFFSET, DETAIL_ID_WIDTH),
+                            syntheticCardNumber(group),
+                            Long.parseLong(field(line, DETAIL_ACCOUNT_OFFSET, DETAIL_ACCOUNT_WIDTH)),
+                            field(line, DETAIL_TYPE_OFFSET, DETAIL_TYPE_WIDTH),
+                            field(line, DETAIL_TYPE_DESC_OFFSET, DETAIL_TYPE_DESC_WIDTH),
+                            field(line, DETAIL_CATEGORY_OFFSET, DETAIL_CATEGORY_WIDTH),
+                            field(line, DETAIL_CATEGORY_DESC_OFFSET, DETAIL_CATEGORY_DESC_WIDTH),
+                            field(line, DETAIL_SOURCE_OFFSET, DETAIL_SOURCE_WIDTH),
+                            amount));
+                } else if (kind.equals("ACCOUNT_TOTAL")) {
+                    Money summed = Money.ZERO;
+                    for (Money row : groupRows) {
+                        summed = summed.plus(row);
+                    }
+                    assertThat(summed)
+                            .as("the artifact's card-break band %d agrees with the rows it closes, so "
+                                    + "the grouping read off it is the grouping the run had", group)
+                            .isEqualTo(amountOf(line));
+                    groupRows.clear();
+                    closedGroups++;
+                    group++;
+                }
+            }
+
+            assertThat(closedGroups)
+                    .as("the artifact closes 255 of its 256 groups, the last being the one the "
+                            + "reference never closes")
+                    .isEqualTo(ORACLE_CLOSED_GROUPS);
+            assertThat(groupRows)
+                    .as("and the group it leaves open is the final one, which holds rows")
+                    .isNotEmpty();
+            return lines;
+        }
+
+        /**
+         * Derives the synthetic card number standing for one group of the artifact.
+         *
+         * <p>Assumptions: zero-padded to sixteen digits so the grouping keys ascend in artifact order,
+         * which is the order the reporting query declares and therefore the order the emitter is entitled
+         * to assume. A counter rendered without padding would order group 10 before group 2.</p>
+         *
+         * @param group the group's zero-based position in the artifact
+         * @return the synthetic card number; never {@code null}
+         */
+        private String syntheticCardNumber(int group) {
+            return String.format("%016d", group);
+        }
+
+        /**
+         * Reads one printed field of a band, with its declared blank padding removed.
+         *
+         * @param line the stored or emitted line to read from
+         * @param offset the field's zero-based start column
+         * @param width the field's declared width
+         * @return the field with trailing blanks removed; never {@code null}
+         */
+        private String field(String line, int offset, int width) {
+            return line.substring(offset, offset + width).stripTrailing();
+        }
+
+        /**
+         * Classifies one line of the report by the band that produced it.
+         *
+         * <p>Assumptions: classified by its leading literal rather than by its length, because four of
+         * the seven bands share the 112-character class and two share the 133-character one. The detail
+         * band is the one with no leading literal and is recognised by its sixteen leading digits, which
+         * is what {@code TRAN-REPORT-TRANS-ID} carries and what no other band can carry.</p>
+         *
+         * @param line the line to classify
+         * @return the band name; never {@code null}
+         * @throws IllegalStateException if the line matches no band, which means the artifact or the
+         *     emitted stream holds something this model does not describe
+         */
+        private String kindOf(String line) {
+            if (line.isEmpty()) {
+                return "BLANK";
+            }
+            if (line.startsWith(TITLE_LITERAL)) {
+                return "TITLE";
+            }
+            if (line.startsWith(HEADINGS_LITERAL)) {
+                return "HEADINGS";
+            }
+            if (line.chars().allMatch(character -> character == '-')) {
+                return "SEPARATOR";
+            }
+            if (line.startsWith(ACCOUNT_TOTAL_LITERAL)) {
+                return "ACCOUNT_TOTAL";
+            }
+            if (line.startsWith(PAGE_TOTAL_LITERAL)) {
+                return "PAGE_TOTAL";
+            }
+            if (line.startsWith(GRAND_TOTAL_LITERAL)) {
+                return "GRAND_TOTAL";
+            }
+            if (line.length() >= DETAIL_ID_WIDTH
+                    && line.substring(0, DETAIL_ID_WIDTH).chars().allMatch(Character::isDigit)) {
+                return "DETAIL";
+            }
+            throw new IllegalStateException("the stream holds a line this model does not describe");
+        }
+
+        /**
+         * Reads the money field of one band, as a value rather than as rendered characters.
+         *
+         * <p>Assumptions: parsed by this class rather than re-rendered through
+         * {@link CobolEditMask}, so the two bounded identities are asserted on values the subject
+         * produced and not on a second application of the mask under test. Both report masks put a fixed
+         * sign position first -- {@code -ZZZ,ZZZ,ZZZ.ZZ} at L30 of {@code app/cpy/CVTRA07Y.cpy} and
+         * {@code +ZZZ,ZZZ,ZZZ.ZZ} at its L54, L60 and L66 -- so the sign is the field's first character
+         * and the magnitude is the rest with its grouping commas removed.</p>
+         *
+         * @param line the band to read
+         * @return the figure the band carries; never {@code null}
+         */
+        private Money amountOf(String line) {
+            String rendered = line.substring(AMOUNT_OFFSET, AMOUNT_OFFSET + AMOUNT_WIDTH);
+            String magnitude = rendered.substring(1).replace(",", "").strip();
+
+            // WHY : Assumptions: the two shapes handled here are the Z-suppression regime's own, not
+            //       leniency. Every digit position of both masks is a suppression position, so a
+            //       magnitude below one prints with NO integer digit at all -- the artifact's line 387
+            //       carries a ninety-nine-cent transaction as the eleven blanks and '.99' this reader
+            //       has to restore a units zero to -- and an exactly zero value blanks the whole item,
+            //       which is what CobolEditMask states at L339 and L411 and what the zero-amount case
+            //       above observes. Reading the field with a parser that demanded a leading digit would
+            //       fail on the first of those and reading it without the empty case would make this a
+            //       partial function of the mask's own output.
+            if (magnitude.isEmpty()) {
+                return Money.ZERO;
+            }
+            Money value = Money.of(magnitude.startsWith(".") ? "0" + magnitude : magnitude);
+            return rendered.charAt(0) == '-' ? value.negated() : value;
+        }
+
+        /**
+         * Returns the last line of one band kind in a stream.
+         *
+         * @param stream the stored or emitted lines
+         * @param kind the band name to look for
+         * @return that band's last line; never {@code null}
+         * @throws IllegalStateException if the stream holds no such band
+         */
+        private String lastOfKind(List<String> stream, String kind) {
+            for (int position = stream.size() - 1; position >= 0; position--) {
+                if (kindOf(stream.get(position)).equals(kind)) {
+                    return stream.get(position);
+                }
+            }
+            throw new IllegalStateException("the stream holds no " + kind + " band");
+        }
+
+        /**
+         * Counts the lines of one band kind in a stream.
+         *
+         * @param stream the stored or emitted lines
+         * @param kind the band name to count
+         * @return how many lines that band produced
+         */
+        private long countOfKind(List<String> stream, String kind) {
+            return stream.stream().filter(line -> kindOf(line).equals(kind)).count();
+        }
+
+        /**
+         * Frames a run's emitted records the way the harness frames them before storing an artifact.
+         *
+         * @param run the completed emission run
+         * @return one right-trimmed line per emitted record; never {@code null}
+         */
+        private List<String> trimmedRecordsOf(EmissionRun run) {
+            List<String> framed = new ArrayList<>();
+            for (byte[] record : run.sink().records) {
+                framed.add(rightTrimmed(record));
+            }
+            return framed;
+        }
+
+        /**
+         * Renders a run's emitted records as the single stream a stored artifact holds.
+         *
+         * @param run the completed emission run
+         * @return the framed stream, each line newline-terminated; never {@code null}
+         */
+        private String emittedStream(EmissionRun run) {
+            StringBuilder stream = new StringBuilder();
+            for (String line : trimmedRecordsOf(run)) {
+                stream.append(line).append('\n');
+            }
+            return stream.toString();
+        }
+
+        /**
+         * Builds the stream the emitter must produce: the oracle with exactly the registered divergences.
+         *
+         * <p>Assumptions: the expected stream is the ORACLE'S OWN BYTES everywhere except at the three
+         * places a divergence is registered, so a drift anywhere else has nothing to hide behind. The
+         * three places are the two date items of every title band, which carry a range
+         * {@link java.time.LocalDate} cannot represent; the two-line closing card-break sequence, whose
+         * label and rule come from the artifact's own last such sequence; and the money field of the
+         * closing page band and of the grand band.</p>
+         *
+         * @param oracle the artifact's stored lines; must not be {@code null}
+         * @return the stream the emitter must produce, each line newline-terminated; never {@code null}
+         */
+        private String expectedStream(List<String> oracle) {
+            Money lastDetail = amountOf(lastOfKind(oracle, "DETAIL"));
+            String closingBand = withAmount(lastOfKind(oracle, "ACCOUNT_TOTAL"), lastDetail);
+            String closingRule = lastOfKind(oracle, "SEPARATOR");
+            String lastDetailLine = lastOfKind(oracle, "DETAIL");
+
+            StringBuilder stream = new StringBuilder();
+            for (String line : oracle) {
+                String kind = kindOf(line);
+                String amended = switch (kind) {
+                    case "TITLE" -> withCanonicalRange(line);
+                    case "PAGE_TOTAL" -> line.equals(lastOfKind(oracle, "PAGE_TOTAL"))
+                            ? withAmount(line, amountOf(line).minus(lastDetail)) : line;
+                    case "GRAND_TOTAL" -> withAmount(line, amountOf(line).minus(lastDetail));
+                    default -> line;
+                };
+                stream.append(amended).append('\n');
+                if (line.equals(lastDetailLine)) {
+                    stream.append(closingBand).append('\n').append(closingRule).append('\n');
+                }
+            }
+            return stream.toString();
+        }
+
+        /**
+         * Replaces a title band's two date items with the range this class drives every run over.
+         *
+         * <p>Assumptions: this is the one divergence in the comparison that is not a behavioural one. The
+         * artifact was produced over the end-to-end harness's deliberately wide sentinel range,
+         * {@code 0000-00-00} to {@code 9999-99-99}, and neither bound is a date: month and day zero do
+         * not exist and nor does month 99, so {@link java.time.LocalDate} cannot carry either and no
+         * argument to the emitter could reproduce those ten characters. The substitution is bounded to
+         * the two ten-character items at L11 and L13 of {@code app/cpy/CVTRA07Y.cpy}; the rest of the
+         * title band, including its two literals and the {@code ' to '} between the dates, is compared
+         * as the artifact stores it.</p>
+         *
+         * @param title one title band from the artifact
+         * @return the band with the canonical range substituted; never {@code null}
+         */
+        private String withCanonicalRange(String title) {
+            StringBuilder amended = new StringBuilder(title);
+            amended.replace(TITLE_START_DATE_OFFSET, TITLE_START_DATE_OFFSET + DATE_WIDTH,
+                    CANONICAL_START.toString());
+            amended.replace(TITLE_END_DATE_OFFSET, TITLE_END_DATE_OFFSET + DATE_WIDTH,
+                    CANONICAL_END.toString());
+            return amended.toString();
+        }
+
+        /**
+         * Replaces the money field of one total band, leaving its label and leader as the artifact has
+         * them.
+         *
+         * <p>Assumptions: the field is re-rendered through {@link CobolEditMask} rather than assembled
+         * here, and the tautology that introduces is contained: it reaches exactly three of the artifact's
+         * 857 lines, while the same mask renders the 255 card-break bands, the 13 undisturbed page bands
+         * and the 262 detail amounts that the byte comparison pins against the artifact exactly. The
+         * VALUES of the three exempted fields are additionally asserted by the two divergence cases
+         * above, against figures parsed out of the emitted bytes by this class's own reader.</p>
+         *
+         * @param band one total band from the artifact
+         * @param value the figure the emitter must carry there
+         * @return the band with its money field replaced; never {@code null}
+         */
+        private String withAmount(String band, Money value) {
+            return band.substring(0, AMOUNT_OFFSET) + CobolEditMask.formatReportTotalAmount(value);
+        }
+    }
 }

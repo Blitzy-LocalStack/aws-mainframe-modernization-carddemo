@@ -106,14 +106,21 @@ public class CategoryBalanceArtifactPublisher {
     public PublishedCategoryBalanceReport publish() throws IOException {
         String key = this.prefix + REPORT_OBJECT;
 
-        // WHY : Assumptions: the writer is held in its own local so its version can be read AFTER the
-        //       try-with-resources closes it. A version exists only once the artifact is published and
-        //       publication happens in close(), so reading it inside the block would always answer
-        //       null -- the same shape ReportArtifactPublisher uses and for the same reason.
+        // WHY : Assumptions: the writer is held in its own local so its version can be read after the
+        //       block. A version exists only once the artifact is published and publication is the
+        //       completion call inside the block -- the same shape ReportArtifactPublisher uses and for
+        //       the same reason.
         S3ArtifactWriter writer = new S3ArtifactWriter(this.s3, this.bucket, key);
         CategoryBalanceReportService.CategoryBalanceReportSummary summary;
         try (writer) {
             summary = this.reports.generateReport(writer::write);
+
+            // WHY : Refactoring Rationale: publication is this call and no longer the resource clause's
+            //       close. This report writes ONE key with no date in it, so it is the artifact the old
+            //       shape damaged worst: a pass that failed part way published a truncated print of
+            //       current balances over the last good one, and the reasoning is recorded in full on
+            //       S3ArtifactWriter.
+            writer.complete();
         }
         return new PublishedCategoryBalanceReport(
                 summary, this.bucket, key, writer.publishedVersionId());

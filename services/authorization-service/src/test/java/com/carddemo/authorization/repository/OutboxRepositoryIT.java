@@ -7,6 +7,7 @@ import com.carddemo.authorization.domain.AuthReplyOutbox;
 import io.awspring.cloud.autoconfigure.sqs.SqsAutoConfiguration;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -435,16 +436,6 @@ class OutboxRepositoryIT {
      * biting. It is kept well above the largest row count any method here creates.</p>
      */
     private static final int UNRESTRICTIVE_BATCH = 50;
-
-    /**
-     * An attempt ceiling high enough that no case reaches it unless it means to.
-     *
-     * <p>Assumptions: the claim now refuses a row whose attempt count has reached the caller's ceiling,
-     * which is the terminal policy that stops a permanently unreachable queue holding a group's head
-     * forever. Every case that is not ABOUT that policy passes this value, so the ceiling is never an
-     * unstated variable in an assertion about ordering, grouping or retention.</p>
-     */
-    private static final int UNRESTRICTIVE_ATTEMPTS = 1_000;
 
     /**
      * The reference consumer's own per-invocation message bound, as DECLARED.
@@ -935,14 +926,15 @@ class OutboxRepositoryIT {
         List<AuthReplyOutbox> firstClaim = claimHeads(UNRESTRICTIVE_BATCH);
         List<AuthReplyOutbox> withinLease = claimHeads(UNRESTRICTIVE_BATCH);
         List<AuthReplyOutbox> afterLease = claimHeads(UNRESTRICTIVE_BATCH,
-                LEASE_INSTANT.plusSeconds(1), LEASE_INSTANT.plusYears(1), UNRESTRICTIVE_ATTEMPTS);
+                LEASE_INSTANT.plusSeconds(1), LEASE_INSTANT.plusYears(1));
 
         assertThat(identities(firstClaim)).containsExactly(persisted.getOutboxId());
         assertThat(withinLease).isEmpty();
         assertThat(identities(afterLease)).containsExactly(persisted.getOutboxId());
         // WHY : Assumptions: TWO is two CLAIMS here, not one claim and one failure. Each claim advances
         //       the counter exactly once and nothing else does, so the number is a count of attempts
-        //       BEGUN -- which is what the terminal ceiling is compared against.
+        //       BEGUN -- which is what the publisher's stall-alert threshold is compared against and
+        //       what its backoff is computed from.
         assertThat(afterLease.get(0).getAttempts()).isEqualTo(2);
         // WHY : Assumptions: the row is still unpublished throughout. A lease defers a row; it must
         //       never write off a reply the committed data says was produced, which is the one property
@@ -951,29 +943,39 @@ class OutboxRepositoryIT {
     }
 
     /**
-     * Confirms a row at the attempt ceiling leaves the ready set instead of being retried forever.
+     * Confirms a row many attempts in is STILL a claim candidate once its backoff has elapsed.
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
-    // WHY : Assumptions: the ceiling is compared with a strict less-than, so a row AT it is refused and
-    //       a row one below it is taken. Asserting both sides is the point: an off-by-one here either
-    //       abandons a reply that still had an attempt left, or leaves a permanently unreachable one
-    //       holding its group's head position forever -- which is the liveness failure the ceiling was
-    //       introduced to remove, and the reason a group's later replies were blocked without bound.
+    // WHY : ⚠️ Assumptions: this case is the inverse of the one it replaces, and the inversion is the
+    //       point. The claim carried {@code and attempts < :maxAttempts}, so a row that had been tried
+    //       the caller's number of times left the ready set -- the committed reply behind it was then
+    //       never sent, and because the head is derived as a group's lowest unpublished, unquarantined
+    //       identity, the same card's NEXT reply became the head and was delivered in its place. What
+    //       bounds a permanently failing row is its backoff, not its history, so eligibility must not
+    //       expire. Ten claims is comfortably past the shipped stall-alert threshold, which is where the
+    //       withdrawn ceiling's default sat.
     @Test
-    @DisplayName("a row at the attempt ceiling is no longer a claim candidate")
-    void aRowAtTheAttemptCeilingIsNoLongerAClaimCandidate() {
+    @DisplayName("a row well past the stall-alert threshold is still claimed once it is ready")
+    void aRowManyAttemptsInIsStillAClaimCandidate() {
         AuthReplyOutbox persisted = persistOne(pendingRow(
-                orderGroup("ceiling", 1), deduplication("ceiling", 1), BASE_INSTANT));
-        claimHeads(UNRESTRICTIVE_BATCH);
-        claimHeads(UNRESTRICTIVE_BATCH, LEASE_INSTANT.plusSeconds(1), LEASE_INSTANT.plusSeconds(2),
-                UNRESTRICTIVE_ATTEMPTS);
+                orderGroup("persistent", 1), deduplication("persistent", 1), BASE_INSTANT));
+        LocalDateTime ready = READY_INSTANT;
+        for (int attempt = 0; attempt < 10; attempt++) {
+            ready = ready.plusMinutes(1);
+            assertThat(identities(claimHeads(UNRESTRICTIVE_BATCH, ready, ready.plusSeconds(1))))
+                    .as("attempt %d must still be offered to a publisher", attempt + 1)
+                    .containsExactly(persisted.getOutboxId());
+        }
 
-        LocalDateTime ready = LEASE_INSTANT.plusSeconds(3);
-        assertThat(reload(persisted.getOutboxId()).getAttempts()).isEqualTo(2);
-        assertThat(claimHeads(UNRESTRICTIVE_BATCH, ready, ready.plusMinutes(1), 2)).isEmpty();
-        assertThat(identities(claimHeads(UNRESTRICTIVE_BATCH, ready, ready.plusMinutes(1), 3)))
+        LocalDateTime afterwards = ready.plusMinutes(1);
+        assertThat(reload(persisted.getOutboxId()).getAttempts()).isEqualTo(10);
+        assertThat(identities(claimHeads(UNRESTRICTIVE_BATCH, afterwards, afterwards.plusMinutes(1))))
+                .as("an eleventh attempt is offered too: eligibility does not expire")
                 .containsExactly(persisted.getOutboxId());
+        assertThat(reload(persisted.getOutboxId()).getPublishedAt())
+                .as("nothing here published the reply, so the guarantee is still outstanding")
+                .isNull();
     }
 
     /**
@@ -981,25 +983,32 @@ class OutboxRepositoryIT {
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
-    // WHY : Assumptions: both halves are asserted together because they are one contract. Abandonment is
-    //       terminal, so the claim must not return the row however ready it looks; and it is EVIDENCE,
+    // WHY : Assumptions: both halves are asserted together because they are one contract. A quarantined
+    //       row is terminal, so the claim must not return it however ready it looks; and it is EVIDENCE,
     //       so the sweep must not remove it on an operational timer. Trade-offs: the row keeps a payload
     //       carrying a card number beyond the retention window, which is deliberate -- it is a reply the
     //       committed decision says was owed and that was never delivered, and deleting it silently
     //       would destroy the only record of that.
+    // WHY : ⚠️ Assumptions: the quarantine is arranged by an administrative UPDATE and no longer through
+    //       a mutator on the entity, because the entity no longer offers one. Nothing in the service may
+    //       write this column: the publisher used to, at an attempt ceiling, and that both lost a reply
+    //       and released the same card's later replies past it. Setting it is an operator's act after
+    //       they have reconciled the missing reply by hand, and arranging it the way an operator would is
+    //       what keeps this case a statement about the QUERIES rather than about a code path that no
+    //       longer exists.
     @Test
-    @DisplayName("an abandoned row is claimed by nothing and swept by nothing")
+    @DisplayName("a quarantined row is claimed by nothing and swept by nothing")
     void anAbandonedRowIsClaimedByNothingAndSweptByNothing() {
         AuthReplyOutbox persisted = persistOne(pendingRow(
                 orderGroup("abandon", 1), deduplication("abandon", 1), BASE_INSTANT));
-        abandon(persisted.getOutboxId(), BASE_INSTANT, PUBLICATION_FAILURE_REASON);
+        quarantineByAdministrativeStatement(persisted.getOutboxId(), BASE_INSTANT);
 
         assertThat(claimHeads(UNRESTRICTIVE_BATCH)).isEmpty();
         assertThat(deletePublishedBefore(READY_INSTANT)).isZero();
         AuthReplyOutbox stored = reload(persisted.getOutboxId());
         assertThat(stored.isAbandoned()).isTrue();
         assertThat(stored.getPublishedAt())
-                .as("abandonment must never read as delivered")
+                .as("a quarantine must never read as delivered")
                 .isNull();
     }
 
@@ -1036,7 +1045,7 @@ class OutboxRepositoryIT {
         recordFailure(failing.getOutboxId(), PUBLICATION_FAILURE_REASON, failedAt);
         LocalDateTime ready = failedAt.plusMinutes(1);
 
-        assertThat(identities(claimHeads(1, ready, ready.plusMinutes(1), UNRESTRICTIVE_ATTEMPTS)))
+        assertThat(identities(claimHeads(1, ready, ready.plusMinutes(1))))
                 .as("a group that has already been attempted yields to one that has not")
                 .containsExactly(healthy.getOutboxId());
     }
@@ -1109,8 +1118,7 @@ class OutboxRepositoryIT {
             Future<List<AuthReplyOutbox>> holder = claimants.submit(
                     () -> this.commit.execute(status -> {
                         List<AuthReplyOutbox> taken = this.repository.claimGroupHeads(
-                                UNRESTRICTIVE_BATCH, READY_INSTANT, LEASE_INSTANT,
-                                UNRESTRICTIVE_ATTEMPTS);
+                                UNRESTRICTIVE_BATCH, READY_INSTANT, LEASE_INSTANT);
                         claimTaken.countDown();
                         awaitSignal(mayCommit);
                         return taken;
@@ -1118,7 +1126,7 @@ class OutboxRepositoryIT {
             Future<List<AuthReplyOutbox>> contender = claimants.submit(() -> {
                 awaitSignal(claimTaken);
                 return this.commit.execute(status -> this.repository.claimGroupHeads(
-                        UNRESTRICTIVE_BATCH, READY_INSTANT, LEASE_INSTANT, UNRESTRICTIVE_ATTEMPTS));
+                        UNRESTRICTIVE_BATCH, READY_INSTANT, LEASE_INSTANT));
             });
 
             awaitBlockedSession();
@@ -1249,10 +1257,10 @@ class OutboxRepositoryIT {
         //       left the row immediately eligible is what starved every healthy group behind a
         //       permanently failing head, and a failure that made it permanently ineligible would
         //       discard an answer the committed data says was produced.
-        assertThat(claimHeads(UNRESTRICTIVE_BATCH, LEASE_INSTANT.minusSeconds(1), LEASE_INSTANT,
-                UNRESTRICTIVE_ATTEMPTS)).isEmpty();
+        assertThat(claimHeads(UNRESTRICTIVE_BATCH, LEASE_INSTANT.minusSeconds(1), LEASE_INSTANT))
+                .isEmpty();
         assertThat(identities(claimHeads(UNRESTRICTIVE_BATCH, LEASE_INSTANT.plusSeconds(1),
-                LEASE_INSTANT.plusYears(1), UNRESTRICTIVE_ATTEMPTS)))
+                LEASE_INSTANT.plusYears(1))))
                 .containsExactly(persisted.getOutboxId());
     }
 
@@ -1361,7 +1369,7 @@ class OutboxRepositoryIT {
     //       leave the counter where it started, and the next assertion in the same method would then
     //       observe a row that had never been claimed.
     private List<AuthReplyOutbox> claimHeads(int batchSize) {
-        return claimHeads(batchSize, READY_INSTANT, LEASE_INSTANT, UNRESTRICTIVE_ATTEMPTS);
+        return claimHeads(batchSize, READY_INSTANT, LEASE_INSTANT);
     }
 
     /**
@@ -1374,13 +1382,12 @@ class OutboxRepositoryIT {
      * @param batchSize the greatest number of ordering groups to take a head row from
      * @param now the instant readiness is judged against
      * @param leaseUntil the instant each claimed row's next attempt is deferred to
-     * @param maxAttempts the attempt count at or above which a row is no longer a candidate
      * @return the rows the claim actually transitioned, in ascending identity order
      */
     private List<AuthReplyOutbox> claimHeads(int batchSize, LocalDateTime now,
-            LocalDateTime leaseUntil, int maxAttempts) {
+            LocalDateTime leaseUntil) {
         return this.commit.execute(status ->
-                this.repository.claimGroupHeads(batchSize, now, leaseUntil, maxAttempts));
+                this.repository.claimGroupHeads(batchSize, now, leaseUntil));
     }
 
     /**
@@ -1395,7 +1402,7 @@ class OutboxRepositoryIT {
     private List<AuthReplyOutbox> claimFollowers(
             String orderGroupId, long afterOutboxId, int batchSize) {
         return this.commit.execute(status -> this.repository.claimGroupFollowers(orderGroupId,
-                afterOutboxId, batchSize, READY_INSTANT, LEASE_INSTANT, UNRESTRICTIVE_ATTEMPTS));
+                afterOutboxId, batchSize, READY_INSTANT, LEASE_INSTANT));
     }
 
     /**
@@ -1432,15 +1439,36 @@ class OutboxRepositoryIT {
     }
 
     /**
-     * Abandons one row permanently, and commits.
+     * Quarantines one row the way an operator does, by administrative statement against the table.
      *
-     * @param outboxId the identity of the row to abandon
-     * @param abandonedAt the instant to record as the abandonment instant
-     * @param reason the diagnostic to store against the row
+     * <p>⚠️ Assumptions: this is deliberately NOT expressed through the entity. No application code path
+     * writes {@code abandoned_at} -- the publisher's attempt ceiling that once did is withdrawn, because
+     * it lost a reply the committed decision says is owed and released the same card's later replies
+     * past it -- so a helper calling a mutator would model a path the service does not have. An UPDATE
+     * through a borrowed connection is what an operator with governed access actually issues, and it
+     * commits on its own, so the state is visible to the queries under test.</p>
+     *
+     * @param outboxId the identity of the row to quarantine
+     * @param abandonedAt the instant to record as the quarantine instant
+     * @throws IllegalStateException if the statement cannot be executed or matches no row, either of
+     *     which would leave a later assertion describing a row that was never quarantined
      */
-    private void abandon(long outboxId, LocalDateTime abandonedAt, String reason) {
-        this.commit.executeWithoutResult(status ->
-                loadWithinTransaction(outboxId).abandon(abandonedAt, reason));
+    private void quarantineByAdministrativeStatement(long outboxId, LocalDateTime abandonedAt) {
+        try (Connection connection = this.dataSource.getConnection();
+                PreparedStatement statement = connection.prepareStatement(
+                        "UPDATE auth_reply_outbox SET abandoned_at = ?, last_error = ?"
+                                + " WHERE outbox_id = ?")) {
+            statement.setObject(1, abandonedAt);
+            statement.setString(2, PUBLICATION_FAILURE_REASON);
+            statement.setLong(3, outboxId);
+            if (statement.executeUpdate() != 1) {
+                throw new IllegalStateException(
+                        "The quarantine statement matched no row for identity " + outboxId);
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException(
+                    "Unable to quarantine outbox row " + outboxId, failure);
+        }
     }
 
     /**

@@ -503,12 +503,12 @@ services, repositories and adapters as non-`package-info.java` main-source Java:
 | Maven module | main-source classes | owned Flyway migrations |
 |---|---:|---|
 | `common-lib` | 46 | none — it owns no schema |
-| `auth-service` | 30 | `V1__auth.sql`, `V2__auth_identity_sync.sql`, `V3__auth_identity_sync_operations.sql`, `V4__auth_folded_user_id.sql`, `V5__auth_folded_user_id_trim.sql`, `V6__auth_canonical_user_id.sql`, `V7__auth_identity_sync_provisioning_guard.sql` |
+| `auth-service` | 30 | `V1__auth.sql`, `V2__auth_identity_sync.sql`, `V3__auth_identity_sync_operations.sql`, `V4__auth_folded_user_id.sql`, `V5__auth_folded_user_id_trim.sql`, `V6__auth_canonical_user_id.sql`, `V7__auth_identity_sync_provisioning_guard.sql`, `V8__auth_addressable_user_id.sql` |
 | `account-service` | 45 | `V1__account.sql`, `V2__account_inquiry_reply_ledger.sql` |
 | `card-service` | 25 | `V1__card.sql`, `V2__card_num_digit_domain.sql` |
 | `transaction-service` | 40 | `V1__ledger.sql`, `V2__ledger_transaction_id_allocator.sql`, `V3__ledger_bytewise_collation.sql` |
 | `reference-service` | 56 | `V1__reference.sql`, `V2__seed_reference.sql`, `V3__reference_inquiry_reply_ledger.sql`, `V4__drop_reference_inquiry_reply_ledger.sql` |
-| `batch-service` | 63 | `V1__batch.sql`, `V2__batch_feed_watermark.sql` |
+| `batch-service` | 64 | `V1__batch.sql`, `V2__batch_feed_watermark.sql`, `V3__batch_run_contract_restatement.sql` |
 | `authorization-service` | 57 | `V1__authorization.sql`, `V2__authorization_outbox_claim_version.sql`, `V3__authorization_outbox_fifo_identities.sql`, `V4__authorization_outbox_send_acceptance.sql` |
 | `reporting-service` | 64 | none by design — it owns no table, only read-only views |
 
@@ -538,6 +538,15 @@ and is 29 both before and after. The claim survived because the gate below check
 and not the prose beside it, which is the one thing a countable claim in a sentence cannot
 be held to.
 
+The `auth-service` migration list gained `V8__auth_addressable_user_id.sql` when the stored
+user identifier was narrowed to the URI-safe canonical domain the service addresses as a
+single path segment. It arrives as a new version rather than as an edit to
+`V6__auth_canonical_user_id.sql` because a released migration's checksum is recorded in
+every environment that ran it, so editing one makes those environments refuse to start;
+`ReleasedMigrationImmutabilityTest` holds both halves of that rule. The class figure did not
+move with it -- narrowing a column's domain is a constraint and a validation pattern, not a
+new type.
+
 The `reporting-service` figure moved from 53 to 58 when the report and statement
 lifecycles were given a read side. A submission returned an orchestration handle that no
 operation consumed and a statement response carried a location that resolved to nothing, so
@@ -546,6 +555,18 @@ five types landed: `ReportExecutionStatusResponse` for what became of a run,
 object-store port both lifecycles read through, and `StatementIndexEntry` with
 `StatementRunOutcome` for the run index that tells a caller which records of a run-wide
 document are its own. Five types in, none out.
+
+Refactoring Rationale: `batch-service` reads 64 where it read 63, and the added class is
+`com.carddemo.batch.service.PostingRecordUnitOfWork`. It is an extraction rather than new
+behaviour. The per-record posting decisions and the four writes they reach —
+`app/cbl/CBTRN02C.cbl:440` the category balance, `:441` the account, `:442` the posted
+transaction, and the target-only feed checkpoint that has no baseline analogue — were
+private to `PostTransactionsJob`, so the integration tests that claim to pin the write
+ORDER and the atomicity of one record could only re-implement them, and a production
+reordering would have left those tests green while the shipped order changed. The job keeps
+the transaction boundary and the post-commit append of the 430-byte reject image; the
+component owns the decisions and the writes, so the test drives the same code the night
+runs. One class in, none out, and no migration, queue or schema object with it.
 
 The counts exclude package charters, which are
 documentation rather than delivery. `ServiceCatalogInventoryTest` in `common-lib`
@@ -630,19 +651,30 @@ reading.
 
 Refactoring Rationale: `transaction-service` reads 39 where it read 37. Two classes were added to
 `com.carddemo.transaction.dto`, and both exist to close one defect in the copy-last-transaction
-operation rather than to add a capability. `TransactionCopyRequest` is the operation's real parameter
+operation rather than to add a capability. `CopyLastRequest` is the operation's real parameter
 list — a key and a confirmation — and it replaces `TransactionAddRequest`, whose eleven data components
 are each `@NotBlank`, so a copy could previously only be requested from a screen the operator had already
 filled in completely; `COPY-LAST-TRAN-DATA` at line 471 of `app/cbl/COTRN02C.cbl` performs
 `VALIDATE-INPUT-KEY-FIELDS` at line 473 and nothing else, precisely because it is about to overwrite
-those eleven fields. `TransactionCopiedDraft` is the ten non-monetary columns the reference moves over
+those eleven fields. `CopiedTransactionData` is the ten non-monetary columns the reference moves over
 the terminal at lines 480 to 493, published on the 200 body so the client can render and then resubmit
 exactly the row it was shown; without it the preview disclosed only the amount, so a client had no way to
 confirm the row it saw and its only means of confirming was to ask for "the latest row" a second time —
 which a concurrent insert changes. Alternatives Considered: a server-held draft keyed by a token, which
 would have needed no new response member. Rejected because it puts a mutable per-operator state back into
 a context whose whole session design was removed with `DFHCOMMAREA`, and because the value the client
-must be able to see and re-send is the draft itself, not a handle to it.
+must be able to see and re-send is the copied data itself, not a handle to it.
+
+Assumptions: this paragraph named those two classes by a pair of prefixed spellings that no source
+file and no published contract declares, and the count it reports is the
+interim one: it is the same movement the measured paragraph below records at 40 with three classes,
+the third being `TransactionKeySelection`, and the two paragraphs are kept because each records what
+was known when it was written. The names are re-derived from
+`services/transaction-service/src/main/java/com/carddemo/transaction/dto` and from the
+`CopyLastRequest` and `CopiedTransactionData` schemas in
+`services/transaction-service/src/main/resources/openapi/transaction-api.yaml`, because a class name
+that appears in no source file and no contract cannot be reconciled against either by a reader who
+arrives at this catalog first.
 
 Refactoring Rationale: `transaction-service` reads 37 where it read 33. Four classes were added
 to `com.carddemo.transaction.dto`, and all four exist to correct one defect rather than to add a
@@ -738,7 +770,14 @@ closed rather than a capability dropped. A second queue consumer declared
 requests were answered by whichever bean received them under two different sets of
 expiry, routing and media-type semantics; its one queue-independent member became the
 added class, `DateConversionService`. A duplicate `UsPhoneAreaCodeMapper` was
-referenced by nothing and duplicated a conversion `LookupMapper` already published.
+referenced by nothing and duplicated a conversion a static class then published.
+Assumptions: that static class was `LookupMapper` and it is **deleted**; it is named
+here only because the withdrawn duplicate is unintelligible without it, and a reader
+who searches the tree for it finds no such type. The surviving `UsPhoneAreaCodeMapper`
+is the sole implementation of the area-code conversion and both delivered area-code
+routes reach it: `AddressLookupService` hands `areaCodeMapper::toResponse` to
+`ReferencePaging.page` in `listAreaCodes` and calls `areaCodeMapper.toResponse`
+directly in `readAreaCode`. The entry below records the deletion in full.
 The count is restated rather than left to drift because
 `ServiceCatalogInventoryTest` compares every figure in this table against the tree on
 each build, which is what turned a stale count into a failing test instead of a
@@ -748,11 +787,18 @@ Refactoring Rationale: `reference-service` reads 57 where it read 56. One class 
 added, `com.carddemo.reference.mapper.UsStateMapper`, the state-side counterpart of the
 area-code mapper the paragraph above describes. Assumptions: it is recorded here as an
 addition and not as a correction, because nothing in the tree was miscounted — the
-figure was accurate for the tree it was measured against. Trade-offs: that class renders
-the same single row `LookupMapper` already renders, so the module carries one more
-conversion than the delivered routes reach; the duplication and the caller position are
-stated outright in that class's own header and in its package charter's roster rather
-than being left for a reader to infer from a count in this table.
+figure was accurate for the tree it was measured against. ⚠️ Refactoring Rationale: this
+entry said the class "renders the same single row `LookupMapper` already renders, so the
+module carries one more conversion than the delivered routes reach". Both halves are
+false of the module as it stands and the second half was the damaging one, because it
+read as standing permission to delete a reached class. `UsStateMapper` is the SOLE
+implementation of the state conversion and both delivered state routes reach it:
+`AddressLookupService` holds it as a final field, takes it as a constructor parameter,
+hands `stateMapper::toResponse` to `ReferencePaging.page` in `listStates` as the per-row
+render function, and calls `stateMapper.toResponse` directly in `readState`.
+`AddressLookupController` imports no type from the mapper package at all. The caller
+position is stated in that class's own header and in its package charter's roster as
+well, so a reader who arrives at any of the three finds the same account.
 
 Refactoring Rationale: `reference-service` reads 58 where it read 57. One class was
 added, `com.carddemo.reference.mapper.UsStateZipPrefixMapper`, the third and last of the
@@ -760,11 +806,16 @@ three per-entity lookup mappers, standing to the state-and-postal-prefix combina
 the two classes the paragraphs above describe stand to the state code and the area code.
 Assumptions: it is recorded here as an addition and not as a correction, on the same
 ground as the entry above — the figure was accurate for the tree it was measured against.
-Trade-offs: it too renders a single row `LookupMapper` already renders, so this is the
-third conversion the delivered routes do not reach, and the duplication and caller
-position are again stated in that class's own header and in its package charter's roster
-rather than being inferable only from this figure. What that class adds over the shared
-mapper is the list member and a per-entity home for the ruling its header records: that
+⚠️ Refactoring Rationale: this entry said "it too renders a single row `LookupMapper`
+already renders, so this is the third conversion the delivered routes do not reach", and
+it is corrected for the same reason as the entry above and by the same measurement.
+`UsStateZipPrefixMapper` is the sole implementation of the combination conversion and
+both delivered combination routes reach it: `AddressLookupService` hands
+`zipPrefixMapper::toResponse` to `ReferencePaging.page` in `listZipPrefixes` and calls
+`zipPrefixMapper.toResponse` directly in `readZipPrefix`. The caller position is again
+stated in that class's own header and in its package charter's roster rather than being
+inferable only from this figure. What that class carries beyond the conversion itself is
+its list member and a per-entity home for the ruling its header records: that
 the four characters of the combination are one indivisible value, evidenced by the
 allow-list condition standing over the whole `PIC X(4)` field at `app/cpy/CSLKPCDY.cpy`
 L1072 to L1073 and by the edit at `app/cbl/COACTUPC.cbl` L2537 to L2542, which assembles
@@ -800,15 +851,29 @@ per browse on the paging direction and the classification filter, the walk bound
 in-memory reversal of a backward page, the envelope assembly and three verbatim "NOT
 found" refusals — in the layer the AAP's ports-and-adapters rule states reaches no
 store. The deletion closes the duplication the three paragraphs above each recorded
-and none resolved: those paragraphs describe three per-entity lookup mappers as
-conversions "the delivered routes do not reach", because the routes reached
-`LookupMapper` instead. Every one of those three sentences is now false. The new
-service injects the three per-entity beans, so each is the sole implementation of its
-conversion and none is unreached, and the static class that was reached is gone. The
-pair that survived is the pair carrying the cited-baseline rulings about why each of
-these keys crosses at its declared width. Assumptions: a net-zero movement is the
-easiest kind to leave undocumented, since the one figure a build can check does not
-move — which is precisely why it is written down here.
+and none resolved: each of them described a per-entity lookup mapper as a conversion
+"the delivered routes do not reach", because the routes reached `LookupMapper`
+instead. ⚠️ Refactoring Rationale: this sentence used to stop at declaring those three
+sentences false and left them standing where a reader meets them, several paragraphs
+before this correction. They are now **rewritten in place** — each entry above states
+the delivered arrangement and cites the two call sites that reach its class — because a
+false statement annotated as false further down the same document is still the statement
+a reader acts on, and this document is read by section rather than end to end. What is
+delivered is one service and three beans:
+`com.carddemo.reference.service.AddressLookupService` holds `UsPhoneAreaCodeMapper`,
+`UsStateMapper` and `UsStateZipPrefixMapper` as final constructor-injected fields and
+reaches each on **both** of its operations for that lookup — as the per-row render
+function its keyset browse hands to `ReferencePaging.page`, and directly on the
+single-row read — so each bean is the sole implementation of its conversion and none is
+unreached. `AddressLookupController` imports no mapper type; it validates its request
+parameters and delegates. The static class the routes once reached is gone. Each of the
+three that survived carries the cited-baseline ruling about why its own key crosses at
+its declared width — all three cite `app/cpy/CSLKPCDY.cpy` at the field the conversion
+reads — which is the reason a per-entity home is worth three classes rather than one
+static one: a single class would have had to hold three unrelated rulings with nothing
+to attach each to. Assumptions: a net-zero
+movement is the easiest kind to leave undocumented, since the one figure a build can
+check does not move — which is precisely why it is written down here.
 
 Refactoring Rationale: `batch-service` reads 56 where it read 52. Four classes were
 added — `com.carddemo.batch.domain.Customer` with

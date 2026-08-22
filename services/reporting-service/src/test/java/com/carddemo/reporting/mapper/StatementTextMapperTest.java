@@ -118,14 +118,21 @@ import org.junit.jupiter.params.provider.MethodSource;
  * the boundary it reaches and why a value short of it would pass either way.</p>
  *
  * <p>Alternatives Considered: driving them from the module's fixture files. Rejected on measurement
- * rather than preference. The fixture register at {@code src/test/resources/fixtures/README.md}
- * declares four data fixtures and none of them is a {@code TRNX} record, so there is no fixture
- * description to be longer than 49 in the first place; and of the values that do exist, the widest
- * account balance in {@code acctfile.txt} needs 4 integer digits against the ten this artifact must
- * exercise, every middle name in {@code custfile.txt} is non-blank, and its longest three-part name
- * sums to 24 characters against the 78 the assembly can offer. A fixture-driven form would
- * therefore read as though it exercised four boundaries while reaching none of them, which is
- * strictly worse than a literal that reaches them and says so.</p>
+ * rather than preference, and the measurement is of the committed VALUES rather than of which record
+ * types happen to be committed. A {@code TRNX} extract is bound --
+ * {@code fixtures/trnxfile.txt} is 700 rows of the 350-byte {@code TRNX} record, registered by
+ * {@code ReportingFixtureContractTest} -- and its descriptions do overrun the 49 the band item
+ * declares. What they do not do is straddle it: every one of its rows, 700 of them being the count
+ * that sibling test binds, occupies between 61 and 77 of its declared {@code PIC X(100)}, so not one
+ * of them is 48, 49 or 50 characters long, and the
+ * boundary triple below needs all three of those lengths. A committed description reaches only the
+ * arm that is far above the cut, which is the one arm a narrowing that shortened by a fixed AMOUNT
+ * rather than to a fixed WIDTH also passes. The other three committed columns fall short outright:
+ * the widest account balance in {@code acctfile.txt} needs 4 integer digits against the ten this
+ * artifact must exercise, every middle name in {@code custfile.txt} is non-blank, and its longest
+ * three-part name sums to 24 characters against the 78 the assembly can offer. A fixture-driven form
+ * would therefore read as though it exercised four boundaries while reaching one arm of one of them,
+ * which is strictly worse than a literal that reaches them and says so.</p>
  *
  * <h2>Assumptions: table arity is out of scope for this class, and its numbers are not one
  * number</h2>
@@ -364,8 +371,11 @@ class StatementTextMapperTest {
         //       independently: LRECL=80 at line 89 for STMTFILE at lines 87 to 91, and a separate
         //       LRECL=100 at line 94 for HTMLFILE at lines 92 to 95. Two independent declarations
         //       agreeing is what makes 80 a contract rather than a transcription that could be off.
-        assertThat(STATEMENT_RECORD_LENGTH).isNotEqualTo(MARKUP_RECORD_LENGTH);
-
+        // WHY : Refactoring Rationale: the inequality of the two transcribed lengths was asserted here
+        //       as a first line and is removed. Both operands are constants of this class, so the
+        //       compiler folded the comparison and nothing StatementTextMapper did could fail it,
+        //       while it read in a report as one more covered property. The emission below carries the
+        //       same claim against the subject: each emitted record is 80 bytes and shorter than 100.
         List<byte[]> emitted = StatementTextMapper.emitHeaderBlock(representativeHeader());
         assertThat(emitted).allSatisfy(line -> assertThat(line)
                 .hasSize(STATEMENT_RECORD_LENGTH)
@@ -903,10 +913,11 @@ class StatementTextMapperTest {
 
         // WHY : Assumptions: the discarded character is asserted ABSENT rather than the kept run
         //       asserted present, because a truncation at 48 or at 50 would also leave a run of
-        //       g-characters and would also fill the item. Naming the surplus character is what
-        //       makes the boundary exact, and it is the boundary the fixture register cannot reach:
-        //       src/test/resources/fixtures/README.md declares no TRNX record at all, so no fixture
-        //       description exists to be longer than the declared 49.
+        //       g-characters and would also fill the item. Naming the surplus character is what makes
+        //       the boundary exact, and a committed description cannot name it: the shortest of the
+        //       700 TRNX descriptions in src/test/resources/fixtures/trnxfile.txt occupies 61
+        //       characters, so every one of them loses at least 12 characters here and none can show
+        //       that the loss is exactly the fiftieth.
         assertThat(StatementTextMapper.renderDescriptionItem(source))
                 .doesNotContain("Z")
                 .isEqualTo("g".repeat(StatementTextMapper.DESCRIPTION_ITEM_WIDTH));

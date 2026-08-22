@@ -377,22 +377,30 @@ class InternalServiceTokenTest {
      * either direction is the failure mode a single-sided assertion cannot see: admitting one second past the
      * bound weakens it silently, and refusing a token exactly at it would refuse every token the minter
      * issues at its own maximum.</p>
+     *
+     * <p>Assumptions: the verifier's instant supplied here is the issue instant itself, which is the ordinary
+     * case -- a token minted and presented in the same moment -- so what these four assertions isolate is the
+     * DECLARED-lifetime clause and nothing else. The clock-anchored clauses are asserted separately below, on
+     * pairs whose declared lifetime is inside the bound, so a regression in one clause cannot be masked by
+     * another refusing the same fixture.</p>
      */
     @Test
     @DisplayName("the lifetime rule admits at the bound and refuses one second past it")
     void theLifetimeRuleHoldsTheSameBoundAsTheConstructor() {
         assertThat(InternalServiceToken.isWithinMaximumLifetime(
-                NOW, NOW.plus(InternalServiceToken.MAX_LIFETIME)))
+                NOW, NOW.plus(InternalServiceToken.MAX_LIFETIME), NOW))
                 .as("a token declaring exactly the bound is one the minter itself would issue")
                 .isTrue();
         assertThat(InternalServiceToken.isWithinMaximumLifetime(
-                NOW, NOW.plus(InternalServiceToken.MAX_LIFETIME).plusSeconds(1)))
+                NOW, NOW.plus(InternalServiceToken.MAX_LIFETIME).plusSeconds(1), NOW))
                 .as("one second past the bound is refused, as the constructor refuses it")
                 .isFalse();
-        assertThat(InternalServiceToken.isWithinMaximumLifetime(NOW, NOW.plus(Duration.ofMinutes(30))))
+        assertThat(InternalServiceToken.isWithinMaximumLifetime(
+                NOW, NOW.plus(Duration.ofMinutes(30)), NOW))
                 .as("the thirty-minute credential the verifier used to accept")
                 .isFalse();
-        assertThat(InternalServiceToken.isWithinMaximumLifetime(NOW, NOW.plus(Duration.ofMinutes(1))))
+        assertThat(InternalServiceToken.isWithinMaximumLifetime(
+                NOW, NOW.plus(Duration.ofMinutes(1)), NOW))
                 .as("an ordinary one-minute token")
                 .isTrue();
     }
@@ -411,17 +419,131 @@ class InternalServiceTokenTest {
     @Test
     @DisplayName("an absent issue time, an absent expiry and a backwards pair are all refused")
     void theLifetimeRuleRefusesAnythingItCannotBound() {
-        assertThat(InternalServiceToken.isWithinMaximumLifetime(null, NOW.plusSeconds(60)))
+        assertThat(InternalServiceToken.isWithinMaximumLifetime(null, NOW.plusSeconds(60), NOW))
                 .as("no issue time means no declared lifetime to bound")
                 .isFalse();
-        assertThat(InternalServiceToken.isWithinMaximumLifetime(NOW, null))
+        assertThat(InternalServiceToken.isWithinMaximumLifetime(NOW, null, NOW))
                 .as("no expiry is otherwise refused by nothing")
                 .isFalse();
-        assertThat(InternalServiceToken.isWithinMaximumLifetime(null, null))
+        assertThat(InternalServiceToken.isWithinMaximumLifetime(null, null, NOW))
                 .as("neither claim present")
                 .isFalse();
-        assertThat(InternalServiceToken.isWithinMaximumLifetime(NOW, NOW.minusSeconds(1)))
+        assertThat(InternalServiceToken.isWithinMaximumLifetime(NOW, NOW.minusSeconds(1), NOW))
                 .as("an expiry before the issue time is contradictory, not merely late")
                 .isFalse();
+    }
+
+    /**
+     * Verifies an issue time in the verifier's FUTURE is refused beyond the skew allowance and admitted
+     * inside it.
+     *
+     * <p>⚠️ Purpose: this is the bypass the anchored rule was written for, and the first assertion is the
+     * exact shape of it. Both instants are written by whoever mints the token, so a pair declaring an issue
+     * time eight hours ahead and an expiry five minutes after that declares a lifetime INSIDE the bound, is
+     * not expired by any clock, and was therefore admitted -- for eight hours -- by a rule whose entire
+     * purpose is a five-minute capture window. Nothing else on the verifying path closed it: the framework's
+     * default validator set refuses an expiry that has already passed and does not read the issue time at
+     * all.</p>
+     *
+     * <p>Assumptions: the admitted case is asserted beside the refused one, at exactly the allowance, because
+     * a clause that refused any future issue time whatever would satisfy the refusal on its own while
+     * refusing correct tokens in deployment -- the minter's clock and the verifier's are two clocks, and a
+     * token minted a fraction of a second ahead is the normal case, not an attack.</p>
+     *
+     * <p>Assumptions: an issue time in the PAST is asserted admitted as well, well beyond the allowance,
+     * because the clause has to be one-sided. A token minted four minutes ago is still live under a
+     * five-minute lifetime, so a symmetric window around the verifier's clock -- which is what the
+     * framework's own issued-at validator offers -- would refuse it.</p>
+     */
+    @Test
+    @DisplayName("an issue time beyond the skew allowance in the future is refused, inside it admitted")
+    void anIssueTimeInTheVerifiersFutureIsRefused() {
+        Instant farAhead = NOW.plus(Duration.ofHours(8));
+        assertThat(InternalServiceToken.isWithinMaximumLifetime(
+                farAhead, farAhead.plus(InternalServiceToken.MAX_LIFETIME), NOW))
+                .as("a five-minute lifetime declared eight hours from now is the eight-hour credential")
+                .isFalse();
+
+        Instant justPastTheAllowance = NOW.plus(InternalServiceToken.MAX_CLOCK_SKEW).plusSeconds(1);
+        assertThat(InternalServiceToken.isWithinMaximumLifetime(justPastTheAllowance,
+                justPastTheAllowance.plus(Duration.ofMinutes(1)), NOW))
+                .as("one second past the allowance is refused, so the allowance is a bound")
+                .isFalse();
+
+        Instant atTheAllowance = NOW.plus(InternalServiceToken.MAX_CLOCK_SKEW);
+        assertThat(InternalServiceToken.isWithinMaximumLifetime(atTheAllowance,
+                atTheAllowance.plus(InternalServiceToken.MAX_LIFETIME), NOW))
+                .as("a token minted exactly at the allowance is admitted, drift being ordinary")
+                .isTrue();
+
+        Instant fourMinutesAgo = NOW.minus(Duration.ofMinutes(4));
+        assertThat(InternalServiceToken.isWithinMaximumLifetime(fourMinutesAgo,
+                fourMinutesAgo.plus(InternalServiceToken.MAX_LIFETIME), NOW))
+                .as("a token minted four minutes ago is still live and must not be refused")
+                .isTrue();
+    }
+
+    /**
+     * Verifies no presented token may expire later than the verifier's own window allows.
+     *
+     * <p>⚠️ Purpose: this is the invariant the whole rule exists to hold -- the furthest moment a presented
+     * credential may still be usable is the verifier's own now plus the maximum lifetime plus the allowance.
+     * Trade-offs: the clause is arithmetically IMPLIED by the declared-lifetime bound and the future-issue
+     * bound together, so this case cannot present a pair that only it refuses, and the refusal asserted below
+     * is attributable to two clauses rather than one. It is asserted anyway because the invariant is what a
+     * later edit would break: relaxing either of the other two clauses without noticing would widen the
+     * capture window, and this assertion fails when it does.</p>
+     */
+    @Test
+    @DisplayName("an expiry past the verifier's own window is refused and the window's edge is admitted")
+    void anExpiryBeyondTheVerifiersWindowIsRefused() {
+        Instant edgeOfTheWindow =
+                NOW.plus(InternalServiceToken.MAX_LIFETIME).plus(InternalServiceToken.MAX_CLOCK_SKEW);
+
+        assertThat(InternalServiceToken.isWithinMaximumLifetime(
+                NOW.plus(InternalServiceToken.MAX_CLOCK_SKEW), edgeOfTheWindow, NOW))
+                .as("the furthest admissible expiry is admitted at exactly the window's edge")
+                .isTrue();
+        assertThat(InternalServiceToken.isWithinMaximumLifetime(
+                NOW.plus(InternalServiceToken.MAX_CLOCK_SKEW).plusSeconds(1),
+                edgeOfTheWindow.plusSeconds(1), NOW))
+                .as("one second past the edge is refused, so the window is closed at the top")
+                .isFalse();
+    }
+
+    /**
+     * Verifies the verifier's own instant is required rather than treated as an absent claim.
+     *
+     * <p>Assumptions: this asserts the ONE argument whose absence is raised rather than answered. The two
+     * claims are attacker-controlled, so a missing one is a token shape and gets a verdict; the verifier's
+     * instant is this deployment's own clock reading, so a missing one is a wiring defect. Folding it into a
+     * {@code false} would present as every internal call failing authorization, which sends an operator to
+     * the credential rather than to the context that supplied no clock.</p>
+     */
+    @Test
+    @DisplayName("the verifier's own instant is required, not defaulted")
+    void theVerifiersInstantIsRequired() {
+        assertThatThrownBy(() -> InternalServiceToken.isWithinMaximumLifetime(
+                NOW, NOW.plus(Duration.ofMinutes(1)), null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining("verifiedAt");
+    }
+
+    /**
+     * Verifies the skew allowance is small enough to be a bound rather than a second lifetime.
+     *
+     * <p>Assumptions: the allowance widens the window a captured token stays usable in, so its MAGNITUDE is
+     * part of the control and not a formatting detail. Pinning it as a fraction of the maximum lifetime
+     * rather than as a literal thirty seconds is what keeps this assertion about the property -- an
+     * allowance that grew to minutes would be a second lifetime under another name -- while leaving the exact
+     * value free to be re-tuned.</p>
+     */
+    @Test
+    @DisplayName("the skew allowance is positive and far smaller than the maximum lifetime")
+    void theSkewAllowanceIsBoundedWellBelowTheLifetime() {
+        assertThat(InternalServiceToken.MAX_CLOCK_SKEW).isPositive();
+        assertThat(InternalServiceToken.MAX_CLOCK_SKEW)
+                .as("an allowance approaching the lifetime would double the capture window")
+                .isLessThanOrEqualTo(InternalServiceToken.MAX_LIFETIME.dividedBy(4));
     }
 }

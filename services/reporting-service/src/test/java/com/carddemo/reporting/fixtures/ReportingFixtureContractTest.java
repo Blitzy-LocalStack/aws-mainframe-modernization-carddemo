@@ -79,13 +79,28 @@ import org.junit.jupiter.params.provider.MethodSource;
  * stops trusting the assertions.</p>
  *
  * <p>Assumptions: this directory carries synthetic primary account numbers and synthetic card
- * verification values, and neither is what the three markers below cover. {@code carddata.txt} holds
- * {@code CARD-NUM} at offset 0 and {@code CARD-CVV-CD} at offset 27; {@code cardxref.txt} holds
- * {@code XREF-CARD-NUM} at offset 0. The evidence that those are synthetic is structural in a
- * different way -- the five verification values are {@code 901} through {@code 905}, a counter no
- * issuer could compute -- and section 1.1 of the README carries it together with the handling
- * guidance. It is restated here because a reader of this class should not have to open the README to
- * learn that two of its bound fixtures carry those columns at all.</p>
+ * verification values, and neither is what the three markers below cover. Which fixtures carry them
+ * is not written down here or anywhere else in this class: {@link #everyPanBearingFixture()} derives
+ * the card-number columns and {@link #everyVerificationValueBearingFixture()} the verification-value
+ * columns out of the registered descriptor of every fixture {@link #everyFixture()} admits, so a
+ * fixture that arrives carrying either column is covered by its admission rather than by an editor
+ * remembering to extend a list. The evidence that those values are synthetic is structural in a
+ * different way -- every verification value is one repeated non-discriminating placeholder and every
+ * card number is either provably from this repository's own published extract or provably unroutable
+ * -- and section 1.1 of the README carries it together with the handling guidance. It is restated
+ * here because a reader of this class should not have to open the README to learn that some of its
+ * bound fixtures carry those columns at all.</p>
+ *
+ * <p>Refactoring Rationale: this paragraph used to name {@code carddata.txt} and
+ * {@code cardxref.txt} as the two fixtures holding a card number, and described the verification
+ * values as "the five values {@code 901} through {@code 905}, a counter no issuer could compute".
+ * Both statements had gone stale in the same way and each was the documentation half of a real gap.
+ * Three more PAN-bearing fixtures landed after it was written -- {@code xreffile.txt},
+ * {@code tranfile.txt} and {@code trnxfile.txt}, whose descriptors declare
+ * {@code XREF-CARD-NUM}, {@code TRAN-CARD-NUM} and {@code TRNX-CARD-NUM} -- and the verification
+ * column was replaced outright by {@link #PLACEHOLDER_VERIFICATION_VALUE}. Naming files and values
+ * in prose is what let both drift, so both enumerations are now derived from the registry and this
+ * paragraph states the rule instead of the roster.</p>
  */
 @DisplayName("Reporting fixtures: inventory, decoding, mapper consumption and provenance markers")
 class ReportingFixtureContractTest {
@@ -99,13 +114,18 @@ class ReportingFixtureContractTest {
      * The two card numbers this directory takes verbatim from the published demonstration extract.
      *
      * <p>Assumptions: these two, and only these two, are exempt from the two unroutability rules
-     * {@link #noCommittedCardNumberIsAPlausibleCredential()} applies, because their provenance is
-     * stronger than either rule. Both appear in {@code app/data/ASCII/carddata.txt}, the Apache-2.0
+     * {@link #noCommittedCardNumberIsAPlausibleCredential(String, String, String)} applies to every
+     * card-number column of every fixture, because their provenance is stronger than either rule.
+     * Both appear in {@code app/data/ASCII/carddata.txt}, the Apache-2.0
      * demonstration extract this repository publishes and that roughly sixty other fixtures across
      * the service tree already key on, so replacing them with synthetic values here would isolate
      * this directory from the rest of the corpus for no gain in safety. The exemption is not taken on
-     * trust: that case reads the extract and asserts both are in it, so naming a value here cannot
-     * exempt it.</p>
+     * trust: {@link #theCardNumberGateCoversEveryPanBearingFixture()} reads the extract and asserts
+     * both are in it, so naming a value here cannot exempt it.</p>
+     *
+     * <p>Assumptions: an exemption that no fixture uses is withdrawn rather than left standing, and
+     * that case asserts the use as well as the provenance. A named-but-unused entry is how a
+     * two-value exemption becomes a place to park any number a future edit finds inconvenient.</p>
      *
      * <p>Assumptions: every field of these two rows OTHER than the card number is authored for this
      * directory -- the expiry dates are future-dated and the verification value is the placeholder
@@ -135,6 +155,56 @@ class ReportingFixtureContractTest {
     private static final String SYNTHETIC_CARD_PREFIX = "9900";
 
     /**
+     * The one major industry identifier every committed card number that is not from the extract has.
+     *
+     * <p>Assumptions: this is the weaker of the two prefix rules and it exists for exactly one value.
+     * {@link #SENTINEL_ABSENT_CARD} is a repeated-nine sentinel rather than an authored card, so it
+     * cannot carry {@link #SYNTHETIC_CARD_PREFIX} and still read at a glance as the deliberately
+     * unresolvable key it is; what it must still carry is the property that makes the longer prefix
+     * safe in the first place, which is the ISO/IEC 7812 major industry identifier reserved for
+     * national assignment. Stating it separately keeps the sentinel inside the gate rather than
+     * outside it: the alternative was an unconditional exemption for that one string, which would
+     * have admitted any sixteen-digit value an editor chose to spell that way.</p>
+     */
+    private static final String NATIONAL_ASSIGNMENT_MII = "9";
+
+    /**
+     * Field-name suffix every primary account number in the shared registry is declared under.
+     *
+     * <p>Assumptions: the card-number columns are found by SUFFIX and declared width rather than by a
+     * list of file names, because the registry names them consistently -- {@code CARD-NUM},
+     * {@code XREF-CARD-NUM}, {@code TRAN-CARD-NUM}, {@code TRNX-CARD-NUM} and
+     * {@code DALYTRAN-CARD-NUM} are every sixteen-byte card column
+     * {@link CopybookLayout} declares -- and a suffix match therefore reaches a record type this
+     * directory has not yet admitted. Alternatives Considered: filtering on
+     * {@link CopybookLayout.FieldSpec#sensitive()} alone. Rejected as the primary rule and kept as a
+     * secondary assertion instead: sensitivity is a marking a declaration site can forget, so keying
+     * coverage to it would silently exclude exactly the field whose marking was missed, whereas
+     * asserting it per covered column turns that omission into a failure.</p>
+     */
+    private static final String CARD_NUMBER_FIELD_SUFFIX = "CARD-NUM";
+
+    /**
+     * Declared width of a primary account number, in bytes.
+     *
+     * <p>Assumptions: the width is part of the match rather than only of the assertion, because the
+     * suffix alone would also select a narrower column of the same name if a future record declared
+     * one, and a nine-digit or masked-tail column is neither a full credential nor subject to a Luhn
+     * check. Every card column in the registry is {@code PIC X(16)}.</p>
+     */
+    private static final int CARD_NUMBER_WIDTH = 16;
+
+    /**
+     * Field-name suffix the card verification value is declared under in the shared registry.
+     *
+     * <p>Assumptions: derived the same way as the card-number columns and for the same reason, even
+     * though exactly one registered record -- the card master's {@code CARD-CVV-CD} -- declares one
+     * today. A gate that reads one hard-coded file cannot notice the second such column arriving,
+     * and this is the class whose whole purpose is that nothing enters this directory unexamined.</p>
+     */
+    private static final String VERIFICATION_VALUE_FIELD_SUFFIX = "CVV-CD";
+
+    /**
      * The verification value every row of the card fixture carries.
      *
      * <p>Assumptions: one repeated placeholder rather than a distinct value per row. The column is
@@ -157,11 +227,22 @@ class ReportingFixtureContractTest {
     private static final String UNREFERENCED_CARD_ACCOUNT = "00000000101";
 
     /**
-     * The card number that must appear in no fixture in this directory.
+     * The card number that must appear in neither the card master nor the cross-reference.
      *
-     * <p>Assumptions: this is the orphan the statement path points at, so its ABSENCE is the contract.
-     * It is stated as a constant because a negative assertion needs something to name, and because an
-     * editor adding it to "fix" the orphan would otherwise face no failure.</p>
+     * <p>Assumptions: this is the orphan the report and statement paths point at, so its absence from
+     * the two files a card lookup READS is the contract, while a driving record has to carry it or no
+     * lookup is ever attempted. It is stated as a constant because a negative assertion needs
+     * something to name, and because an editor adding it to the card master to "fix" the orphan would
+     * otherwise face no failure.</p>
+     *
+     * <p>Assumptions: being a sentinel does not put it outside the safety gate. It is a committed
+     * sixteen-digit string like any other, so
+     * {@link #noCommittedCardNumberIsAPlausibleCredential(String, String, String)} holds it to
+     * {@link #NATIONAL_ASSIGNMENT_MII} and to the same deliberate Luhn failure as every authored
+     * number, and {@link #theCardNumberGateCoversEveryPanBearingFixture()} asserts a driving record
+     * still uses it. Trade-offs: that costs one branch in the gate. The alternative -- exempting the
+     * string outright -- would have admitted any sixteen-digit value spelled that way, including one
+     * that happened to satisfy Luhn.</p>
      */
     private static final String SENTINEL_ABSENT_CARD = "9999999999999999";
 
@@ -174,12 +255,24 @@ class ReportingFixtureContractTest {
      * provenance statement was deleted. Both are things this test exists to prevent.</p>
      *
      * <p>Assumptions: closing the set means each planned fixture must be admitted here by name as it
-     * lands, so this list grows by deliberate edit rather than on its own. {@code tcatbal.txt} is
-     * such an admission: it is the transaction-category-balance record of
-     * {@code app/cpy/CVTRA01Y.cpy}, which {@code app/jcl/PRTCATBL.jcl} reads at its declared
+     * lands, so this list grows by deliberate edit rather than on its own. The paragraphs below argue
+     * one admission each, and they are deliberately NOT numbered: an ordinal restated per paragraph
+     * has to be re-tallied whenever a fixture lands, and this run of paragraphs had drifted into two
+     * files calling themselves "the second such admission" and two more calling themselves "the
+     * third". The list above is the census, {@link #theFixtureDirectoryHoldsExactlyTheExpectedResources()}
+     * is what enforces it, and a paragraph here argues why one name belongs rather than where it sits
+     * in an arrival order nobody can check. The same edit withdrew a superlative for the same reason:
+     * {@code tranfile.txt} described itself as "the only member of this directory whose name is a
+     * data-definition name", which stopped being true the moment {@code trnxfile.txt} and
+     * {@code xreffile.txt} arrived under DD names of their own. The argument each paragraph makes --
+     * that the DD name is what the file is called, because no seeded extract of that record exists --
+     * survives without the tally, and it is the tally that had to be maintained.</p>
+     *
+     * <p>Assumptions: {@code tcatbal.txt} is one such admission: it is the transaction-category-balance
+     * record of {@code app/cpy/CVTRA01Y.cpy}, which {@code app/jcl/PRTCATBL.jcl} reads at its declared
      * 50-byte length, and it is a planned member of this directory rather than a stray file.</p>
      *
-     * <p>Assumptions: {@code xreffile.txt} is the second such admission, and it is the same record
+     * <p>Assumptions: {@code xreffile.txt} is admitted as the same record
      * as {@code cardxref.txt} under a different data-definition name rather than a new record type.
      * {@code app/jcl/CREASTMT.JCL} line 84 supplies {@code XREFFILE} to {@code app/cbl/CBSTM03A.CBL},
      * and line 118 of {@code app/cbl/CBSTM03B.CBL} resolves that name as one of its four branches, so
@@ -192,7 +285,7 @@ class ReportingFixtureContractTest {
      * written against no descriptor at all, would then enter this directory silently. Naming each
      * arrival costs one line and keeps the directory's contents an owned decision.</p>
      *
-     * <p>Assumptions: {@code carddata.txt} is the second such admission. It is the card master of
+     * <p>Assumptions: {@code carddata.txt} is admitted as the card master of
      * {@code app/cpy/CVACT02Y.cpy}, whose {@code 01 CARD-RECORD} at line 4 declares six named fields
      * summing to 91 bytes and a trailing {@code FILLER PIC X(59)} at line 11, giving the 150-byte
      * length its header comment at line 2 states and {@link CopybookLayout} registers as
@@ -241,7 +334,7 @@ class ReportingFixtureContractTest {
      * rows exist. {@link #theCardFixturesCarryEveryStatedRelationship()} now asserts every one of the
      * six, each read independently out of the two files rather than from a shared constant.</p>
      *
-     * <p>Assumptions: {@code cardxref.txt} is the third such admission, and unlike the card master it
+     * <p>Assumptions: {@code cardxref.txt} is admitted for a stronger reason than the card master: unlike it, this
      * is a file the report path genuinely reads. It is the card cross-reference of
      * {@code app/cpy/CVACT03Y.cpy}, whose {@code 01 CARD-XREF-RECORD} at line 4 declares
      * {@code XREF-CARD-NUM PIC X(16)}, {@code XREF-CUST-ID PIC 9(09)} and
@@ -299,8 +392,8 @@ class ReportingFixtureContractTest {
      * provenance to a corpus that does not exist. The row's real purpose, being the one card absent
      * from the cross-reference, is stated above and is now asserted.</p>
      *
-     * <p>Assumptions: {@code tranfile.txt} is the third such admission, and it is the only member of
-     * this directory whose name is a data-definition name rather than a seed-dataset name. The posted
+     * <p>Assumptions: {@code tranfile.txt} is admitted under a data-definition name rather than the
+     * seed-dataset name its neighbours carry, and it has no seed-dataset name to carry. The posted
      * transaction master is batch OUTPUT, so no seeded extract of it exists to borrow a name from;
      * {@code app/cbl/CBTRN03C.cbl} names its input {@code TRANFILE} and {@code app/jcl/TRANREPT.jcl}
      * supplies it at lines 65 and 66, so the DD name is what the file is called. Its layout is
@@ -317,8 +410,8 @@ class ReportingFixtureContractTest {
      * directory holds but this class does not name is a fixture whose length, round trip and pad
      * character nobody checks, and it is the largest and most offset-dependent record here.</p>
      *
-     * <p>Assumptions: {@code trnxfile.txt} is the fourth such admission and the second whose name is
-     * a data-definition name rather than a seed-dataset name. It is the statement path's driving
+     * <p>Assumptions: {@code trnxfile.txt} is admitted under a data-definition name for the same
+     * reason {@code tranfile.txt} is, and for a stronger one. It is the statement path's driving
      * record, and it is DERIVED rather than seeded: {@code app/jcl/CREASTMT.JCL} STEP010 at line 44
      * sorts the transaction master by card then identifier and its {@code OUTREC} at line 54 rewrites
      * each record so the card leads, so no extract of it exists to borrow a name from and the DD name
@@ -628,11 +721,19 @@ class ReportingFixtureContractTest {
                 //       than described, and it is narrower than the withdrawn claim:
                 //       everyFixturePadIsSuppliedByTheCodecOnlyWhenItIsBlank below decodes each row,
                 //       removes the FILLER entry from the decoded map, re-encodes, and asserts the
-                //       committed bytes come back -- but only for the five BLANK-padded fixtures.
+                //       committed bytes come back -- but only for the fixtures this source pads with
+                //       a BLANK, which fixturesPaddedWith(' ') reads back out of these rows.
                 //       The codec's rule is content-based, so a zero pad is content it carries
-                //       rather than padding it derives, and the three zero-padded fixtures are
+                //       rather than padding it derives, and the zero-padded fixtures are
                 //       asserted NOT to be reproducible from the descriptor. That asymmetry is why
                 //       this argument source has to measure the character from the extract at all.
+                // WHY : Refactoring Rationale: that sentence read "only for the five BLANK-padded
+                //       fixtures" and this source registers seven of them, having gained
+                //       xreffile.txt and trnxfile.txt since. The count is now derived from these rows
+                //       by fixturesPaddedWith rather than restated beside them, and
+                //       theTwoPadPopulationsPartitionTheRegistry asserts the two halves cover every
+                //       registered fixture exactly once, so a figure here can no longer disagree with
+                //       the rows it describes and a fixture cannot be registered with no pad at all.
                 // WHY : Assumptions: the cross-reference is the one record whose pad CANNOT be
                 //       measured from its extract, because app/data/ASCII/cardxref.txt stores only the
                 //       36 declared bytes and pads nothing at all -- it truncates where the account
@@ -735,6 +836,59 @@ class ReportingFixtureContractTest {
         assertThat(everyFixturePad().map(arguments -> arguments.get()[2]).distinct().count())
                 .as("the pad character is a per-record-type fact, not one directory convention")
                 .isEqualTo(2);
+    }
+
+    /**
+     * Names every fixture {@link #everyFixturePad()} declares to be padded with one character.
+     *
+     * <p>Assumptions: the membership of each pad population is READ back out of the argument source
+     * rather than written down a second time. Every prose statement in this class that used to give a
+     * figure for one of the two halves -- "the five BLANK-padded fixtures", "the three zero-padded
+     * ones" -- had to be re-tallied by hand whenever a fixture landed, and twice it was not, which is
+     * the drift this accessor exists to end. Trade-offs: a derived figure cannot be read at a glance
+     * from the sentence that uses it, so a reader has to follow one link to see which files are meant;
+     * a figure that maintains itself is worth that, because the alternative failed twice.</p>
+     *
+     * @param padCharacter the pad character to select on
+     * @return the fixture file names registered against that pad character, in registration order
+     */
+    private static List<String> fixturesPaddedWith(char padCharacter) {
+        return everyFixturePad()
+                .filter(fixture -> ((Character) fixture.get()[2]).charValue() == padCharacter)
+                .map(fixture -> String.valueOf(fixture.get()[0]))
+                .toList();
+    }
+
+    /**
+     * Asserts the two pad populations cover every registered fixture exactly once.
+     *
+     * <p>Purpose: close the gap between the two argument sources. {@link #everyFixture()} admits a
+     * fixture to the directory and {@link #everyFixturePad()} declares its pad character, and nothing
+     * held the two to each other: a fixture registered in the first and forgotten in the second would
+     * have been decoded, round-tripped and mapper-driven while its trailing bytes went unexamined,
+     * and both pad cases would have reported a clean run over a set that no longer matched the
+     * directory.</p>
+     *
+     * <p>Assumptions: both halves are asserted non-empty as well as exhaustive, because exhaustiveness
+     * alone would be satisfied by a directory that had standardised on one character -- which is the
+     * outcome {@link #everyFixturePadsWithItsExtractsCharacter} exists to prevent and which its own
+     * distinct-count assertion catches from the other side.</p>
+     */
+    @Test
+    @DisplayName("the two pad populations cover every registered fixture exactly once")
+    void theTwoPadPopulationsPartitionTheRegistry() {
+        List<String> registered = everyFixture()
+                .map(fixture -> String.valueOf(fixture.get()[0]))
+                .sorted()
+                .toList();
+        List<String> blankPadded = fixturesPaddedWith(' ');
+        List<String> zeroPadded = fixturesPaddedWith('0');
+
+        assertThat(blankPadded).as("some fixture must be blank-padded").isNotEmpty();
+        assertThat(zeroPadded).as("some fixture must be zero-padded").isNotEmpty();
+        assertThat(Stream.concat(blankPadded.stream(), zeroPadded.stream()).sorted().toList())
+                .as("every registered fixture must declare a pad character exactly once")
+                .containsExactlyElementsOf(registered);
     }
 
     /**
@@ -881,8 +1035,9 @@ class ReportingFixtureContractTest {
      *       per-row value in the 900 block still LOOKS like a verification value, which is the
      *       property the placeholder removes.
      *       Assumptions: the coverage is not lost. The surviving case --
-     *       "no committed card number is a plausible credential and no verification value is
-     *       real" -- asserts the whole CARD-CVV-CD column equals that placeholder, which subsumes
+     *       everyCommittedVerificationValueIsTheSamePlaceholder, which reaches this column by
+     *       deriving it from the registry rather than by naming carddata.txt -- asserts the whole
+     *       CARD-CVV-CD column equals that placeholder, which subsumes
      *       a per-row leading-digit check and additionally rejects a row that varied its value.
      *       Trade-offs: the withdrawn assertion admitted new rows with any 9xx value, so it was
      *       the more permissive of the two for a fixture that is meant to be uniform; the
@@ -1256,66 +1411,231 @@ class ReportingFixtureContractTest {
     }
 
     /**
-     * Asserts that no committed card number is a plausible payment credential.
+     * Names every declared field of one descriptor that is a full-width primary account number.
      *
-     * <p>Purpose: the fixture directory attests its own provenance, and for the two files that carry a
+     * <p>Assumptions: a field qualifies on its declared WIDTH and its name SUFFIX, both read from the
+     * shared registry, and on nothing else. That is what lets the safety gate reach a record type this
+     * directory has not admitted yet: {@link CopybookLayout} names every sixteen-byte card column
+     * {@code *-CARD-NUM} without exception, so a fixture registered against any of them is covered the
+     * moment it is admitted rather than when someone remembers to extend a file list.</p>
+     *
+     * @param descriptorName the registered layout to inspect
+     * @return that layout's full-width card-number fields, in declaration order; empty when it
+     *     declares none, which is the case for every reference and balance record here
+     */
+    private static List<CopybookLayout.FieldSpec> cardNumberFields(String descriptorName) {
+        return CopybookLayout.layout(descriptorName).fields().stream()
+                .filter(field -> field.length() == CARD_NUMBER_WIDTH
+                        && field.name().endsWith(CARD_NUMBER_FIELD_SUFFIX))
+                .toList();
+    }
+
+    /**
+     * Supplies every committed resource that carries a primary account number, and the column it is in.
+     *
+     * <p>Purpose: drive the card-number safety gate from the fixture registry rather than from a
+     * hand-written list of files, so that admitting a PAN-bearing fixture to {@link #everyFixture()}
+     * is what subjects it to the gate.</p>
+     *
+     * <p>Refactoring Rationale: the gate this feeds read {@code carddata.txt} alone and took the
+     * cross-reference on an inheritance argument -- every card it names is in the master, so the
+     * master's guarantees carry over. That argument was sound for {@code cardxref.txt}, whose four
+     * cards are all in the master, and it does not survive the fixtures admitted since:
+     * {@code xreffile.txt} carries 88 cards and {@code trnxfile.txt} 88 distinct cards of which 86 are
+     * in no card master here at all, and {@code tranfile.txt} carries a sentinel that is deliberately
+     * in neither lookup file. A primary account number could therefore have been added to any of the
+     * three with nothing objecting, in the one class whose purpose is that nothing enters this
+     * directory unexamined. Alternatives Considered: naming the three new files beside
+     * {@code carddata.txt}. Rejected -- that is the same mechanism that failed, one iteration later,
+     * and it would fail again on the next fixture.</p>
+     *
+     * @return a stream of fixture name, descriptor name and card-number field name, one row per
+     *     card-number column of every registered fixture that declares one
+     */
+    private static Stream<Arguments> everyPanBearingFixture() {
+        return everyFixture().flatMap(fixture -> {
+            String fileName = String.valueOf(fixture.get()[0]);
+            String descriptorName = String.valueOf(fixture.get()[1]);
+            return cardNumberFields(descriptorName).stream()
+                    .map(field -> Arguments.of(fileName, descriptorName, field.name()));
+        });
+    }
+
+    /**
+     * Supplies every committed resource that carries a card verification value, and its column.
+     *
+     * <p>Assumptions: derived by the same rule as {@link #everyPanBearingFixture()} and for the same
+     * reason, although exactly one registered record declares such a column today. A gate that named
+     * that one file could not notice a second arriving, and this argument source costs one method to
+     * remove that possibility permanently.</p>
+     *
+     * @return a stream of fixture name, descriptor name and verification-value field name, one row per
+     *     such column of every registered fixture that declares one
+     */
+    private static Stream<Arguments> everyVerificationValueBearingFixture() {
+        return everyFixture().flatMap(fixture -> {
+            String fileName = String.valueOf(fixture.get()[0]);
+            String descriptorName = String.valueOf(fixture.get()[1]);
+            return CopybookLayout.layout(descriptorName).fields().stream()
+                    .filter(field -> field.name().endsWith(VERIFICATION_VALUE_FIELD_SUFFIX))
+                    .map(field -> Arguments.of(fileName, descriptorName, field.name()));
+        });
+    }
+
+    /**
+     * Asserts that no committed card number in a PAN-bearing fixture is a plausible payment credential.
+     *
+     * <p>Purpose: the fixture directory attests its own provenance, and for every file that carries a
      * primary account number the attestation has two halves -- which numbers came from the published
      * extract in this repository, and that every other one is deliberately unroutable. This case
-     * asserts both halves against the bytes.</p>
+     * asserts both halves against the bytes, once per card-number column of every registered fixture
+     * that declares one.</p>
      *
      * <p>Assumptions: "unroutable" is asserted as two independent properties, because either alone is
-     * weak. A Luhn-invalid number in an allocated range still names a real issuer; a number in the
-     * major-industry-identifier 9 range that happened to satisfy Luhn would still look like a
-     * credential. Requiring both of every synthetic value is what leaves no committed number that
-     * could be mistaken for one, and it is what a fixed-width fixture can offer in place of masking --
-     * masking is a mapper decision and applying it here would break the byte-identical round trip.</p>
+     * weak. A Luhn-invalid number in an allocated range still names a real issuer -- the digits read as
+     * a card a scheme could have issued, and the checksum is the last thing a reviewer or a scanner
+     * looks at. A number in the major-industry-identifier 9 range that happened to satisfy Luhn reads
+     * to that same scanner as a live credential. Requiring both of every value is what leaves no
+     * committed number that could be mistaken for one, and it is what a fixed-width fixture can offer
+     * in place of masking -- masking is a mapper decision and applying it here would break the
+     * byte-identical round trip.</p>
      *
-     * <p>Assumptions: the verification value is asserted to be the same non-discriminating placeholder
-     * on every row rather than a distinct value per row. {@code CARD-CVV-CD} is declared
-     * {@code PIC 9(03)}, so it can be neither blank nor shortened without breaking the 150-byte
-     * geometry, and no case in this module distinguishes the rows by it -- the mapper suppresses it
-     * from every response. One repeated placeholder is therefore all the fixture needs, and it is what
-     * keeps the committed bytes from resembling a verification value at all.</p>
+     * <p>Assumptions: the registry's sensitivity marking is asserted rather than relied on. Coverage
+     * keys on the field's width and name so that a column whose {@code sensitive} flag was forgotten is
+     * still gated; asserting the flag here is what turns that omission into a failure instead of a
+     * silent exclusion, and the flag is what keeps the raw bytes out of a codec diagnostic.</p>
+     *
+     * @param fileName the PAN-bearing fixture under test
+     * @param descriptorName the registered layout the fixture is written against
+     * @param fieldName the card-number field of that layout, as derived from the registry
      */
-    @Test
-    @DisplayName("no committed card number is a plausible credential and no verification value is real")
-    void noCommittedCardNumberIsAPlausibleCredential() {
-        List<String> cardNumbers = column("carddata.txt", "CARD", "CARD-NUM");
-        List<String> xrefCards = column("cardxref.txt", "XREF", "XREF-CARD-NUM");
+    @ParameterizedTest(name = "{0} carries no plausible credential in {2}")
+    @MethodSource("everyPanBearingFixture")
+    @DisplayName("no committed card number in any PAN-bearing fixture is a plausible credential")
+    void noCommittedCardNumberIsAPlausibleCredential(String fileName, String descriptorName,
+            String fieldName) {
+        CopybookLayout.FieldSpec field = cardNumberFields(descriptorName).stream()
+                .filter(candidate -> fieldName.equals(candidate.name()))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException(
+                        descriptorName + " no longer declares " + fieldName));
+        assertThat(field.sensitive())
+                .as("%s must be marked sensitive in the registry, so no diagnostic can print it",
+                        fieldName)
+                .isTrue();
 
-        for (String card : cardNumbers) {
-            assertThat(card).as("every card number is exactly sixteen digits").hasSize(16)
+        for (String card : column(fileName, descriptorName, fieldName)) {
+            assertThat(card)
+                    .as("every %s of %s is exactly sixteen digits", fieldName, fileName)
+                    .hasSize(CARD_NUMBER_WIDTH)
                     .containsOnlyDigits();
             if (PUBLISHED_EXTRACT_CARDS.contains(card)) {
                 continue;
             }
-            assertThat(card)
-                    .as("card %s is not from the published extract, so it must sit in the"
-                            + " national-assignment major-industry range", card)
-                    .startsWith(SYNTHETIC_CARD_PREFIX);
+
+            // WHY : Assumptions: the sentinel is held to the weaker prefix rule and to the same Luhn
+            //       failure, rather than exempted. It cannot carry the four-digit synthetic prefix
+            //       and still read as the deliberately unresolvable key it is, but the property that
+            //       makes that prefix safe -- the national-assignment major industry identifier --
+            //       it can and must carry.
+            if (SENTINEL_ABSENT_CARD.equals(card)) {
+                assertThat(card)
+                        .as("the orphan sentinel must still sit in the national-assignment"
+                                + " major-industry range")
+                        .startsWith(NATIONAL_ASSIGNMENT_MII);
+            } else {
+                assertThat(card)
+                        .as("a card in %s that is neither published nor the orphan sentinel must be"
+                                + " authored under the synthetic prefix", fileName)
+                        .startsWith(SYNTHETIC_CARD_PREFIX);
+            }
             assertThat(satisfiesLuhn(card))
-                    .as("card %s is synthetic, so it must deliberately fail the Luhn check", card)
+                    .as("a card in %s that is not from the published extract must deliberately fail"
+                            + " the Luhn check", fileName)
                     .isFalse();
         }
+    }
 
-        // WHY : Assumptions: the published-extract members are asserted to BE in the extract rather
-        //       than trusted from the constant, by reading app/data/ASCII/carddata.txt. That file is
-        //       REFERENCE-only and is read here and never written. Without this read the constant would
-        //       be a way to exempt any value from the two rules above simply by naming it.
-        List<String> published = publishedExtractCardNumbers();
-        assertThat(published).as("the published extract must contain every card the constant exempts")
-                .containsAll(PUBLISHED_EXTRACT_CARDS);
-        assertThat(cardNumbers).as("every exempted card must actually be used by this fixture")
-                .containsAll(PUBLISHED_EXTRACT_CARDS);
-
-        assertThat(xrefCards)
-                .as("the cross-reference may name no card the master does not carry, so its numbers"
-                        + " inherit the same two guarantees")
-                .allSatisfy(card -> assertThat(cardNumbers).contains(card));
-
-        assertThat(column("carddata.txt", "CARD", "CARD-CVV-CD"))
-                .as("every verification value is the same non-discriminating placeholder")
+    /**
+     * Asserts that every committed verification value is the same non-discriminating placeholder.
+     *
+     * <p>Assumptions: the whole column is asserted equal to one placeholder rather than each row being
+     * checked for a fabricated-looking range. {@code CARD-CVV-CD} is declared {@code PIC 9(03)}, so it
+     * can be neither blank nor shortened without breaking the record geometry, and no case in this
+     * module distinguishes the rows by it -- the mapper suppresses it from every response. One repeated
+     * placeholder is therefore all the fixture needs, and it is what keeps the committed bytes from
+     * resembling a verification value at all. Trade-offs: this rejects a fixture that varied the value
+     * per row even harmlessly, which is the intent.</p>
+     *
+     * @param fileName the fixture carrying a verification-value column
+     * @param descriptorName the registered layout the fixture is written against
+     * @param fieldName the verification-value field of that layout, as derived from the registry
+     */
+    @ParameterizedTest(name = "{0} carries only the placeholder in {2}")
+    @MethodSource("everyVerificationValueBearingFixture")
+    @DisplayName("every committed verification value is the same non-discriminating placeholder")
+    void everyCommittedVerificationValueIsTheSamePlaceholder(String fileName, String descriptorName,
+            String fieldName) {
+        assertThat(column(fileName, descriptorName, fieldName))
+                .as("every %s of %s is the same non-discriminating placeholder", fieldName, fileName)
                 .containsOnly(PLACEHOLDER_VERIFICATION_VALUE);
+    }
+
+    /**
+     * Asserts the card-number gate reaches every PAN-bearing fixture and that no exemption is unused.
+     *
+     * <p>Purpose: hold the derivation itself to account. The parameterized cases above prove the policy
+     * over whatever columns the derivation yields; this case proves the derivation yields the right
+     * columns -- that it is not empty, that it discriminates rather than selecting everything, and that
+     * each of the two named exemptions is both provable and actually needed.</p>
+     *
+     * <p>Assumptions: the exemption list is checked from BOTH ends. Membership of
+     * {@code app/data/ASCII/carddata.txt} is what makes an exempted number's provenance demonstrable
+     * rather than asserted, and being used by a committed column is what stops the list from becoming a
+     * place to park a value: an entry no fixture carries is an exemption available to the next number
+     * an editor finds inconvenient. That file is REFERENCE-only and is read here and never written.</p>
+     *
+     * <p>Assumptions: the discrimination assertion is what makes the suffix-and-width rule provably
+     * selective. A derivation that accidentally matched every field would yield every fixture and the
+     * parameterized cases would then pass vacuously over columns that hold no card number at all;
+     * requiring at least one registered fixture to yield no card column is the cheapest statement of
+     * that property, and the reference and balance records are why it holds.</p>
+     */
+    @Test
+    @DisplayName("the card-number gate reaches every PAN-bearing fixture and no exemption is unused")
+    void theCardNumberGateCoversEveryPanBearingFixture() {
+        List<String> panBearing = everyPanBearingFixture()
+                .map(fixture -> String.valueOf(fixture.get()[0]))
+                .distinct()
+                .toList();
+        List<String> registered = everyFixture()
+                .map(fixture -> String.valueOf(fixture.get()[0]))
+                .toList();
+
+        assertThat(panBearing).as("some registered fixture must carry a card number").isNotEmpty();
+        assertThat(registered).as("every gated fixture must be one this directory admits")
+                .containsAll(panBearing);
+        assertThat(panBearing)
+                .as("the width-and-suffix rule must select some fixtures and not all of them")
+                .hasSizeLessThan(registered.size());
+
+        List<String> committed = everyPanBearingFixture()
+                .flatMap(fixture -> column(String.valueOf(fixture.get()[0]),
+                        String.valueOf(fixture.get()[1]),
+                        String.valueOf(fixture.get()[2])).stream())
+                .distinct()
+                .toList();
+
+        assertThat(publishedExtractCardNumbers())
+                .as("the published extract must contain every card the constant exempts")
+                .containsAll(PUBLISHED_EXTRACT_CARDS);
+        assertThat(committed)
+                .as("every exempted card must actually be used by a fixture in this directory")
+                .containsAll(PUBLISHED_EXTRACT_CARDS);
+        assertThat(committed)
+                .as("the orphan sentinel must be carried by a driving record, or no unresolvable"
+                        + " lookup is ever attempted")
+                .contains(SENTINEL_ABSENT_CARD);
     }
 
     /**
@@ -1391,11 +1711,21 @@ class ReportingFixtureContractTest {
      * <p>Purpose: settle, per record type, whether the committed pad byte is something the codec
      * derives from the descriptor or something the file states. The codec's rule is content-based and
      * measured here rather than assumed: a BLANK padding field is dropped on decode and restored on
-     * encode, while a NONBLANK one stays content and is carried through. So the five blank-padded
-     * fixtures do get their pad from the codec, and the three zero-padded ones do not -- their zeroes
+     * encode, while a NONBLANK one stays content and is carried through. So every fixture in
+     * {@link #fixturesPaddedWith(char)}{@code (' ')} does get its pad from the codec, and every
+     * fixture in {@code fixturesPaddedWith('0')} does not -- their zeroes
      * are data the file supplies, which is exactly why
      * {@link #everyFixturePadsWithItsExtractsCharacter} has to measure the character from the
      * extract instead of deriving it.</p>
+     *
+     * <p>Refactoring Rationale: those two halves were given as "the five blank-padded fixtures" and
+     * "the three zero-padded ones". The blank half is seven, and has been since
+     * {@code xreffile.txt} and {@code trnxfile.txt} were registered; the figure had gone stale twice
+     * over. Both halves are now named by the accessor that reads them out of
+     * {@link #everyFixturePad()}, so the sentence cannot disagree with the rows it describes, and
+     * {@link #theTwoPadPopulationsPartitionTheRegistry()} asserts the two halves between them cover
+     * every registered fixture exactly once -- which is the property a count was standing in for and
+     * never actually checked.</p>
      *
      * <p>Refactoring Rationale: two entries of {@link #everyFixturePad()} claimed the card and
      * cross-reference fixtures reached their pad by "omitting the FILLER key entirely" so the codec
@@ -1438,8 +1768,8 @@ class ReportingFixtureContractTest {
             if (padCharacter == ' ') {
                 assertThat(decoded)
                         .as("%s: a blank %s is padding, so the codec drops it on decode rather than"
-                                + " handing 59 or 178 meaningless blanks to a consumer", fileName,
-                                padName)
+                                + " handing %d meaningless blanks to a consumer", fileName,
+                                padName, pad.length())
                         .doesNotContainKey(padName);
             } else {
                 assertThat(decoded)
@@ -1454,12 +1784,16 @@ class ReportingFixtureContractTest {
                     StandardCharsets.UTF_8).substring(pad.start(), pad.end());
 
             // WHY : Assumptions: the codec's restored pad is always BLANK, whatever the record type,
-            //       and that single fact is what makes the two branches above meaningful. For the five
-            //       blank-padded fixtures it equals the committed bytes, so the pad is a codec fact and
-            //       a descriptor whose FILLER span disagreed with the file would fail here. For the
-            //       three zero-padded ones it deliberately does NOT equal them, which is the positive
+            //       and that single fact is what makes the two branches above meaningful. For a
+            //       blank-padded fixture it equals the committed bytes, so the pad is a codec fact and
+            //       a descriptor whose FILLER span disagreed with the file would fail here. For a
+            //       zero-padded one it deliberately does NOT equal them, which is the positive
             //       evidence that their pad character cannot be derived and has to be measured from the
             //       extract -- the claim everyFixturePadsWithItsExtractsCharacter rests on.
+            //       Trade-offs: neither half is counted here. A figure would have to be re-tallied on
+            //       every arrival, which is exactly how "five" and "three" came to describe a seven
+            //       and three split; the membership of each half is read from everyFixturePad by
+            //       fixturesPaddedWith instead.
             assertThat(rebuiltPad)
                     .as("%s: the codec restores a dropped pad with blanks", fileName)
                     .isEqualTo(blankPad);

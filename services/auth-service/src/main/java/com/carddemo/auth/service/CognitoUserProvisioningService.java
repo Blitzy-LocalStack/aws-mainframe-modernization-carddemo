@@ -111,12 +111,22 @@ import software.amazon.awssdk.services.secretsmanager.model.ResourceNotFoundExce
  * {@code AdminSetUserPassword} grant at all. It also removes a window: there is never a moment where
  * the account exists holding a provider-generated password nobody can obtain.</p>
  *
- * <p>Trade-offs: no credential is returned to the caller and none is logged, so this operation's
- * response says nothing about the handover. That is the point rather than an omission -- the reference
- * system's handling of a credential is the defect this migration is undoing, since
- * {@code app/cpy/CSUSR01Y.cpy} L21 stores {@code SEC-USR-PWD PIC X(08)} in the clear,
- * {@code app/cbl/COSGN00C.cbl} L223 compares it in the clear and {@code app/cbl/COUSR02C.cbl} L169
- * writes it back out onto a screen. What the operator needs instead is the entry's NAME, and that is
+ * <p>⚠️ Refactoring Rationale: the generated value IS returned to the caller, once, and this paragraph
+ * previously said the opposite and called the omission "the point rather than an omission". It was not:
+ * the only principal who has to hand the credential over is the administrator who performed the create,
+ * and that principal holds a browser session carrying neither {@code GetSecretValue} nor a grant on the
+ * key -- so the account was created, grouped, rowed and archived, and stranded. The value is returned on
+ * {@link ProvisionedIdentity} and travels exactly once, in the create response; it is never logged, and
+ * {@code auth.users} still declares no password column, so nothing here reinstates the reference
+ * system's defect at {@code app/cpy/CSUSR01Y.cpy} L21, which stores {@code SEC-USR-PWD PIC X(08)} in
+ * the clear, at {@code app/cbl/COSGN00C.cbl} L223, which compares it in the clear, or at
+ * {@code app/cbl/COUSR02C.cbl} L169, which writes it back out onto a screen.</p>
+ *
+ * <p>Assumptions: the managed entry is kept BESIDE the returned value rather than replaced by it,
+ * because the two cover different failures. A response is delivered once -- a closed tab, a dropped
+ * connection after the commit, a refused render -- and without the entry that account would be
+ * stranded again with no operational recovery; and the value itself has no audit trail, where the entry
+ * has the store's own. The entry's NAME is what the response carries beside the value, and the name is
  * derived rather than transported: it is the configured prefix, the fixed segment
  * {@value #SECRET_NAME_INFIX}, and the hexadecimal digest of the user identifier, so anyone who knows
  * the identifier can recompute it and nobody who merely lists entries learns an identifier from one.
@@ -448,9 +458,11 @@ public class CognitoUserProvisioningService {
      * @param userType {@code "A"} or {@code "U"}, the whole domain at {@code app/cpy/COCOM01Y.cpy}
      *     L27 and L28; must not be {@code null}
      * @return the subject the provider assigned -- the value {@code auth.users.cognito_sub} stores and
-     *     the only link between a presented token and the row -- paired with the name of the managed
-     *     secret entry holding the account's first credential, so the administrator who created the
-     *     user is told where to collect it; never {@code null}, and it never carries the credential
+     *     the only link between a presented token and the row -- paired with the generated one-time
+     *     credential the account was created with and with the name of the managed-secret entry that
+     *     credential was archived to, so the administrator who created the user can hand the value over
+     *     directly and an operator who loses that handover can still recover it; never {@code null},
+     *     and the credential it carries is never logged and never stored in this service's schema
      * @throws IllegalArgumentException if {@code userType} is outside the two-value domain, raised
      *     before any provider call so an out-of-domain value creates nothing
      * @throws IllegalStateException if the created account carries no subject attribute, which would
@@ -522,7 +534,24 @@ public class CognitoUserProvisioningService {
             LOG.info("event=auth.identity.provisioned userId={} group={} credential=published",
                     userId, groupName);
 
-            return new ProvisionedIdentity(subject, credentialSecretName(userId));
+            // WHY : ⚠️ Refactoring Rationale: the generated value is returned as well as published, and
+            //       the previous revision returned the locator alone. Publishing without returning left
+            //       the credential readable only by a principal holding secretsmanager:GetSecretValue
+            //       and a grant on the customer-managed key -- which the task role holds and the
+            //       administrator's browser session does not -- so the one reader who had to hand the
+            //       credential over was the one reader who could not obtain it, and every account
+            //       created through the runtime operation was stranded. The value returned here is the
+            //       SAME object the account was created with above rather than a re-read of the entry:
+            //       there is nothing to re-read it from that is more authoritative, and a second read
+            //       would be a second chance for the two to disagree.
+            // WHY : Trade-offs: this puts a live credential in a response body, and three controls
+            //       bound that rather than one. The account stands in the provider's force-change
+            //       state, so the value buys exactly one sign-on and can do nothing but replace
+            //       itself; the create response is marked no-store by
+            //       com.carddemo.auth.api.UserController, so no intermediary or browser may retain it;
+            //       and the record that carries it withholds it from every diagnostic rendering. What
+            //       is bought is that onboarding needs no privileged secret-store read at all.
+            return new ProvisionedIdentity(subject, credentialSecretName(userId), temporaryPassword);
 
         } catch (RuntimeException incomplete) {
             // WHY : Assumptions: the withdrawal removes BOTH the account and any credential entry the

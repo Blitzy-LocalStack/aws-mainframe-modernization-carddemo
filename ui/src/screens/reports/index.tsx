@@ -20,8 +20,8 @@
  * module: nothing records that a turn has happened before, and the message band is a function of the
  * current validation outcome alone.
  *
- * The report is never rendered here
- * ---------------------------------
+ * The report is never rendered here, and the run is followed rather than assumed
+ * -------------------------------------------------------------------------------
  * Assumptions: submission STARTS a run and resolves to a handle, never to the document. The reference
  * reaches the same asynchrony through a queue -- `SUBMIT-JOB-TO-INTRDR` at L462 writes 80-byte
  * job-control records with `EXEC CICS WRITEQ TD QUEUE ('JOBS')` at L517, and `app/csd/CARDDEMO.CSD`
@@ -30,8 +30,17 @@
  * `EXEC PROC=TRANREPT` (`app/jcl/TRANREPT.jcl`), so the operator was returned to the screen at once and
  * the document was produced elsewhere. The printed artifact is 133 columns wide and its amount bands
  * carry COBOL edit masks whose sign character differs between the detail line and the three total lines;
- * `ui/src/api/reporting.ts` declines to reproduce any of it, and so does this module. No synchronous
- * download is offered.
+ * `ui/src/api/reporting.ts` declines to reproduce any of it, and so does this module -- the bytes are
+ * handed to the browser undecoded and are never displayed on this screen.
+ *
+ * Refactoring Rationale: ⚠️ what the handle is FOR was previously left unspent. The screen rendered the
+ * run's name and stopped there, so a report an operator had submitted could be neither followed nor
+ * obtained from anywhere in the application, and the two operations that answer both questions --
+ * `readReportExecution` and `collectReportArtifact` -- were published by the client and called from
+ * nowhere. The queue the reference wrote to reported nothing back at all, so following a run is a
+ * documented improvement rather than a port; the screen now reads the run's status until it settles,
+ * offers a read on demand, explains each terminal outcome, and hands over the document of a run that
+ * succeeded.
  *
  * Where the shell's three bands come from
  * ---------------------------------------
@@ -67,8 +76,18 @@ import type { ChangeEvent, CSSProperties, ReactElement } from 'react';
 import { useNavigate } from 'react-router';
 
 import { isApiRequestError } from '../../api/client';
-import { submitTransactionReport } from '../../api/reporting';
-import type { ReportRequest, ReportSubmission, ReportSubmissionOutcome } from '../../api/reporting';
+import {
+  collectReportArtifact,
+  newSubmissionKey,
+  readReportExecution,
+  submitTransactionReport,
+} from '../../api/reporting';
+import type {
+  ReportExecutionStatus,
+  ReportRequest,
+  ReportSubmission,
+  ReportSubmissionOutcome,
+} from '../../api/reporting';
 import type { ApiError } from '../../api/types';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { useShellSlot } from '../../layout/AppShell';
@@ -80,6 +99,11 @@ import type { PfKeyHandlerMap, PfKeyRejection } from '../../layout/usePfKeys';
 import {
   MESSAGE_TEMPLATES,
   PROGRAM_MESSAGES,
+  REPORTS_CAPTIONS,
+  REPORTS_KEY_LABELS,
+  REPORTS_TITLE,
+  REPORT_RUN_MESSAGES,
+  REPORT_TYPE_PROMPTS,
   formatMessageTemplate,
 } from '../../messages/messages';
 import { MAIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
@@ -114,14 +138,25 @@ export const REPORTS_PROGRAM_NAME = 'CORPT00C';
  */
 export const REPORTS_MAPSET = 'CORPT00';
 
-/**
- * Screen title, verbatim from the row-4 heading at `app/bms/CORPT00.bms` L75-L79.
- *
- * Assumptions: the field is `LENGTH=19 COLOR=NEUTRAL ATTRB=(ASKIP,BRT)`, and brightness resolves to font
- * weight through `TYPOGRAPHY_TOKENS.brightEmphasis` rather than to a colour, because the field already
- * carries a colour of its own -- expressing brightness as colour would collide with it.
+/*
+ * WHY : Refactoring Rationale: the four groups of painted text this screen used to transcribe -- the
+ *       row-4 heading, the three selector captions, the five captions and hints around the date bounds
+ *       and the confirmation, and the two halves of the row-24 legend -- are imported above from
+ *       `ui/src/messages/messages.ts`, which AAP section 0.2.1.5 makes the owner of every string a
+ *       screen renders. Each entry's mapset line now sits beside the value there, indexed by
+ *       `REPORTS_PAINTED_TEXT_SOURCES` against the file `REPORTS_MAPSET_SOURCE_FILE` names, so the
+ *       citations are not duplicated here.
+ * WHY : Assumptions: nothing about the values changed in the move, and the three fragile ones are why
+ *       that is worth stating: `endDate` still carries its two LEADING spaces, `confirmation` still ends
+ *       with a space, and the legend is still split from one 23-character literal. Transformation rule
+ *       T8 compares these byte for byte, so a screen that re-typed any of them would put a second copy
+ *       in the tree with nothing to compare it against.
+ * WHY : Assumptions: brightness on the row-4 heading is still resolved HERE, as font weight through
+ *       `TYPOGRAPHY_TOKENS.brightEmphasis` rather than as a colour, because the field declares
+ *       `COLOR=NEUTRAL` of its own and expressing brightness as colour would collide with it. That is a
+ *       rendering decision rather than text, which is why it stays in this module while the string does
+ *       not.
  */
-export const REPORTS_TITLE = 'Transaction Reports';
 
 /**
  * The three report types, in the order the reference evaluates them.
@@ -136,23 +171,19 @@ export const REPORT_TYPES = ['monthly', 'yearly', 'custom'] as const;
 export type ReportType = (typeof REPORT_TYPES)[number];
 
 /**
- * The three selector prompts, verbatim from their `INITIAL=` literals in `app/bms/CORPT00.bms`.
+ * The two report types whose bounds come from a clock reading rather than from the map.
  *
- * ⚠️ Assumptions: these are the full 23-character captions the operator reads and are NOT the report
- * names. Each is a separate `LENGTH=23 COLOR=TURQUOISE ATTRB=(ASKIP,BRT)` field sitting beside its
- * one-character selector, while {@link REPORT_TYPE_NAMES} below holds the bare words the program moves
- * into `WS-REPORT-NAME` and interpolates into two of its sentences. Both sets exist in the baseline and
- * neither is derivable from the other, so conflating them would either put `Monthly (Current Month)`
- * inside a message the reference spells `Monthly`, or strip the caption an operator uses to choose.
+ * Assumptions: the reference reads `FUNCTION CURRENT-DATE` in exactly these two arms --
+ * `app/cbl/CORPT00C.cbl` L215 for monthly and L241 for yearly -- and reads the six keyed date parts in
+ * the third. Naming the pair once is what lets the selector that offers them and the resolver that
+ * computes them agree on which types depend on a clock at all; the alternative was the same two
+ * literals written at both sites, where a change to one would silently offer a range the other refuses.
+ *
+ * Assumptions: the member type is widened to `ReportType` rather than left as the literal pair, so that
+ * a membership test may be asked about any of the three types. A `readonly ['monthly', 'yearly']` tuple
+ * types its own `includes` parameter as that pair, which would reject the very question being asked.
  */
-export const REPORT_TYPE_PROMPTS: Readonly<Record<ReportType, string>> = {
-  /** `app/bms/CORPT00.bms` L89-L93. */
-  monthly: 'Monthly (Current Month)',
-  /** `app/bms/CORPT00.bms` L103-L107. */
-  yearly: 'Yearly (Current Year)',
-  /** `app/bms/CORPT00.bms` L117-L121. */
-  custom: 'Custom (Date Range)',
-};
+const CLOCK_DERIVED_REPORT_TYPES: readonly ReportType[] = ['monthly', 'yearly'];
 
 /**
  * The bare report names the program interpolates into its confirm and acknowledgement sentences.
@@ -161,6 +192,12 @@ export const REPORT_TYPE_PROMPTS: Readonly<Record<ReportType, string>> = {
  * `app/cbl/CORPT00C.cbl` L214, `'Yearly'` at L240 and `'Custom'` at L433 -- and both sentences take it
  * `DELIMITED BY SPACE`, so the trailing blanks of the ten-character field never reach the operator. The
  * values are imported from the message catalog for the two the catalog records rather than retyped.
+ *
+ * ⚠️ Assumptions: these bare words are NOT the selector captions, and the two sets now sit in different
+ * files, which makes the distinction easier to lose rather than harder. `REPORT_TYPE_PROMPTS` holds the
+ * 23-character captions an operator reads beside each selector; both sets exist in the baseline and
+ * neither is derivable from the other, so substituting one would either put `Monthly (Current Month)`
+ * inside a message the reference spells `Monthly` or strip the caption an operator chooses by.
  */
 export const REPORT_TYPE_NAMES: Readonly<Record<ReportType, string>> = {
   monthly: REPORT_MESSAGES.MONTHLY,
@@ -203,39 +240,6 @@ export const DATE_PART_WIDTHS: Readonly<Record<DatePart, number>> = {
 export const CONFIRM_WIDTH = 1;
 
 /**
- * The captions and hints the mapset paints around the two date bounds and the confirmation, verbatim.
- *
- * ⚠️ Assumptions: `endDate` carries TWO leading spaces. The literal at `app/bms/CORPT00.bms` L161-L165 is
- * `'  End Date :'`, declared `LENGTH=12` exactly as `'Start Date :'` at L122-L126 is, and the two spaces
- * are the mapset's own right-alignment of the shorter caption against the longer one. Trimming them would
- * be a one-character-class edit to text the screen tests read byte for byte.
- *
- * Trade-offs: the two spaces are carried into the DOM verbatim and are then COLLAPSED by HTML's default
- * whitespace handling, so the caption reads `End Date :` on screen while the string still measures twelve
- * characters. That is deliberate rather than overlooked: the spaces are character-cell alignment on a
- * fixed-pitch 24x80 grid, which is exactly what AAP gap G1 declines to reproduce, and forcing them to
- * paint with a preformatted whitespace rule would indent this caption against its sibling in a
- * proportional face instead of aligning the two colons. The verbatim-text guarantee is about the string
- * the screen carries, and that is preserved; the terminal's column arithmetic is not.
- *
- * Assumptions: `confirmation` also ends with a space. It is a `LENGTH=59 COLOR=TURQUOISE` field written
- * as a BMS continuation across L200-L205, and the trailing blank separated the sentence from the
- * one-character input that followed it on the same row.
- */
-export const REPORTS_CAPTIONS = {
-  /** `app/bms/CORPT00.bms` L122-L126, `LENGTH=12 COLOR=TURQUOISE`. */
-  startDate: 'Start Date :',
-  /** `app/bms/CORPT00.bms` L161-L165, `LENGTH=12 COLOR=TURQUOISE`; the two leading spaces are in source. */
-  endDate: '  End Date :',
-  /** `app/bms/CORPT00.bms` L157-L160 and L196-L199, `LENGTH=12 COLOR=BLUE`; painted once per bound. */
-  dateFormatHint: '(MM/DD/YYYY)',
-  /** `app/bms/CORPT00.bms` L200-L205, `LENGTH=59`; the trailing space is in source. */
-  confirmation: 'The Report will be submitted for printing. Please confirm: ',
-  /** `app/bms/CORPT00.bms` L213-L217, `LENGTH=5 COLOR=NEUTRAL`. */
-  confirmDomainHint: '(Y/N)',
-} as const;
-
-/**
  * The separator the mapset paints between the parts of a date, verbatim.
  *
  * Assumptions: four `LENGTH=1 COLOR=BLUE` fields carry it, two per bound -- `app/bms/CORPT00.bms` L133-L137
@@ -243,25 +247,6 @@ export const REPORTS_CAPTIONS = {
  * than four times as a set, because a bound is rendered once and the separator belongs to it.
  */
 export const DATE_PART_SEPARATOR = '/';
-
-/**
- * Legend labels for the two keys this screen paints, split from the row-24 literal.
- *
- * ⚠️ Assumptions: the row-24 field is ONE literal, `'ENTER=Continue  F3=Back'`, declared `LENGTH=23
- * COLOR=YELLOW` at `app/bms/CORPT00.bms` L222-L226, and the two spaces between the segments are in the
- * source. Splitting it into two labels is what lets each sit on the control that performs it, and the
- * parts still join back to the declared 23 characters.
- *
- * Assumptions: there are exactly TWO entries because the legend advertises exactly two keys and the
- * dispatch honours exactly two: `EVALUATE EIBAID` at `app/cbl/CORPT00C.cbl` L184-L195 handles `DFHENTER`
- * and `DFHPF3` and sends every other attention identifier to `CCDA-MSG-INVALID-KEY`. `F4=Clear` is NOT
- * imported from the uniform legend set here, because this mapset does not paint it and this program does
- * not dispatch it.
- */
-export const REPORTS_KEY_LABELS = {
-  ENTER: 'ENTER=Continue',
-  PFK03: 'F3=Back',
-} as const;
 
 /*
  * WHY : Assumptions: nothing is rendered for the six anonymous zero-length fields at (7,12), (9,12),
@@ -299,17 +284,6 @@ const NON_NUMERIC_FIELD_CHARACTERS = /[^0-9.-]/gu;
 
 /** The calendar mask both `DatePicker` controls display and parse, from `REPORTS_CAPTIONS`. */
 const DATE_PICKER_FORMAT = 'MM/DD/YYYY';
-
-/**
- * The interchange form both bounds travel in, and the mask the reference validates them against.
- *
- * Assumptions: `app/cbl/CORPT00C.cbl` L72 declares `WS-DATE-FORMAT PIC X(10) VALUE 'YYYY-MM-DD'` and
- * passes it to `CSUTLDTC` at L389 and L409, while L60-L71 build `WS-START-DATE` and `WS-END-DATE` as
- * year-month-day groups joined by hyphens. The baseline therefore already normalises the six keyed parts
- * into this exact form before it validates or transmits them, which is why composing it here is a port
- * rather than an invention.
- */
-const ISO_DATE_FORMAT = 'YYYY-MM-DD';
 
 /**
  * The two answers the reference accepts as consent, from `app/cbl/CORPT00C.cbl` L478.
@@ -350,6 +324,41 @@ export interface ReportsFieldError {
   readonly message: string;
 }
 
+/**
+ * The mark every refusal of the report-type selector carries.
+ *
+ * Purpose
+ * -------
+ * `app/cbl/CORPT00C.cbl` L437-L442 answers an unselected type by painting the sentence on row 23 and
+ * moving `-1` into `MONTHLYL` -- so the reference ASSOCIATES the refusal with the selector, and it does
+ * so by putting the cursor there. A browser reproduces the cursor move directly but has a second,
+ * non-visual channel the terminal did not: assistive software resolves a control's validity and its
+ * description from the control itself, not from where the caret happens to rest. This mark is what
+ * populates that channel.
+ *
+ * ⚠️ Refactoring Rationale: both selector refusals used to pass an EMPTY array, and that made the
+ * control's whole accessibility wiring inert. `refusalFor('reportType')` returns `undefined` for an
+ * empty array, and the render keys `validateStatus`, `help` and `fieldAriaProps` off exactly that
+ * value -- so `aria-invalid` and `aria-describedby` were both omitted on the one turn they exist for,
+ * and an operator on the group after a refused submit was told neither that it was invalid nor why.
+ * Measured in a browser before the change: after submitting with nothing selected, the element
+ * carrying `role="radiogroup"` held no `aria-invalid` and no `aria-describedby`, and the identifier the
+ * helper composes for the description resolved to no element at all. The wiring was correct; nothing
+ * ever switched it on.
+ *
+ * Assumptions: the sentence is the SAME one the message line carries, not a second wording. AAP rule
+ * T8 carries user-visible strings verbatim and the catalog holds exactly one string for this
+ * condition, so composing a per-field variant would put text on the screen that no line of the
+ * reference holds.
+ *
+ * Assumptions: one shared constant rather than a literal at each site, because the two sites answer the
+ * SAME condition -- no usable report type -- and a mark that named a different field at one of them
+ * would move the description onto a control the cursor never reaches.
+ */
+const SELECTOR_REFUSAL_MARKS: readonly ReportsFieldError[] = [
+  { field: 'reportType', message: REPORT_MESSAGES.SELECT_A_REPORT_TYPE_TO_PRINT_REPORT },
+];
+
 /** An inclusive processing-date range, both bounds already in the interchange form. */
 export interface ReportDateRange {
   /** Lower bound, inclusive, as `YYYY-MM-DD`. */
@@ -357,6 +366,27 @@ export interface ReportDateRange {
   /** Upper bound, inclusive, as `YYYY-MM-DD`. */
   readonly endDate: string;
 }
+
+/**
+ * What a submission carries for its two bounds, which is BOTH of them or NEITHER.
+ *
+ * Assumptions: this is derived from `ReportRequest` with `Pick` rather than declared independently, so
+ * the two member names and their optionality are the published contract's and cannot drift from it. It
+ * is deliberately weaker than {@link ReportDateRange}: that type states a resolved range, both members
+ * present, and is what the custom arm's edit chain returns, whereas this states what goes on the wire --
+ * and a preset puts nothing there, because `ReportExecutionService` resolves a preset's period from its
+ * own clock and never reads the request's bounds on that path.
+ */
+type SubmittedRange = Pick<ReportRequest, 'startDate' | 'endDate'>;
+
+/**
+ * The empty range a preset submits, frozen so no caller can add a bound to the shared value.
+ *
+ * Alternatives Considered: returning a fresh `{}` from each preset arm, which would need no constant.
+ * Rejected because a named sentinel makes "this submission deliberately carries no bounds" readable at
+ * the two call sites, where a bare literal reads as an oversight.
+ */
+const NO_SUBMITTED_RANGE: SubmittedRange = Object.freeze({});
 
 /**
  * Composes the empty, range and calendar values a bound is refused with.
@@ -435,7 +465,9 @@ const FEBRUARY = 2;
  * underlying `Date` maps a year below 100 into the twentieth century, so any well-formedness test routed
  * through a parsed date misreports every year the four-character `SDTYYYY` field can hold below 0100. The
  * reference has no such window: `CSUTLDTC` calls `CEEDAYS`, which applies the Gregorian rule over its
- * whole supported span and answers an out-of-span year with a feedback code the caller tolerates.
+ * whole supported span and answers an out-of-span year with a feedback code the caller tolerates. The
+ * same measurement governs the DISPLAY side of the screen for the same reason, at
+ * {@link calendarValueFor}: what the library cannot represent is not shown rather than shown wrongly.
  * @param {number} year - Four-digit year to classify.
  * @returns {boolean} `true` when February carries twenty-nine days in that year.
  */
@@ -557,6 +589,11 @@ export function composeIsoDate(parts: DatePartValues): string {
  * month thirteen and day zero -- and was rejected on the span half of the rule: `dayjs('0001-01-01')`
  * resolves to `1901-01-01`, so a well-formed year below 0100 would fail the comparison and be reported as
  * a bad date, which is the one case the reference explicitly forgives.
+ *
+ * Assumptions: this predicate is therefore NECESSARY but not sufficient for the calendar affordance, which
+ * has to satisfy a second condition this function deliberately does not test -- that the year survives the
+ * date library unchanged. {@link calendarValueFor} applies both, and the division is what keeps a year the
+ * reference accepts from being refused here merely because a browser control cannot draw it.
  * @param {DatePartValues} parts - The three normalised parts of one bound.
  * @returns {boolean} `true` when the parts name a real calendar date.
  */
@@ -571,54 +608,69 @@ function isExistingCalendarDate(parts: DatePartValues): boolean {
 }
 
 /**
- * Resolves the inclusive range a monthly report covers: the first and last day of the current month.
+ * Lowest year the calendar control can carry as itself, below which it is left unset.
  *
- * Purpose: the port of `app/cbl/CORPT00C.cbl` L214-L238.
- *
- * ⚠️ Assumptions: `endOf('month')` is used in place of the reference's four-statement arithmetic, and the
- * two were MEASURED equivalent rather than assumed so. The reference moves `1` into the day, adds `1` to
- * the month, rolls the year and resets the month to `1` when the month then exceeds twelve (L223-L228),
- * and finally takes `FUNCTION DATE-OF-INTEGER(FUNCTION INTEGER-OF-DATE(...) - 1)` (L229-L230) -- the last
- * day of the original month reached by stepping back one day from the first of the next. Both forms were
- * evaluated over a thirty-one-day month, a thirty-day month, February in a leap year, February in a
- * non-leap year and December, and agreed on every one, including the December case where the reference's
- * month-thirteen branch is the only thing that keeps the year correct.
- *
- * Assumptions: the instant is a PARAMETER rather than read from the clock inside this function, so the
- * screen supplies a server-anchored value and a test can supply a fixed one. The reference reads
- * `FUNCTION CURRENT-DATE` at L215, which is the region's clock; anchoring on the server is the target's
- * equivalent of that and is what stops two operators in different time zones resolving different months.
- * @param {Dayjs} now - Instant the current month is taken from.
- * @returns {ReportDateRange} The first and last day of that month, both as `YYYY-MM-DD`.
+ * Assumptions: one hundred, and the boundary is a measured property of the date library the control is
+ * generated over rather than a preference. `dayjs('0000-01-01')`, `dayjs('0001-02-28')` and
+ * `dayjs('0099-12-31')` resolve to 1900, 1901 and 1999 respectively, because the underlying `Date`
+ * constructor maps a year below one hundred into the twentieth century; `dayjs('0100-01-01')` is the
+ * first four-digit year that resolves to itself. The four-character `SDTYYYY` field
+ * (`app/cpy-bms/CORPT00.CPY` L90) can hold every one of those years, so the window is reachable by
+ * keying rather than hypothetical.
  */
-export function computeMonthlyRange(now: Dayjs): ReportDateRange {
-  return {
-    startDate: now.startOf('month').format(ISO_DATE_FORMAT),
-    endDate: now.endOf('month').format(ISO_DATE_FORMAT),
-  };
-}
+const LOWEST_DISPLAYABLE_YEAR = 100;
 
 /**
- * Resolves the inclusive range a yearly report covers: the first and last day of the current year.
+ * Resolves the value the calendar control shows for one bound, or nothing when it cannot show it.
  *
- * Purpose: the port of `app/cbl/CORPT00C.cbl` L240-L255, which moves the current year into both bounds,
- * `'01'` into the start month and start day (L245-L246), then `'12'` into the end month and `'31'` into
- * the end day (L250-L251). Those are literals rather than arithmetic, so no month-length question arises.
+ * Purpose: the single place the three keyed parts become a value the additive calendar affordance can
+ * display, and the one place the display is allowed to disagree with the parts by being ABSENT rather
+ * than by being a different date.
  *
- * Assumptions: the instant is a parameter for the same reason it is in {@link computeMonthlyRange}.
- * @param {Dayjs} now - Instant the current year is taken from.
- * @returns {ReportDateRange} The first and last day of that year, both as `YYYY-MM-DD`.
+ * ⚠️ Refactoring Rationale: this returned `dayjs(composeIsoDate(parts))` for every well-formed date,
+ * which silently rewrote a keyed year below one hundred. An operator who keyed `05 / 15 / 0007` passed
+ * every edit as keyed, had `0007-05-15` composed into the request, and read `05/15/1907` back off the
+ * calendar box beside the fields -- so the screen showed one date, validated another and submitted a
+ * third-party reader's guess at which was real. The parts are the authoritative value and the calendar is
+ * an affordance for filling them (AAP gap G5, additive), so the affordance goes blank where it cannot
+ * represent the value and never displays a substitute.
+ *
+ * Alternatives Considered: preserving the extended year by building a `Date` and calling `setFullYear`,
+ * which was measured to work -- `dayjs(withFullYearSetToSeven).format('MM/DD/YYYY')` renders
+ * `05/15/0007`. Rejected on the control's own parse path: antd generates its picker over dayjs with
+ * `customParseFormat`, and `dayjs('05/15/0007', 'MM/DD/YYYY', true)` is INVALID while
+ * `dayjs('05/15/0100', 'MM/DD/YYYY', true)` parses. The control would therefore display text it refuses
+ * to accept back, and a re-parse of its own displayed text on edit or blur resolves to nothing -- which
+ * risks clearing a bound the operator keyed correctly. An empty box loses no data and misstates nothing.
+ *
+ * Trade-offs: for a year in that window the operator sees the three parts holding what they keyed and an
+ * empty calendar box beside them. That is the accepted cost: the alternative on offer was a box holding a
+ * date nobody entered, and the reference paints no calendar at all, so nothing of the baseline is lost.
+ * @param {DatePartValues} parts - The three parts of one bound, already normalised to their widths.
+ * @returns {Dayjs | null} The date to display, or `null` when the parts name no calendar date or name one
+ *   the control cannot carry without changing its year.
  */
-export function computeYearlyRange(now: Dayjs): ReportDateRange {
-  return {
-    startDate: now.startOf('year').format(ISO_DATE_FORMAT),
-    endDate: now.endOf('year').format(ISO_DATE_FORMAT),
-  };
+export function calendarValueFor(parts: DatePartValues): Dayjs | null {
+  if (!isExistingCalendarDate(parts)) {
+    return null;
+  }
+  if (Number.parseInt(parts.year, 10) < LOWEST_DISPLAYABLE_YEAR) {
+    return null;
+  }
+  return dayjs(composeIsoDate(parts));
 }
 
 /** Outcome of putting a custom report's six keyed parts through the reference's three edit families. */
 export interface CustomRangeValidation {
-  /** Every control to mark, in the order the reference flags them. */
+  /**
+   * The control to mark, which is the ONE the first failing edit named, or empty when none failed.
+   *
+   * Assumptions: a list of at most one entry rather than a single nullable member, because
+   * `reportRefusal` and the screen's `fieldErrors` state take a list -- a service refusal can name
+   * several properties at once, so the list shape is the screen's own and this validation contributes
+   * one element to it. The at-most-one bound is the reference's: every failing edit arm ends the task,
+   * so a terminal never showed two marks from this family either.
+   */
   readonly fieldErrors: readonly ReportsFieldError[];
   /** Sentence for the message band, or `null` when the range is acceptable. */
   readonly message: string | null;
@@ -631,45 +683,42 @@ export interface CustomRangeValidation {
 /**
  * Puts a custom report's six keyed parts through the reference's three edit families, in order.
  *
- * Purpose: the port of `app/cbl/CORPT00C.cbl` L258-L426 -- the empty family, the range family and the two
- * calendar checks -- preserving the DIFFERENT precedence each family has.
+ * Purpose: the port of `app/cbl/CORPT00C.cbl` L258-L426 -- the emptiness family, the range family and the
+ * two calendar checks -- preserving the family order and the reference's own stop-at-the-first-failure
+ * behaviour within each of them.
  *
- * ⚠️ Trade-offs: the two families behave differently on purpose, because the reference expresses them with
- * two different constructs and the difference is observable. L258-L303 is a single `EVALUATE TRUE` whose
- * arms are the six emptiness tests, and an `EVALUATE` short-circuits: the FIRST empty field wins, the
- * remaining five are never tested, and one sentence is shown. L329-L379 is six independent sequential
- * `IF` statements, so every failing field is flagged and each one overwrites `WS-MESSAGE`, which leaves
- * the LAST failure as the sentence on the band. Collapsing the two into one shape would change what an
- * operator sees for a form with several bad parts.
+ * ⚠️ Assumptions: EVERY family stops at its first failing edit, and the reason is the same transfer of
+ * control in all three. The emptiness tests are a single `EVALUATE TRUE` at L258-L303, which
+ * short-circuits by construction. The range tests at L329-L379 are six independent sequential `IF`
+ * statements and the two calendar tests at L387-L426 are two more, which reads as flag-them-all -- but
+ * every one of those arms ends in `PERFORM SEND-TRNRPT-SCREEN`, and that paragraph ends with
+ * `GO TO RETURN-TO-CICS` at L580, which issues `EXEC CICS RETURN`. The task therefore ENDS inside the
+ * first failing arm and no later arm in the paragraph is ever reached: one field is marked, that field's
+ * own sentence is on the band, and the cursor is on it.
  *
- * ⚠️ Assumptions: the flag-all reading of the range family is the STRUCTURAL one, and the qualification is
- * recorded rather than glossed. Each arm ends in `PERFORM SEND-TRNRPT-SCREEN`, and that paragraph ends
- * with `GO TO RETURN-TO-CICS` at L580, which issues `EXEC CICS RETURN` -- so on the terminal the task
- * actually ends at the first failing range check and the later ones never run. A stateless handler has no
- * task to end, and flagging every failing part is a superset of that behaviour in information terms: the
- * same sentence family, the same per-field marks, and nothing hidden that the terminal would have shown on
- * a later turn. The alternative -- stopping at the first range failure to mirror the transfer of control
- * -- would make the operator resubmit once per bad part to discover them all.
+ * ⚠️ Refactoring Rationale: the range and calendar families accumulated every failing part, kept the LAST
+ * one's sentence and put the cursor on the last one's control. That was structurally faithful to the
+ * sequential `IF` shape and behaviourally wrong: for a form with two bad parts the reference marks the
+ * first and quotes the first, while this marked both and quoted the second. The argument recorded for it
+ * -- that flagging everything spares the operator one resubmission per bad part -- is a usability
+ * preference, and AAP rule T9 admits no behavioural change on such a basis: an intentional divergence has
+ * to be registered in `docs/architecture/cobol-to-service-traceability.md`, and this one was not. Marked
+ * fields and message text are exactly the surface AAP rules T7 and T8 hold to the baseline, so the
+ * behaviour is now the reference's and the usability idea is not pursued here.
  *
- * Assumptions: normalisation runs BETWEEN the two families, never before the first, because the reference
- * places it at L305-L327 -- after the emptiness `EVALUATE` closes at L303 and before the first range `IF`
- * at L329. The order matters: normalising first would turn a blank field into `00` and defeat every one of
- * the six emptiness tests.
+ * Assumptions: normalisation runs BETWEEN the emptiness family and the range family, never before the
+ * first, because the reference places it at L305-L327 -- after the emptiness `EVALUATE` closes at L303 and
+ * before the first range `IF` at L329. The order matters: normalising first would turn a blank field into
+ * `00` and defeat every one of the six emptiness tests.
  * @param {DateRangeValues} values - The six parts exactly as the operator keyed them, untrimmed.
- * @returns {CustomRangeValidation} The marks to render, the sentence to paint, where to put the cursor,
+ * @returns {CustomRangeValidation} The one mark to render, the sentence to paint, where to put the cursor,
  *   and the composed bounds when every edit passed.
  */
 export function validateCustomRange(values: DateRangeValues): CustomRangeValidation {
   for (const bound of DATE_BOUNDS) {
     for (const part of DATE_PARTS) {
       if (isEmptyPart(values[bound][part])) {
-        const message = DATE_REFUSAL_MESSAGES[bound].empty[part];
-        return {
-          fieldErrors: [{ field: `${bound}-${part}`, message }],
-          message,
-          focus: `${bound}-${part}`,
-          range: null,
-        };
+        return refusedRange(`${bound}-${part}`, DATE_REFUSAL_MESSAGES[bound].empty[part]);
       }
     }
   }
@@ -679,39 +728,16 @@ export function validateCustomRange(values: DateRangeValues): CustomRangeValidat
     end: normaliseBound(values.end),
   };
 
-  const rangeFailures: ReportsFieldError[] = [];
-  let rangeMessage: string | null = null;
-  let rangeFocus: ReportsField | null = null;
-
   for (const bound of DATE_BOUNDS) {
     for (const part of DATE_PARTS) {
       if (!isPartWithinRange(normalised[bound][part], part)) {
-        const message = DATE_REFUSAL_MESSAGES[bound].range[part];
-        rangeFailures.push({ field: `${bound}-${part}`, message });
-        /*
-         * WHY : Assumptions: the sentence and the cursor are OVERWRITTEN on every failure rather than kept
-         *       from the first, which is what the sequential `IF` arms do -- each moves its own text into
-         *       `WS-MESSAGE` and its own `-1` into a field's length, so the last arm to run owns both. The
-         *       marks accumulate because each arm sets a different field; the sentence does not because
-         *       every arm sets the same one.
-         */
-        rangeMessage = message;
-        rangeFocus = `${bound}-${part}`;
+        return refusedRange(`${bound}-${part}`, DATE_REFUSAL_MESSAGES[bound].range[part]);
       }
     }
   }
 
-  if (rangeMessage !== null) {
-    return { fieldErrors: rangeFailures, message: rangeMessage, focus: rangeFocus, range: null };
-  }
-
-  const calendarFailures: ReportsFieldError[] = [];
-  let calendarMessage: string | null = null;
-  let calendarFocus: ReportsField | null = null;
-
   for (const bound of DATE_BOUNDS) {
     if (!isExistingCalendarDate(normalised[bound])) {
-      const message = DATE_REFUSAL_MESSAGES[bound].calendar;
       /*
        * WHY : Assumptions: the cursor goes to the MONTH part of the offending bound and not to the part
        *       that is actually wrong, because that is where the reference puts it -- L403 moves `-1` into
@@ -719,19 +745,8 @@ export function validateCustomRange(values: DateRangeValues): CustomRangeValidat
        *       names no part, so the month is the only position the reference can offer and the operator
        *       re-keys the bound from its start.
        */
-      calendarFailures.push({ field: `${bound}-month`, message });
-      calendarMessage = message;
-      calendarFocus = `${bound}-month`;
+      return refusedRange(`${bound}-month`, DATE_REFUSAL_MESSAGES[bound].calendar);
     }
-  }
-
-  if (calendarMessage !== null) {
-    return {
-      fieldErrors: calendarFailures,
-      message: calendarMessage,
-      focus: calendarFocus,
-      range: null,
-    };
   }
 
   return {
@@ -743,6 +758,21 @@ export function validateCustomRange(values: DateRangeValues): CustomRangeValidat
       endDate: composeIsoDate(normalised.end),
     },
   };
+}
+
+/**
+ * Composes the outcome one failing edit produces: its own mark, its own sentence, its own cursor.
+ *
+ * Assumptions: the sentence on the band and the sentence beneath the control are the SAME string rather
+ * than two, because the reference has only one -- it moves the literal into `WS-MESSAGE`, which
+ * `SEND-TRNRPT-SCREEN` moves into `ERRMSGO` at L560, and marks the field by moving `-1` into that field's
+ * length member. There is no second per-field text to carry, so both surfaces render the one sentence.
+ * @param {ReportsField} field - Control the failing edit named, which is also where the cursor goes.
+ * @param {string} message - Verbatim sentence from the message catalog for that edit.
+ * @returns {CustomRangeValidation} The refusal, carrying no composed bounds.
+ */
+function refusedRange(field: ReportsField, message: string): CustomRangeValidation {
+  return { fieldErrors: [{ field, message }], message, focus: field, range: null };
 }
 
 /**
@@ -929,6 +959,319 @@ export function mapSubmissionFailure(failure: unknown): SubmissionRefusal {
   return { message, fieldErrors, focus: 'reportType' };
 }
 
+/**
+ * Lowest HTTP status a service uses to report its OWN failure rather than the caller's.
+ *
+ * Assumptions: five hundred, mirroring `SERVER_ERROR_STATUS` in `ui/src/api/client.ts`, which mirrors the
+ * division the shared `ApiError` document draws. It is spelled here rather than imported because that
+ * constant is private to the client module, and this screen needs the boundary for a different decision --
+ * whether a refusal settled a submission -- not for classifying a failure.
+ */
+const LOWEST_SERVICE_FAILURE_STATUS = 500;
+
+/**
+ * Reports whether a failed submission settled the submission, so its identity may be released.
+ *
+ * Purpose: decides which failures end a submission and which leave it ambiguous, which is the whole
+ * mechanism behind retaining one submission key across retries.
+ *
+ * ⚠️ Assumptions: only a service's OWN refusal below the server-error boundary is conclusive. A problem
+ * document with a 4xx status was written by the reporting handler after it had decided not to start
+ * anything -- an unmarked report type, an unrecognised confirmation answer, a malformed submission key, a
+ * missing or rejected token -- so the operator must change the request and the next Enter is a genuinely
+ * new submission. Every other failure leaves it unknown whether the orchestrator accepted the start: the
+ * shared client abandons a call at its configured timeout, a lost connection reports nothing at all, a
+ * gateway can answer with a body that is not a problem document, and a 5xx or a 503 can be raised on
+ * either side of the moment the run was accepted. Those keep the identity, so pressing Enter again is
+ * recognised as the same submission and answered with the run that already exists.
+ *
+ * Alternatives Considered: releasing the identity on every failure, which is what an unconditional reset
+ * in the rejection handler would do. Rejected because the timeout case is precisely the one this
+ * mechanism exists for -- `ui/src/api/client.ts` bounds a call at ten seconds by default while the
+ * orchestrator may well have accepted the start -- so releasing there would start a second run of the
+ * same report and leave two sets of output objects with nothing to say which is current.
+ *
+ * Alternatives Considered: retaining the identity on every failure without exception, which is simpler
+ * and errs safely for double-starts. Rejected because a corrected resubmission after a 400 would then
+ * carry the previous attempt's key: with the same report type and the same bounds -- the other three
+ * parts of the service's execution name -- the corrected request would be refused as a duplicate of a
+ * request that never started anything.
+ * @param {unknown} failure - The value the submission rejected with, of any shape.
+ * @returns {boolean} `true` when the service refused this submission conclusively, so a later attempt is
+ *   a new submission rather than a retry of this one.
+ */
+export function isDefinitiveRefusal(failure: unknown): boolean {
+  return (
+    isApiRequestError(failure) &&
+    failure.kind === 'PROBLEM' &&
+    failure.status < LOWEST_SERVICE_FAILURE_STATUS
+  );
+}
+
+/** One of the six states `services/reporting-service` publishes for a report execution. */
+export type ExecutionState = ReportExecutionStatus['status'];
+
+/**
+ * The two states a run is still moving through, so the screen keeps reading its status.
+ *
+ * ⚠️ Assumptions: `PENDING_REDRIVE` is an ACTIVE state and not a terminal one, which is the single
+ * classification here a reader is most likely to get backwards. The orchestration reports it for a run
+ * that has been redriven and has not yet restarted -- so it is a transition, and treating it as
+ * terminal would stop the screen reading a run that is about to start producing a document. The
+ * contract's own note beside the enumeration says an operator has already been told about such a run,
+ * which is why it needs no sentence of its own beyond its status label.
+ *
+ * Assumptions: the ACTIVE set is enumerated rather than the terminal one, and the polling predicate is
+ * derived from it. Both readings are expressible; this one is chosen because the two active states are
+ * the closed set the screen has to keep working for, whereas a new terminal state added to the
+ * contract would then default to "stop reading", which is the safe direction to default in.
+ */
+const ACTIVE_EXECUTION_STATES: readonly ExecutionState[] = ['RUNNING', 'PENDING_REDRIVE'];
+
+/**
+ * Reports whether a run is still going, and therefore whether its status is worth reading again.
+ * @param {ExecutionState} state - State the last status read reported.
+ * @returns {boolean} `true` while the run may still change state on its own.
+ */
+export function isExecutionActive(state: ExecutionState): boolean {
+  return ACTIVE_EXECUTION_STATES.includes(state);
+}
+
+/**
+ * The authored sentence each terminal FAILURE state is explained with.
+ *
+ * Assumptions: three sentences rather than one, because the three states differ in what an operator
+ * does next. `services/reporting-service/src/main/resources/openapi/reporting-api.yaml` states the
+ * distinctions are ones an operator acts on -- a timed-out run is retried, an aborted run was stopped
+ * deliberately -- so one shared sentence would delete the only information the three carry that a bare
+ * "it failed" does not. Each string is imported from the catalog; none is composed here.
+ */
+const TERMINAL_FAILURE_DETAILS: Readonly<Record<'FAILED' | 'TIMED_OUT' | 'ABORTED', string>> = {
+  FAILED: REPORT_RUN_MESSAGES.FAILED_DETAIL,
+  TIMED_OUT: REPORT_RUN_MESSAGES.TIMED_OUT_DETAIL,
+  ABORTED: REPORT_RUN_MESSAGES.ABORTED_DETAIL,
+};
+
+/** The three coordinates the collect operation addresses one run's document by. */
+export interface ReportArtifactCoordinates {
+  /** The run's own report-type token, one of the four the contract publishes. */
+  readonly reportType: string;
+  /** Inclusive lower bound of the range the run covered. */
+  readonly startDate: string;
+  /** Inclusive upper bound of the range the run covered. */
+  readonly endDate: string;
+}
+
+/**
+ * Reports the coordinates a succeeded run's document can be collected by, or `null` when there is none.
+ *
+ * ⚠️ Assumptions: FOUR conditions are required and none of them is redundant. The state must be
+ * `SUCCEEDED`, because the contract states that only a succeeded run can have an artifact; and the
+ * result location must be present, because it is null while the run is going, after it failed AND after
+ * a lifecycle rule has expired what the run wrote -- so a completed run whose document has since been
+ * swept reports success with nothing to collect. The three coordinates must each be present because
+ * they are null for a run started outside this surface, which the nightly schedule does.
+ *
+ * Assumptions: the coordinates are taken from the STATUS and not from the submission this screen holds,
+ * although both carry a range. The status reports the range as the orchestration recorded it, which is
+ * the range the stored document actually covers; the submission reports what was asked for. They agree
+ * for every run this screen starts, and preferring the status means the collect request is composed from
+ * the same values the service composed the location from.
+ *
+ * Alternatives Considered: following `resultUri` directly, which is exactly the collect operation's path
+ * with these three values as query parameters. Rejected because the shared client's operation takes the
+ * three values and builds the path from its own contract manifest -- so following the location would
+ * mean either parsing a URL to recover them or bypassing the manifest, and the manifest is what keeps
+ * `ui/src/api/contracts.test.ts` able to check every request path against the published document.
+ *
+ * Alternatives Considered: checking the report type against the four tokens the contract enumerates, and
+ * the two bounds against the ISO calendar form. Deliberately NOT done, and the reason is what the
+ * rejection would cost rather than what the check would gain: `collectReportArtifact` documents a 400 for
+ * a token outside the published set, and the value here is the service's own recording of a run it
+ * started -- so a token this client did not recognise would be one the CONTRACT had gained, and
+ * withholding the download for it would report "no document" for a document that exists. The values are
+ * carried as query parameters, which the transport encodes, so nothing is composed from them unchecked.
+ * @param {ReportExecutionStatus | null} execution - The last status read, or `null` when none has been.
+ * @returns {ReportArtifactCoordinates | null} The three coordinates, or `null` when nothing is
+ *   collectable.
+ */
+export function collectableCoordinates(
+  execution: ReportExecutionStatus | null,
+): ReportArtifactCoordinates | null {
+  if (execution === null || execution.status !== 'SUCCEEDED' || execution.resultUri === null) {
+    return null;
+  }
+  const { reportType, startDate, endDate } = execution;
+  if (reportType === null || startDate === null || endDate === null) {
+    return null;
+  }
+  return { reportType, startDate, endDate };
+}
+
+/**
+ * Reports the sentence explaining a run's outcome, or `null` while there is nothing to explain.
+ *
+ * Assumptions: an ACTIVE run and a collectable succeeded one both answer `null`, because the status
+ * label beside them already says everything there is to say -- a sentence repeating "it is running"
+ * would fill the region with text carrying no information the label does not.
+ *
+ * Assumptions: a succeeded run with nothing to collect is reported with the same sentence whether its
+ * document has expired or the run was started outside this surface. The two causes differ and the
+ * available action does not: the report has to be submitted again either way, and naming the cause
+ * would describe the deployment's retention policy on an operator's screen.
+ * @param {ReportExecutionStatus | null} execution - The last status read, or `null` when none has been.
+ * @returns {string | null} The verbatim catalog sentence, or `null` when the label suffices.
+ */
+export function executionOutcomeDetail(execution: ReportExecutionStatus | null): string | null {
+  if (execution === null) {
+    return null;
+  }
+  if (execution.status === 'SUCCEEDED') {
+    return collectableCoordinates(execution) === null
+      ? REPORT_RUN_MESSAGES.DOCUMENT_UNAVAILABLE
+      : null;
+  }
+  // Assumptions: the three failure states are named individually rather than the table being indexed
+  //   with the status directly, so the compiler proves the key exists. Indexing by the six-value union
+  //   would need a cast, and a cast here would compile just as happily on the day a seventh state is
+  //   published and answer `undefined` for it at run time.
+  if (
+    execution.status === 'FAILED' ||
+    execution.status === 'TIMED_OUT' ||
+    execution.status === 'ABORTED'
+  ) {
+    return TERMINAL_FAILURE_DETAILS[execution.status];
+  }
+  return null;
+}
+
+/**
+ * Stem of the name the collected document is written to the file system under.
+ *
+ * ⚠️ Assumptions: a name is composed here BECAUSE the service deliberately declines to supply one. The
+ * contract states its `Content-Disposition` is `attachment` with no filename, and gives the reason: a
+ * filename derived from a card or an account would put an identifier into a value the browser writes to
+ * the file system. A transaction report is addressed by a type and two dates, which describe a query and
+ * name no person, so composing a name from exactly those three values stays inside that reasoning rather
+ * than working around it. Leaving the name to the browser is not an option worth taking: an object URL's
+ * basename is an opaque identifier, so every collected report would land in the operator's downloads
+ * folder under a different meaningless name.
+ */
+const REPORT_DOCUMENT_FILE_STEM = 'transaction-report';
+
+/**
+ * Extension the collected document is named with.
+ *
+ * Assumptions: `.txt` and not `.rpt` or no extension at all. The body is 133-column fixed-width text,
+ * one record per line, and the extension is what decides whether an operator's machine offers to open it
+ * with something that can display it. It says nothing about the media type, which the service declares as
+ * an opaque attachment so that no client re-encodes a parity artifact.
+ */
+const REPORT_DOCUMENT_FILE_SUFFIX = '.txt';
+
+/**
+ * Composes the file name one collected report document is saved under.
+ *
+ * Assumptions: the three coordinates are interpolated AS THE SERVICE RECORDED THEM, unnormalised. The
+ * result is carried on a `download` attribute, which names a file and is not a path -- a browser strips
+ * any separator it finds rather than following it -- so the value reaches the file system as one name
+ * whatever it contains. Normalising here would mean this module deciding what a report type may look
+ * like, which is the contract's decision and is made at the guard in {@link collectableCoordinates}.
+ * @param {ReportArtifactCoordinates} coordinates - The run's type and both range bounds.
+ * @returns {string} A name carrying the three coordinates, so two runs over different ranges do not
+ *   overwrite each other in the operator's downloads folder.
+ */
+export function reportDocumentFileName(coordinates: ReportArtifactCoordinates): string {
+  return `${REPORT_DOCUMENT_FILE_STEM}-${coordinates.reportType}-${coordinates.startDate}-${coordinates.endDate}${REPORT_DOCUMENT_FILE_SUFFIX}`;
+}
+
+/**
+ * Hands one collected document to the browser to save, and releases the handle it was passed through.
+ *
+ * ⚠️ Assumptions: the anchor is a TRANSPORT and not user interface, which is why it is a bare element in
+ * a tree where AAP section 0.3.2 admits only design-system components. It is created, clicked and
+ * removed inside this one call, is never part of a render, and carries no visual presence at all. The
+ * `download` attribute is the only mechanism a browser offers for naming a saved file, and a
+ * design-system button cannot carry it for bytes that do not exist until a request has answered.
+ *
+ * Alternatives Considered: holding the object URL in state and rendering a link the operator clicks a
+ * second time. Rejected because it turns one action into two and leaves a live handle to the document
+ * on the page for as long as the operator does not take the second one.
+ *
+ * ⚠️ Assumptions: the handle is released on the NEXT task rather than immediately after the click. The
+ * click starts the transfer, and browsers differ on whether they have finished reading the blob by the
+ * time the calling task ends -- revoking synchronously has been observed to abort the save. Deferring by
+ * one task keeps the release deterministic without racing the transfer, and the release happens either
+ * way, so no handle is leaked.
+ * @param {Blob} bytes - The document exactly as the service wrote it, undecoded.
+ * @param {ReportArtifactCoordinates} coordinates - The run's coordinates, which name the saved file.
+ * @returns {void} Nothing; the browser is left to write the file.
+ */
+function saveReportDocument(bytes: Blob, coordinates: ReportArtifactCoordinates): void {
+  const handle = URL.createObjectURL(bytes);
+  const anchor = window.document.createElement('a');
+  anchor.href = handle;
+  anchor.download = reportDocumentFileName(coordinates);
+  // Assumptions: `noopener` is set although the anchor opens nothing. It costs nothing, and it means a
+  //   later edit that adds a target cannot hand the opened context a reference back to this one.
+  anchor.rel = 'noopener';
+  window.document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(
+    /**
+     * Releases the object URL once the browser has had a task to start reading it.
+     * @returns {void} Nothing; the handle is revoked in place.
+     */
+    (): void => {
+      URL.revokeObjectURL(handle);
+    },
+  );
+}
+
+/**
+ * Gap between two automatic status reads, in milliseconds.
+ *
+ * Assumptions: five seconds, matching the receive wait `ui/src/api/reporting.ts` records the reference's
+ * message flows using, so the one interval this application polls on is the one interval the baseline
+ * already waited on. Trade-offs: a shorter gap would report a finished run sooner and multiply the reads
+ * a nightly-sized report costs; a longer one would leave an operator watching an unchanging label. The
+ * manual control beside it is what makes the choice non-critical -- an operator who does not want to wait
+ * does not have to.
+ */
+const STATUS_POLL_INTERVAL_MS = 5_000;
+
+/**
+ * How many FURTHER reads one tracked run gets after its first, before the screen stops on its own.
+ *
+ * Assumptions: the first read is not counted, because it is not on the timer -- adopting a run reads its
+ * status at once, and this bounds only what the screen goes on to schedule. So a followed run costs one
+ * read plus at most this many, which is what `ui/src/screens/reports/reports.test.tsx` asserts.
+ *
+ * ⚠️ Assumptions: the loop is BOUNDED rather than left to run for as long as the screen is mounted, and
+ * the bound is the point of it. A report over a wide date range can outlive an operator's attention, and
+ * an unbounded loop would then have a forgotten tab reading a status every five seconds for as long as it
+ * stayed open -- a request per five seconds per abandoned tab, against a service whose other reads are
+ * operator-driven. Sixty scheduled reads is five minutes at the interval above, after which the screen
+ * says so and the operator refreshes.
+ *
+ * Alternatives Considered: stopping when the document loses focus, and backing off exponentially. Both
+ * were rejected for the same reason: they make the moment the screen stops reading depend on something an
+ * operator cannot see, whereas a fixed count reaches a state the screen can and does announce.
+ */
+const MAX_AUTOMATIC_STATUS_READS = 60;
+
+/**
+ * The status the collect operation answers when there is no document at those coordinates.
+ *
+ * Assumptions: this is the one status of that operation's five this screen distinguishes, because it is
+ * the only one that changes what the operator should do. `collectReportArtifact` documents it as the
+ * answer both for a run that never happened and for one whose document has been expired by a lifecycle
+ * rule, and neither is recoverable by trying again -- so it is reported as an absent document while every
+ * other answer is reported as a request to retry.
+ */
+const DOCUMENT_ABSENT_STATUS = 404;
+
 /** The empty state both bounds start in, matching the space-filled map fields the mapset declares. */
 const EMPTY_RANGE: DateRangeValues = {
   start: { month: '', day: '', year: '' },
@@ -1005,6 +1348,72 @@ export function ReportsScreen(): ReactElement {
   const [busy, setBusy] = useState(false);
 
   /*
+   * WHY : Refactoring Rationale: the run's LIFECYCLE is held apart from the submission that started
+   *       it, because they are two different facts with two different lifetimes. The submission is
+   *       what one turn produced and never changes again; the lifecycle is what the orchestration
+   *       reports about that run and changes without the operator doing anything. This screen
+   *       previously held only the first of the two and rendered the run's name, so a report an
+   *       operator had submitted could not be followed and its document could not be reached from
+   *       anywhere in the application -- the two operations that answer both questions were published
+   *       by `ui/src/api/reporting.ts` and called from nowhere.
+   * WHY : Assumptions: `busy` is NOT reused for either of the two reads below. It gates the form and
+   *       disables every input while a submission is outstanding, which is the wrong behaviour for a
+   *       status read -- an operator reading the status of a finished run has no reason to lose the
+   *       form they are filling in for the next one.
+   */
+  const [execution, setExecution] = useState<ReportExecutionStatus | null>(null);
+  const [runNotice, setRunNotice] = useState<string | null>(null);
+  const [statusReadPending, setStatusReadPending] = useState(false);
+  const [collecting, setCollecting] = useState(false);
+
+  /*
+   * WHY : Assumptions: a manual read is requested by BUMPING a counter that the following effect
+   *       depends on, rather than by calling the read directly. The effect owns the timer, so a read
+   *       started outside it would run alongside a scheduled one and both would settle into the same
+   *       state; changing the dependency tears the timer down and starts a single fresh loop, which
+   *       makes "refresh now" and "keep polling" one mechanism instead of two that have to agree.
+   * WHY : Alternatives Considered: exposing the read as a callback and having the effect call it on a
+   *       timer. Rejected because the callback would then need the same liveness guard the effect's
+   *       teardown already provides, and a settlement arriving after a newer run replaced the tracked
+   *       one would have nothing to be dropped by.
+   */
+  const [statusReadRequest, setStatusReadRequest] = useState(0);
+
+  /**
+   * Identity of the run being followed, or `null` when no run has been started this turn.
+   *
+   * Assumptions: derived from the submission rather than stored beside it, so exactly one run is
+   * followed and it is always the one the screen is displaying. A refusal clears the submission -- see
+   * {@link reportRefusal} -- and therefore stops the loop; the run itself carries on producing its
+   * document, and the deploy runbook records how an operator reaches a document whose handle they no
+   * longer hold.
+   */
+  const trackedRun = submission === null ? null : submission.executionName;
+
+  /*
+   * WHY : Assumptions: two references guard the asynchronous work, and they answer different
+   *       questions. The mounted flag decides whether a settlement may touch state at all, and is
+   *       needed because collecting a document is the one operation here that can outlive the
+   *       operator's interest in the screen. The read counter decides whether the loop has spent its
+   *       budget, and lives in a reference rather than in state because changing it must not itself
+   *       cause a render -- it is incremented from inside the effect that would then re-run.
+   */
+  const mounted = useRef(true);
+  const automaticReads = useRef(0);
+
+  /**
+   * The run the screen is currently following, as a value a settlement can read.
+   *
+   * ⚠️ Assumptions: this exists for the COLLECTION and not for the status read. The status read is owned
+   * by an effect whose teardown disowns it, so replacing the tracked run drops its answer; a collection
+   * is started by a click and has no teardown, so its only guard would otherwise be that the screen is
+   * still mounted -- and a document collected for a superseded run would then be saved to the operator's
+   * file system while a different run is on the screen. Comparing against this makes the guard the run
+   * rather than the component.
+   */
+  const followedRun = useRef<string | null>(null);
+
+  /*
    * WHY : Assumptions: the in-flight state is held in a ref AS WELL AS in state, and the two answer
    *       different questions. The state value drives the rendered busy affordance; the ref is what a
    *       handler reads to decide whether a turn is already running, because React state set earlier in the
@@ -1013,6 +1422,29 @@ export function ReportsScreen(): ReactElement {
    *       where the operator asked for one.
    */
   const inFlight = useRef(false);
+
+  /*
+   * WHY : ⚠️ Refactoring Rationale: one submission identity is minted per SUBMISSION and retained across
+   *       its attempts, where every dispatch used to be anonymous. The reporting service deduplicates a
+   *       re-sent submission by composing its orchestration execution name from the report type, both
+   *       bounds and a submission key -- `ReportExecutionService.executionName` -- and it takes that key
+   *       from the `Idempotency-Key` header when one arrives, falling back to a digest of the request's
+   *       correlation identifier when none does. This screen sent no header and the shared client minted a
+   *       fresh correlation identifier on every dispatch, so neither source was stable: an operator who
+   *       pressed Enter again after the ten-second client timeout expired on a call the orchestrator had
+   *       already accepted started a SECOND run of the same report, producing two sets of output objects
+   *       with nothing to say which was current.
+   * WHY : Assumptions: a ref rather than state, for the reason `inFlight` above is one -- the identity has
+   *       to be readable and writable inside the handler that dispatches, and state set earlier in the same
+   *       task is not readable within it. Nothing renders from it, so there is nothing for a re-render to
+   *       carry.
+   * WHY : Trade-offs: the identity is retained even when the operator edits the form between attempts,
+   *       which is safe rather than merely tolerable: the service's execution name carries the report type
+   *       and BOTH bounds beside the key, so a retained key cannot fold a submission over one range onto a
+   *       run over another. Clearing it on every edit was the alternative, and it would break the case this
+   *       exists for -- an operator who corrects nothing and simply presses Enter again after a timeout.
+   */
+  const submissionIdentity = useRef<string | null>(null);
 
   const reportTypeRef = useRef<HTMLDivElement | null>(null);
   const confirmRef = useRef<InputRef | null>(null);
@@ -1056,10 +1488,11 @@ export function ReportsScreen(): ReactElement {
     /**
      * Applies a recorded cursor move once the render that caused it has been committed.
      *
-     * Assumptions: focusing the report-type group reaches the FIRST radio rather than the group wrapper,
-     * because a wrapper is not a focusable control. The reference's `MOVE -1 TO MONTHLYL` names the monthly
-     * field specifically, and monthly is the first option, so querying the group for its first input lands
-     * on exactly the field the reference names -- and keeps doing so without a second ref per option.
+     * Assumptions: focusing the report-type group reaches the FIRST radio rather than the element the
+     * reference points at, because the element carrying `role="radiogroup"` is a container and not a
+     * focusable control. The reference's `MOVE -1 TO MONTHLYL` names the monthly field specifically, and
+     * monthly is the first option, so querying the group for its first input lands on exactly the field
+     * the reference names -- and keeps doing so without a second ref per option.
      * @returns {void} Completion is the focused control. A control that is not currently rendered is a
      *   no-op, and the request is cleared either way so it can never be replayed on a later render.
      */
@@ -1077,6 +1510,179 @@ export function ReportsScreen(): ReactElement {
       setPendingFocus(null);
     },
     [pendingFocus],
+  );
+
+  useEffect(
+    /**
+     * Tracks whether the screen is still mounted, so a settlement never writes state after it is gone.
+     *
+     * Assumptions: the flag is raised here as well as at its declaration, for the reason
+     * `ui/src/hooks/usePagedQuery.ts` records of the same arrangement: a remount reuses neither the
+     * reference's initial value nor the previous teardown's, so under a development double-mount the
+     * first teardown lowers it and the second mount has to raise it again.
+     * @returns {() => void} Teardown lowering the flag.
+     */
+    (): (() => void) => {
+      mounted.current = true;
+      return (
+        /**
+         * Lowers the mounted flag so an outstanding collection settles into nothing.
+         * @returns {void} Nothing; the flag is lowered in place.
+         */
+        (): void => {
+          mounted.current = false;
+        }
+      );
+    },
+    [],
+  );
+
+  useEffect(
+    /**
+     * Forgets the previous run's lifecycle as soon as a different run becomes the tracked one.
+     *
+     * ⚠️ Assumptions: this is declared BEFORE the following effect and the order is load bearing. React
+     * runs a component's effects in declaration order, so on the render that adopts a new run the
+     * previous run's status has already been dropped by the time the loop below performs its first
+     * read -- which is what stops the old run's state being displayed under the new run's reference for
+     * the length of one request.
+     *
+     * Assumptions: it depends on the tracked run alone, so a manual read does NOT clear the status. A
+     * refresh that blanked the status and then refilled it would flicker the one value the operator
+     * pressed the control to see.
+     *
+     * ⚠️ Assumptions: the two BUSY flags are lowered here as well, and not only the two values. Either
+     * read can be outstanding when a newer run is adopted, and the settlement that would have lowered
+     * the flag is then disowned -- so without this a superseded collection would leave its control
+     * spinning against the new run for as long as the screen stayed open, describing work that is no
+     * longer being done for the run on display.
+     * @returns {void} Nothing; the derived lifecycle state is reset in place.
+     */
+    (): void => {
+      setExecution(null);
+      setRunNotice(null);
+      setStatusReadPending(false);
+      setCollecting(false);
+      automaticReads.current = 0;
+      followedRun.current = trackedRun;
+    },
+    [trackedRun],
+  );
+
+  useEffect(
+    /**
+     * Reads the tracked run's status, and keeps reading while the run is still going.
+     *
+     * Purpose: the half of the report lifecycle the reference has no equivalent of at all. Writing to
+     * the `JOBS` transient data queue returned no identity and no outcome -- `app/csd/CARDDEMO.CSD`
+     * L499-L505 defines it with `ERROROPTION(IGNORE)` -- so this is a documented improvement rather
+     * than a port, and the loop exists because the target's own contract publishes a status to read.
+     *
+     * ⚠️ Assumptions: the loop is a CHAIN of timers and not an interval. Each read is scheduled only
+     * once the previous one has settled, so a slow service cannot accumulate overlapping requests --
+     * which `setInterval` would do, and which would then have several settlements racing to write one
+     * status.
+     *
+     * Assumptions: a read that FAILS stops the chain rather than retrying. The operator is told and
+     * has a control that reads again, so an automatic retry would repeat a failing request on a timer
+     * while adding nothing an operator cannot do deliberately.
+     * @returns {() => void} Teardown that both stops the chain and makes any outstanding settlement a
+     *   no-op, so replacing the tracked run or leaving the screen cannot revive the previous run's
+     *   state.
+     */
+    (): (() => void) => {
+      let live = true;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const name = trackedRun;
+
+      /**
+       * Stops the chain and disowns whatever is outstanding.
+       * @returns {void} Nothing; the flag and the timer are cleared in place.
+       */
+      function stopFollowing(): void {
+        live = false;
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
+      }
+
+      if (name === null) {
+        return stopFollowing;
+      }
+
+      /*
+       * WHY : Assumptions: the four steps below are `const` arrows rather than the function
+       *       declarations the rest of this module uses, and the reason is a compiler rule rather
+       *       than a style preference. TypeScript preserves a narrowing of a `const` inside a closure
+       *       CREATED AFTER the narrowing, and a `function` declaration is hoisted to the top of its
+       *       block -- so declared that way, `name` would still be `string | null` inside these bodies
+       *       even though the guard above has already returned for the null case, and the read would
+       *       not compile. Threading the narrowed name through four signatures was the alternative;
+       *       it compiles and puts the same value in four parameter lists for no gain.
+       */
+
+      /**
+       * Schedules the next automatic read, or reports that automatic reads have stopped.
+       * @returns {void} Nothing; either a timer is armed or the notice is painted.
+       */
+      const scheduleNextRead = (): void => {
+        if (automaticReads.current >= MAX_AUTOMATIC_STATUS_READS) {
+          setRunNotice(REPORT_RUN_MESSAGES.AUTOMATIC_UPDATES_STOPPED);
+          return;
+        }
+        automaticReads.current += 1;
+        timer = setTimeout(readStatus, STATUS_POLL_INTERVAL_MS);
+      };
+
+      /**
+       * Adopts a status read, and keeps the chain going while the run is still moving.
+       * @param {ReportExecutionStatus} status - What the service reports about the run.
+       * @returns {void} Nothing; the run's state is replaced and the next read possibly armed.
+       */
+      const applyStatus = (status: ReportExecutionStatus): void => {
+        if (!live) {
+          return;
+        }
+        setStatusReadPending(false);
+        setRunNotice(null);
+        setExecution(status);
+        if (isExecutionActive(status.status)) {
+          scheduleNextRead();
+        }
+      };
+
+      /**
+       * Reports a status read that did not answer, without disclosing why.
+       *
+       * Assumptions: the cause goes to the console and the operator gets one authored sentence, which
+       * is the split `ui/src/main.tsx` and `ui/src/layout/ShellContentBoundary.tsx` both apply. An
+       * HTTP status, a run name and a service path are internal; the operator can act on none of them
+       * and rendering any of them would put deployment detail into every screenshot of this screen.
+       * @param {unknown} cause - Whatever the read rejected with.
+       * @returns {void} Nothing; the notice is painted and the chain is left stopped.
+       */
+      const reportUnreadableStatus = (cause: unknown): void => {
+        if (!live) {
+          return;
+        }
+        console.warn('carddemo: the status of a report run could not be read', cause);
+        setStatusReadPending(false);
+        setRunNotice(REPORT_RUN_MESSAGES.STATUS_READ_FAILED);
+      };
+
+      /**
+       * Reads the run's status once.
+       * @returns {void} Nothing; the outcome is applied by one of the two settlements above.
+       */
+      const readStatus = (): void => {
+        setStatusReadPending(true);
+        readReportExecution(name).then(applyStatus, reportUnreadableStatus);
+      };
+
+      readStatus();
+      return stopFollowing;
+    },
+    [trackedRun, statusReadRequest],
   );
 
   /**
@@ -1128,28 +1734,41 @@ export function ReportsScreen(): ReactElement {
   }
 
   /**
-   * Resolves the range a chosen report type covers, running the edit chain only for the custom type.
+   * Resolves what a chosen report type SUBMITS, running the edit chain only for the custom type.
    *
-   * Assumptions: the two preset types resolve their own bounds and are never edit-checked, because the
-   * reference computes them from the clock rather than reading them from the screen -- `app/cbl/CORPT00C.cbl`
-   * L214-L238 and L240-L255 -- and its whole edit chain sits inside the custom arm at L256-L436.
+   * Assumptions: the two preset types are never edit-checked, because the reference derives them rather
+   * than reading them from the screen -- `app/cbl/CORPT00C.cbl` L214-L238 and L240-L255 -- and its whole
+   * edit chain sits inside the custom arm at L256-L436.
    *
-   * ⚠️ Assumptions: both preset ranges are resolved HERE and transmitted, although `ReportRequest` declares
-   * each bound optional and the service can resolve them itself. The reference resolves them on the
-   * presentation side and puts the results in the submitted job control, so transmitting them is the port.
-   * It also removes a real hazard the service-side default carries: a monthly report submitted seconds
-   * either side of midnight on the last day of a month would otherwise resolve to two different ranges, and
-   * `ui/src/api/reporting.ts` records that a bound is supplied by the caller precisely so that two runs of
-   * one report over one range produce the same document.
+   * ⚠️ Refactoring Rationale: the two presets now submit NO bounds, where they previously computed both
+   * from the anchored instant and transmitted them. Transmitting them was measurably pointless: the
+   * service does not read them on a preset. `ReportExecutionService.resolveRange(request, reportName)`
+   * dispatches on the report name and calls `resolveMonthlyRange()` and `resolveYearlyRange()` with NO
+   * arguments, reaching `resolveCustomRange(request)` -- the only arm that reads the request's bounds --
+   * for the custom type alone. So the computed pair was serialised, sent and discarded, and the two
+   * clock-derived computers that produced it were dead weight behind an appearance of authority.
+   *
+   * ⚠️ Assumptions: the service's clock is therefore authoritative for a preset's period, which is a
+   * registered divergence rather than a silent one -- `D-REPORT-PRESET-RANGE-SERVICE-CLOCK` in
+   * `docs/architecture/cobol-to-service-traceability.md`. The reference resolved a preset on the
+   * presentation side from the region's own clock, and the target resolves it on the service side from
+   * the service's; both read one trusted clock, and neither lets the browser's clock decide. Sending a
+   * client-computed pair could not have made the two agree in any case -- the service ignores it -- so
+   * the previous rationale about a submission either side of midnight resolving two different ranges
+   * described a guarantee the transmission never actually bought.
+   *
+   * Assumptions: the two presets remain WITHHELD until a server instant has been observed, which
+   * {@link renderReportTypeOption} enforces on the control itself. That gate is about provenance and not
+   * about this computation, so removing the computation does not release it: a preset means "the period
+   * the system considers current", and the screen declines to offer one until it can paint which date
+   * that is -- `ui/src/screens/reports/refusalAnnouncement.test.tsx` holds both halves of that.
    * @param {ReportType} chosen - Report type the operator selected.
-   * @returns {ReportDateRange | null} The bounds to submit, or `null` when a refusal was painted instead.
+   * @returns {SubmittedRange | null} The bounds to submit -- neither, for a preset -- or `null` when a
+   *   refusal was painted instead.
    */
-  function resolveRange(chosen: ReportType): ReportDateRange | null {
-    if (chosen === 'monthly') {
-      return computeMonthlyRange(dayjs(paintedAt));
-    }
-    if (chosen === 'yearly') {
-      return computeYearlyRange(dayjs(paintedAt));
+  function resolveRange(chosen: ReportType): SubmittedRange | null {
+    if (chosen === 'monthly' || chosen === 'yearly') {
+      return NO_SUBMITTED_RANGE;
     }
 
     const validation = validateCustomRange(range);
@@ -1166,12 +1785,22 @@ export function ReportsScreen(): ReactElement {
 
   /**
    * Starts one report run and renders whichever of the three outcomes the service reports.
+   *
+   * Assumptions: the submission identity is resolved here rather than in {@link runTurn}, because this is
+   * the one function that dispatches -- a turn refused by the report-type check, the range edits or the
+   * confirmation sends nothing, so it must not consume an identity and make the next real submission look
+   * like a retry of a request that never left the browser.
    * @param {ReportType} chosen - Report type being submitted, which names the acknowledgement's report.
-   * @param {ReportDateRange} bounds - Bounds the run is submitted over.
+   * @param {SubmittedRange} submittedRange - Bounds the run is submitted over, which a preset leaves
+   *   empty so the service resolves them from its own clock.
    * @param {string} answer - The confirmation character to relay, which is always a consenting one.
    * @returns {void} Completion is represented by the screen's own state.
    */
-  function startReportRun(chosen: ReportType, bounds: ReportDateRange, answer: string): void {
+  function startReportRun(
+    chosen: ReportType,
+    submittedRange: SubmittedRange,
+    answer: string,
+  ): void {
     /*
      * WHY : Assumptions: exactly one of the three marks is set. `ReportRequest` keeps all three as separate
      *       members because the reference resolves a double mark by precedence rather than refusing it --
@@ -1187,8 +1816,14 @@ export function ReportsScreen(): ReactElement {
       transactionName: REPORTS_TRANSACTION_ID,
       programName: REPORTS_PROGRAM_NAME,
       ...reportTypeMarks(chosen),
-      startDate: bounds.startDate,
-      endDate: bounds.endDate,
+      /*
+       * WHY : Assumptions: the range is SPREAD rather than assigned member by member, so that a preset
+       *       omits both keys instead of sending them as `undefined`. The two are optional in
+       *       `ReportRequest`, and omitting a key and sending it undefined are the same value to a
+       *       reader but not the same request on the wire -- `exactOptionalPropertyTypes` is what makes
+       *       the distinction expressible here, and the spread is the form that keeps it.
+       */
+      ...submittedRange,
       confirm: answer,
     };
 
@@ -1197,7 +1832,17 @@ export function ReportsScreen(): ReactElement {
     setMessage(null);
     setFieldErrors([]);
 
-    submitTransactionReport(request).then(
+    /*
+     * WHY : Assumptions: a retained identity is REUSED and only an absent one is minted, so the first
+     *       attempt and every later attempt at one submission carry the same value. `newSubmissionKey`
+     *       states why its shape satisfies both published domains at once -- the reporting service's
+     *       submission-key domain and the narrower correlation-identifier contract the shared client
+     *       filter enforces -- so this call site chooses no format of its own.
+     */
+    submissionIdentity.current ??= newSubmissionKey();
+    const submissionKey = submissionIdentity.current;
+
+    submitTransactionReport(request, submissionKey).then(
       /**
        * Renders the outcome the service reported for this submission.
        * @param {ReportSubmissionOutcome} outcome - Which of the three arms the service answered with.
@@ -1206,6 +1851,14 @@ export function ReportsScreen(): ReactElement {
       (outcome: ReportSubmissionOutcome): void => {
         inFlight.current = false;
         setBusy(false);
+        /*
+         * WHY : Assumptions: the identity is spent on ANY of the three answered outcomes, because each of
+         *       them is the service having settled this submission -- started, declined, or asking for the
+         *       confirmation again. The next Enter is then a new submission and mints a new identity, which
+         *       is what keeps a legitimate rerun of the same report over the same range from being folded
+         *       onto the run that just finished: the service remembers an execution name for ninety days.
+         */
+        submissionIdentity.current = null;
 
         if (outcome.outcome === 'STARTED') {
           /*
@@ -1262,8 +1915,136 @@ export function ReportsScreen(): ReactElement {
       (failure: unknown): void => {
         inFlight.current = false;
         setBusy(false);
+        /*
+         * WHY : Assumptions: the identity survives an INCONCLUSIVE failure and is spent on a conclusive
+         *       one, which is the whole point of retaining it -- see {@link isDefinitiveRefusal} for which
+         *       failures fall on which side and why the ambiguous ones are the ones that matter.
+         */
+        if (isDefinitiveRefusal(failure)) {
+          submissionIdentity.current = null;
+        }
         const refusal = mapSubmissionFailure(failure);
         reportRefusal(refusal.message, refusal.fieldErrors, refusal.focus);
+      },
+    );
+  }
+
+  /**
+   * Reads the tracked run's status now, without waiting for the next automatic read.
+   *
+   * Purpose: the operator's own way of asking what became of a run -- the action the baseline required
+   * a different system for, because the queue write it performed reported nothing back.
+   *
+   * Assumptions: the automatic budget is restored as well as a read being requested, and the two belong
+   * together. The bound on {@link MAX_AUTOMATIC_STATUS_READS} exists to stop an ABANDONED screen reading
+   * forever; an operator pressing this control is by definition not abandoned, so the evidence the bound
+   * was guarding against has just been contradicted.
+   * @returns {void} Completion is represented by the screen's own state.
+   */
+  function refreshRunStatus(): void {
+    if (trackedRun === null || statusReadPending) {
+      return;
+    }
+    automaticReads.current = 0;
+    setStatusReadRequest(
+      /**
+       * Advances the read request so the following effect restarts with a fresh read.
+       * @param {number} previous - Requests made so far.
+       * @returns {number} The next request number.
+       */
+      (previous: number): number => previous + 1,
+    );
+  }
+
+  /**
+   * Collects the document a succeeded run produced and hands it to the browser to save.
+   *
+   * ⚠️ Assumptions: the coordinates are recomputed from the status HERE rather than taken from the
+   * render that painted the control, so a status that changed between the paint and the press cannot
+   * produce a request for a document that is no longer there. The guard is also what makes the control's
+   * absence and its behaviour rest on one predicate instead of two that have to agree.
+   *
+   * Assumptions: nothing about the document is rendered on this screen. It is 133 columns of
+   * fixed-width text whose amount bands carry COBOL edit masks that a golden-master comparison reads
+   * byte for byte, so displaying it here would make this screen a second renderer of a parity artifact
+   * -- which is the reason `ui/src/api/reporting.ts` hands back undecoded bytes in the first place.
+   * @returns {void} Completion is represented by the screen's own state and the browser's saved file.
+   */
+  function collectDocument(): void {
+    const coordinates = collectableCoordinates(execution);
+    if (coordinates === null || collecting) {
+      return;
+    }
+
+    setCollecting(true);
+    setRunNotice(null);
+    const requestedFor = trackedRun;
+
+    /**
+     * Reports whether this collection is still the one the screen is waiting for.
+     *
+     * Assumptions: BOTH conditions are required. The mount check stops a settlement writing state after
+     * the screen has gone, and the run check stops a superseded settlement acting on the screen that
+     * replaced it -- and only the second of the two can prevent a document being saved for a run the
+     * operator has moved on from.
+     * @returns {boolean} `true` when the settlement may act.
+     */
+    function stillWanted(): boolean {
+      return mounted.current && followedRun.current === requestedFor;
+    }
+
+    collectReportArtifact(coordinates.reportType, coordinates.startDate, coordinates.endDate).then(
+      /**
+       * Hands the collected bytes to the browser.
+       *
+       * Assumptions: the save is guarded, because it is the one step here that touches the browser
+       * directly. Minting an object URL, activating a transient anchor and releasing the handle are all
+       * capabilities a hardened browser configuration can withhold, and a throw inside a settlement
+       * would otherwise surface as an unhandled rejection with the control already un-spun -- a
+       * download that silently did not happen, which is the one outcome worse than a reported failure.
+       * @param {Blob} bytes - The document exactly as the service wrote it.
+       * @returns {void} Completion is represented by the browser's saved file.
+       */
+      (bytes: Blob): void => {
+        if (!stillWanted()) {
+          return;
+        }
+        setCollecting(false);
+        try {
+          saveReportDocument(bytes, coordinates);
+        } catch (cause: unknown) {
+          console.warn('carddemo: a report document could not be handed to the browser', cause);
+          setRunNotice(REPORT_RUN_MESSAGES.DOCUMENT_COLLECTION_FAILED);
+        }
+      },
+      /**
+       * Reports a collection that did not answer, without disclosing why.
+       *
+       * ⚠️ Assumptions: a NOT-FOUND answer is reported as an absent document rather than as a failed
+       * request, and the two are genuinely different for the operator. `collectReportArtifact` documents
+       * 404 as the answer both for a run that never happened and for one whose document a lifecycle rule
+       * has expired -- neither of which a second attempt or a status read will recover, so the sentence
+       * that says to submit the report again is the only one that is true. Every other answer may well
+       * be transient, so it gets the sentence that says to try again.
+       *
+       * Assumptions: the status is read through the shared failure type rather than from a property of
+       * the raw cause, so a rejection that is not one of this client's -- a browser error, a programming
+       * error -- falls through to the general sentence instead of being read for a status it never had.
+       * @param {unknown} cause - Whatever the collection rejected with.
+       * @returns {void} Completion is represented by the screen's own state.
+       */
+      (cause: unknown): void => {
+        if (!stillWanted()) {
+          return;
+        }
+        console.warn('carddemo: a report document could not be collected', cause);
+        setCollecting(false);
+        const absent = isApiRequestError(cause) && cause.status === DOCUMENT_ABSENT_STATUS;
+        setRunNotice(
+          absent
+            ? REPORT_RUN_MESSAGES.DOCUMENT_UNAVAILABLE
+            : REPORT_RUN_MESSAGES.DOCUMENT_COLLECTION_FAILED,
+        );
       },
     );
   }
@@ -1299,12 +2080,16 @@ export function ReportsScreen(): ReactElement {
      *       which is reached when none of the three marks is set.
      */
     if (reportType === null) {
-      reportRefusal(REPORT_MESSAGES.SELECT_A_REPORT_TYPE_TO_PRINT_REPORT, [], 'reportType');
+      reportRefusal(
+        REPORT_MESSAGES.SELECT_A_REPORT_TYPE_TO_PRINT_REPORT,
+        SELECTOR_REFUSAL_MARKS,
+        'reportType',
+      );
       return;
     }
 
-    const bounds = resolveRange(reportType);
-    if (bounds === null) {
+    const submittedRange = resolveRange(reportType);
+    if (submittedRange === null) {
       return;
     }
 
@@ -1330,7 +2115,7 @@ export function ReportsScreen(): ReactElement {
       return;
     }
 
-    startReportRun(reportType, bounds, answer);
+    startReportRun(reportType, submittedRange, answer);
   }
 
   /**
@@ -1544,6 +2329,16 @@ export function ReportsScreen(): ReactElement {
   };
   const fixedPitchStyle: CSSProperties = { fontFamily: cssVar[TYPOGRAPHY_TOKENS.fixedPitchData] };
 
+  /*
+   * WHY : Assumptions: both are DERIVED from the last status read rather than stored beside it, so
+   *       the sentence and the control can never describe a status the screen is not showing. The
+   *       alternative -- setting them in the settlement that read the status -- would put two more
+   *       values in state that have to be kept in step with a third, and every path that forgot one
+   *       would offer a download for a run whose document had gone.
+   */
+  const outcomeDetail = executionOutcomeDetail(execution);
+  const collectable = collectableCoordinates(execution);
+
   /**
    * Finds the refusal naming one control, if the last turn produced one for it.
    * @param {ReportsField} field - Control to look up.
@@ -1559,6 +2354,19 @@ export function ReportsScreen(): ReactElement {
       (entry: ReportsFieldError): boolean => entry.field === field,
     );
   }
+
+  /*
+   * WHY : Assumptions: the selector group's identifier and its refusal are read ONCE, here, and every
+   *       consumer below reads these two values rather than recomposing the identifier or querying the
+   *       refusal again. That is what makes the association below sound rather than coincidental: the
+   *       element carrying the sentence, the `aria-invalid` state and the `aria-describedby` that names
+   *       that element are all derived from the same two values, so they cannot disagree about whether a
+   *       refusal exists or about which identifier carries it. The six date parts and the confirmation
+   *       already read theirs this way -- see `renderDatePart` -- and this brings the group's own wiring
+   *       under the same shape rather than inventing a second one.
+   */
+  const reportTypeControlId = `${idPrefix}reportType`;
+  const reportTypeRefusal = refusalFor('reportType');
 
   /**
    * Renders one date part as a digit-restricted control at its declared width.
@@ -1620,13 +2428,15 @@ export function ReportsScreen(): ReactElement {
     const caption = REPORTS_CAPTIONS[bound === 'start' ? 'startDate' : 'endDate'];
     const parts = range[bound];
     /*
-     * WHY : Assumptions: the calendar shows a value only when all three parts together name a real date.
-     *       A partially keyed bound has no date to show, and handing the control a half-formed value would
-     *       either display a date the operator did not enter or force the control into an invalid state it
-     *       has no way to render.
+     * WHY : Assumptions: the calendar shows a value only when all three parts together name a real date
+     *       AND the control can carry that date's year unchanged. A partially keyed bound has no date to
+     *       show; a bound whose year falls below one hundred has one the control would display as a
+     *       different year, and {@link calendarValueFor} records the measurement and the two rejected
+     *       alternatives behind leaving the box empty for it. What the operator reads here is therefore
+     *       either the date the six fields hold or nothing at all, never a third value.
      */
     const composed = normaliseBound(parts);
-    const picked = isExistingCalendarDate(composed) ? dayjs(composeIsoDate(composed)) : null;
+    const picked = calendarValueFor(composed);
 
     return (
       <Flex key={bound} align="flex-start" gap="small" wrap>
@@ -1672,12 +2482,42 @@ export function ReportsScreen(): ReactElement {
    * mapset declared with the `IC` attribute -- `ATTRB=(FSET,IC,NORM,UNPROT)` at `app/bms/CORPT00.bms` L80 --
    * and `IC` places the initial cursor. There is exactly one such field on the map and therefore exactly one
    * `autoFocus` on this screen.
+   *
+   * ⚠️ Trade-offs: a clock-derived option is withheld until an instant is anchored, so an operator who
+   * reaches this screen before any response has been observed sees monthly and yearly unavailable and the
+   * custom range -- which needs no clock -- available throughout. That is a narrower loss than the
+   * alternative: a preset resolved from the browser's clock produces a report whose range depends on whose
+   * machine submitted it, silently, which is the determinism the two ranges are resolved on this side to
+   * protect. The consequence of the withholding is that in that window the initial cursor cannot land on
+   * the monthly selector, because a disabled control is not focusable -- the same consequence the busy
+   * window already carries.
+   *
+   * Assumptions: on the normal path an anchor exists before this screen can be reached, so the withholding
+   * is invisible. `ui/src/main.tsx` awaits the runtime-configuration fetch before the first render and
+   * `ui/src/api/runtimeConfig.ts` anchors from that response's `Date` header ahead of any status check,
+   * `ui/src/api/client.ts` re-anchors from every later response INCLUDING failures, and this screen is
+   * reachable only from the main menu -- so the sign-on exchange that got the operator there has already
+   * anchored the clock. What is left for the guard is the narrow case: no response at all was observed,
+   * which is the fetch rejecting outright, or a response whose `Date` header was stripped in transit.
+   *
+   * ⚠️ Assumptions: `busy` is re-tested HERE even though the group already carries it, because antd resolves
+   * a member's disabled state as `radioProps.disabled ?? groupContext.disabled` (`antd/es/radio/radio.js`).
+   * That is a nullish fallback and not a disjunction, so an option passing `false` would OVERRIDE the
+   * group's `true` and stay operable during a submission -- which is exactly the doubled-turn the busy
+   * window exists to prevent.
    * @param {ReportType} option - Report type to render.
    * @returns {ReactElement} The radio control carrying that type's caption.
    */
   function renderReportTypeOption(option: ReportType): ReactElement {
+    const unanchoredPreset = paintedAt === undefined && CLOCK_DERIVED_REPORT_TYPES.includes(option);
+
     return (
-      <Radio key={option} value={option} autoFocus={option === REPORT_TYPES[0]}>
+      <Radio
+        key={option}
+        value={option}
+        autoFocus={option === REPORT_TYPES[0]}
+        disabled={busy || unanchoredPreset}
+      >
         <Typography.Text style={captionStyle}>{REPORT_TYPE_PROMPTS[option]}</Typography.Text>
       </Radio>
     );
@@ -1735,28 +2575,51 @@ export function ReportsScreen(): ReactElement {
            * mutual exclusion the reference merely resolves into something the operator cannot express.
            */}
           <Form.Item
-            {...(refusalFor('reportType') === undefined
+            {...(reportTypeRefusal === undefined
               ? {}
               : {
                   validateStatus: 'error' as const,
-                  help: fieldErrorHelp(
-                    `${idPrefix}reportType`,
-                    refusalFor('reportType')?.message ?? '',
-                  ),
+                  help: fieldErrorHelp(reportTypeControlId, reportTypeRefusal.message),
                 })}
           >
-            <div ref={reportTypeRef}>
-              <Radio.Group
-                value={reportType}
-                onChange={handleReportTypeChange}
-                disabled={busy}
-                aria-label={REPORTS_TITLE}
-              >
-                <Flex vertical gap="middle">
-                  {REPORT_TYPES.map(renderReportTypeOption)}
-                </Flex>
-              </Radio.Group>
-            </div>
+            {/*
+             * WHY : ⚠️ Refactoring Rationale: the identifier, the invalid state, the description and the
+             *       focus reference all sit on `Radio.Group` itself, where a wrapping `div` used to hold
+             *       the reference and the group carried only a name. antd renders this component as the
+             *       element bearing `role="radiogroup"`, forwards its `ref` to that element, passes `id`
+             *       straight through and spreads every `aria-*` prop onto it
+             *       (`antd/es/radio/group.js`) -- so the members land on the element that carries the
+             *       group role, which is the only element assistive technology resolves a description
+             *       against. On the wrapper they would have described a generic container holding the
+             *       group, and the operator would have heard the group and not the reason it was refused.
+             *       Removing the wrapper follows from the same fact rather than being a separate change:
+             *       the reference now reaches the same node it always meant, so the intermediate element
+             *       had nothing left to hold.
+             * WHY : Assumptions: the group's accessible name is an `aria-label` carrying the row-4 heading,
+             *       and no `htmlFor` accompanies it. The mapset paints NO caption over the three selectors
+             *       -- the nearest painted text above them is that heading at `POS=(4,30)` -- so the name
+             *       is taken from the one string the source does paint there rather than invented, which
+             *       rule T8 would forbid. `htmlFor` is inapplicable rather than omitted: a `for` attribute
+             *       may only reference a labelable element, and the element carrying the group role is a
+             *       `div`.
+             */}
+            <Radio.Group
+              id={reportTypeControlId}
+              ref={reportTypeRef}
+              value={reportType}
+              onChange={handleReportTypeChange}
+              disabled={busy}
+              aria-label={REPORTS_TITLE}
+              {...fieldAriaProps(reportTypeControlId, {
+                invalid: reportTypeRefusal !== undefined,
+                hasError: reportTypeRefusal !== undefined,
+                hasHint: false,
+              })}
+            >
+              <Flex vertical gap="middle">
+                {REPORT_TYPES.map(renderReportTypeOption)}
+              </Flex>
+            </Radio.Group>
           </Form.Item>
 
           {/*
@@ -1843,14 +2706,87 @@ export function ReportsScreen(): ReactElement {
       </Spin>
 
       {/*
-       * Assumptions: the started run's identity is surfaced and its document is not. The submission resolves
-       * to a handle -- `executionName`, the value `readReportExecution` is addressed by -- because the
-       * artifact is assembled asynchronously and is 133 columns of fixed-width text with COBOL edit masks
-       * that a golden-master comparison reads byte for byte. Rendering the handle lets an operator quote the
-       * run; rendering the document here would make this a second renderer of a parity artifact.
+       * Refactoring Rationale: ⚠️ this region rendered the run's name and nothing else, so a submitted
+       * report could be started and then neither followed nor obtained -- the two operations that answer
+       * both questions were published by `ui/src/api/reporting.ts` and called from nowhere in the
+       * application. It now reports the run's state, explains a terminal one, and offers the document a
+       * succeeded run produced.
+       * Assumptions: the document itself is still not rendered. It is 133 columns of fixed-width text
+       * whose amount bands carry COBOL edit masks that a golden-master comparison reads byte for byte,
+       * so it is handed to the browser as bytes and never decoded here.
+       * Assumptions: the region is scoped to the turn that started the run -- a refusal clears the
+       * submission and with it this region, which is the refusal contract {@link reportRefusal}
+       * documents. The run carries on producing its document regardless, and
+       * `docs/runbooks/batch-operations.md` is where an operator without a handle goes.
+       * Assumptions: every sentence and label here is AUTHORED and comes from
+       * `REPORT_RUN_MESSAGES`, because the baseline has no run state to transcribe. None of it is
+       * painted on row 23: that line carries this program's own nineteen sentences, and the screen
+       * already declines to put non-baseline text there for the reason recorded at
+       * {@link mapSubmissionFailure}.
        */}
       {submission === null ? null : (
-        <Typography.Text style={fixedPitchStyle}>{submission.executionName}</Typography.Text>
+        <Flex vertical gap="small">
+          <Typography.Text strong style={captionStyle}>
+            {REPORT_RUN_MESSAGES.HEADING}
+          </Typography.Text>
+          <Flex align="baseline" gap="small" wrap>
+            <Typography.Text style={captionStyle}>
+              {REPORT_RUN_MESSAGES.REFERENCE_CAPTION}
+            </Typography.Text>
+            <Typography.Text style={fixedPitchStyle}>{submission.executionName}</Typography.Text>
+          </Flex>
+          {/*
+           * Assumptions: the three lines below are one polite live region, because they change without
+           * the operator doing anything -- a run moves from running to completed on the service's own
+           * schedule. `polite` rather than `assertive` for the reason the message band applies the same
+           * choice to row 23: an operator reading the form should not be interrupted mid-field by a
+           * status the screen will still be showing a moment later.
+           * Assumptions: the status line is rendered only once a status has been READ. Before the first
+           * read there is nothing to report, and defaulting the label to `Running` would state as fact
+           * something no answer has yet said -- the control's own busy affordance is what shows that a
+           * read is outstanding.
+           */}
+          <Flex vertical gap="small" aria-live="polite">
+            {execution === null ? null : (
+              <Flex align="baseline" gap="small" wrap>
+                <Typography.Text style={captionStyle}>
+                  {REPORT_RUN_MESSAGES.STATUS_CAPTION}
+                </Typography.Text>
+                <Typography.Text style={neutralStyle}>
+                  {REPORT_RUN_MESSAGES.STATUS_LABELS[execution.status]}
+                </Typography.Text>
+              </Flex>
+            )}
+            {outcomeDetail === null ? null : (
+              <Typography.Text style={neutralStyle}>{outcomeDetail}</Typography.Text>
+            )}
+            {runNotice === null ? null : (
+              <Typography.Text style={neutralStyle}>{runNotice}</Typography.Text>
+            )}
+          </Flex>
+          {/*
+           * Assumptions: these two are body controls and NOT function keys, which is the same decision
+           * the key handlers above record. `app/bms/CORPT00.bms` L222-L226 paints a legend advertising
+           * exactly two keys and `app/cbl/CORPT00C.cbl` L184-L195 dispatches exactly those two, so a
+           * third binding would advertise a key the reference neither paints nor honours. Both actions
+           * are additive to a screen the baseline had no lifecycle for, so they belong where the
+           * lifecycle is rendered.
+           * Assumptions: the collect control is MOUNTED only when there is something to collect, rather
+           * than rendered disabled. A disabled download beside a completed run reads as a document the
+           * operator is not allowed to have; its absence beside the sentence explaining why is the
+           * honest rendering of a run with nothing stored.
+           */}
+          <Flex gap="small" wrap>
+            <Button onClick={refreshRunStatus} loading={statusReadPending} disabled={busy}>
+              {REPORT_RUN_MESSAGES.REFRESH_CONTROL}
+            </Button>
+            {collectable === null ? null : (
+              <Button type="primary" onClick={collectDocument} loading={collecting} disabled={busy}>
+                {REPORT_RUN_MESSAGES.DOWNLOAD_CONTROL}
+              </Button>
+            )}
+          </Flex>
+        </Flex>
       )}
     </Flex>
   );

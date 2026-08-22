@@ -967,7 +967,16 @@ class StatementBandLayoutsTest {
         //       arithmetic of one band. The compensation is what the equality of the two totals then
         //       demonstrates: twice the run plus its own sentinel is 80 in each case, for the banner
         //       at app/cbl/CBSTM03A.CBL L86 and for the banner at L143 alike.
-        assertThat(OPENING_RUN_WIDTH).isNotEqualTo(CLOSING_RUN_WIDTH);
+        // WHY : Refactoring Rationale: the inequality was written over this class's own two
+        //       expectations, 31 against 32, which the compiler folds into a constant -- so the one
+        //       edit it exists to catch, StatementBandLayouts declaring both banners at one width,
+        //       could not fail it. It is read out of the two descriptors instead. Alternatives
+        //       Considered: comparing OPENING_ASTERISK_RUN_LENGTH to CLOSING_ASTERISK_RUN_LENGTH,
+        //       which is the pair such an edit would unify; rejected because both are compile-time
+        //       constants and would fold the same way. The descriptor fields are read at run time, so
+        //       this line survives inlining and fails on the unification itself.
+        assertThat(opening.field("FILLER-1").length())
+                .isNotEqualTo(closing.field("FILLER-1").length());
         assertThat(StatementBandLayouts.OPENING_ASTERISK_RUN_LENGTH).isEqualTo(OPENING_RUN_WIDTH);
         assertThat(StatementBandLayouts.CLOSING_ASTERISK_RUN_LENGTH).isEqualTo(CLOSING_RUN_WIDTH);
         assertThat(2 * OPENING_RUN_WIDTH + StatementBandLayouts.START_OF_STATEMENT_SENTINEL.length())
@@ -1114,7 +1123,12 @@ class StatementBandLayoutsTest {
         //       outside the program. This is an observation about an immutable reference, not a
         //       finding against it: the baseline writes two artifacts at two lengths and the
         //       migration writes two artifacts at the same two lengths.
-        assertThat(HTML_RECORD_LENGTH).isNotEqualTo(STATEMENT_RECORD_LENGTH);
+        // WHY : Refactoring Rationale: a bare inequality between this class's own 100 and its own 80
+        //       stood here and is removed rather than rewritten. The compiler folded it, so no change
+        //       to StatementBandLayouts could falsify it, and the two assertions that bracket it say
+        //       the same thing against the subject at run time: no band in the published table
+        //       declares the markup length, and every band declares the statement length. Its
+        //       reference citation is the block above, which is kept.
         assertThat(StatementBandLayouts.bands())
                 .noneMatch(band -> band.reclen() == HTML_RECORD_LENGTH);
 

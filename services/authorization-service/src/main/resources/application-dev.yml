@@ -60,12 +60,31 @@
 # markup. What that document supplies is the FORM; the obligation to carry a
 # rationale at all is the second sentence of the validation gate at line 43 of
 # the project's single user-specified rule, Rule 1 "Explainability".
-# Assumptions: nothing mechanical reads this file. The Checker in
-# config/checkstyle/checkstyle.xml is narrowed to fileExtensions="java" at L178,
-# no linter in this repository parses YAML comments, and no workflow step
-# validates them, so review is the only reader these notes have. They are written
-# at the rigour applied where a build would fail without them, because the
-# absence of a gate is not a reason for a reader to be given less.
+# Assumptions: two gates read this file and they decide different halves of the
+# obligation, so neither one passing is evidence about the other. The Checker in
+# config/checkstyle/checkstyle.xml is narrowed to fileExtensions="java" at L178, so
+# the Checkstyle execution bound to the Maven validate phase never opens a .yml
+# document and decides nothing here. config/rule1/rule1_gate.py does read this one:
+# .yml is in both of its governed suffix sets and services/ is not among its
+# excluded prefixes, so it decides that every label below is written in the single
+# permitted plural, unparenthesised, unemphasised form, and that no comment outside
+# this header block carries a purpose line. It is fail-closed, exposes no tolerance
+# flag, and runs as a required step named "Run the Rule 1 lexical and consistency
+# gate" in all three authored pipelines -- .github/workflows/services-ci.yml job
+# rule1-documentation-gate, .github/workflows/ui-ci.yml job ui, and
+# .github/workflows/infra-ci.yml job terraform-static.
+# Refactoring Rationale: this paragraph said nothing mechanical reads this file and
+# that no workflow step validates these notes, which was false once the lexical gate
+# existed, and false in the harmful direction: a reader who believed it would treat
+# the label form as a house style to approximate, and a singular or parenthesised
+# label written on that belief reddens three pipelines rather than reaching the
+# review it was aimed at.
+# Trade-offs: what remains with review is whether a rationale is TRUE. A lexical
+# gate decides FORM and nothing else -- it cannot separate a reason that names the
+# consequence under the alternative from one that says "for performance" -- so the
+# notes below are written at the rigour applied where a build would fail without
+# them, and each names that consequence, because the second sentence of the
+# validation gate at line 43 of Rule 1 "Explainability" rests on a reader.
 # =============================================================================
 
 spring:
@@ -76,9 +95,17 @@ spring:
     #       context reads no Parameter Store subtree at all: every deployment value
     #       reaches it as an environment variable the task definition sets, which is
     #       what application.yml's datasource, issuer and queue placeholders bind to.
-    #       reference-service, the other context whose only AWS artifact is the queue
-    #       starter, takes the identical shape, so the repository holds ONE model for a
-    #       queue-only context rather than two.
+    #       reference-service's overlays take the identical import shape, so the
+    #       repository holds ONE model for an overlay that reads no Parameter Store
+    #       subtree rather than two. Refactoring Rationale: that comparison described
+    #       reference-service as "the other context whose only AWS artifact is the queue
+    #       starter", which its own POM contradicts: it withdrew
+    #       io.awspring.cloud:spring-cloud-aws-starter-sqs and builds no queue client at
+    #       all, because the shared inquiry request queue has one owning consumer and it
+    #       is account-service's InquiryMessageListener. What the two modules genuinely
+    #       share is the import shape, so that is what the comparison now claims; the
+    #       classpath half is dropped rather than repeated, because a reader who believed
+    #       it would go looking for a consumer in a module that has none.
     #       Refactoring Rationale: this note previously said that this profile
     #       "declares NO spring.config.import", and that the sibling POM declares no
     #       parameter-store starter, and it grouped the two with a third claim as "one
@@ -135,12 +162,19 @@ spring:
     #       markup. What that document supplies is the FORM; the obligation to carry a
     #       rationale at all is the second sentence of the validation gate at line 43 of
     #       the project's single user-specified rule, Rule 1 "Explainability".
-    #       Assumptions: nothing mechanical reads this file. The Checker in
-    #       config/checkstyle/checkstyle.xml is narrowed to fileExtensions="java" at L178,
-    #       no linter in this repository parses YAML comments, and no workflow step
-    #       validates them, so review is the only reader these notes have. They are written
-    #       at the rigour applied where a build would fail without them, because the
-    #       absence of a gate is not a reason for a reader to be given less.
+    #       Assumptions: the FORM of that label is machine-decided, not review-decided.
+    #       config/rule1/rule1_gate.py governs .yml, runs fail-closed as a required step
+    #       in the services, user-interface and infrastructure pipelines, and rejects a
+    #       parenthesised, singular or emphasis-wrapped label and any purpose line placed
+    #       outside the file's leading header block -- which is why this note carries a
+    #       labelled rationale and no purpose line, even though it sits above a key rather
+    #       than in the header. The file header states the division of labour between that
+    #       gate and Checkstyle in full and is not restated here.
+    #       Refactoring Rationale: this paragraph asserted that nothing mechanical reads
+    #       this file and that review is the only reader these notes have. It was false in
+    #       the harmful direction -- a label written to a house style rather than to the
+    #       gate's one permitted form reddens three pipelines -- and it was a second copy
+    #       of a claim the header already made, so the two could drift and did.
     #       =============================================================================
     import:
       - "classpath:/carddemo-common-defaults.yml"

@@ -99,6 +99,21 @@ import java.time.format.DateTimeParseException;
  * committed, and in a COBOL or JCL line columns 73 to 80 carry a sequence field that is not part of
  * the statement.</p>
  *
+ * <p>⚠️ Refactoring Rationale: every citation of the sibling Python stager below names a SYMBOL -- a
+ * function, a class member or a module constant in
+ * {@code data-migration/src/carddemo_migration/loaders/s3_stage.py} or
+ * {@code data-migration/src/carddemo_migration/config.py} -- where each formerly named a line or a
+ * line range. All ten had stopped pointing at what they claimed: three landed in module-docstring
+ * prose, the {@code __all__} tail and a validation helper's docstring respectively, and the rest had
+ * moved when the stager was rewritten to share this type's reservation contract. A citation into a
+ * file that is edited independently of this one cannot be maintained by line number -- it decays
+ * silently, and it decays into the most misleading state available, because a reader who follows it
+ * lands on real code that says something else and concludes the claim is false. Symbols move with
+ * their definition. Citations of {@code app/**} above stay line-numbered deliberately, since that
+ * tree is reference-only and byte-identical by policy, so a line number into it is stable in a way
+ * one into a live sibling never is. {@code DatasetGenerationService} carries the same convention for
+ * the same reason, so the two files cite the sibling identically.</p>
+ *
  * @param family the generation-dataset family this coordinate addresses, one of the ten the
  *     reference baseline defines; it supplies the {@code <domain>/<dataset>} portion of the
  *     rendered prefix and must not be {@code null}
@@ -150,11 +165,13 @@ public record DatasetGeneration(
      *
      * <p>Assumptions: the width comes from the target prefix convention
      * {@code <domain>/<dataset>/dt=YYYY-MM-DD/gen=NNNN/}, in which {@code NNNN} is four digits.
-     * The sibling renderer that stages generations, {@code generation_prefix} at
-     * {@code data-migration/src/carddemo_migration/config.py:1296-1385}, formats to the same four
-     * from its own {@code _GENERATION_DIGITS} at line 428, and the loader that reads prefixes back
-     * matches them with the pattern {@code dt=(\d{4}-\d{2}-\d{2})/gen=(\d{4})/} at
-     * {@code data-migration/src/carddemo_migration/loaders/s3_stage.py:27}. The width is therefore
+     * The sibling renderer that stages generations,
+     * {@code DatasetStagingSettings.generation_prefix} in
+     * {@code data-migration/src/carddemo_migration/config.py}, formats to the same four from that
+     * module's {@code _GENERATION_DIGITS}, and the loader that reads prefixes back matches them
+     * with the pattern {@code dt=(\d{4}-\d{2}-\d{2})/gen=(\d{4})/} held in
+     * {@code _GENERATION_SUFFIX} in
+     * {@code data-migration/src/carddemo_migration/loaders/s3_stage.py}. The width is therefore
      * asserted on the read side as well as chosen on the write side, so it is a contract between
      * two authored components rather than a formatting preference of this one.</p>
      */
@@ -167,19 +184,22 @@ public record DatasetGeneration(
      * reference baseline, where the first relative reference is {@code (+1)} and the first
      * catalogued generation of every one of the ten bases is {@code G0001V00}. There is no
      * mainframe generation zero, so {@code gen=0000} would name a coordinate with no counterpart on
-     * either side of the migration. The sibling stager states the same bound for the same reason at
-     * {@code data-migration/src/carddemo_migration/loaders/s3_stage.py:125}, and it is the value
-     * that component returns for the first generation of a business date at
-     * {@code loaders/s3_stage.py:1328}.</p>
+     * either side of the migration. The sibling stager states the same bound for the same reason in
+     * its {@code MIN_GENERATION} constant in
+     * {@code data-migration/src/carddemo_migration/loaders/s3_stage.py}, and that constant is the
+     * value the same module's {@code next_generation} returns for the first generation of a
+     * business date.</p>
      *
      * <p>Refactoring Rationale: this bound was zero, on the recorded ground that the sibling
      * renderer admits zero and a Java bound of one would leave a prefix that component can
      * legitimately produce unrepresentable here. That ground was withdrawn after being measured
-     * against the sibling rather than against its renderer alone. The renderer at
-     * {@code config.py:1495} does accept zero, but no writer reaches it with zero: every staging
-     * write is guarded by {@code _require_staged_generation} at
-     * {@code loaders/s3_stage.py:1010-1044}, which enforces one to 9999 inclusive. The one caller
-     * that does pass zero is {@code family_prefix} at {@code loaders/s3_stage.py:1088-1093}, and it
+     * against the sibling rather than against its renderer alone. The renderer,
+     * {@code DatasetStagingSettings.generation_prefix} in {@code config.py}, does accept zero --
+     * its range check admits {@code 0} to that module's {@code _MAX_GENERATION} -- but no writer
+     * reaches it with zero: every staging write is guarded by
+     * {@code _require_staged_generation} in {@code loaders/s3_stage.py}, which enforces that
+     * module's {@code MIN_GENERATION} to {@code MAX_GENERATION}, one to 9999 inclusive. The one
+     * caller that does pass zero is {@code family_prefix} in the same module, and it
      * passes zero to a throwaway sample it immediately truncates at {@code dt=} -- its own comment
      * records that the value "cannot influence the result" and that this is precisely why the
      * builder is left permissive while writes are guarded separately. So {@code gen=0000} is not a
@@ -205,8 +225,9 @@ public record DatasetGeneration(
      * has to be enforced rather than trusted because formatting does not truncate -- a value of
      * 10000 would render as {@code gen=10000}, five digits, and would then sort ahead of
      * {@code gen=9999} in the lexicographic ordering an object listing offers, which is precisely
-     * the ordering the padding exists to protect. The sibling renderer records the same reasoning
-     * at {@code data-migration/src/carddemo_migration/config.py:422-429}.</p>
+     * the ordering the padding exists to protect. The sibling records the same reasoning where it
+     * derives its own ceiling, on {@code _GENERATION_DIGITS} and {@code _MAX_GENERATION} in
+     * {@code data-migration/src/carddemo_migration/config.py}.</p>
      */
     public static final int MAXIMUM_GENERATION_NUMBER = 9999;
 
@@ -214,8 +235,8 @@ public record DatasetGeneration(
      * The literal that opens the business-date partition segment, {@code dt=}.
      *
      * <p>Assumptions: the spelling is fixed by the target prefix convention and is matched
-     * literally by {@code loaders/s3_stage.py:27}, so it is a shared constant in effect even though
-     * each component declares its own.</p>
+     * literally by {@code _GENERATION_SUFFIX} in {@code loaders/s3_stage.py}, so it is a shared
+     * constant in effect even though each component declares its own.</p>
      */
     private static final String DATE_PARTITION_MARKER = "dt=";
 
@@ -445,8 +466,9 @@ public record DatasetGeneration(
 
         // WHY : Alternatives Considered: returning the token unchanged, or substituting a placeholder
         //       date, were both evaluated and both rejected. Either would stage a generation under a
-        //       prefix that the loader's own dt=(\d{4}-\d{2}-\d{2})/gen=(\d{4})/ pattern at
-        //       data-migration/src/carddemo_migration/loaders/s3_stage.py:27 does not match, so the
+        //       prefix that the loader's own dt=(\d{4}-\d{2}-\d{2})/gen=(\d{4})/ pattern, held in
+        //       _GENERATION_SUFFIX in data-migration/src/carddemo_migration/loaders/s3_stage.py,
+        //       does not match, so the
         //       objects would be written and would then be invisible to every reader that walks
         //       generations by convention. Raising stops the step at the coordinate that cannot be
         //       rendered instead of producing an unreachable one.
@@ -463,8 +485,9 @@ public record DatasetGeneration(
      * they ask where the hyphens are and whether the rest are digits -- and a shape test cannot tell
      * {@code 2022-07-18} from {@code 2022-99-99}. An earlier revision rendered whichever of the two it
      * was given, and the second one is the more dangerous of the pair precisely because it looks
-     * well formed: the loader's own key pattern {@code dt=(\d{4}-\d{2}-\d{2})/gen=(\d{4})/} at
-     * {@code data-migration/src/carddemo_migration/loaders/s3_stage.py:27} matches it, so the objects
+     * well formed: the loader's own key pattern {@code dt=(\d{4}-\d{2}-\d{2})/gen=(\d{4})/}, held in
+     * {@code _GENERATION_SUFFIX} in
+     * {@code data-migration/src/carddemo_migration/loaders/s3_stage.py}, matches it, so the objects
      * would be written, indexed and then filed for ever under a day that never occurred. Nothing
      * downstream would report an error; a generation would simply not be where any reader by date
      * looks. Raising here stops the step at the coordinate that cannot exist, which is the same
@@ -566,11 +589,12 @@ public record DatasetGeneration(
      * {@code gen=00010}, so a listing filtered by the shorter string would return the objects of
      * both generations and a caller would read one generation's contents as another's. Including it
      * costs the caller one step when composing an object key, since the separator is already present
-     * and must not be added again. The sibling renderer at
-     * {@code data-migration/src/carddemo_migration/config.py:1312-1314} states the same reasoning
-     * and returns the same shape, and {@code loaders/s3_stage.py:27} anchors its pattern on that
-     * trailing slash, so a Java rendering without it would not be recognised by the component that
-     * reads generations back.</p>
+     * and must not be added again. The sibling renderer,
+     * {@code DatasetStagingSettings.generation_prefix} in
+     * {@code data-migration/src/carddemo_migration/config.py}, states the same reasoning and
+     * returns the same shape, and {@code _GENERATION_SUFFIX} in {@code loaders/s3_stage.py} anchors
+     * its pattern on that trailing slash, so a Java rendering without it would not be recognised by
+     * the component that reads generations back.</p>
      *
      * <p>Trade-offs: no bucket name, environment name or URI scheme appears in the returned value.
      * The same coordinate is therefore valid unchanged in every environment, and a caller needing a

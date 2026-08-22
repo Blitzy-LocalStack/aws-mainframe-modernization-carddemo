@@ -17,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.Base64;
 import java.util.List;
+import java.util.Objects;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -84,13 +85,22 @@ import org.springframework.security.web.util.matcher.RequestMatcher;
  * NAMES, so a token minted with the transaction context's key under the authorization context's name fails its
  * signature check before any claim is read.</p>
  *
- * <p>Assumptions: SIX properties of the token are checked and not one. The signature says it was minted by a
+ * <p>Assumptions: SEVEN properties of the token are checked and not one. The signature says it was minted by a
  * holder of the key the token's own identifier names; the issuer distinguishes it from a token the identity
  * provider minted with an unrelated key; the audience says it was minted for THIS service, so a token intended
  * for another internal callee cannot be replayed here; the subject names a caller from a closed set; the key
  * identifier and the subject agree, so the caller a decision is recorded against is the caller whose key
- * signed; and the scope is one that caller is permitted to carry. Checking the signature alone would admit any
- * internal token for any purpose, which is the same mistake as having one credential for the whole system.</p>
+ * signed; the scope is one that caller is permitted to carry; and the token's issue and expiry instants sit
+ * inside the shared maximum lifetime measured against THIS service's own clock. Checking the signature alone
+ * would admit any internal token for any purpose, which is the same mistake as having one credential for the
+ * whole system.</p>
+ *
+ * <p>Refactoring Rationale: the seventh property is stated separately from the sixth because it was counted as
+ * absent here twice over. The lifetime was first not read at all, so a token declaring eight hours was
+ * accepted for eight hours; it was then read as a DIFFERENCE between the token's own two claims, which the
+ * same party writes, so a token declaring a five-minute life starting eight hours from now was accepted for
+ * eight hours by the rule meant to stop exactly that. Measuring against this service's clock is what makes
+ * the five-minute capture window a property of the verifier rather than of the token.</p>
  *
  * <p>Refactoring Rationale: authorisation is now PER OPERATION FAMILY, where the whole chain used to require a
  * single authority on every request it matched. Under the old rule a caller needing one address was authorised
@@ -677,19 +687,31 @@ public class InternalApiSecurityConfig {
      * Rejected because it reproduces the defect it appears to fix -- a token signed by either key verifies
      * whatever subject it claims, so the subject remains a claim any holder can write.</p>
      *
-     * <p>Assumptions: five validators are composed with the framework's default set rather than replacing it.
+     * <p>Assumptions: six validators are composed with the framework's default set rather than replacing it.
      * The default set is what enforces the expiry, and an internal token's short life is only a control if
-     * something checks it -- so the additions are issuer, audience, subject, key-identifier agreement and
-     * scope permission, and the expiry keeps being enforced by the machinery that already did.</p>
+     * something checks it -- so the additions are issuer, audience, subject, key-identifier agreement, scope
+     * permission and the clock-anchored lifetime bound, and the expiry keeps being enforced by the machinery
+     * that already did.</p>
      *
      * <p>Assumptions: the bean is qualified rather than declared as the only {@code JwtDecoder}. This context
      * already has one, for the identity provider's tokens, and two unqualified beans of one type would make the
      * choice of which chain got which decoder depend on bean-definition order.</p>
      *
+     * <p>Refactoring Rationale: the deployment's {@link Clock} is taken as a parameter, exactly as
+     * {@link #internalApiFilterChain(HttpSecurity, JwtDecoder, Clock)} already takes it, rather than read
+     * inside the lifetime validator as {@code Instant.now()}. Two reasons, and neither is style. The
+     * validator's verdict now depends on what time this service believes it is, so the reading has to come
+     * from the one clock bean the context publishes -- the same instant the refusal bodies are stamped from --
+     * instead of from a second source that a fixed-clock deployment or test could not substitute. And a
+     * decision that cannot be pinned to a chosen instant cannot be tested at all: the case that matters is a
+     * token issued in the FUTURE, which is only expressible by fixing one side of the comparison.</p>
+     *
      * @param authorizationKey the authorization context's own signing key from the deployment's secret store,
      *     base64 or raw text; must not be {@code null} and must not be blank
      * @param transactionKey the transaction context's own signing key from the deployment's secret store,
      *     base64 or raw text; must not be {@code null} and must not be blank
+     * @param clock the clock this service's own notion of now is read from, against which a presented token's
+     *     issue and expiry instants are bounded; must not be {@code null}
      * @return the decoder, never {@code null}
      * @throws IllegalStateException if either configured key is blank or too short, so the failure names the
      *     property, or if the key set cannot be assembled
@@ -698,7 +720,8 @@ public class InternalApiSecurityConfig {
     @InternalTokenDecoder
     public JwtDecoder internalTokenDecoder(
             @Value("${carddemo.internal-identity.authorization-signing-key}") String authorizationKey,
-            @Value("${carddemo.internal-identity.transaction-signing-key}") String transactionKey) {
+            @Value("${carddemo.internal-identity.transaction-signing-key}") String transactionKey,
+            Clock clock) {
         // WHY : Assumptions: both keys are required and neither has a fallback. A context that started with
         //   one of them would verify one caller and refuse the other with a 401 that names no property, and
         //   the two callers fail differently -- the authorization consumer redelivers until its queue
@@ -767,16 +790,20 @@ public class InternalApiSecurityConfig {
                 //   a token that should be refused is answered.
                 subjectMatchesSigningKey(),
                 scopePermittedForSubject(),
-                // WHY : ⚠️ Refactoring Rationale: the declared LIFETIME is validated, and nothing validated
-                //   it before. InternalServiceToken.MAX_LIFETIME bounds a minted token to five minutes, but
-                //   that bound was applied only in the minting constructor -- so it constrained a caller
-                //   that chose to honour it and constrained nothing at all about a token arriving here. A
-                //   token declaring thirty minutes, or eight hours, signed with a real key and naming a real
-                //   caller and an admitted scope, was accepted for exactly as long as it said. That is the
-                //   whole mitigation for what this credential is: a bearer token reaching account and
-                //   customer reads with no user in the loop, whose capture window IS its lifetime. Applying
-                //   the bound here is what makes it a bound rather than a convention.
-                lifetimeWithinMaximum());
+                // WHY : ⚠️ Refactoring Rationale: the LIFETIME is validated against this service's own
+                //   clock, and it was validated against nothing at all in the first revision and against
+                //   the token alone in the second. InternalServiceToken.MAX_LIFETIME bounds a minted token
+                //   to five minutes, but that bound was applied only in the minting constructor -- so it
+                //   constrained a caller that chose to honour it and constrained nothing about a token
+                //   arriving here. Bounding exp - iat closed the thirty-minute and eight-hour DECLARATIONS
+                //   and left the window free to slide: the same party writes both claims, so a token
+                //   declaring iat eight hours ahead and exp five minutes after that satisfied the
+                //   difference, was not yet expired, and was admitted for eight hours. That is the whole
+                //   mitigation for what this credential is: a bearer token reaching account and customer
+                //   reads with no user in the loop, whose capture window IS its usable life. Anchoring the
+                //   comparison to the clock bean is what makes the bound a bound rather than an arithmetic
+                //   identity the presenter controls both sides of.
+                lifetimeWithinMaximum(clock));
         decoder.setJwtValidator(issuerAudienceAndSubject);
         return decoder;
     }
@@ -864,14 +891,22 @@ public class InternalApiSecurityConfig {
     }
 
     /**
-     * Builds the validator requiring the presented token's declared lifetime to be within the shared maximum.
+     * Builds the validator requiring the presented token to be inside the shared maximum lifetime as
+     * measured against this service's own clock.
      *
      * <p>Assumptions: the rule itself lives on the shared minter as
-     * {@link InternalServiceToken#isWithinMaximumLifetime(java.time.Instant, java.time.Instant)}, and this
-     * method only reads the two claims and reports the verdict. That is the same division the scope validator
-     * above draws with {@code InternalServiceToken.permits}: the TABLE and the RULE belong to the shared
-     * module so the minting side and this side cannot come to disagree, while the mapping onto a framework
-     * validator belongs here because it is this context's mechanism.</p>
+     * {@link InternalServiceToken#isWithinMaximumLifetime(java.time.Instant, java.time.Instant,
+     * java.time.Instant)}, and this method only reads the two claims, supplies this service's own instant and
+     * reports the verdict. That is the same division the scope validator above draws with
+     * {@code InternalServiceToken.permits}: the TABLE and the RULE belong to the shared module so the minting
+     * side and this side cannot come to disagree, while the mapping onto a framework validator belongs here
+     * because it is this context's mechanism.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: the instant is read PER VALIDATION, from the clock captured here, rather
+     * than once when the decoder is built. A decoder bean lives for the life of the container, so an instant
+     * captured at assembly would be minutes old on the first request and hours old later -- which would
+     * anchor every decision to the moment the context started and reinstate the very drift this validator
+     * exists to remove.</p>
      *
      * <p>Assumptions: the refusal is reported as an INVALID token rather than as insufficient scope, and the
      * distinction is what an operator reads. A scope failure says the caller asked for something it may not
@@ -879,21 +914,30 @@ public class InternalApiSecurityConfig {
      * it as a scope failure would send a reader looking at the permission table for a fault that is in the
      * token's own shape.</p>
      *
-     * <p>Assumptions: the message names the bound but NOT the lifetime the token declared. The declared value
-     * is an attacker-supplied number and this message reaches a caller, so echoing it would let a probe read
-     * back what it sent; the bound is a published constant and discloses nothing.</p>
+     * <p>Assumptions: the message names the bound but NOT the instants the token declared, and it lists the
+     * four refusable shapes without saying which of them applied. The declared values are attacker-supplied
+     * numbers and this message reaches a caller, so echoing one -- or telling a probe which clause it
+     * tripped -- would let it read back what it sent and tune the next attempt; the bound is a published
+     * constant and discloses nothing. Trade-offs: an operator therefore reads one message for four causes.
+     * That is accepted because all four are the same operational fault, a caller presenting a credential this
+     * context will not accept, and the caller's own logs hold the claims it wrote.</p>
      *
+     * @param clock the clock this service's own notion of now is read from; must not be {@code null}
      * @return the validator, never {@code null}
      */
-    private static OAuth2TokenValidator<Jwt> lifetimeWithinMaximum() {
+    private static OAuth2TokenValidator<Jwt> lifetimeWithinMaximum(Clock clock) {
+        Objects.requireNonNull(clock, "clock must not be null");
         return token -> {
-            if (InternalServiceToken.isWithinMaximumLifetime(token.getIssuedAt(), token.getExpiresAt())) {
+            if (InternalServiceToken.isWithinMaximumLifetime(
+                    token.getIssuedAt(), token.getExpiresAt(), clock.instant())) {
                 return OAuth2TokenValidatorResult.success();
             }
             return OAuth2TokenValidatorResult.failure(new OAuth2Error(
                     OAuth2ErrorCodes.INVALID_TOKEN,
-                    "the internal token declares a lifetime longer than "
-                            + InternalServiceToken.MAX_LIFETIME + ", or declares none at all",
+                    "the internal token does not declare a coherent lifetime inside "
+                            + InternalServiceToken.MAX_LIFETIME + " of this context's own clock: it"
+                            + " declares a longer one, declares none at all, expires before it was issued,"
+                            + " or is dated at a moment this service has not reached",
                     null));
         };
     }

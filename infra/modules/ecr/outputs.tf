@@ -15,18 +15,44 @@
 #   are the only sanctioned source of an endpoint or an identifier, and no
 #   consumer hard-codes one. Two consumers read these values, both through
 #   the calling root: the deployment workflow, which pushes the ten built
-#   images and mirrors the pinned telemetry sidecar image under a short-lived
-#   federated role, and the sibling ecs-service module,
-#   whose task definitions and task-execution policies are wired from them.
+#   images under a short-lived federated role, and the sibling ecs-service
+#   module, whose task definitions and task-execution policies are wired from
+#   them.
+#
+#   Refactoring Rationale: that sentence described the workflow as mirroring a pinned
+#   third-party telemetry sidecar image into an eleventh repository, and an earlier
+#   revision of this block then recorded that both the mirror and the sidecar had been
+#   WITHDRAWN. Neither withdrawal is in this tree: infra/modules/ecs-service composes
+#   the collector for every workload with enable_telemetry_collector defaulting to
+#   true and no environment root overriding it, main.tf projects its iteration
+#   collection from setunion(var.repository_names,
+#   var.third_party_mirror_repository_names), and both environment roots resolve
+#   repository_urls["aws-otel-collector"] when they compose their task definitions. So
+#   the maps below name ELEVEN repositories, ten holding images this repository builds
+#   and one holding a mirrored upstream image.
+#
+#   Assumptions: the distinction matters to a reader of `repository_urls`
+#   specifically, because .github/workflows/deploy.yml waits for a vulnerability scan
+#   of the release tag it pushed rather than of every key this map publishes. The
+#   mirrored image carries its own upstream tag, not that release tag, so it is
+#   mirrored by its own step and is not a key the scan loop can wait on -- which is
+#   why the mirror step is separate from the build-and-push loop rather than one more
+#   iteration of it.
 #
 # Parameters:
 #   None. This file declares no `variable` block and accepts nothing; the
-#   module's input surface is the ten variables in
-#   infra/modules/ecr/variables.tf. What it reads instead are the attributes
+#   module's input surface is the ELEVEN `variable` blocks in
+#   infra/modules/ecr/variables.tf -- eleven declarations, not ten, because
+#   var.repository_names holds the ten deployables as one list and
+#   var.third_party_mirror_repository_names declares the single mirror
+#   separately, which is also the boundary the prose-count gate in
+#   .github/workflows/infra-ci.yml slices this inventory on by name. What it reads instead are the attributes
 #   of `aws_ecr_repository.this`, the resource infra/modules/ecr/main.tf
-#   creates once per entry in `var.repository_names`. Recorded explicitly
-#   rather than omitted, so a reader can tell "this file has no inputs" apart
-#   from "this file's inputs went undocumented".
+#   creates once per entry in `local.repository_names` -- the union of the ten
+#   asserted deployables with the mirror input, which is empty, so ten entries
+#   today and never fewer. Recorded explicitly rather than omitted, so a
+#   reader can tell "this file has no inputs" apart from "this file's inputs
+#   went undocumented".
 #
 # Return values:
 #   repository_urls ... map, keyed by logical artifact name, of the registry
@@ -47,21 +73,25 @@
 # Exceptions / errors:
 #   - Nothing here can raise at apply time. These are expressions over an
 #     already-created resource, not resources.
-#   - An output naming a key absent from `var.repository_names` would fail at
-#     plan time with an invalid-index error. That is precisely why all three
+#   - An output naming a key absent from `aws_ecr_repository.this` would fail
+#     at plan time with an invalid-index error. That is precisely why all three
 #     maps below are PROJECTED from `aws_ecr_repository.this` with a `for`
 #     expression rather than listing the ten artifacts a second time: a key
 #     present in an output and absent from the resource cannot be written at
 #     all, so the failure class is removed instead of guarded against.
 #   - `registry_id` would fail at plan time with an index-out-of-range error
 #     against an empty repository collection. It cannot be empty: variables.tf
-#     asserts both a non-empty set and a length of exactly TEN before any
-#     resource is touched. The dependency is recorded on that output.
-#     Refactoring Rationale: this said ten, which understated the assertion it
-#     cites. The number matters here because it is offered as the proof that the
-#     collection is non-empty, so a reader checking that proof against
-#     variables.tf would have found a validation demanding a different count and
-#     had no way to tell which statement was the stale one.
+#     asserts on var.repository_names both a non-empty set and a length of
+#     exactly TEN before any resource is touched, and the mirror input that
+#     main.tf unions with it can only ever ADD to that collection. The dependency
+#     is recorded on that output.
+#     Refactoring Rationale: this number was reconciled upwards to eleven while a
+#     third-party mirror was defaulted into the provisioned set, then back to ten
+#     when that default was emptied. It is stated as an assertion about
+#     var.repository_names rather than as a total precisely so that a future
+#     mirror cannot make it stale again: the proof offered here is
+#     non-emptiness, and a union with a possibly-empty second set preserves it
+#     either way.
 #
 # WHY (non-obvious design decisions):
 #   - Refactoring Rationale: the baseline had no machine-readable inventory of
@@ -96,14 +126,18 @@
 # keyed by the artifact name gives each value a stable key that states what it
 # identifies, and it is the form the deployment workflow and the ecs-service
 # module look a repository up by.
-# Assumptions: the keys are exactly the elements of `var.repository_names`,
-# because each map is projected from the very collection main.tf's `for_each`
-# iterates rather than from a second list written here. That is what makes the
-# key sets of the resource and of these outputs incapable of drifting apart --
-# variables.tf owns the canonical ten names, and restating them here would
-# create a second copy that no gate compares against the first, so an entry
-# added there and forgotten here would publish nine repositories out of ten
-# and report nothing.
+# Assumptions: the keys are exactly the keys of `local.repository_names` -- the
+# ten asserted deployables today, and whatever a mirror would add if one were
+# ever supplied -- because each map is projected from the very collection
+# main.tf's `for_each` iterates rather than from a second list written here.
+# That is what makes the key sets of the resource and of these outputs
+# incapable of drifting apart, and it is deliberately stated against the local
+# rather than against var.repository_names: an output that tracked only the
+# deployable input would stop publishing a repository the module had actually
+# created. variables.tf owns the canonical ten names, and restating them here
+# would create a second copy that no gate compares against the first, so an
+# entry added there and forgotten here would publish nine repositories out of
+# ten and report nothing.
 
 output "repository_urls" {
   description = "Map keyed by logical artifact name, such as `auth-service`, whose values are the registry addresses each image is pushed to and pulled from; each is read from that repository's provider-computed `repository_url` attribute rather than composed from an account identifier and a region."
@@ -214,8 +248,10 @@ output "registry_id" {
   #       key-sorted list is taken because `values` orders by key, which makes
   #       the choice deterministic rather than incidental. It is safe only
   #       because the collection is never empty, and that is guaranteed
-  #       upstream: variables.tf asserts a non-empty set and a length of
-  #       exactly TEN at plan time, before any resource is touched.
+  #       upstream: variables.tf asserts on var.repository_names a non-empty set
+  #       and a length of exactly TEN at plan time, before any resource is
+  #       touched, and the mirror input main.tf unions with it -- empty by
+  #       default -- can only add to that collection, never shrink it.
   value = values(aws_ecr_repository.this)[0].registry_id
 }
 

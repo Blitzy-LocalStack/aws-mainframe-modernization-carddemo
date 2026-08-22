@@ -37,7 +37,7 @@
 // ui/vitest.config.ts sets `globals: false` and records that as a contract.
 import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes } from 'react-router';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -91,10 +91,12 @@ vi.mock(
 //   rediscovering it.
 const {
   default: RefTypeListScreen,
+  REF_TYPE_ADD_ROUTE,
   REF_TYPE_LIST_KEY_LABELS,
   reduceActionSelection,
   validateTypeFilter,
 } = await import('./index');
+const { REFERENCE_TYPE_LIST_ROUTE } = await import('../../routes/navigation');
 const { AppShell } = await import('../../layout/AppShell');
 const { PF_KEY_BAR_REGION_LABEL } = await import('../../layout/PfKeyBar');
 const { MESSAGE_BAND_TEST_ID } = await import('../../layout/MessageBand');
@@ -137,8 +139,44 @@ function AdminSentinel(): ReactElement {
   return <p>{ADMIN_SENTINEL_TEXT}</p>;
 }
 
+/** Prefix the maintenance-screen stand-in renders, so one arrival can be found by text. */
+const ADD_ARRIVAL_PREFIX = 'maintenance screen reached with';
+
+/** What the stand-in reports when the transfer handed over no caller at all. */
+const NO_CALLER = 'no caller';
+
+/**
+ * Stands in for the maintenance screen, reporting the caller the transfer handed over.
+ *
+ * Assumptions: the caller is read from the arriving location's own `state` rather than through
+ * `screenTransitionState`, the reader the real screen uses. The property under test is that this
+ * transfer HANDS the member over; routing the assertion through the production reader would let a
+ * reader that silently dropped it agree with a sender that never sent it, and those two defects are
+ * indistinguishable from the destination.
+ *
+ * Assumptions: a stand-in rather than the real maintenance screen, because that screen would issue
+ * its own read for the `new` sentinel and paint its own form, neither of which is under test -- and
+ * its exit destination is covered where it lives, in `ui/src/screens/refTypeEditScreen.test.tsx`.
+ * @returns {ReactElement} One line naming the handed-over caller.
+ */
+function AddScreenSentinel(): ReactElement {
+  // Assumptions: the member is widened to `unknown` before it is read, because `useLocation` types
+  //   `state` as `any` and reading through it would defeat the very check this stand-in performs.
+  const state: unknown = useLocation().state;
+  const caller =
+    typeof state === 'object' && state !== null && 'from' in state
+      ? String((state as { readonly from?: unknown }).from)
+      : NO_CALLER;
+
+  return <p>{`${ADD_ARRIVAL_PREFIX} ${caller}`}</p>;
+}
+
 /**
  * Renders the screen inside the shell at its own route.
+ *
+ * Assumptions: the add route is mounted as its own entry ALONGSIDE the list route rather than as a
+ * child of it, matching how the router declares the two, so the transfer resolves to the maintenance
+ * stand-in and not back to the list with a trailing segment.
  * @returns {void} Completion is the mounted tree.
  */
 function renderScreen(): void {
@@ -147,6 +185,7 @@ function renderScreen(): void {
       <Routes>
         <Route element={<AppShell />}>
           <Route path={LIST_ROUTE} element={<RefTypeListScreen />} />
+          <Route path={REF_TYPE_ADD_ROUTE} element={<AddScreenSentinel />} />
           <Route path="/admin" element={<AdminSentinel />} />
         </Route>
       </Routes>
@@ -337,6 +376,34 @@ async function exitsToTheAdministrativeMenuWithoutASentence(): Promise<void> {
   expect(screen.queryByText(EXIT_SENTENCE)).toBeNull();
 }
 
+/**
+ * The add key transfers to the maintenance screen and names this screen as its caller.
+ *
+ * ⚠️ Purpose: the transfer handed over nothing, so the maintenance screen's exit key could only
+ * take its fallback arm and returned an operator to the administrative menu rather than to the list
+ * they left -- along with the grid state, the filter and the page position. The reference's add arm
+ * writes `LIT-THISTRANID` and `LIT-THISPGM` into `CDEMO-FROM-TRANID` and `CDEMO-FROM-PROGRAM` at
+ * `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` L632-L633, and the maintenance program prefers
+ * exactly those two over its own default at `COTRTUPC.cbl` L429-L443.
+ *
+ * Assumptions: the handed-over value is compared against `REFERENCE_TYPE_LIST_ROUTE` from
+ * `ui/src/routes/navigation.ts` rather than against this file's own `LIST_ROUTE` literal, because the
+ * destination validates what it receives against that module's closed route set -- so an origin that
+ * merely looked right, and would be refused there, has to fail here.
+ * @returns {Promise<void>} Resolves once the arrival has been observed.
+ */
+async function addTransfersToTheMaintenanceScreenNamingItsCaller(): Promise<void> {
+  const user = userEvent.setup();
+  await renderWithFirstPage();
+
+  await user.click(keyButton(REF_TYPE_LIST_KEY_LABELS.PFK02));
+  await settle();
+
+  expect(
+    screen.getByText(`${ADD_ARRIVAL_PREFIX} ${REFERENCE_TYPE_LIST_ROUTE}`),
+  ).toBeInTheDocument();
+}
+
 /** The verbatim refusal the reference moves for an unrecognised action byte, at L1038. */
 const INVALID_ACTION_REFUSAL = STATUS_MESSAGES.COTRTLIC.WS_MESG_INVALID_ACTION_CODE.text;
 
@@ -506,6 +573,10 @@ function refTypeListCases(): void {
   it(
     'exits to the administrative menu without a sentence',
     exitsToTheAdministrativeMenuWithoutASentence,
+  );
+  it(
+    'transfers to the maintenance screen naming itself as the caller',
+    addTransfersToTheMaintenanceScreenNamingItsCaller,
   );
 }
 

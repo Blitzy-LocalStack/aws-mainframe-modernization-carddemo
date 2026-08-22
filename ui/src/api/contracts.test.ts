@@ -2264,9 +2264,11 @@ function compareClosure(): {
  * are the scalars, enums and cursor tokens the objects are built from.
  *
  * Refactoring Rationale: both figures read 163 and 534, with transaction measured at 32. The transaction
- * contract gained `TransactionCopiedDraft` and `TransactionCopyRequest`, which together declare thirteen
- * properties, and `TransactionAddPreview` gained the `copiedDraft` member that references the first --
- * fourteen properties in total, which is the whole of the 534-to-548 movement. Both are object schemas
+ * contract gained the two copy-last shapes -- `CopiedTransactionData` and `CopyLastRequest`, named here
+ * as the document names them now, and carrying ten and three properties at that revision -- which
+ * together declare thirteen properties, and `TransactionAddPreview` gained the member that references
+ * the first -- fourteen properties in total, which is the whole of the 534-to-548 movement. Both are
+ * object schemas
  * built from scalars the document already declared, which is why the scalar tally is unchanged. They exist
  * because the copy-last operation previously answered the amount alone and took the capture operation's
  * whole request shape: a screen could neither render the ten other copied fields nor re-send them, so its
@@ -2303,8 +2305,27 @@ function compareClosure(): {
  * reference 42/82, reporting 21/76, transaction 34/88. Ninety-three of the 167 are object schemas; the
  * member comparison reads ninety-one of those, the two entries of {@link UNBOUND_SCHEMAS} being the
  * exceptions.
+ *
+ * ⚠️ Refactoring Rationale: this reads 170 where it read 167, and the three are named string schemas the
+ * transaction contract now declares -- `MerchantName`, `MerchantCity` and `MerchantZip`. They exist
+ * because the externally authored `PIC X` members of the capture request were the one place a browser
+ * could put a control character or an unrepresentable code point into a record that is later written to
+ * a fixed-width plain-text statement, a 133-column report and a US-ASCII export, none of which has an
+ * escaping mechanism. Publishing the printable domain as a named schema referenced from every use is
+ * this document's own convention for a constraint that must not be restated per operation -- the same
+ * shape `CorrelationId`, `TransactionDescription` and `TransactionSource` already take -- so nine inline
+ * declarations became three references. The figure is RE-MEASURED from the seven documents rather than
+ * incremented: measured per contract, account 18, auth 20, authorization 21, card 11, reference 42,
+ * reporting 21, transaction 37, which sums to the 170 below.
+ *
+ * ⚠️ Assumptions: {@link EXPECTED_COMPARED_PROPERTY_COUNT} does NOT move with it, and the reason is
+ * worth stating because an unchanged property total beside a changed schema total looks like an
+ * oversight. All three new shapes are plain strings, so they declare no properties of their own, and the
+ * nine members that now reference them are the same nine members that previously declared the constraint
+ * inline. A named scalar replacing an inline scalar moves the schema tally and leaves the member tally
+ * exactly where it was.
  */
-const EXPECTED_CLOSURE_SCHEMA_COUNT = 167;
+const EXPECTED_CLOSURE_SCHEMA_COUNT = 170;
 
 /**
  * How many properties the bound object schemas of that closure declare in total.
@@ -2318,8 +2339,17 @@ const EXPECTED_CLOSURE_SCHEMA_COUNT = 167;
  * echo it back, and the token carries the same guarantee in a form the browser cannot read. Measured per
  * contract, schemas then compared properties: account 18/111, auth 20/63, authorization 21/98, card 11/38,
  * reference 42/82, reporting 21/76, transaction 34/90.
+ *
+ * ⚠️ Refactoring Rationale: this now reads 559, re-measured from the files rather than incremented. The
+ * one property is `CreatedUserResponse.oneTimeCredential`, the credential a runtime-created account is
+ * handed once so the administrator who created it can pass it on -- the auth contract previously returned
+ * only the name of the managed-secret entry it was archived to, which a browser session holds no grant to
+ * read, so every account created through that operation was unreachable. The schema count is unchanged at
+ * 167 because no shape was added, only a member. Measured per contract, schemas then compared properties:
+ * account 18/111, auth 20/64, authorization 21/98, card 11/38, reference 42/82, reporting 21/76,
+ * transaction 34/90.
  */
-const EXPECTED_COMPARED_PROPERTY_COUNT = 558;
+const EXPECTED_COMPARED_PROPERTY_COUNT = 559;
 
 /**
  * Asserts every reachable object schema is bound to a type that declares members.

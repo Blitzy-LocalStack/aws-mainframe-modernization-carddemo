@@ -227,11 +227,14 @@ function refusal(
  */
 function renderSignOn(): ReactElement {
   /*
-   * Refactoring Rationale: the single `AppShell` is part of the tree, mirroring `ui/src/App.tsx`, which
-   * renders `<AppShell><CardDemoRouter /></AppShell>`. This screen delegates its title band, its row-23
-   * message and its row-24 legend through `useShellSlot` instead of composing them, so a bare screen
-   * would render no band and no legend and every case asserting on either would fail for the wrong
-   * reason. The provider stays outermost because theming is injected exactly once, above the frame.
+   * Refactoring Rationale: the single `AppShell` is part of the tree, mirroring the PUBLIC shell
+   * layout route `ui/src/router.tsx` declares for this one screen — a sibling of the guarded shell
+   * branch, so sign-on is framed without anything above it that could demand a credential. This
+   * screen delegates its title band, its row-23 message and its row-24 legend through `useShellSlot`
+   * instead of composing them, so a bare screen would render no band and no legend and every case
+   * asserting on either would fail for the wrong reason. The provider stays outermost because theming
+   * is injected exactly once, above the frame — in the application that is `ui/src/App.tsx`, which
+   * wraps its single `RouterProvider` in `ConfigProvider`.
    */
   return (
     <ConfigProvider theme={cardDemoTheme}>

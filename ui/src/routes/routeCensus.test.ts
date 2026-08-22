@@ -10,23 +10,22 @@
  * table and MOUNTED as the element of a route inside it — and that no route mounts a screen
  * directory that does not exist.
  *
- * Why this file exists — Refactoring Rationale: five screen modules were authored and never
- * mounted, and the gap was invisible from both directions. A screen compiles, type-checks and lints
- * while unreachable, because nothing in a module's own text depends on being imported; and a route
- * table cannot assert what is absent from it, because an absent route is simply a table with fewer
- * entries. `ui/src/screens/accountView/index.tsx` was the clearest case: its own contract stated
- * that the router mounts it at `/account/view` and that the route was live, while nothing in the
- * repository imported it — so the documentation and the code disagreed and no gate could tell. This
- * census closes the CLASS of defect rather than the five instances, which is why it discovers the
- * screens from the filesystem instead of listing them.
+ * Why this file exists — Assumptions: an unmounted screen is invisible from both directions. A screen
+ * compiles, type-checks and lints while unreachable, because nothing in a module's own text depends
+ * on being imported; and a route table cannot assert what is absent from it, because an absent route
+ * is simply a table with fewer entries. A screen's own contract can even state the path the router
+ * mounts it at while nothing in the repository imports it, and the two disagree with no gate able to
+ * tell. This census closes that CLASS of defect, which is why it discovers the screens from the
+ * filesystem instead of listing them.
  *
- * Alternatives Considered: rendering `CardDemoRouter` at each expected path and asserting the screen
- * appears. Rejected on what such a case would actually measure. Every screen needs its
+ * Alternatives Considered: mounting the shipped route array at each expected path and asserting the
+ * screen appears. Rejected on what such a case would actually measure. Every screen needs its
  * authentication guard satisfied, its API responses stubbed and its lazy chunk resolved before it
  * mounts at all, so a failure would name a missing token or an unstubbed request far more often than
  * a missing route, and the one property under test here — that the table names the module — would be
- * the least likely explanation of a red result. Reading the table's source is narrow, and its
- * failure names the screen and the direction of the gap.
+ * the least likely explanation of a red result. `ui/src/routerRoutes.test.tsx` pays that cost
+ * deliberately for the paths it renders; reading the table's source is narrow, and its failure names
+ * the screen and the direction of the gap.
  *
  * Alternatives Considered: listing the screens in this file, as `ui/src/layout/screenHeaderClock.test.tsx`
  * deliberately does for the header-clock contract. Rejected here because the two cases differ in
@@ -34,12 +33,16 @@
  * hand-written list is a feature: adding a screen becomes an explicit edit rather than a surprise
  * failure. This file guards a contract a new screen must satisfy by construction — being reachable —
  * and a hand-written list would have to be extended by the same change that forgot the route, so it
- * could never have caught the five it exists for.
+ * could never catch the omission it exists for.
  *
- * Assumptions: the census reads sources rather than importing modules, because the property under
- * test is syntactic. Whether a module appears in an import specifier and whether an identifier
- * appears as a route element are both facts about the text of `ui/src/router.tsx`, and neither is
- * observable through anything that module exports — it publishes one component and no route list.
+ * Assumptions: the census reads sources rather than importing modules, and it stays that way now
+ * that `ui/src/router.tsx` publishes its route objects. Importing them would give the mounted
+ * ELEMENTS, and an element built from `React.lazy` carries no module specifier at all — there is no
+ * way back from a lazy component to the `./screens/<name>` directory this census is about. Whether a
+ * directory appears in an import specifier and whether the identifier bound to it is an `element`
+ * value are both facts about the text of that file, so the text is what is read. What the exported
+ * array is good for is the complementary property — that the paths and guards are the intended ones
+ * — which `ui/src/routerRoutes.test.tsx` asserts against the objects themselves.
  */
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
@@ -53,19 +56,48 @@ const SCREENS_ROOT = join(import.meta.dirname, '..', 'screens');
 /** The route table's own source, which is the single artifact this census measures. */
 const ROUTER_SOURCE = readFileSync(join(import.meta.dirname, '..', 'router.tsx'), 'utf8');
 
+/** First text of the mounted route array's declaration, which opens the measured region. */
+const MOUNTED_REGION_OPENS = 'export const CARD_DEMO_ROUTES';
+
+/** Text closing the mounted route array, which Prettier puts at column 0 on its own line. */
+const MOUNTED_REGION_CLOSES = '\n];';
+
 /**
- * The region of the route table between the `Routes` element's tags.
+ * The region of the route table between the mounted route array's own delimiters.
  *
  * Assumptions: "mounted" is asserted against this slice and not against the whole file, because an
  * identifier can appear in a module while being mounted nowhere — a lazy adapter is declared above
  * this region and referenced there, and a declaration alone is exactly the half-finished state the
- * five unmounted screens were in. Slicing on the element's tags rather than on a line number keeps
- * the region correct as the table grows.
+ * five unmounted screens were in. Slicing on the declaration's own text rather than on a line number
+ * keeps the region correct as the table grows.
+ *
+ * ⚠️ Refactoring Rationale: the delimiters are the route ARRAY's, where they were the `Routes`
+ * element's opening and closing tags. `ui/src/router.tsx` builds the tree as route objects handed to
+ * `createBrowserRouter`, so there is no `<Routes>` element left to slice on and the previous anchors
+ * would both resolve to -1 — which `slice(-1, -1)` turns into an EMPTY string, and an empty region
+ * makes every mounting assertion below vacuously false rather than reporting the missing anchor. The
+ * emptiness is therefore asserted against directly by {@link theMountedRegionIsMeasurable}, so a
+ * future rename of the array breaks that one case with a message naming the anchor instead of
+ * failing twenty cases with a message naming screens.
+ * @returns {string} The source text between the array's declaration and its closing bracket, or the
+ *   empty string when either delimiter is absent.
  */
-const ROUTES_REGION = ROUTER_SOURCE.slice(
-  ROUTER_SOURCE.indexOf('<Routes>'),
-  ROUTER_SOURCE.indexOf('</Routes>'),
-);
+function mountedRegion(): string {
+  const opens = ROUTER_SOURCE.indexOf(MOUNTED_REGION_OPENS);
+  if (opens < 0) {
+    return '';
+  }
+
+  const closes = ROUTER_SOURCE.indexOf(MOUNTED_REGION_CLOSES, opens);
+  if (closes < 0) {
+    return '';
+  }
+
+  return ROUTER_SOURCE.slice(opens, closes);
+}
+
+/** The measured region, resolved once because the source it reads cannot change mid-run. */
+const ROUTES_REGION = mountedRegion();
 
 /**
  * Matches one lazily-loaded screen adapter and captures the identifier it binds.
@@ -177,24 +209,69 @@ function everyScreenIsImported(): void {
 }
 
 /**
+ * The measured region is present and non-empty, so the mounting case measures the route array.
+ *
+ * Assumptions: this is asserted as a case of its own rather than inside the mounting case below,
+ * exactly as the screen population is asserted non-empty before it is iterated. Both delimiters are
+ * required by name, so a rename of the exported array fails HERE naming the anchor rather than
+ * failing every screen for a reason that has nothing to do with screens.
+ * @returns {void} Nothing; assertions raise on failure.
+ */
+function theMountedRegionIsMeasurable(): void {
+  expect(
+    ROUTER_SOURCE,
+    `ui/src/router.tsx must declare the mounted route array as ${MOUNTED_REGION_OPENS}`,
+  ).toContain(MOUNTED_REGION_OPENS);
+  expect(
+    ROUTER_SOURCE,
+    `the mounted route array must close with ${JSON.stringify(MOUNTED_REGION_CLOSES)}`,
+  ).toContain(MOUNTED_REGION_CLOSES);
+  expect(
+    ROUTER_SOURCE.indexOf(MOUNTED_REGION_OPENS),
+    'the closing delimiter must follow the declaration it closes',
+  ).toBeLessThan(
+    ROUTER_SOURCE.indexOf(MOUNTED_REGION_CLOSES, ROUTER_SOURCE.indexOf(MOUNTED_REGION_OPENS)),
+  );
+  expect(
+    ROUTES_REGION.length,
+    'the mounted route region resolved empty, so nothing below measures the route array',
+  ).toBeGreaterThan(0);
+
+  /*
+   * Assumptions: the region has to contain route DECLARATIONS, not merely be non-empty. Two anchors
+   * that had drifted together would satisfy a length check while enclosing no route at all, so the
+   * assertion is on the two keys every declared route carries.
+   */
+  expect(ROUTES_REGION, 'the measured region encloses no route declaration').toContain('path:');
+  expect(ROUTES_REGION, 'the measured region encloses no route element').toContain('element:');
+}
+
+/**
  * Every authored screen module is mounted as the element of a route.
  *
  * Assumptions: this is a SEPARATE case from the import above rather than a second assertion inside
  * it, because the two failures have different causes and different fixes. An unimported screen needs
- * an adapter; an imported-but-unmounted one needs a `Route` entry, and that was the exact state of
+ * an adapter; an imported-but-unmounted one needs a route entry, and that was the exact state of
  * the transaction-capture screen at one point -- adapter declared, route absent.
+ *
+ * ⚠️ Assumptions: the match is `element: <Identifier />` rather than the bare JSX element, because
+ * the tree is now route OBJECTS: a screen is mounted by being the value of an `element` key, and a
+ * bare element match would also be satisfied by an identifier appearing anywhere in the region --
+ * inside a fallback, or as a prop -- which is the vacuous pass this census exists to prevent.
  * @returns {void} Nothing; assertions raise on failure.
  */
 function everyScreenIsMounted(): void {
+  expect(ROUTES_REGION.length, 'the mounted route region resolved empty').toBeGreaterThan(0);
+
   for (const screen of authoredScreens()) {
     const identifiers = identifiersFor(screen);
     const mounted = identifiers.some(
       /**
-       * Reports whether one identifier is used as a route element.
+       * Reports whether one identifier is mounted as a route element.
        * @param {string} identifier - An identifier the route table binds to a screen module.
-       * @returns {boolean} `true` when the identifier appears as an element inside `Routes`.
+       * @returns {boolean} `true` when the identifier is an `element` value in the route array.
        */
-      (identifier) => ROUTES_REGION.includes(`<${identifier} />`),
+      (identifier) => ROUTES_REGION.includes(`element: <${identifier} />`),
     );
 
     expect(
@@ -273,6 +350,7 @@ function theDeliveredScreensArePresent(): void {
  * @returns {void} Nothing; the cases are registered with the runner.
  */
 function routeCensusCases(): void {
+  it('measures a non-empty mounted route region', theMountedRegionIsMeasurable);
   it('imports every authored screen module', everyScreenIsImported);
   it('mounts every authored screen module on a route', everyScreenIsMounted);
   it('names no screen directory that does not exist', noRouteNamesAMissingScreen);

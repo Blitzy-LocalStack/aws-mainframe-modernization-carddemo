@@ -127,11 +127,16 @@ import org.springframework.transaction.support.TransactionTemplate;
  * and <strong>L287</strong> for the child file, both of which write a message and return. Read against
  * {@code PERFORM ... UNTIL} at L178 and L181, a status that is neither success nor {@code '10'} leaves
  * both the flag and the file position unchanged, so the loop re-reads the same condition indefinitely.
- * The target has no continuation condition at all: {@link #records(InputStream, int, String)} resolves the
- * stream to a known number of whole records ONCE, and each pass is then a counted walk of that many
- * elements. A loop whose bound is settled before it starts, and whose body cannot extend it, terminates
- * whatever the input was; there is no status a record can carry that returns control to the top without
- * consuming an element.
+ * The target has no such condition. {@link RecordStream#nextChunk(int)} is the only source either pass
+ * reads from, and every one of its exits consumes input or ends the walk: it returns a chunk of whole
+ * records, returns an empty chunk at the end of the extract, or throws. A pass therefore ends when a
+ * chunk comes back smaller than it asked for, and no branch inside either loop returns control to the top
+ * without either taking records out of the stream or leaving it.
+ * Assumptions: the reference loops are unbounded because a bad status leaves the FILE POSITION unchanged
+ * as well as the flag, so the same bytes are re-read. Here {@code readNBytes} has already consumed
+ * whatever it returned by the time any check runs on it, so the position cannot fail to advance -- which
+ * is why termination does not depend on the ceiling. The ceiling refuses an extract that is larger than
+ * an operator expected; it is not what makes the walk finite.
  *
  * <h2>Idempotence at both levels</h2>
  *
@@ -216,34 +221,55 @@ import org.springframework.transaction.support.TransactionTemplate;
  *
  * <h2>Trade-offs accepted</h2>
  *
- * <p>Trade-offs: the whole load runs in ONE transaction, so a failure part-way leaves nothing behind. The
- * reference program takes no syncpoint of its own -- it contains no checkpoint call, and the module's job
- * streams contain no {@code CHKPT=} -- and relies on the transaction monitor committing at program end,
- * so one unit of work is the closer reading. The alternative, committing per record, would leave a failed
- * load half-applied and would make the duplicate tolerance above load-bearing for correctness rather than
- * merely for convenience. Keeping it atomic means every re-run starts from a state that is either wholly
- * loaded or wholly absent. What is given up is that a load too large for one transaction's resources
- * cannot be split, which the extract this reads does not approach: it is one file pair per unload of one
- * database.
+ * <p>Trade-offs: the whole load runs in ONE transaction -- both files, every chunk -- so a failure
+ * part-way leaves nothing behind. The reference program takes no syncpoint of its own -- it contains no
+ * checkpoint call, and the module's job streams contain no {@code CHKPT=} -- and relies on the transaction
+ * monitor committing at program end, so one unit of work is the closer reading. The alternative,
+ * committing per record or per chunk, would leave a failed load half-applied and would make the duplicate
+ * tolerance above load-bearing for correctness rather than merely for convenience. Keeping it atomic means
+ * every re-run starts from a state that is either wholly loaded or wholly absent. What is given up is that
+ * a load too large for one transaction's resources cannot be split, which the extract this reads does not
+ * approach: it is one file pair per unload of one database.
  *
- * <p>Trade-offs: every record of a file is resolved before any record is decoded, rather than each being
- * decoded as it is read. That costs memory proportional to the file, and it is chosen for a diagnostic
- * reason record-at-a-time decoding cannot match. A length remainder is the symptom of one of these two
- * files being handed to the other's reader, and the strides are a hundred and two hundred and six -- so
- * the child file divided by the root stride leaves two whole records and a six-byte remainder. Decoded as
- * read, those two records would be written first, and a child record's bytes read against the summary
- * layout fail somewhere in the middle of a packed money field: the run would then report a malformed field
- * rather than the mismatched file that actually caused it. Resolving the length first means the stride
- * mismatch is what gets reported, before a single row is written.
+ * <p>⚠️ Refactoring Rationale: that atomicity was LOST and is restored here. A revision that introduced
+ * chunking opened one transaction per five hundred records, on the stated grounds that a single
+ * declarative transaction "accumulated every entity of every record in one persistence context". That
+ * ground no longer holds and has not since the writes became native conflict-tolerant statements: nothing
+ * on this path is a managed entity, so the persistence context does not grow with the extract and the
+ * chunk boundary was buying nothing that needed a commit. What it cost was the property this class's own
+ * comment promised -- a failure in the seventh chunk left six chunks visible to every reader, and a
+ * failure in the child file left the whole summary file committed, which is the half-loaded database an
+ * atomic load exists to prevent. The chunk is retained as a MEMORY and BIND-PARAMETER unit and is no
+ * longer a commit boundary.
  *
- * <p>Refactoring Rationale: that memory cost is now BOUNDED by a stated ceiling, {@link
- * #MAX_RECORDS_PROPERTY}, and the file is read one stride at a time rather than drained into a single
- * array. The rationale that stood here claimed the cost was bounded by the transaction that holds the
- * entities, which was false in two ways: the bytes are read before any entity exists, so the transaction
- * bounds nothing about them, and the two costs are additive rather than one standing in for the other.
- * With no ceiling at all, a stream that is not an extract -- an object-storage key pointing at the wrong
- * file -- was read until the heap ended, reporting an allocation failure naming a byte count instead of a
- * refusal naming the file.
+ * <p>Trade-offs: one transaction across both files holds its write locks for the length of the load, and
+ * that has a cost worth naming rather than discovering. The conflict-tolerant insert of a key another
+ * transaction has inserted but not yet committed WAITS for that transaction to resolve, so an online
+ * decision inserting the first summary for an account can block behind a load that is still running, and
+ * the load can block behind it. This is accepted because the load is an operator-scheduled maintenance
+ * task over an extract of one database, run at a known time, and because the alternative -- committing per
+ * chunk -- trades a bounded wait for a partially visible database. The re-run property makes the wait
+ * recoverable and does not make partial visibility recoverable.
+ *
+ * <p>Trade-offs: the extract is read a BOUNDED CHUNK at a time and the memory the load holds is the chunk
+ * rather than the file, which is a ceiling of five hundred records however large the extract is. The
+ * mis-handed-file diagnosis this reader is judged on survives that bound: a stride remainder is the
+ * symptom of one of these two files being handed to the other's reader, the strides are a hundred and two
+ * hundred and six, and so the child file read against the root stride ends with a six-byte remainder. That
+ * remainder is refused at the END of the stream rather than by dividing a known total, because a stream
+ * read incrementally has no known total -- so the refusal still names the stride mismatch rather than a
+ * malformed packed field in the middle of a record, but it arrives after the rows before it have been
+ * decoded and written. It costs nothing observable, because those writes are inside the transaction the
+ * refusal rolls back: a mis-handed file leaves no row at all.
+ *
+ * <p>⚠️ Refactoring Rationale: what stood here read the whole extract into one array before decoding
+ * anything, on the diagnostic grounds above, and said the memory cost was bounded by the transaction
+ * holding the entities. Both parts were wrong. The bytes are read before any entity exists, so the
+ * transaction bounded nothing about them, and with no ceiling at all a stream that is not an extract -- an
+ * object-storage key pointing at the wrong file -- was read until the heap ended, reporting an allocation
+ * failure naming a byte count instead of a refusal naming the file. The record count is now capped by
+ * {@link #MAX_RECORDS_PROPERTY} as well, so a stream that is the wrong file AND divides evenly is refused
+ * by count rather than by exhaustion.
  */
 @Service
 public class LoadService {
@@ -297,30 +323,42 @@ public class LoadService {
     private final PendingAuthDetailRepository details;
 
     /**
-     * The template each bounded chunk's unit of work is opened through.
+     * The template the ONE unit of work of a load is opened through.
      *
-     * <p>Refactoring Rationale: the load is a SEQUENCE of bounded transactions rather than one, and the
-     * template is what makes the boundary visible in the code. A single declarative transaction over the
-     * whole load accumulated every entity of every record in one persistence context, so the memory the
-     * load needed grew with the extract rather than staying flat -- on top of an extract that had itself
-     * been read into memory entirely. Ending the transaction per chunk also ends the persistence context
-     * per chunk, which is why no explicit clear is needed.</p>
+     * <p>Assumptions: exactly one transaction is opened per PUBLIC entry point, and the private chunk
+     * loops open none. {@link #load(InputStream, InputStream)} therefore runs both files in a single
+     * transaction, and a standalone {@link #loadSummaries(InputStream)} or
+     * {@link #loadDetails(InputStream)} runs its own file in one. Alternatives Considered: declaring the
+     * boundary with {@code @Transactional} on the public methods instead. Rejected because the combined
+     * entry point would then have to call the two public methods to reuse them, and a self-invocation
+     * bypasses the proxy -- so the annotation would read as atomic and the code would not be.</p>
      *
-     * <p>Trade-offs: the load is no longer atomic across chunks, so a failure part-way leaves earlier
-     * chunks committed. That is acceptable precisely because both halves of this loader are idempotent --
-     * a record whose row is already present is counted and skipped -- so a re-run after a failure
-     * completes the load rather than duplicating it, which is a stronger operational property than
-     * all-or-nothing over an extract large enough for the difference to matter.</p>
+     * <p>Assumptions: the template is used rather than nested, which is why this class is indifferent to
+     * the propagation the template was configured with. No transactional method here calls another, so
+     * there is no inner {@code execute} whose propagation could turn one unit of work into two.</p>
+     *
+     * <p>⚠️ Refactoring Rationale: this template opened one transaction PER CHUNK, and this comment
+     * defended that by saying a single transaction "accumulated every entity of every record in one
+     * persistence context". The writes are native conflict-tolerant statements -- see
+     * {@code PendingAuthSummaryRepository.insertSummaryIfAbsent} and
+     * {@code PendingAuthDetailRepository.insertDetailIfAbsent}, both of which state that the caller owns
+     * the transaction -- so no entity is managed on this path and the context never grew. The chunk
+     * commit therefore bought nothing and cost the atomicity the class contract promises.</p>
      */
     private final TransactionTemplate transactions;
 
     /**
      * How many extract records one chunk holds.
      *
-     * <p>Assumptions: the figure bounds three things at once and so is chosen for the tightest of them --
-     * the records held in memory, the entities in one persistence context, and the bind parameters in the
-     * presence queries issued per chunk. Five hundred is comfortably inside every engine's bind ceiling
-     * while still amortising the round trip across a useful number of records.</p>
+     * <p>Assumptions: the figure bounds two things and is chosen for the tighter of them -- the record
+     * images held in memory at once, and the bind parameters in the presence queries a chunk issues. Five
+     * hundred is comfortably inside every engine's bind ceiling while still amortising the round trip
+     * across a useful number of records.</p>
+     *
+     * <p>⚠️ Assumptions: the chunk is NOT a commit boundary. Refactoring Rationale: this figure was also
+     * described as bounding "the entities in one persistence context", and it never did -- the writes are
+     * native statements and manage no entity -- which was the reasoning that turned a memory bound into a
+     * commit boundary and left a failed load partially visible.</p>
      */
     private static final int CHUNK_SIZE = 500;
 
@@ -340,7 +378,7 @@ public class LoadService {
      * @param summaries the summary repository the root images are loaded into; must not be {@code null}
      * @param details the authorization repository the child records are loaded into; must not be
      *     {@code null}
-     * @param transactions the template each bounded chunk's unit of work is opened through; must not be
+     * @param transactions the template a load's single unit of work is opened through; must not be
      *     {@code null}
      * @param maxRecords the greatest number of records one extract file may hold, which must be positive
      * @throws NullPointerException if any repository or the template is {@code null}
@@ -380,6 +418,12 @@ public class LoadService {
      * where {@code 1000-INITIALIZE} at L190 to L215 and {@code 4000-FILE-CLOSE} at L341 to L356 went. The
      * caller decides whether a stream comes from a file, from object storage or from a test resource, and
      * closing one it still intends to reuse would end a run half-read with no error.
+     *
+     * <p>Assumptions: both passes run in ONE transaction, so this call is ALL-OR-NOTHING: a refusal
+     * anywhere -- in the last record of the child file as much as the first of the root file -- leaves the
+     * two tables exactly as it found them. That is what makes a re-run after a failure a fresh load rather
+     * than a completion of a partial one, and it is why the duplicate tolerance below is a convenience for
+     * a repeated extract rather than the mechanism correctness depends on.
      *
      * @param rootImages the summary extract, a whole number of hundred-byte segment images; must not be
      *     {@code null}
@@ -424,8 +468,21 @@ public class LoadService {
         //       lines are identical in shape without the ordinal being fetched reflectively or parsed back
         //       out of a message.
         try {
-            roots = loadSummaries(rootImages);
-            children = loadDetails(childRecords);
+            // WHY : ⚠️ Assumptions: ONE transaction spans both files, and the two private loops inside it
+            //       open none of their own -- which is what makes a failure in the child file withdraw the
+            //       summary rows as well. Refactoring Rationale: these two lines called the PUBLIC
+            //       loaders, each of which committed per chunk, so a child refusal left every summary
+            //       committed and a mid-file refusal left the chunks before it committed; the class
+            //       contract promised the opposite. Calling the private loops instead is also what keeps
+            //       this method's atomicity independent of how the injected template is configured: a
+            //       nested execute could resolve to a new transaction under REQUIRES_NEW and quietly
+            //       reinstate the split.
+            PairedOutcome loaded = Objects.requireNonNull(
+                    this.transactions.execute(status ->
+                            new PairedOutcome(loadRootChunks(rootImages), loadChildChunks(childRecords))),
+                    "the load transaction returned no outcome");
+            roots = loaded.roots();
+            children = loaded.children();
         } catch (MalformedParentKeyException prefix) {
             throw reportRefusedRecord(prefix.getRecordOrdinal(), prefix);
         } catch (MalformedSegmentException segment) {
@@ -562,6 +619,35 @@ public class LoadService {
      */
     public LoadOutcome loadSummaries(InputStream rootImages) {
         Objects.requireNonNull(rootImages, "rootImages must not be null");
+        // WHY : ⚠️ Assumptions: ONE transaction covers this whole file, however many chunks it holds.
+        //       Refactoring Rationale: the loop below used to open a transaction per chunk, so a refusal
+        //       in the third chunk left the first two visible to every reader -- a partially loaded
+        //       summary table, which is the state the class contract says a load never leaves. The chunk
+        //       is a memory and bind-parameter unit; it was never a unit of work.
+        return Objects.requireNonNull(
+                this.transactions.execute(status -> loadRootChunks(rootImages)),
+                "the summary load transaction returned no outcome");
+    }
+
+    /**
+     * Reads the root extract chunk by chunk and inserts each chunk, in the CALLER'S transaction.
+     *
+     * <p>Assumptions: this opens no transaction of its own, and that is the whole reason it is separate
+     * from {@link #loadSummaries(InputStream)}. Both the standalone entry point and the combined one need
+     * this loop inside exactly one transaction, and the combined one needs the SAME transaction that then
+     * loads the child file -- which a method opening its own could not provide.</p>
+     *
+     * <p>Assumptions: the stream is read one chunk at a time rather than drained, so the memory the loop
+     * holds is the chunk rather than the extract, and the record ordinals it reports count from the start
+     * of the file rather than of the chunk.</p>
+     *
+     * @param rootImages the summary extract, a whole number of segment images; must not be {@code null}
+     * @return the counts of what was read, inserted and skipped across every chunk; never {@code null}
+     * @throws UncheckedIOException if the stream cannot be read
+     * @throws IllegalArgumentException if the stream does not hold a whole number of segment images, or if
+     *     an image is malformed for the summary layout
+     */
+    private LoadOutcome loadRootChunks(InputStream rootImages) {
         RecordStream stream =
                 new RecordStream(rootImages, PendingAuthSummaryMapper.unloadRecordLength(), "summary",
                         this.maxRecords);
@@ -572,15 +658,18 @@ public class LoadService {
             if (chunk.isEmpty()) {
                 return total;
             }
-            int base = ordinalBase;
-            LoadOutcome outcome = this.transactions.execute(status -> insertSummaries(chunk, base));
-            total = total.combinedWith(Objects.requireNonNull(outcome));
+            total = total.combinedWith(insertSummaries(chunk, ordinalBase));
             ordinalBase += chunk.size();
         }
     }
 
     /**
-     * Inserts one bounded chunk of summary records inside its own transaction.
+     * Inserts one bounded chunk of summary records, in the transaction its caller opened.
+     *
+     * <p>⚠️ Assumptions: this method neither opens nor commits a transaction. Refactoring Rationale: it
+     * was invoked through the transaction template once per chunk, which made the chunk a commit boundary
+     * and left a failed load partially visible; the boundary now sits at the public entry point, so a
+     * chunk that succeeds is withdrawn if a later one fails.</p>
      *
      * <p>Assumptions: presence is settled for the WHOLE chunk in one statement before anything is
      * written, and the resulting set is then consulted in memory. Refactoring Rationale: this replaces an
@@ -682,6 +771,38 @@ public class LoadService {
      */
     public LoadOutcome loadDetails(InputStream childRecords) {
         Objects.requireNonNull(childRecords, "childRecords must not be null");
+        // WHY : ⚠️ Assumptions: ONE transaction covers this whole file, for the reason
+        //       loadSummaries(InputStream) records. A refusal anywhere in the extract -- an undecodable
+        //       prefix, an unresolved parent, a malformed segment -- withdraws every authorization this
+        //       call inserted, including those in chunks that had already been read.
+        return Objects.requireNonNull(
+                this.transactions.execute(status -> loadChildChunks(childRecords)),
+                "the authorization load transaction returned no outcome");
+    }
+
+    /**
+     * Reads the child extract chunk by chunk and inserts each chunk, in the CALLER'S transaction.
+     *
+     * <p>Assumptions: this opens no transaction of its own, for the reason
+     * {@link #loadRootChunks(InputStream)} records -- the combined entry point needs this loop and the
+     * root loop inside ONE transaction, which neither could provide by opening its own.</p>
+     *
+     * <p>Assumptions: a parent inserted by an earlier chunk of the SAME transaction counts as present.
+     * The presence query reads the transaction's own uncommitted inserts, so the ordering both halves of
+     * the load require -- summaries before authorizations -- holds without either half having committed.
+     * Refactoring Rationale: this held for a different reason while each chunk committed, and stating the
+     * new one matters: the property now rests on read-your-own-writes rather than on a prior commit.</p>
+     *
+     * @param childRecords the detail extract, a whole number of prefixed records; must not be
+     *     {@code null}
+     * @return the counts of what was read, inserted and skipped across every chunk; never {@code null}
+     * @throws UncheckedIOException if the stream cannot be read
+     * @throws IllegalArgumentException if the stream does not hold a whole number of prefixed records, or
+     *     if a record is malformed for the detail layout
+     * @throws MalformedParentKeyException if a record's six-byte prefix does not decode
+     * @throws UnresolvedParentException if a record names an account with no summary row
+     */
+    private LoadOutcome loadChildChunks(InputStream childRecords) {
         RecordStream stream = new RecordStream(childRecords,
                 PendingAuthDetailMapper.unloadRecordLength(), "prefixed detail", this.maxRecords);
         LoadOutcome total = new LoadOutcome(0, 0, 0);
@@ -691,25 +812,29 @@ public class LoadService {
             if (chunk.isEmpty()) {
                 return total;
             }
-            int base = ordinalBase;
-            LoadOutcome outcome = this.transactions.execute(status -> insertDetails(chunk, base));
-            total = total.combinedWith(Objects.requireNonNull(outcome));
+            total = total.combinedWith(insertDetails(chunk, ordinalBase));
             ordinalBase += chunk.size();
         }
     }
 
     /**
-     * Inserts one bounded chunk of authorization records inside its own transaction.
+     * Inserts one bounded chunk of authorization records, in the transaction its caller opened.
+     *
+     * <p>⚠️ Assumptions: this method neither opens nor commits a transaction, for the reason
+     * {@link #insertSummaries(java.util.List, int)} records.</p>
      *
      * <p>Assumptions: parent presence and row presence are each settled for the WHOLE chunk in one
      * statement before anything is written. Refactoring Rationale: this replaces TWO probes per record --
      * one for the parent and one for the row -- so a chunk of five hundred records now issues two queries
      * where it previously issued a thousand.</p>
      *
-     * <p>Assumptions: a parent inserted by an EARLIER chunk of the same run counts as present, because
-     * the presence query reads the table and earlier chunks have committed. That is the ordering both
-     * halves of the load already require -- summaries before authorizations -- so chunking does not
-     * weaken it.</p>
+     * <p>⚠️ Assumptions: a parent inserted by an earlier chunk of the same TRANSACTION counts as present,
+     * because the presence query reads that transaction's own uncommitted inserts. Refactoring Rationale:
+     * this paragraph said "earlier chunks have committed", which was true while each chunk committed and
+     * is now false: nothing commits until the load ends. The ordering the load requires -- summaries
+     * before authorizations -- is unaffected, but it rests on read-your-own-writes rather than on a prior
+     * commit, and a reader who believed the old reason would expect a cross-transaction visibility this
+     * path no longer depends on.</p>
      *
      * @param chunk the extract records to insert; must not be {@code null}
      * @param ordinalBase how many records preceded this chunk, so logged and refused ordinals count from
@@ -877,7 +1002,7 @@ public class LoadService {
     }
 
     /**
-     * Resolves a stream into a known number of whole fixed-length records, refusing a remainder.
+     * Reads one extract stream as a bounded run of whole fixed-length records, refusing a remainder.
      *
      * <p>Purpose. This is the read at {@code cbl/PAUDBLOD.CBL} L226 and L272 together with the file-status
      * tests that follow each, reduced to the two outcomes those tests exist to distinguish: the file held
@@ -890,8 +1015,14 @@ public class LoadService {
      * <strong>L235</strong> for the root file and <strong>L287</strong> for the child file -- reached from
      * any status that is neither success nor end-of-file, and returning from it leaves the enclosing
      * {@code PERFORM ... UNTIL} at L178 or L181 with an unchanged flag and an unchanged file position.
-     * Resolving the whole stream once removes the possibility: after this method returns the element count
-     * is settled, and a caller's walk of it cannot be extended by anything a record contains.
+     * Reading through this class removes the possibility, and it does so WITHOUT settling a total in
+     * advance: {@link #nextChunk(int)} has consumed whatever it returns by the time any check runs on the
+     * bytes, so the position always advances, and its three exits are a chunk, an empty chunk at the end of
+     * the extract, or a throw. A caller's loop therefore cannot be returned to its top without either
+     * taking records out of the stream or ending. Refactoring Rationale: this paragraph previously rested
+     * termination on the element count being "settled" after one whole-stream read, which stopped being
+     * true when the read became incremental; the property that actually holds it is that no exit here
+     * leaves the stream where it found it.
      *
      * <p>Refactoring Rationale: the stream is read ONE STRIDE AT A TIME and the record count is capped,
      * where the whole stream was previously drained into a single array with no ceiling of any kind. Two
@@ -904,15 +1035,28 @@ public class LoadService {
      * A stride-sized read plus an explicit ceiling makes the bound a stated number an operator can raise
      * deliberately, instead of an unstated one the heap discovers.
      *
-     * <p>Assumptions: the diagnostic ORDER that the drain was chosen for is preserved exactly, and that is
-     * why this still resolves every record before returning rather than yielding them one at a time to the
-     * caller. A length remainder is the symptom of one of these two files being handed to the other's
-     * reader, and the strides are a hundred and two hundred and six -- so the child file divided by the
-     * root stride leaves two whole records and a six-byte remainder. Yielded one at a time, those two
+     * <p>Assumptions: the diagnostic ORDER that the drain was chosen for is preserved WITHIN A CHUNK, and
+     * that is why this resolves a whole chunk before returning rather than yielding records one at a time
+     * to the caller. A length remainder is the symptom of one of these two files being handed to the
+     * other's reader, and the strides are a hundred and two hundred and six -- so the child file divided by
+     * the root stride leaves two whole records and a six-byte remainder. Yielded one at a time, those two
      * records would be DECODED and written first, and a child record's bytes read against the summary
      * layout fail somewhere in the middle of a packed money field: the run would report a malformed field
-     * rather than the mismatched file that actually caused it. Resolving the length first means the stride
-     * mismatch is what gets reported, before a single row is written.
+     * rather than the mismatched file that actually caused it. Resolving the chunk's length first means the
+     * stride mismatch is what gets reported, and for any mismatched file up to a chunk long -- which the
+     * two-record case above is -- it is reported before a single row is written.
+     *
+     * <p>Trade-offs: that guarantee does NOT extend across chunks, and the limit is stated here rather
+     * than left to be inferred from the word "chunk". Reading incrementally means a remainder is found
+     * where the stream reaches it, so a mismatched file longer than the caller's chunk size has earlier
+     * chunks decoded and INSERTED before the refusal arrives. Restoring the unconditional form would mean
+     * draining the whole stream to divide it, which is the cost this class exists to remove; the trade is
+     * taken because the case being diagnosed is a file whose stride is wrong -- the WRONG file rather than
+     * a larger one. Assumptions: what weakens across chunks is only WHEN the refusal is raised relative to
+     * the inserts, never what a reader can observe. Every public entry point wraps its whole walk in ONE
+     * {@code transactions.execute}, so the refusal discards every row the earlier chunks inserted and no
+     * caller ever sees a partially loaded table; the chunk is a memory and bind-parameter unit and is not
+     * a unit of work. Nothing here is a registered divergence for that reason.
      *
      * <p>Assumptions: a remainder is a refusal rather than a partial last record. It means the file was
      * produced against a different layout, or was truncated in transit, and either way every field offset
@@ -964,8 +1108,15 @@ public class LoadService {
          * revision read the entire extract into one array and then copied every record out of it into a
          * second list, so the load held two complete copies of the extract in memory before it wrote a
          * single row, and nothing about either the extract or the caller bounded that. Reading
-         * incrementally holds one chunk, and the caller's transaction ends per chunk, so the memory the
-         * load needs is flat in the size of the extract.</p>
+         * incrementally holds one chunk, so the BYTES the load needs are flat in the size of the
+         * extract.</p>
+         *
+         * <p>⚠️ Assumptions: that flatness is a property of this reader alone and says nothing about the
+         * caller's transaction, which spans every chunk. This paragraph claimed "the caller's transaction
+         * ends per chunk", and it no longer does -- the commit boundary moved to the public entry point so
+         * that a refusal in a later chunk withdraws the earlier ones. The row-level resources one
+         * transaction holds therefore DO grow with the extract even though the byte-level ones do not, and
+         * conflating the two is what made a per-chunk commit look free.</p>
          *
          * <p>Assumptions: the whole-record check is applied at the END of the stream rather than by
          * dividing a known total, because a stream's total is exactly what is no longer read. A trailing
@@ -1048,6 +1199,23 @@ public class LoadService {
             return new LoadOutcome(this.read + other.read, this.inserted + other.inserted,
                     this.alreadyPresent + other.alreadyPresent);
         }
+    }
+
+    /**
+     * The two files' outcomes of ONE load, carried out of the single transaction that produced them.
+     *
+     * <p>Assumptions: the pair exists because the completion line reports the two files SEPARATELY --
+     * {@code roots=} and {@code children=} -- while the caller receives their sum, and both halves are
+     * produced inside one transaction that can only return one value. Alternatives Considered: assigning
+     * the two outcomes to fields captured from the transaction callback, or returning only the sum and
+     * dropping the per-file figures from the log. The first makes a method's result depend on assignment
+     * order inside a lambda, and the second removes the one line that tells an operator which file of a
+     * refused load had been read -- which is the first question a partial extract raises.</p>
+     *
+     * @param roots what the summary extract read, inserted and skipped
+     * @param children what the authorization extract read, inserted and skipped
+     */
+    private record PairedOutcome(LoadOutcome roots, LoadOutcome children) {
     }
 
     /**

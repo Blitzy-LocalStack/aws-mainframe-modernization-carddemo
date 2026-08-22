@@ -48,6 +48,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Optional;
@@ -253,6 +254,32 @@ class StatementServiceTest {
     private static final String PREFIX = "statements/";
 
     /**
+     * The run the manifest names in this class.
+     *
+     * <p>Assumptions: a FIXED identifier rather than one minted per case, so the key every assertion
+     * below expects is reproducible from the source alone. The production identifier is random per run --
+     * which is what stops a rerun overwriting the run it replaces -- and a case asserting a key would
+     * otherwise have to recover the identifier from the value under test before it could compare
+     * anything.</p>
+     */
+    private static final String RUN_ID = "0123456789abcdef0123456789abcdef";
+
+    /** The key prefix that run's three objects sit under. */
+    private static final String RUN_PREFIX = PREFIX + StatementService.RUN_SEGMENT + RUN_ID + "/";
+
+    /**
+     * The audience every case here reads under, bar the one asserting what a cardholder is told.
+     *
+     * <p>Assumptions: the operator audience is the default for this class because it is the audience
+     * every artifact assertion needs -- a cardholder response carries no location, no instant and no
+     * position at all, so a class defaulting to it would assert nothing about any of them. The one case
+     * that names {@link StatementService.ArtifactAudience#CARDHOLDER} asserts exactly that
+     * withholding.</p>
+     */
+    private static final StatementService.ArtifactAudience OPERATOR =
+            StatementService.ArtifactAudience.OPERATOR;
+
+    /**
      * Fixed tokeniser key material, at the tokeniser's minimum length.
      *
      * <p>Assumptions: fixed rather than random so a token asserted here is reproducible from the
@@ -360,8 +387,14 @@ class StatementServiceTest {
         when(artifacts.describe(anyString())).thenAnswer(call -> Optional.of(
                 new ArtifactStore.ArtifactDescriptor(
                         call.getArgument(0), ARTIFACT_SIZE, WRITTEN_AT)));
-        when(artifacts.describe(PREFIX + StatementService.INDEX_OBJECT))
+        when(artifacts.describe(RUN_PREFIX + StatementService.INDEX_OBJECT))
                 .thenReturn(Optional.empty());
+        // WHY : Assumptions: the manifest is stubbed to name ONE published run, because that is the
+        //       state every artifact case is about -- a run's objects are addressable only through it.
+        //       The cases that exercise an unpublished run and a corrupt manifest override this stub
+        //       explicitly, so the state each of them turns on is visible at the case.
+        when(artifacts.readRange(eq(StatementService.manifestKey(PREFIX)), anyLong(), anyLong()))
+                .thenReturn(StatementService.encodeManifest(RUN_ID));
         service = new StatementService(transactions, cardXrefs, customers, accounts,
                 PREFIX, artifacts, new OpaqueIdentifier(ARTIFACT_KEY));
     }
@@ -377,7 +410,7 @@ class StatementServiceTest {
     @DisplayName("a request naming neither a card nor an account is refused")
     void aRequestNamingNeitherSelectorIsRefused() {
         assertThatExceptionOfType(ClientInputException.class)
-                .isThrownBy(() -> service.describe(new StatementRequest(null, null)))
+                .isThrownBy(() -> service.describe(new StatementRequest(null, null), OPERATOR))
                 .satisfies(refusal -> assertThat(refusal.fields()).contains("cardNumber"));
 
         verify(cardXrefs, never()).resolveByWholeCardNumber(anyString());
@@ -392,7 +425,7 @@ class StatementServiceTest {
     void aRequestNamingBothSelectorsIsRefused() {
         assertThatExceptionOfType(ClientInputException.class)
                 .isThrownBy(() -> service.describe(
-                        new StatementRequest(SEED_CARD_NUMBER, String.valueOf(ACCOUNT_ID))))
+                        new StatementRequest(SEED_CARD_NUMBER, String.valueOf(ACCOUNT_ID)), OPERATOR))
                 .satisfies(refusal -> assertThat(refusal.fields()).contains("accountId"));
 
         verify(cardXrefs, never()).resolveByWholeCardNumber(anyString());
@@ -413,7 +446,7 @@ class StatementServiceTest {
     void aCardIsResolvedByTheWholeNumber() {
         stubOneCard();
 
-        service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+        service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
 
         ArgumentCaptor<String> selector = ArgumentCaptor.forClass(String.class);
         verify(cardXrefs).resolveByWholeCardNumber(selector.capture());
@@ -434,7 +467,7 @@ class StatementServiceTest {
         when(cardXrefs.resolveByWholeCardNumber(anyString())).thenReturn(Optional.empty());
 
         assertThatExceptionOfType(NoSuchElementException.class)
-                .isThrownBy(() -> service.describe(new StatementRequest(SEED_CARD_NUMBER, null)));
+                .isThrownBy(() -> service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR));
 
         verify(cardXrefs, never()).findById(anyString());
     }
@@ -453,7 +486,7 @@ class StatementServiceTest {
         when(cardXrefs.findCardsOfAccount(eq(ACCOUNT_ID), any(Limit.class)))
                 .thenReturn(List.of(xref(FINGERPRINT)));
 
-        service.describe(new StatementRequest(null, String.valueOf(ACCOUNT_ID)));
+        service.describe(new StatementRequest(null, String.valueOf(ACCOUNT_ID)), OPERATOR);
 
         ArgumentCaptor<Limit> bound = ArgumentCaptor.forClass(Limit.class);
         verify(cardXrefs).findCardsOfAccount(eq(ACCOUNT_ID), bound.capture());
@@ -473,7 +506,7 @@ class StatementServiceTest {
 
         assertThatExceptionOfType(ClientInputException.class)
                 .isThrownBy(() -> service.describe(
-                        new StatementRequest(null, String.valueOf(ACCOUNT_ID))))
+                        new StatementRequest(null, String.valueOf(ACCOUNT_ID)), OPERATOR))
                 .satisfies(refusal -> assertThat(refusal.fields()).contains("accountId"));
 
         verify(transactions, never()).aggregateByCardFingerprint(anyString());
@@ -490,7 +523,7 @@ class StatementServiceTest {
 
         assertThatExceptionOfType(NoSuchElementException.class)
                 .isThrownBy(() -> service.describe(
-                        new StatementRequest(null, String.valueOf(ACCOUNT_ID))));
+                        new StatementRequest(null, String.valueOf(ACCOUNT_ID)), OPERATOR));
     }
 
     // WHY : Refactoring Rationale: this is the boundedness case. The earlier shape opened the card's
@@ -506,7 +539,7 @@ class StatementServiceTest {
     void aHeadingOnlyReadMaterialisesNoTransactionRow() {
         stubOneCard();
 
-        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
 
         assertThat(response.transactionCount()).isEqualTo(7);
         assertThat(response.totalAmount()).isEqualTo(Money.of("-1234.56"));
@@ -532,7 +565,7 @@ class StatementServiceTest {
                 eq(FINGERPRINT), anyString(), eq(StatementService.MAX_RESPONSE_TRANSACTIONS)))
                 .thenReturn(List.of());
 
-        StatementDocument document = service.compose(new StatementRequest(SEED_CARD_NUMBER, null));
+        StatementDocument document = service.compose(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
 
         assertThat(document.statement().transactionCount())
                 .as("the heading reports what the card holds, not what the body carries")
@@ -557,7 +590,7 @@ class StatementServiceTest {
     void anArtifactLocationCarriesNoIdentifier() {
         stubOneCard();
 
-        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
 
         for (String uri : List.of(response.plainTextUri(), response.htmlUri())) {
             assertThat(uri).startsWith(StatementService.ARTIFACT_LOCATION_PREFIX);
@@ -586,7 +619,7 @@ class StatementServiceTest {
     void theArtifactSelectorIsTheDeclaredWidth() {
         stubOneCard();
 
-        String uri = service.describe(new StatementRequest(SEED_CARD_NUMBER, null)).plainTextUri();
+        String uri = service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR).plainTextUri();
         String selector = uri.substring(StatementService.ARTIFACT_LOCATION_PREFIX.length());
 
         assertThat(selector).hasSize(OpaqueIdentifier.TOKEN_LENGTH);
@@ -606,14 +639,14 @@ class StatementServiceTest {
     void aPublishedLocationResolvesToTheWrittenObject() {
         stubOneCard();
 
-        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
 
         assertThat(service.resolveArtifactKey(selectorOf(response.plainTextUri())))
                 .as("the plain-text location resolves to the object S3StatementSink writes")
-                .contains(PREFIX + S3StatementSink.PLAIN_TEXT_OBJECT);
+                .contains(RUN_PREFIX + S3StatementSink.PLAIN_TEXT_OBJECT);
         assertThat(service.resolveArtifactKey(selectorOf(response.htmlUri())))
                 .as("the markup location resolves to the object S3StatementSink writes")
-                .contains(PREFIX + S3StatementSink.HTML_OBJECT);
+                .contains(RUN_PREFIX + S3StatementSink.HTML_OBJECT);
     }
 
     // WHY : Assumptions: absence is asserted on ALL THREE members together, because the three are one
@@ -629,7 +662,7 @@ class StatementServiceTest {
         stubOneCard();
         when(artifacts.describe(anyString())).thenReturn(Optional.empty());
 
-        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
 
         assertThat(response.plainTextUri())
                 .as("a location that resolves to nothing is worse than no location")
@@ -641,9 +674,11 @@ class StatementServiceTest {
     }
 
     // WHY : Assumptions: the two artifacts are described independently, so this case stubs ONE of them
-    //       present. A run interrupted between its two writes, or a lifecycle rule that expires one,
-    //       leaves the store in exactly this state, and an implementation that reported both on the
-    //       strength of either would publish a location that resolves to nothing.
+    //       present. A lifecycle rule expiring one object of the published run leaves the store in
+    //       exactly this state, and an implementation that reported both on the strength of either
+    //       would publish a location that resolves to nothing. Note what this no longer covers: a run
+    //       INTERRUPTED between its two writes used to reach a reader this way and no longer can,
+    //       because an incomplete run never reaches the manifest at all.
     /**
      * Asserts that one stored artifact is reported without the other being invented.
      */
@@ -652,11 +687,11 @@ class StatementServiceTest {
     void oneStoredArtifactIsReportedAlone() {
         stubOneCard();
         when(artifacts.describe(anyString())).thenReturn(Optional.empty());
-        when(artifacts.describe(PREFIX + S3StatementSink.PLAIN_TEXT_OBJECT))
+        when(artifacts.describe(RUN_PREFIX + S3StatementSink.PLAIN_TEXT_OBJECT))
                 .thenReturn(Optional.of(new ArtifactStore.ArtifactDescriptor(
-                        PREFIX + S3StatementSink.PLAIN_TEXT_OBJECT, ARTIFACT_SIZE, WRITTEN_AT)));
+                        RUN_PREFIX + S3StatementSink.PLAIN_TEXT_OBJECT, ARTIFACT_SIZE, WRITTEN_AT)));
 
-        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
 
         assertThat(response.plainTextUri()).isNotNull();
         assertThat(response.htmlUri())
@@ -675,7 +710,7 @@ class StatementServiceTest {
     void theProductionInstantIsTheStoreInstant() {
         stubOneCard();
 
-        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
 
         assertThat(response.generatedAt()).isEqualTo(WRITTEN_AT);
     }
@@ -696,7 +731,7 @@ class StatementServiceTest {
                 .thenReturn(aggregate("1000000000.00", 3L));
 
         assertThatExceptionOfType(ArithmeticException.class)
-                .isThrownBy(() -> service.describe(new StatementRequest(SEED_CARD_NUMBER, null)))
+                .isThrownBy(() -> service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR))
                 .withMessageContaining("integer positions")
                 .withMessageNotContaining("1000000000");
     }
@@ -711,7 +746,7 @@ class StatementServiceTest {
         when(transactions.aggregateByCardFingerprint(FINGERPRINT))
                 .thenReturn(aggregate("999999999.99", 3L));
 
-        assertThat(service.describe(new StatementRequest(SEED_CARD_NUMBER, null)).totalAmount())
+        assertThat(service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR).totalAmount())
                 .isEqualTo(Money.of(new BigDecimal("999999999.99")));
     }
 
@@ -744,7 +779,7 @@ class StatementServiceTest {
     @DisplayName("collection opens the resolved key and nothing derived from the selector")
     void collectionOpensTheResolvedKey() {
         stubOneCard();
-        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
         when(artifacts.open(anyString())).thenReturn(new ArtifactStore.OpenArtifact(
                 ARTIFACT_SIZE, new ByteArrayInputStream(new byte[] {0})));
 
@@ -752,7 +787,164 @@ class StatementServiceTest {
 
         ArgumentCaptor<String> key = ArgumentCaptor.forClass(String.class);
         verify(artifacts).open(key.capture());
-        assertThat(key.getValue()).isEqualTo(PREFIX + S3StatementSink.HTML_OBJECT);
+        assertThat(key.getValue()).isEqualTo(RUN_PREFIX + S3StatementSink.HTML_OBJECT);
+    }
+
+    // WHY : Refactoring Rationale: this is the confidentiality case a review filed against the
+    //       statement surface, and it is the reason the audience parameter exists. The two artifacts
+    //       hold EVERY cardholder's statement in the portfolio and the index positions are coordinates
+    //       into them, so a per-card answer carrying either handed an ordinary caller the address of
+    //       the whole run -- one card it was entitled to, in exchange for all of them. The assertion is
+    //       on all five run-wide members together, because withholding four of them and publishing the
+    //       fifth is the same disclosure with one more step.
+    /**
+     * Asserts that a cardholder audience is told nothing about the run-wide artifacts.
+     */
+    @Test
+    @DisplayName("a cardholder audience is told no location, no instant and no position")
+    void aCardholderIsToldNothingOfTheRunWideArtifacts() {
+        stubOneCard();
+        stubIndex(new StatementIndexEntry(FINGERPRINT, 41L, 7L));
+
+        StatementResponse response = service.describe(
+                new StatementRequest(SEED_CARD_NUMBER, null),
+                StatementService.ArtifactAudience.CARDHOLDER);
+
+        assertThat(response.plainTextUri()).isNull();
+        assertThat(response.htmlUri()).isNull();
+        assertThat(response.generatedAt()).isNull();
+        assertThat(response.firstRecord())
+                .as("a position is a coordinate into the run-wide artifact and discloses it too")
+                .isNull();
+        assertThat(response.recordCount()).isNull();
+        assertThat(response.totalAmount())
+                .as("the card's own figures are still the answer to the card's own question")
+                .isEqualTo(Money.of(new BigDecimal("-1234.56")));
+        assertThat(response.transactionCount()).isEqualTo(7);
+        // WHY : Assumptions: the store is asserted UNTOUCHED rather than merely unreported, because an
+        //       implementation that read the manifest, both artifacts and the index and then discarded
+        //       what it read would satisfy every assertion above while spending four requests per
+        //       statement on fields it is not allowed to return.
+        Mockito.verifyNoInteractions(artifacts);
+    }
+
+    // WHY : Refactoring Rationale: this is the coherence case, and it is the one the retired shape
+    //       could not express. The three objects of a run were written to fixed keys, so each became
+    //       visible the moment it was written and a reader could hold the previous run's index over the
+    //       new run's artifact -- reporting a position that addressed an unrelated cardholder. A run is
+    //       now addressable only through the manifest, so this case asserts the manifest is what the
+    //       response resolves against: ONE read of it, and every key derived from that one answer.
+    /**
+     * Asserts that one response resolves the manifest once and reads only that run's objects.
+     */
+    @Test
+    @DisplayName("one response resolves one run and reads only that run's objects")
+    void oneResponseResolvesOneRun() {
+        stubOneCard();
+        stubIndex(new StatementIndexEntry(FINGERPRINT, 41L, 7L));
+
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
+
+        assertThat(response.firstRecord()).isEqualTo(41L);
+        verify(artifacts, Mockito.times(1))
+                .readRange(eq(StatementService.manifestKey(PREFIX)), anyLong(), anyLong());
+        verify(artifacts).describe(RUN_PREFIX + S3StatementSink.PLAIN_TEXT_OBJECT);
+        verify(artifacts).describe(RUN_PREFIX + S3StatementSink.HTML_OBJECT);
+        verify(artifacts).describe(RUN_PREFIX + StatementService.INDEX_OBJECT);
+        // WHY : Assumptions: the manifest is read through a BOUNDED range, and the bound is asserted --
+        //       an unbounded read of an object whose size this service does not control would size an
+        //       allocation from the store's answer.
+        verify(artifacts).readRange(
+                StatementService.manifestKey(PREFIX), 0L, StatementService.RUN_ID_LENGTH + 15L);
+    }
+
+    // WHY : Assumptions: an unpublished run is asserted to be an ORDINARY state rather than a failure,
+    //       because a deployment whose first statement run has not happened has no manifest, and that
+    //       is the same state as the one in which no artifact exists. Failing the statement read would
+    //       deny a caller its own figures over the absence of a document it did not ask for.
+    /**
+     * Asserts that a deployment with no published run reports no artifact rather than failing.
+     */
+    @Test
+    @DisplayName("no published run yields no location and probes no artifact")
+    void anUnpublishedRunYieldsNoArtifact() {
+        stubOneCard();
+        when(artifacts.readRange(eq(StatementService.manifestKey(PREFIX)), anyLong(), anyLong()))
+                .thenThrow(new NoSuchElementException("no manifest"));
+
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
+
+        assertThat(response.plainTextUri()).isNull();
+        assertThat(response.htmlUri()).isNull();
+        assertThat(response.generatedAt()).isNull();
+        assertThat(response.firstRecord()).isNull();
+        assertThat(response.recordCount()).isNull();
+        verify(artifacts, never()).describe(anyString());
+    }
+
+    // WHY : Assumptions: a manifest that is present but does not name a run identifier is a FAILURE
+    //       rather than an absence, because the alternative is to compose an object key out of whatever
+    //       it holds. The second value is the case that makes the difference visible: a relative path
+    //       would address an object outside the statement prefix entirely if it were concatenated, and
+    //       an implementation that trusted its own manifest would do exactly that.
+    /**
+     * Asserts that a manifest not naming a well-formed run is refused rather than used as a key part.
+     */
+    @Test
+    @DisplayName("a manifest not naming a run identifier is refused")
+    void aManifestNamingNoRunIsRefused() {
+        stubOneCard();
+        // WHY : Assumptions: the case-sensitivity rejection is DERIVED from the accepted value rather
+        //       than transcribed as a second literal. StatementService declares the run identifier as
+        //       thirty-two LOWER-case hexadecimal characters, so upper-casing the accepted constant
+        //       produces the one negative case that differs from it in nothing but case -- a hand-written
+        //       constant could drift from RUN_ID and then stop testing case at all. Trade-offs: it also
+        //       keeps a thirty-two character hexadecimal literal out of the source, which the
+        //       repository's secret scan reads as a credential shape wherever it appears unreviewed.
+        String upperCasedRun = RUN_ID.toUpperCase(Locale.ROOT);
+        for (String bogus : List.of("../../etc/passwd", upperCasedRun, RUN_ID + RUN_ID, "")) {
+            when(artifacts.readRange(eq(StatementService.manifestKey(PREFIX)), anyLong(), anyLong()))
+                    .thenReturn(bogus.getBytes(StandardCharsets.US_ASCII));
+
+            assertThatExceptionOfType(IllegalStateException.class)
+                    .as("a manifest holding %s must not reach an object key", bogus)
+                    .isThrownBy(() ->
+                            service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR))
+                    .withMessageContaining("manifest");
+        }
+        verify(artifacts, never()).describe(anyString());
+    }
+
+    // WHY : Refactoring Rationale: this is the case that makes immutable keys worth having. Keys that
+    //       are never overwritten stop a run's bytes changing underneath a reader, but on their own
+    //       they would still let a selector minted for one run resolve against whichever run is current
+    //       -- so a caller holding yesterday's selector, published beside yesterday's positions, would
+    //       be handed today's artifact and told nothing had changed. Binding the run into the tokenised
+    //       value is what closes that, and the assertion is that the OLD selector stops resolving
+    //       rather than that the new one starts.
+    /**
+     * Asserts that a selector minted for a superseded run resolves to nothing once the manifest moves.
+     */
+    @Test
+    @DisplayName("a selector of a superseded run resolves to nothing")
+    void aSelectorOfASupersededRunResolvesToNothing() {
+        stubOneCard();
+        StatementResponse published =
+                service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
+        String stale = selectorOf(published.plainTextUri());
+        String laterRun = "fedcba9876543210fedcba9876543210";
+        when(artifacts.readRange(eq(StatementService.manifestKey(PREFIX)), anyLong(), anyLong()))
+                .thenReturn(StatementService.encodeManifest(laterRun));
+
+        assertThat(service.resolveArtifactKey(stale))
+                .as("the superseded run's selector must not open the current run's bytes")
+                .isEmpty();
+        assertThatExceptionOfType(NoSuchElementException.class)
+                .isThrownBy(() -> service.collectArtifact(stale));
+        verify(artifacts, never()).open(anyString());
+        assertThat(service.artifactSelector(laterRun, S3StatementSink.PLAIN_TEXT_OBJECT))
+                .as("a selector names one artifact of one run, so the two runs differ")
+                .isNotEqualTo(stale);
     }
 
     // WHY : Refactoring Rationale: this is the other half of what a review found wrong with the
@@ -770,7 +962,7 @@ class StatementServiceTest {
         stubOneCard();
         stubIndex(new StatementIndexEntry(FINGERPRINT, 240L, 27L));
 
-        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
 
         assertThat(response.firstRecord()).isEqualTo(240L);
         assertThat(response.recordCount()).isEqualTo(27L);
@@ -792,7 +984,7 @@ class StatementServiceTest {
                 new StatementIndexEntry("5".repeat(63) + "5", 30L, 12L),
                 new StatementIndexEntry(FINGERPRINT, 42L, 9L));
 
-        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
 
         assertThat(response.firstRecord()).isEqualTo(42L);
         assertThat(response.recordCount()).isEqualTo(9L);
@@ -813,7 +1005,7 @@ class StatementServiceTest {
                 new StatementIndexEntry("0".repeat(63) + "1", 0L, 30L),
                 new StatementIndexEntry("f".repeat(63) + "f", 30L, 12L));
 
-        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
 
         assertThat(response.firstRecord()).isNull();
         assertThat(response.recordCount()).isNull();
@@ -827,11 +1019,15 @@ class StatementServiceTest {
     void anAbsentIndexYieldsNoPosition() {
         stubOneCard();
 
-        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+        StatementResponse response = service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
 
         assertThat(response.firstRecord()).isNull();
         assertThat(response.recordCount()).isNull();
-        verify(artifacts, never()).readRange(anyString(), anyLong(), anyLong());
+        // WHY : Assumptions: the verification names the INDEX key rather than any key, because the
+        //       manifest is itself read through a bounded range -- so a verification of "no ranged read
+        //       at all" would now fail for the read that establishes which run to look in.
+        verify(artifacts, never())
+                .readRange(eq(RUN_PREFIX + StatementService.INDEX_OBJECT), anyLong(), anyLong());
     }
 
     // WHY : Assumptions: a TRUNCATED index is refused outright rather than searched, because an
@@ -845,13 +1041,13 @@ class StatementServiceTest {
     @DisplayName("an index that is not a whole number of entries is refused")
     void aTruncatedIndexIsRefused() {
         stubOneCard();
-        when(artifacts.describe(PREFIX + StatementService.INDEX_OBJECT))
+        when(artifacts.describe(RUN_PREFIX + StatementService.INDEX_OBJECT))
                 .thenReturn(Optional.of(new ArtifactStore.ArtifactDescriptor(
-                        PREFIX + StatementService.INDEX_OBJECT,
+                        RUN_PREFIX + StatementService.INDEX_OBJECT,
                         StatementIndexEntry.ENCODED_WIDTH + 1L, WRITTEN_AT)));
 
         assertThatExceptionOfType(IllegalStateException.class)
-                .isThrownBy(() -> service.describe(new StatementRequest(SEED_CARD_NUMBER, null)))
+                .isThrownBy(() -> service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR))
                 .withMessageContaining("not a whole number of entries");
     }
 
@@ -874,9 +1070,10 @@ class StatementServiceTest {
         entries.sort((left, right) -> left.cardFingerprint().compareTo(right.cardFingerprint()));
         stubIndex(entries.toArray(new StatementIndexEntry[0]));
 
-        service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+        service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
 
-        verify(artifacts, Mockito.atMost(3)).readRange(anyString(), anyLong(), anyLong());
+        verify(artifacts, Mockito.atMost(3)).readRange(
+                eq(RUN_PREFIX + StatementService.INDEX_OBJECT), anyLong(), anyLong());
     }
 
     /**
@@ -891,7 +1088,7 @@ class StatementServiceTest {
      *     fingerprint for a search to be correct
      */
     private void stubIndex(StatementIndexEntry... entries) {
-        String key = PREFIX + StatementService.INDEX_OBJECT;
+        String key = RUN_PREFIX + StatementService.INDEX_OBJECT;
         when(artifacts.describe(key)).thenReturn(Optional.of(
                 new ArtifactStore.ArtifactDescriptor(key,
                         (long) entries.length * StatementIndexEntry.ENCODED_WIDTH, WRITTEN_AT)));
@@ -1004,7 +1201,7 @@ class StatementServiceTest {
                 eq(FINGERPRINT), anyString(), eq(StatementService.MAX_RESPONSE_TRANSACTIONS)))
                 .thenReturn(transactionWindow(BASELINE_INNER_TABLE_THRESHOLD + 1));
 
-        StatementDocument document = service.compose(new StatementRequest(SEED_CARD_NUMBER, null));
+        StatementDocument document = service.compose(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
 
         assertThat(document.transactions())
                 .as("the 513th transaction overruns the baseline's inner table at "
@@ -2242,7 +2439,7 @@ class StatementServiceTest {
         void theKeyedPathReadsTheCrossReferenceThenTheCustomerThenTheAccount() {
             stubOneCard();
 
-            service.describe(new StatementRequest(SEED_CARD_NUMBER, null));
+            service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
 
             InOrder reads = Mockito.inOrder(cardXrefs, customers, accounts);
             reads.verify(cardXrefs).resolveByWholeCardNumber(SEED_CARD_NUMBER);
@@ -2821,7 +3018,7 @@ class StatementServiceTest {
             when(customers.findById(CUSTOMER_ID)).thenReturn(Optional.empty());
 
             assertThatExceptionOfType(IllegalStateException.class)
-                    .isThrownBy(() -> service.compose(new StatementRequest(SEED_CARD_NUMBER, null)))
+                    .isThrownBy(() -> service.compose(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR))
                     .withMessageStartingWith("ERROR READING CUSTFILE")
                     .withMessageContainingAll("abendCode=", "abendReason=")
                     .withMessageContaining("abendCulprit=CBSTM03A")
@@ -2860,7 +3057,7 @@ class StatementServiceTest {
             when(accounts.findById(ACCOUNT_ID)).thenReturn(Optional.empty());
 
             assertThatExceptionOfType(IllegalStateException.class)
-                    .isThrownBy(() -> service.compose(new StatementRequest(SEED_CARD_NUMBER, null)))
+                    .isThrownBy(() -> service.compose(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR))
                     .withMessageStartingWith("ERROR READING ACCTFILE")
                     .withMessageContainingAll("abendCode=", "abendReason=")
                     .withMessageContaining("abendCulprit=CBSTM03A")
@@ -3352,4 +3549,321 @@ class StatementServiceTest {
                     .doesNotContain(stamps.toArray(new String[0]));
         }
     }
+    /**
+     * Reads one fixture file out of a named directory and returns its rows as fixed-width byte arrays.
+     *
+     * <p>Assumptions: an empty line is skipped rather than returned as a zero-length record, because a
+     * fixture file's trailing newline would otherwise decode as a record of no bytes and fail the
+     * layout's own width check with a message about the subject.</p>
+     *
+     * @param directory the directory holding the fixture; must not be {@code null}
+     * @param fileName the fixture file name within it; must not be {@code null}
+     * @return one byte array per fixture row, in file order; never {@code null}
+     * @throws UncheckedIOException if the named file cannot be read
+     */
+    private static List<byte[]> fixtureRowsFrom(Path directory, String fileName) {
+        try {
+            List<byte[]> rows = new ArrayList<>();
+            for (String row : Files.readAllLines(
+                    directory.resolve(fileName), StandardCharsets.US_ASCII)) {
+                if (!row.isEmpty()) {
+                    rows.add(row.getBytes(StandardCharsets.US_ASCII));
+                }
+            }
+            return rows;
+        } catch (IOException unreadable) {
+            throw new UncheckedIOException("fixture " + fileName + " could not be read", unreadable);
+        }
+    }
+
+    /**
+     * Builds the fixture cards of a named directory, in the order the heading query declares.
+     *
+     * <p>Assumptions: every property the varargs form documents holds here unchanged -- the walk order
+     * is the pair (masked rendering, selector) ascending, and each heading row is joined from the three
+     * fixtures rather than invented.</p>
+     *
+     * @param directory the directory holding the four fixtures; must not be {@code null}
+     * @param selection the whole card numbers to select, or an empty list to select every card the
+     *     cross-reference fixture holds; must not be {@code null}
+     * @return the selected cards in ascending walk order; never {@code null}
+     * @throws IllegalStateException if a selected cross-reference row names a customer or an account the
+     *     fixtures do not hold, which is a broken test resource rather than a failure of the subject
+     */
+    private static List<FixtureCard> fixtureCardsFrom(Path directory, List<String> selection) {
+        Map<Long, Map<String, Object>> customers =
+                keyedFixtureFrom(directory, CUSTOMER_FIXTURE, "CUSTOMER", "CUST-ID");
+        Map<Long, Map<String, Object>> accounts =
+                keyedFixtureFrom(directory, ACCOUNT_FIXTURE, "ACCOUNT", "ACCT-ID");
+        Map<String, List<StatementTransactionView>> rowsByCard =
+                fixtureTransactionsByCardFrom(directory);
+
+        List<FixtureCard> cards = new ArrayList<>();
+        for (Map<String, Object> crossReference
+                : decodedFixtureFrom(directory, CROSS_REFERENCE_FIXTURE, "XREF")) {
+            String cardNumber = trimmedText(crossReference, "XREF-CARD-NUM");
+            if (!selection.isEmpty() && !selection.contains(cardNumber)) {
+                continue;
+            }
+            long customerId = (Long) crossReference.get("XREF-CUST-ID");
+            long accountId = (Long) crossReference.get("XREF-ACCT-ID");
+            Map<String, Object> customer = customers.get(customerId);
+            Map<String, Object> account = accounts.get(accountId);
+            if (customer == null || account == null) {
+                throw new IllegalStateException("the cross-reference fixture names customer "
+                        + customerId + " or account " + accountId + " and its own fixture omits it");
+            }
+            cards.add(new FixtureCard(cardNumber, CardNumberMasker.mask(cardNumber),
+                    fingerprintOf(cardNumber),
+                    fixtureHeadingRow(cardNumber, customerId, accountId, customer, account),
+                    rowsByCard.getOrDefault(cardNumber, List.of())));
+        }
+        cards.sort(Comparator.comparing(FixtureCard::maskedCardNum)
+                .thenComparing(FixtureCard::fingerprint));
+        return List.copyOf(cards);
+    }
+
+    /**
+     * Decodes one fixture in a named directory and keys its rows by one unsigned identifier field.
+     *
+     * @param directory the directory holding the fixture; must not be {@code null}
+     * @param fileName the fixture file name within it; must not be {@code null}
+     * @param layoutName the registry name of the layout to decode against
+     * @param keyField the copybook field name of the unsigned identifier to key by
+     * @return the decoded rows keyed by that identifier, in file order; never {@code null}
+     */
+    private static Map<Long, Map<String, Object>> keyedFixtureFrom(
+            Path directory, String fileName, String layoutName, String keyField) {
+        Map<Long, Map<String, Object>> keyed = new LinkedHashMap<>();
+        for (Map<String, Object> row : decodedFixtureFrom(directory, fileName, layoutName)) {
+            keyed.put((Long) row.get(keyField), row);
+        }
+        return keyed;
+    }
+
+    /**
+     * Groups the transaction fixture of a named directory into projections by card.
+     *
+     * <p>Assumptions: every property the no-argument form documents holds here unchanged -- file order
+     * is preserved as the within-card order, the key's card component is the masked rendering, and only
+     * the four members a statement line and the group walk read are assigned.</p>
+     *
+     * @param directory the directory holding {@link #TRANSACTION_FIXTURE}; must not be {@code null}
+     * @return the cards' rows keyed by whole card number; never {@code null}
+     */
+    private static Map<String, List<StatementTransactionView>> fixtureTransactionsByCardFrom(
+            Path directory) {
+        Map<String, List<StatementTransactionView>> byCard = new LinkedHashMap<>();
+        for (Map<String, Object> row : decodedFixtureFrom(directory, TRANSACTION_FIXTURE, "TRNX")) {
+            String cardNumber = trimmedText(row, "TRNX-CARD-NUM");
+            StatementTransactionView projection = newProjection();
+            setMember(projection, "key", new StatementTransactionView.StatementTransactionKey(
+                    CardNumberMasker.mask(cardNumber), trimmedText(row, "TRNX-ID")));
+            setMember(projection, "cardFingerprint", fingerprintOf(cardNumber));
+            setMember(projection, "description", trimmedText(row, "TRNX-DESC"));
+            setMember(projection, "amount", Money.of((BigDecimal) row.get("TRNX-AMT")));
+            byCard.computeIfAbsent(cardNumber, card -> new ArrayList<>()).add(projection);
+        }
+        return byCard;
+    }
+
+    /**
+     * Decodes every row of one fixture in a named directory against its registered layout.
+     *
+     * @param directory the directory holding the fixture; must not be {@code null}
+     * @param fileName the fixture file name within it; must not be {@code null}
+     * @param layoutName the registry name of the layout to decode against, such as {@code TRNX}
+     * @return one decoded field map per row, keyed by copybook field name, in file order; never
+     *     {@code null}
+     */
+    private static List<Map<String, Object>> decodedFixtureFrom(
+            Path directory, String fileName, String layoutName) {
+        CopybookLayout.RecordSpec spec = CopybookLayout.layout(layoutName);
+        List<Map<String, Object>> decoded = new ArrayList<>();
+        for (byte[] row : fixtureRowsFrom(directory, fileName)) {
+            decoded.add(FixedWidthCodec.decodeRecord(row, spec));
+        }
+        return decoded;
+    }
+
+    /**
+     * Resolves the repository root by walking up from the working directory.
+     *
+     * <p>Assumptions: located by the presence of {@code services/pom.xml} rather than by a count of
+     * parent steps, so this class runs identically from the reactor root and from the module directory.
+     * That is the same rule the module's integration tests use to reach repository-level files, and a
+     * relative path would resolve differently between those two invocations.</p>
+     *
+     * @return the repository root; never {@code null}
+     * @throws IllegalStateException if no ancestor carries the reactor descriptor
+     */
+    private static Path repositoryRoot() {
+        Path candidate = Path.of("").toAbsolutePath();
+        while (candidate != null) {
+            if (Files.isRegularFile(candidate.resolve("services/pom.xml"))) {
+                return candidate;
+            }
+            candidate = candidate.getParent();
+        }
+        throw new IllegalStateException(
+                "no ancestor of the working directory carries services/pom.xml");
+    }
+
+    /**
+     * Whole-stream comparison of a run's two artifacts against the committed COBOL oracles.
+     *
+     * <h2>Why this suite exists</h2>
+     *
+     * <p>Purpose: every other case in this file asserts a PROPERTY of the emitted records -- a band's
+     * width class, a field's edit mask, the order two cards appear in. A property suite cannot see
+     * systematic content drift: a heading rendered with the wrong label, a band emitted in the wrong
+     * order, or a line missing altogether satisfies every width and mask assertion in the file while
+     * producing a document the reference never produced. This suite opens the two committed oracles at
+     * {@code tests/golden/statement/happy_path} and compares the COMPLETE normalised stream of each,
+     * byte for byte, so drift anywhere in either document fails.</p>
+     *
+     * <p>Assumptions: the input is the oracle's OWN input -- the four fixed-width fixtures at
+     * {@code tests/fixtures/statement/happy_path}, which is what the reference pair was run over to
+     * produce those two files. Driving this from the module's own 88-card fixtures would compare two
+     * documents describing different portfolios, so the comparison would have to be loosened to
+     * whatever the two had in common, which is the loosening this suite exists to replace.</p>
+     *
+     * <p>Assumptions: both files are REFERENCE. They are read and never written, and no case here
+     * regenerates one -- an oracle a test may rewrite asserts nothing at all.</p>
+     *
+     * <p>Assumptions: the comparison applies the HARNESS's normalisation to this service's fixed-width
+     * output rather than expecting the oracle to be fixed width. The reference writes fixed records --
+     * {@code FD-STMTFILE-REC PIC X(80)} and {@code FD-HTMLFILE-REC PIC X(100)} at L45 and L47 of
+     * {@code app/cbl/CBSTM03A.CBL}, with {@code DCB LRECL=80} and {@code LRECL=100} at L89 and L94 of
+     * {@code app/jcl/CREASTMT.JCL} -- and it is
+     * {@code tests/helpers/statement_compat.py} that frames and right-trims them before they are
+     * stored, joining {@code record.rstrip() + "\n"} at L337 to L341. Reproducing that framing here is
+     * what makes the two streams comparable; expecting 80-byte and 100-byte lines in the stored files
+     * would fail against every line.</p>
+     */
+    @Nested
+    @DisplayName("whole-stream parity with the committed COBOL oracles")
+    class GoldenParity {
+
+        /** Directory of the four fixtures the committed oracles were produced from. */
+        private static final String GOLDEN_INPUT_DIRECTORY = "tests/fixtures/statement/happy_path";
+
+        /** Directory holding the two committed oracles. */
+        private static final String GOLDEN_DIRECTORY = "tests/golden/statement/happy_path";
+
+        /** The plain-text oracle, stored right-trimmed and newline-terminated. */
+        private static final String PLAIN_TEXT_ORACLE = "statement.txt.expected";
+
+        /** The markup oracle, stored the same way. */
+        private static final String MARKUP_ORACLE = "statement.html.expected";
+
+        // WHY : Assumptions: the whole normalised stream is compared, not a line count and not a
+        //       selection of lines. A count passes against two documents that differ in every byte, and a
+        //       selection passes against drift in whatever it did not select -- which is exactly what
+        //       this suite replaces.
+        /**
+         * Asserts that the plain-text stream is byte-for-byte the committed plain-text oracle.
+         */
+        @Test
+        @DisplayName("the plain-text stream is byte-for-byte the committed oracle")
+        void thePlainTextStreamIsTheCommittedOracle() {
+            RecordingSink sink = runOverTheOraclesInput();
+
+            assertThat(normalise(sink.plainRecords))
+                    .as("the whole plain-text statement, framed as the harness frames it")
+                    .isEqualTo(oracle(PLAIN_TEXT_ORACLE));
+        }
+
+        /**
+         * Asserts that the markup stream is byte-for-byte the committed markup oracle.
+         */
+        @Test
+        @DisplayName("the markup stream is byte-for-byte the committed oracle")
+        void theMarkupStreamIsTheCommittedOracle() {
+            RecordingSink sink = runOverTheOraclesInput();
+
+            assertThat(normalise(sink.markupRecords))
+                    .as("the whole markup statement, framed as the harness frames it")
+                    .isEqualTo(oracle(MARKUP_ORACLE));
+        }
+
+        // WHY : Assumptions: the two record widths are asserted on the PRODUCED records rather than
+        //       inferred from the oracles, and they are asserted in this suite as well as by the width
+        //       cases above. The comparison above normalises the produced stream, so a generator that
+        //       emitted short records would still match the oracle after trimming -- this case is what
+        //       keeps the byte-level width contract observable alongside the content contract, so a
+        //       change that satisfied the oracle by dropping padding cannot pass unremarked.
+        /**
+         * Asserts that the records normalised into the oracles were themselves at their declared widths.
+         */
+        @Test
+        @DisplayName("the records behind the oracle comparison are at their declared fixed widths")
+        void theRecordsBehindTheComparisonAreFixedWidth() {
+            RecordingSink sink = runOverTheOraclesInput();
+
+            assertThat(sink.plainRecords).isNotEmpty().allSatisfy(record ->
+                    assertThat(record).hasSize(StatementBandLayouts.STATEMENT_LINE_LENGTH));
+            assertThat(sink.markupRecords).isNotEmpty().allSatisfy(record ->
+                    assertThat(record).hasSize(StatementHtmlMapper.HTML_RECORD_LENGTH));
+        }
+
+        /**
+         * Runs a whole statement generation over the fixtures the committed oracles were produced from.
+         *
+         * @return the sink holding every record the run offered; never {@code null}
+         */
+        private RecordingSink runOverTheOraclesInput() {
+            List<FixtureCard> cards = fixtureCardsFrom(
+                    repositoryRoot().resolve(GOLDEN_INPUT_DIRECTORY), List.of());
+            assertThat(cards)
+                    .as("the oracle's input names exactly one card, so the stream is one statement")
+                    .hasSize(1);
+            stubFixtureWalk(cards);
+
+            RecordingSink sink = new RecordingSink();
+            service.generateStatements(sink);
+            return sink;
+        }
+
+        /**
+         * Frames a run's fixed-width records the way the harness frames them before storing an oracle.
+         *
+         * <p>Assumptions: each record is right-trimmed and newline-terminated, and the results are
+         * concatenated. That is {@code statement_compat.py}'s
+         * {@code "".join(record.rstrip() + "\n" for record in records)} at L341, and it is the reason
+         * the stored oracles hold lines of 22 different lengths rather than lines of 80.</p>
+         *
+         * @param records the records the run offered, in the order it offered them; must not be
+         *     {@code null}
+         * @return the framed stream; never {@code null}
+         */
+        private String normalise(List<byte[]> records) {
+            StringBuilder framed = new StringBuilder();
+            for (byte[] record : records) {
+                framed.append(new String(record, StandardCharsets.US_ASCII).stripTrailing())
+                        .append('\n');
+            }
+            return framed.toString();
+        }
+
+        /**
+         * Reads one committed oracle.
+         *
+         * @param fileName the oracle's file name within {@link #GOLDEN_DIRECTORY}; must not be
+         *     {@code null}
+         * @return the oracle's whole content; never {@code null}
+         * @throws UncheckedIOException if the oracle cannot be read, which is a broken checkout rather
+         *     than a failure of the subject
+         */
+        private String oracle(String fileName) {
+            Path file = repositoryRoot().resolve(GOLDEN_DIRECTORY).resolve(fileName);
+            try {
+                return Files.readString(file, StandardCharsets.US_ASCII);
+            } catch (IOException unreadable) {
+                throw new UncheckedIOException(
+                        "the committed oracle " + fileName + " could not be read", unreadable);
+            }
+        }
+    }
+
 }

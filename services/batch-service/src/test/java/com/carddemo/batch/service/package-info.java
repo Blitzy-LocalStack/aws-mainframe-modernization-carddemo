@@ -330,22 +330,50 @@
  *
  * <h2>Invariants every test here inherits from the production charter</h2>
  *
- * <p>Assumptions: NO method in the production service package carries a transaction annotation, and
- * this is the single most consequential thing to know before writing an assertion here. The
- * production charter fixes the rule, and a scan of that package confirms it holds: not one
- * {@code Transactional} annotation appears on any of its six types. A rule there therefore
- * PARTICIPATES in whatever unit of work its caller has already opened, and opens none of its own.
- * The consequence for this package is direct -- a test here must NOT expect, assert or arrange a
- * transaction boundary. There is none to observe, so an assertion about commit or rollback would be
- * asserting the caller's behaviour through a subject that has no say in it.</p>
+ * <p>Assumptions: every rule in the production service package PARTICIPATES in the unit of work its
+ * caller has already opened and opens none of its own, and this is the single most consequential
+ * thing to know before writing an assertion here. The production package holds ten types --
+ * {@code BatchErrorPublisher}, {@code BatchFailureReporter}, {@code BatchStepLedger},
+ * {@code BatchStepLedgerWriter}, {@code CategoryBalanceService}, {@code DailyFeedWatermarkService},
+ * {@code DatasetGenerationService}, {@code InterestCalculationService},
+ * {@code PostingRecordUnitOfWork} and {@code PostingValidationService} -- and exactly ONE of them
+ * carries a transaction annotation. The consequence for this package is direct: a test here must NOT
+ * expect, assert or arrange a transaction boundary for any of the other nine. There is none to
+ * observe, so an assertion about commit or rollback would be asserting the caller's behaviour through
+ * a subject that has no say in it.</p>
  *
- * <p>The boundary is real and it does matter: the posting unit of work commits a transaction row, a
- * category-balance row and an account row together, transcribed from
- * {@code app/cbl/CBTRN02C.cbl:440-442} where {@code 2000-POST-TRANSACTION} performs the three writes
- * in sequence. It simply is not owned here. It belongs to the job tier, which opens it, and to the
- * repository tier, which can observe it against a real database.</p>
+ * <p>Assumptions: the one exception is {@code BatchStepLedgerWriter}, whose three members are
+ * annotated {@code Transactional(propagation = REQUIRES_NEW)}, and the exception is deliberate rather
+ * than an oversight in the rule. The step ledger records that a step STARTED, FINISHED or FAILED, and
+ * a failure record written inside the failing step's own transaction would roll back with it -- the
+ * ledger would then have no trace of the very run an operator is trying to recover. So those three
+ * SUSPEND the caller's unit and commit independently, which is the opposite of what every other rule
+ * here does and is the reason the writer's own propagation cannot be asserted in this package: with a
+ * mocked repository there is no second transaction to observe. Nor is it asserted against a real
+ * engine anywhere in this module today -- {@code BatchRunRepositoryIT} owns the ledger's TABLE, its
+ * transitions and its attempt counter, but it drives the repository rather than the writer, so the
+ * suspension itself is unobserved. That gap is recorded here rather than left implicit: a case
+ * establishing it belongs in the repository tier, where a step's rollback and the survival of its
+ * failure row can both be seen, and it is not created here because a mock cannot host it.</p>
  *
- * <p>Alternatives Considered: asserting the atomicity of that three-write unit of work in this
+ * <p>Assumptions: {@code PostingRecordUnitOfWork} carries NO annotation, and its absence is a
+ * decision rather than a gap. It is the per-record unit the posting job brackets: the job opens one
+ * transaction per record and the component performs that record's decisions and writes inside it, so
+ * an annotation here would either be redundant with the caller's boundary or, if it declared
+ * {@code REQUIRES_NEW}, would split one record's effects across two commits. It has no unit test in
+ * this package for the same reason its boundary is not asserted here -- what it is FOR is the
+ * co-commit of four durable effects, and four mocked repositories cannot fail to be atomic.</p>
+ *
+ * <p>The boundary is real and it does matter: the migrated posting unit commits a category-balance
+ * row, an account row, a posted transaction row AND the feed's consumed position together, the first
+ * three transcribed from {@code app/cbl/CBTRN02C.cbl:440-442} where {@code 2000-POST-TRANSACTION}
+ * performs the three writes in sequence, and the fourth being the migration's own checkpoint, which
+ * the reference has no counterpart for. It simply is not owned here. It belongs to the job tier,
+ * which opens it, and to the repository tier, which can observe it against a real database --
+ * {@code AccountRepositoryIT} drives {@code PostingRecordUnitOfWork} itself and reads all four
+ * effects from a second connection.</p>
+ *
+ * <p>Alternatives Considered: asserting the atomicity of that four-write unit of work in this
  * package anyway, on the grounds that it is the most safety-relevant property in the module.
  * Rejected, and not merely postponed: with the repositories supplied as mocks there is no
  * unit of work to break, so such an assertion would pass whatever the production propagation

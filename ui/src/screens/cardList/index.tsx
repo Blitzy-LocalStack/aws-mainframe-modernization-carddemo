@@ -99,7 +99,8 @@ import { useServerInstant } from '../../hooks/useServerInstant';
 import { usePfKeys } from '../../layout/usePfKeys';
 import { PROGRAM_MESSAGES, SHARED_MESSAGES, STATUS_MESSAGES } from '../../messages/messages';
 import { cardDetailPath, cardEditPath, isCardNumber } from '../../routes/cards';
-import { MAIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
+import { CARD_LIST_ROUTE, MAIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
+import type { ScreenTransitionState } from '../../routes/navigation';
 import type { CardListQuery } from '../../api/types';
 import { VISUALLY_HIDDEN_STYLE, fieldAriaProps, fieldErrorId } from '../../layout/fieldHelp';
 import { usePagedQuery } from '../../hooks/usePagedQuery';
@@ -204,6 +205,37 @@ export const CARD_LIST_ROW_ACTION_CODES = {
   detail: 'S',
   update: 'U',
 } as const;
+
+/**
+ * Origin every transfer out of this screen hands the screen it transfers to.
+ *
+ * Assumptions: this is the migrated form of `CDEMO-FROM-TRANID` and `CDEMO-FROM-PROGRAM`
+ * (`app/cpy/COCOM01Y.cpy` L23-L26), which the reference's transfer arms write before every
+ * `EXEC CICS XCTL` -- `app/cbl/COCRDLIC.cbl` L520-L521 for the detail arm and L548-L549 for the update
+ * arm both move `LIT-THISTRANID`/`LIT-THISPGM` in. The destination's PF3 then prefers it over its own
+ * default (`app/cbl/COCRDUPC.cbl` L442-L454), so a transfer that hands over nothing loses observable
+ * behaviour: an operator who reached the destination from this browse was returned somewhere they had
+ * not come from.
+ *
+ * Refactoring Rationale: declared once here rather than written at each of the four transfer sites --
+ * the two per-row controls, the Enter turn's selection arm and the typed-number controls. Four copies
+ * of one handover are four places for it to drift, and the same argument
+ * `ui/src/routes/navigation.ts` makes for naming its transition helper once.
+ *
+ * Assumptions: the origin travels in the history entry's STATE and not in the path or the query, for
+ * exactly the reason no card number reaches a route on this screen -- a request target is written
+ * verbatim into the load balancer's access log, the browser's history and any referrer sent onward,
+ * while router state reaches none of them. The value discloses nothing in any case: it is this
+ * screen's own parameterless route, so it names a screen rather than a cardholder. Carrying it as
+ * state keeps ONE rule about what may appear in a request line instead of one rule per value.
+ *
+ * Trade-offs: state is dropped by the full-document fallback in `navigateSafely` and by a reload, so
+ * the destination then takes its own documented fallback destination. That is accepted rather than
+ * worked around, because the alternative is a query member -- which is the shape this migration
+ * refuses -- and the cost is one extra key press on a path an operator reaches only after a failed
+ * client-side transition.
+ */
+const BROWSE_ORIGIN: ScreenTransitionState = Object.freeze({ from: CARD_LIST_ROUTE });
 
 /**
  * Labels of the three controls that act on the card number typed into the filter field.
@@ -543,9 +575,13 @@ export function isAccountFilterWellFormed(entry: string): boolean {
  * the compiler being allowed to enforce that an opening read carries no cursor rather than a cursor
  * whose value is nothing.
  *
- * Assumptions: the DIRECTION is spread on the same condition as the cursor. `listCards` refuses a
- * direction supplied without a cursor -- the combination every contract answers with a 400 keyed on the
- * direction -- so the opening read must not name one.
+ * Assumptions: the DIRECTION is spread on the same condition as the cursor, because `listCards` refuses
+ * a direction supplied without a cursor before it dispatches, so the opening read must not name one. The
+ * refusal is the CLIENT's and not this contract's: `card-api.yaml` publishes the opposite, answering that
+ * pair with the opening page whichever direction it named, which is what `app/cbl/COCRDLIC.cbl`
+ * L444-L454 does when PF7 is pressed on the first page. `ui/src/api/client.ts` records why the guard
+ * refuses it for every service regardless -- the seven contracts do not agree on this one combination,
+ * and a screen must not behave differently depending on which service it is talking to.
  * @param {string | null} cursor - Sealed cursor, or `null` for the opening read.
  * @param {PageDirection} direction - Direction that cursor was sealed for.
  * @param {string} appliedAccountId - Account narrowing in force, or the empty string for none.
@@ -1427,11 +1463,15 @@ export function CardListScreen(): ReactElement {
    * This is the `'S'` transfer arm's destination (`app/cbl/COCRDLIC.cbl` L526 moves `LIT-CARDDTLPGM`,
    * whose mapset `COCRDSL` is the detail screen) reached without a turn, which is the accommodation
    * recorded on the controls themselves.
+   *
+   * Assumptions: the transfer hands over this screen's route as the destination's caller, which is
+   * the same arm's `MOVE LIT-THISTRANID TO CDEMO-FROM-TRANID` at L520-L521. The reasoning for the
+   * carrier, and for it not being a path or query member, is recorded on {@link BROWSE_ORIGIN}.
    * @param {CardSummary} row - The row whose detail to open.
    * @returns {void} Nothing; navigation is the effect.
    */
   function openRowDetail(row: CardSummary): void {
-    navigateSafely(navigate, cardDetailPath(row.key));
+    navigateSafely(navigate, cardDetailPath(row.key), BROWSE_ORIGIN);
   }
 
   /**
@@ -1439,11 +1479,16 @@ export function CardListScreen(): ReactElement {
    *
    * Assumptions: the `'U'` transfer arm's destination, `LIT-CARDUPDPGM` at `app/cbl/COCRDLIC.cbl` L554,
    * addressed by the row's sealed selector for the same disclosure reason as the detail route.
+   *
+   * Assumptions: this transfer hands over the origin too, and the update screen is the one that most
+   * needs it -- `app/cbl/COCRDUPC.cbl` L442-L454 resolves PF3 to the recorded caller and only falls
+   * back when none was recorded, so a handover-free transfer sent an operator who came from this
+   * browse to the update screen's fallback instead. See {@link BROWSE_ORIGIN}.
    * @param {CardSummary} row - The row whose update form to open.
    * @returns {void} Nothing; navigation is the effect.
    */
   function openRowUpdate(row: CardSummary): void {
-    navigateSafely(navigate, cardEditPath(row.key));
+    navigateSafely(navigate, cardEditPath(row.key), BROWSE_ORIGIN);
   }
 
   /**
@@ -1506,10 +1551,16 @@ export function CardListScreen(): ReactElement {
            *       verbatim into the load balancer's access log, which is the same reason the card
            *       number left every path on this screen, and because
            *       `CardApiContractTest.noRequestLineCanCarryACardNumber` asserts that boundary.
+           * WHY : Assumptions: the ORIGIN travels with them, which is the third thing both arms move --
+           *       L520-L521 and L548-L549 write `LIT-THISTRANID` and `LIT-THISPGM` into
+           *       `CDEMO-FROM-TRANID` and `CDEMO-FROM-PROGRAM` beside the two identifiers. It is a
+           *       parameterless route and therefore discloses nothing, but it is still handed over as
+           *       state rather than in the address, for the reason {@link BROWSE_ORIGIN} records.
            */
           navigateSafely(
             navigate,
             edit.action === 'U' ? cardEditPath(row.key) : cardDetailPath(row.key),
+            BROWSE_ORIGIN,
           );
           return;
         }
@@ -1539,6 +1590,12 @@ export function CardListScreen(): ReactElement {
    * request line reaches browser history, referrer headers and every intermediary's access log while a
    * request body reaches none of them. The exchange is one extra round trip and it is the whole reason
    * no primary account number appears in any card URL.
+   *
+   * Assumptions: the resolved transfer carries the same origin the two row arms carry, because the
+   * destination cannot tell the two apart and must not behave differently: both arrive from this
+   * browse, so both leave it by PF3. Omitting it here while supplying it on the row controls would
+   * make the exit key's destination depend on which control opened the card, which no reference arm
+   * does. See {@link BROWSE_ORIGIN}.
    * @param {(selector: string) => string} buildPath - Builds the destination route from the selector the
    *   lookup returns; either the detail route or the update route.
    */
@@ -1562,7 +1619,7 @@ export function CardListScreen(): ReactElement {
        */
       (answer) => {
         setResolving(false);
-        navigateSafely(navigate, buildPath(answer.key));
+        navigateSafely(navigate, buildPath(answer.key), BROWSE_ORIGIN);
       },
       /*
        * WHY : Assumptions: the failure text names no card and does not distinguish "no such card" from
@@ -1717,7 +1774,9 @@ export function CardListScreen(): ReactElement {
          *
          * Assumptions: the catalog entry STAYS in `ui/src/messages/messages.ts` and is simply not read
          * here, matching what `ui/src/screens/accountView/index.tsx` L1361 and
-         * `ui/src/screens/refTypeList/index.tsx` L1582 already concluded for their own exit arms.
+         * `ui/src/screens/refTypeList/index.tsx` already concluded at its own exit handler for the same
+         * arm. ⚠️ Refactoring Rationale: this citation named a line number, which drifted the first time
+         * that file's docstring grew; naming the handler instead cites something that survives an edit.
          * Transformation rule T8 keeps the transcription of every `88`-level sentence complete whether or
          * not a program reaches it; only the program decides which are written, and this one writes it
          * where it cannot be seen.

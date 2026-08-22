@@ -97,12 +97,32 @@ export default defineConfig({
     // surrenders no reach.
     target: 'es2022',
 
-    // Alternatives Considered: `false`, which was the earlier value here. Its case
-    // rests on the source itself being the asset worth withholding, and that case
-    // is answered by the paragraph above rather than dismissed -- withholding it
-    // buys obscurity over an interface the contracts already describe, and pays for
-    // it with every production stack trace this system will ever produce.
-    sourcemap: true,
+    // Refactoring Rationale: this was `true`, and the note beside it argued FOR a
+    // published map on the grounds that withholding source "buys obscurity over an
+    // interface the contracts already describe" while costing every production
+    // stack trace. Two things were wrong with that. A map does not publish an
+    // interface; it publishes the original module structure and every explanatory
+    // comment in it, and this repository's convention makes those comments unusually
+    // revealing -- they name internal paths, rejected designs and the exact
+    // validation each screen applies. On an origin serving a card-management
+    // application that is an information disclosure, and one every visitor can
+    // fetch. The note also appealed to "the paragraph above", which does not exist
+    // in this file, so its central premise could not be checked by a reader at all.
+    // Assumptions: it also disagreed with two other files that a reader would
+    // reasonably trust -- `ui/nginx.conf` states that no map is emitted when it
+    // explains why directory listing is off, and `ui/README.md` told operators the
+    // same. A contradiction between a build setting and the documents describing it
+    // is resolved here in the direction that makes the documents true.
+    // Trade-offs: the cost is real and is accepted: a production stack trace names
+    // generated positions rather than original ones. A defect found there is
+    // reproduced against `npm run dev`, or against a local `vite build --sourcemap`
+    // that is never published, which recovers the diagnosis without serving the
+    // source to everyone. Publishing maps to a restricted diagnostics store was the
+    // other option and is not taken here, because the publication path belongs to
+    // `infra/modules/cloudfront-spa` and its sync step rather than to this file, so
+    // choosing it here would leave the emitted map in `dist/` for whichever path
+    // synced that directory next.
+    sourcemap: false,
 
     // Assumptions: every build starts from an empty output directory, so an
     // asset emitted by an earlier build under a different content hash cannot

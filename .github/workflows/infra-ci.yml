@@ -176,7 +176,13 @@ jobs:
       # Assumptions: the Python inside this workflow is source code and Rule 1 binds it,
       #   but it reaches no Python gate on its own. Ruff walks files on disk; a heredoc
       #   body is a string inside a YAML value, so `ruff check .` never sees it, and the
-      #   data-migration AST gate walks that package only. Two of the blocks below had
+      #   data-migration AST gate walks THREE roots on disk -- that package, its own test
+      #   suite and config/rule1 -- none of which contains a workflow file.
+      #   Refactoring Rationale: this said that gate "walks that package only", which
+      #   understated its reach by two roots and, worse, implied the exemption here rested
+      #   on a narrower gate than the one that exists. The exemption rests on the medium:
+      #   no on-disk walk of any root reaches a heredoc, however many roots it covers.
+      #   Two of the blocks below had
       #   shipped with no module docstring at all and five of their functions documented
       #   neither their parameters nor their return value, which is the exact shape the
       #   packaged gates exist to prevent and were never asked about here. This step
@@ -185,11 +191,18 @@ jobs:
       #   enumerates.
       #   Alternatives Considered: moving the code into governed .py files under a package
       #   and calling them from the workflow. Rejected for a reason specific to what these
-      #   blocks are -- three of the five assert facts about THIS workflow file and about
-      #   the roots it drives, so they are configuration checks rather than reusable code,
-      #   and a package would put a step's own precondition a directory away from the step
-      #   that depends on it. The blocks are also each run exactly once, by one step, so
-      #   there is no second caller for a module to serve.
+      #   blocks are -- every one of the EIGHT asserts a fact about this workflow file, about
+      #   the Terraform roots and modules it drives, or about a report an earlier step in the
+      #   same job wrote, and two of them read this file itself. They are configuration
+      #   checks rather than reusable code, and a package would put a step's own
+      #   precondition a directory away from the step that depends on it. The blocks are
+      #   also each run exactly once, by one step, so there is no second caller for a module
+      #   to serve.
+      #   Refactoring Rationale: this read "three of the five", counting a population that
+      #   had since grown to eight and conceding that the other two were something else --
+      #   which weakened the very argument it was making, because a block that asserts
+      #   nothing about this workflow or its roots is precisely one that belongs in a
+      #   package. All eight do, so the argument holds for the whole set.
       #   Assumptions: the extraction is exact rather than best-effort. The expected block
       #   count is asserted, so a newly added block that does not match the opener pattern
       #   fails this gate instead of being skipped in silence -- a silent skip being the
@@ -243,12 +256,18 @@ jobs:
 
           # Assumptions: the count includes THIS block, so the gate covers itself. A gate
           #   exempt from its own rule is the first place a convention decays.
-          # Assumptions: advanced from 5 to 7 when the permissions-boundary and the
-          #   database-role coverage gates were added. The literal is what stops a
-          #   newly added block from escaping the gate, so it moves with the block
-          #   count rather than being derived from it -- a derived count would agree
-          #   with any number of blocks, including zero.
-          EXPECTED_BLOCKS = 8
+          # Assumptions: NINE is the number of heredoc blocks this workflow currently
+          #   carries, and it is written as a literal rather than derived from the extraction
+          #   because a derived count would agree with any number of blocks, including zero. It
+          #   is raised by hand each time a gate is added, which is what makes a newly added
+          #   block fail this step until someone has looked at it.
+          #   Refactoring Rationale: the value is stated rather than narrated as a growth path.
+          #   One earlier revision of this comment traced the count "from 5 to 7" beside a
+          #   literal of 8 and another traced it to 9, so the prose and the constant disagreed
+          #   in both -- the one question a comment sitting on a constant exists to settle. The
+          #   current value is the only part a reader has to trust, and it is measured against
+          #   the file rather than carried forward.
+          EXPECTED_BLOCKS = 9
 
           OPENER = re.compile(r"^(?P<indent> *)python3? - <<'(?P<delimiter>[A-Z]+)'$")
 
@@ -642,14 +661,14 @@ jobs:
           echo "terraform-docs drift check covered $checked directories"
 
       # WHY : terraform-docs above regenerates the GENERATED table and can therefore only
-      #       detect drift in the part of a document a tool writes. Every count claim in this
-      #       package lives in the hand-written header comment ABOVE that table -- "Ten
+      #       detect drift in the part of a document a tool writes. Count claims in this
+      #       package live in the hand-written header comment ABOVE that table -- "Ten
       #       outputs", "the fourteen inputs", "Six outputs ... where main.tf creates sixteen
       #       resources" -- and a generator has nothing to say about those. Five files had
       #       counts that disagreed with their own declarations, one of them omitting two
       #       outputs the kms module reads as a cross-module contract, which is how a reader
       #       ends up concluding a published value is not published. This gate re-derives each
-      #       claimed number from the declarations themselves.
+      #       ENUMERATED claim from the declarations themselves.
       #       Alternatives Considered: deleting the counts and letting the generated table
       #       speak. Rejected because the header states what the surface IS FOR -- which values
       #       are contracts, which are null for which instantiation -- and a table of names and
@@ -657,6 +676,30 @@ jobs:
       #       Assumptions: only the claims that are countable from HCL are asserted. Prose about
       #       intent is not, and narrowing what a reviewer must verify by hand to exactly that
       #       set is the purpose.
+      # WHY : ⚠️ Refactoring Rationale: this comment and the step's own docstring claimed to
+      #       verify EVERY spelled-out count in a Terraform header, while the implementation
+      #       asserted a hand-picked list of alb, ecs-service, cloudfront-spa, ecs-cluster,
+      #       bootstrap, network and ecr claims -- so it printed "Terraform prose counts: PASS"
+      #       across a review in which s3-datasets/variables.tf stated fourteen inputs and then
+      #       listed thirteen, and infra/envs/dev/variables.tf claimed thirty-four inputs and
+      #       eleven required against declarations of thirty-six and twelve. An exhaustive claim
+      #       over a selective implementation is worse than a narrow one, because it moves those
+      #       headers out of human review without putting them under a gate. Two things change:
+      #       the claim is narrowed to the enumerated list, which the docstring now publishes,
+      #       and the three headers whose drift this gate reported as PASS are added to it --
+      #       s3-datasets and both environment roots, the roots additionally asserting that
+      #       every input declared with no default is NAMED in the header, because the omission
+      #       that mattered was a name missing from the operator's checklist rather than a
+      #       number.
+      #       Alternatives Considered: discovering every count-bearing header automatically, by
+      #       scanning each .tf comment block for a number word beside a block keyword.
+      #       Rejected: a discovered claim has no known subject, so the scanner would have to
+      #       guess which declaration each sentence counts, and a wrong guess is a red gate
+      #       nobody can fix by correcting prose. Discovery would be sound only if every
+      #       header carried a machine-readable annotation naming the declaration its number
+      #       counts, which relocates the drift risk from the count into the annotation and
+      #       buys nothing. An explicit list whose boundary is published in the docstring is
+      #       both honest and actionable, and it is what this gate implements.
       # Assumptions: this gate closes a list against its AUTHORITY rather than against
       # a count. local.service_role_names becomes the ETL's alternate-login allowlist,
       # so a name the database does not declare is refused at connection time and an
@@ -796,6 +839,211 @@ jobs:
           print(f"permissions boundary present on all {examined} aws_iam_role declarations")
           BOUNDARY
 
+      # WHY : This gate exists because the three defects it detects were all invisible to
+      #       every other check in this workflow and to `terraform validate`, `tflint` and
+      #       the policy scan besides. A task role missing an action a delivered code path
+      #       issues plans cleanly, applies cleanly and fails at run time with an access
+      #       denial -- and two of the three did not fail on a first exercise but on the
+      #       first GENERATION ALLOCATION and on the SIXTH run of each dataset family
+      #       respectively, which is well past the point anyone would have been watching.
+      #       The reporting pair was worse again: the grant carried a written rationale
+      #       asserting that no state reads an object, against three object reads in
+      #       ArtifactStore and a states:DescribeExecution on every status read.
+      #       Alternatives Considered: leaving this to the credentialed plan job, or to an
+      #       integration test against a live account. Rejected because neither runs on an
+      #       ordinary pull request -- the plan job needs a protected environment, and an
+      #       access denial reproduces only against real AWS -- so the cheapest moment to
+      #       catch a withdrawn action would be the one moment nothing is looking.
+      #       Trade-offs: this reads the policy DOCUMENT rather than an evaluated policy, so
+      #       it proves a statement is declared with the actions and the scope intended and
+      #       not that AWS authorises the call. That is the half a static job can prove, and
+      #       it is the half that regressed.
+      - name: Verify the runtime task-role grants against the operations the code issues
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'GRANTS'
+          """Assert each environment root grants the actions its delivered code issues.
+
+          Parameters:
+              None. The roots, the policy-document names and the required statements are
+              literals below, because each statement corresponds to a specific operation
+              in a specific class and is reviewed as its own decision.
+          Returns:
+              None. Successful completion lets the workflow step exit zero.
+          Raises:
+              AssertionError: If a root omits a policy document or a statement, if a
+                  statement omits a required action or scope, if it carries an action the
+                  measured code path does not issue, or if the migration document
+                  re-declares a statement identifier it inherits.
+          """
+
+          import re
+          from pathlib import Path
+
+          ROOTS = ("dev", "prod")
+
+
+          def document(text, path, name):
+              """Slice one top-level aws_iam_policy_document data block out of a root.
+
+              Parameters:
+                  text (str): Full contents of the root's main.tf.
+                  path (str): Repository-relative path of that file, for messages.
+                  name (str): Local name of the data source, such as "batch_runtime".
+              Returns:
+                  str: The whole block, opening line through its closing brace.
+              Raises:
+                  AssertionError: If the block is absent or is no longer declared at top
+                      level, either of which would make every statement assertion below
+                      pass by measuring nothing.
+              """
+              block = re.search(
+                  r'(?ms)^data "aws_iam_policy_document" "%s" \{.*?^\}$' % re.escape(name),
+                  text,
+              )
+              assert block, (
+                  f"{path}: data.aws_iam_policy_document.{name} is absent or is no longer a "
+                  "top-level block, so the grants it carries cannot be verified."
+              )
+              return block.group(0)
+
+
+          def statement(block, sid, path, name):
+              """Return one statement's body from a policy document, comments stripped.
+
+              Parameters:
+                  block (str): One policy document as returned by `document`.
+                  sid (str): Statement identifier to find.
+                  path (str): Repository-relative path of the file, for messages.
+                  name (str): Local name of the data source, for messages.
+              Returns:
+                  str: That statement's body with comment lines removed.
+              Raises:
+                  AssertionError: If no statement in the document carries that identifier.
+              """
+              # Assumptions: comment lines are stripped before anything is matched. Every
+              #   statement in these documents carries a why-comment that names the actions
+              #   it grants and often the ones it deliberately withholds, so an unfiltered
+              #   search would find `s3:DeleteObject` in the paragraph explaining why a
+              #   statement does NOT grant it -- a gate a comment can satisfy is not a gate.
+              for body in re.findall(r"(?ms)^  statement \{\n(.*?)^  \}$", block):
+                  code = "\n".join(
+                      line for line in body.splitlines()
+                      if not line.lstrip().startswith("#")
+                  )
+                  if re.search(r'sid\s*=\s*"%s"' % re.escape(sid), code):
+                      return code
+              raise AssertionError(
+                  f"{path}: data.aws_iam_policy_document.{name} declares no statement with "
+                  f"sid {sid!r}. The operation it authorises is issued by delivered code, so "
+                  "its absence is an access denial at run time rather than a missing feature."
+              )
+
+
+          # WHY : Assumptions: each entry names the actions the statement MUST carry, the
+          #   expressions its scope must be composed from, and the actions it must NOT
+          #   carry. All three halves are load-bearing. The required actions are the ones a
+          #   measured code path issues; the scope expressions are module outputs and root
+          #   locals rather than literals, so a renamed prefix moves the grant with it; and
+          #   the forbidden actions are the ones whose absence is the least-privilege
+          #   decision -- a claim record is never listed and never deleted by either
+          #   implementation, so an s3:ListBucket or a delete here would widen the grant to
+          #   an enumeration and a deletion nothing performs.
+          REQUIRED = {
+              "batch_runtime": (
+                  {
+                      "sid": "ReadWriteGenerationClaimRecords",
+                      "actions": ("s3:GetObject", "s3:PutObject"),
+                      "scope": ("module.s3_datasets.generation_claim_prefix",
+                                "module.s3_datasets.bucket_arn"),
+                      "forbidden": ("s3:ListBucket", "s3:DeleteObject", "_generation-claims/"),
+                  },
+                  {
+                      "sid": "ListDatasetGenerationVersions",
+                      "actions": ("s3:ListBucketVersions",),
+                      "scope": ("module.s3_datasets.bucket_arn",
+                                "local.batch_generation_key_prefixes",
+                                's3:prefix'),
+                      "forbidden": (),
+                  },
+                  {
+                      "sid": "ScratchOldestDatasetGeneration",
+                      "actions": ("s3:DeleteObject", "s3:DeleteObjectVersion"),
+                      "scope": ("local.batch_generation_key_prefixes",
+                                "module.s3_datasets.bucket_arn"),
+                      "forbidden": (),
+                  },
+              ),
+              "reporting_runtime": (
+                  {
+                      "sid": "DescribeAdhocReportExecution",
+                      "actions": ("states:DescribeExecution",),
+                      "scope": ("local.adhoc_report_state_machine_arn",
+                                '":stateMachine:"', '":execution:"'),
+                      "forbidden": (),
+                  },
+                  {
+                      "sid": "ReadReportOutputs",
+                      "actions": ("s3:GetObject",),
+                      "scope": ("local.reporting_object_key_prefixes",
+                                "module.s3_datasets.bucket_arn"),
+                      "forbidden": ("s3:DeleteObject",),
+                  },
+              ),
+          }
+
+          for environment in ROOTS:
+              path = f"infra/envs/{environment}/main.tf"
+              text = Path(path).read_text()
+              for name, expected in REQUIRED.items():
+                  block = document(text, path, name)
+                  for entry in expected:
+                      body = statement(block, entry["sid"], path, name)
+                      for action in entry["actions"]:
+                          assert f'"{action}"' in body, (
+                              f"{path}: {name} statement {entry['sid']} does not grant "
+                              f"{action}, which a delivered code path issues."
+                          )
+                      for expression in entry["scope"]:
+                          assert expression in body, (
+                              f"{path}: {name} statement {entry['sid']} does not compose its "
+                              f"scope from {expression}. Composing it from the module output "
+                              "or root local instead of a literal is what keeps the grant and "
+                              "the prefix it authorises from drifting apart."
+                          )
+                      for forbidden in entry["forbidden"]:
+                          assert forbidden not in body, (
+                              f"{path}: {name} statement {entry['sid']} carries {forbidden!r}, "
+                              "which no measured code path needs. The narrow action and scope "
+                              "set is the least-privilege decision this statement records."
+                          )
+
+              # WHY : Assumptions: the migration document must INHERIT the retention pair
+              #   rather than re-declare it, and this is asserted because the provider's
+              #   merge rule makes the mistake look additive. A sid re-declared by a
+              #   document that sources another OVERRIDES the sourced statement instead of
+              #   adding to it, so a well-meant copy here would silently discard the
+              #   statement in batch_runtime for this role -- verified against the provider
+              #   rather than assumed. Either implementation may now retire a generation the
+              #   other created, so the two roles must hold one shared grant.
+              migration = document(text, path, "data_migration_runtime")
+              assert "source_policy_documents" in migration, (
+                  f"{path}: data_migration_runtime no longer sources batch_runtime, so the "
+                  "generation-retention grant the batch document declares is not inherited "
+                  "and the migration task's sweep is denied."
+              )
+              for inherited in ("ListDatasetGenerationVersions", "ScratchOldestDatasetGeneration"):
+                  assert f'sid       = "{inherited}"' not in migration, (
+                      f"{path}: data_migration_runtime re-declares sid {inherited!r} that it "
+                      "inherits. A repeated sid overrides the sourced statement rather than "
+                      "adding to it, so this discards the shared grant while appearing to "
+                      "reinforce it."
+                  )
+
+          print("Runtime task-role grants: PASS")
+          GRANTS
+
       # Assumptions: an engine version pin is the one input in this repository that
       # goes stale WITHOUT anyone editing it -- every other value stays correct until
       # changed, while a pinned Aurora minor silently crosses out of standard support
@@ -810,7 +1058,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'ENGINE'
-          """Assert every root's Aurora engine pin carries an unexpired review horizon.
+          """Assert every root's Aurora engine pin and default share one reviewed release.
 
           Parameters:
               None. The root paths are literals so that a root added without a marker
@@ -818,49 +1066,91 @@ jobs:
           Returns:
               None. Successful completion lets the workflow step exit zero.
           Raises:
-              AssertionError: If a root omits the marker or the pin, if the marker names
-                  a different version than the pin deploys, or if the declared review
-                  horizon is today or in the past.
+              AssertionError: If a root omits the marker, the pin or the variable
+                  default, if the marker names a different version than the pin
+                  deploys, if the variable default disagrees with the pin, or if the
+                  declared review horizon is today or in the past.
           """
 
           import datetime
           import re
           from pathlib import Path
 
-          ROOTS = ("infra/envs/dev/terraform.tfvars", "infra/envs/prod/terraform.tfvars")
+          ROOTS = ("dev", "prod")
           MARKER = re.compile(
               r"#\s*aurora-engine-support-review:\s*(?P<version>[0-9]+\.[0-9]+)"
               r"\s+by\s+(?P<date>\d{4}-\d{2}-\d{2})"
           )
           PIN = re.compile(r'aurora_engine_version\s*=\s*"(?P<version>[^"]+)"')
+          # WHY: anchored on the variable BLOCK, not on the file, because a root's
+          #   variables.tf mentions this input's name in prose and in an error message
+          #   too, and a file-wide search for a quoted version would match those first.
+          DEFAULT = re.compile(
+              r'variable "aurora_engine_version" \{.*?\n  default\s*=\s*"(?P<version>[^"]+)"',
+              re.DOTALL,
+          )
 
           today = datetime.date.today()
-          for root in ROOTS:
-              text = Path(root).read_text()
+          for environment in ROOTS:
+              tfvars = f"infra/envs/{environment}/terraform.tfvars"
+              variables = f"infra/envs/{environment}/variables.tf"
+              text = Path(tfvars).read_text()
 
               marker = MARKER.search(text)
               assert marker is not None, (
-                  f"{root} declares no aurora-engine-support-review marker; add one "
+                  f"{tfvars} declares no aurora-engine-support-review marker; add one "
                   "naming the pinned version and the date its support must be re-reviewed"
               )
               pin = PIN.search(text)
-              assert pin is not None, f"{root} sets no aurora_engine_version"
+              assert pin is not None, f"{tfvars} sets no aurora_engine_version"
 
               # WHY: comparing the two rather than trusting either alone. A pin bumped
               #   without moving the marker would inherit a horizon that was reasoned
               #   about a DIFFERENT release, which reads as reviewed and is not.
               assert marker.group("version") == pin.group("version"), (
-                  f"{root} pins Aurora {pin.group('version')} but its review marker "
+                  f"{tfvars} pins Aurora {pin.group('version')} but its review marker "
                   f"describes {marker.group('version')}: move the marker with the pin"
+              )
+
+              # WHY : Refactoring Rationale: this gate read the TFVARS PIN ALONE, and the
+              #   hole it left is the one it was written to close. Both roots defaulted
+              #   var.aurora_engine_version to 16.6 -- standard support ended 2026-05-31 --
+              #   while their tfvars pinned the reviewed 16.8, and because a passed
+              #   variable overrides its default the divergence was invisible in every
+              #   ordinary plan while this step reported PASS. Any resolution that does not
+              #   pass the file reaches the default instead: a `-var-file` omission, a plan
+              #   from a scratch copy of the root, a `terraform console` session. Asserting
+              #   the default against the pin means the reviewed release is the only one
+              #   either path can select, so the marker's horizon governs both.
+              # WHY : Alternatives Considered: asserting the default against a literal
+              #   version written into this workflow. Rejected because it would need
+              #   editing on every engine upgrade and would then be a third copy of the
+              #   same value -- the marker is already the reviewed statement, and equality
+              #   with the pin chains the default to it without adding a copy.
+              default = DEFAULT.search(Path(variables).read_text())
+              assert default is not None, (
+                  f"{variables} declares no default for aurora_engine_version; a root "
+                  "resolved without its tfvars would then fail with a missing required "
+                  "variable, or -- if a default is reintroduced unreviewed -- select a "
+                  "release this gate never saw"
+              )
+              assert default.group("version") == pin.group("version"), (
+                  f"{variables} defaults aurora_engine_version to "
+                  f"{default.group('version')} but {tfvars} pins "
+                  f"{pin.group('version')}. A resolution that does not pass the tfvars "
+                  "reaches the default, so the two must name the same reviewed release"
               )
 
               horizon = datetime.date.fromisoformat(marker.group("date"))
               assert horizon > today, (
-                  f"{root} pins Aurora {pin.group('version')} with a review horizon of "
+                  f"{tfvars} pins Aurora {pin.group('version')} with a review horizon of "
                   f"{horizon}, which is not in the future: confirm the release is still "
                   "under standard support and move the pin and its marker forward"
               )
-              print(f"{root}: Aurora {pin.group('version')} reviewed through {horizon}")
+              print(
+                  f"infra/envs/{environment}: Aurora {pin.group('version')} pinned and "
+                  f"defaulted, reviewed through {horizon}"
+              )
           ENGINE
 
       - name: Verify hand-written Terraform prose counts against the declarations
@@ -868,7 +1158,17 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PROSE'
-          """Verify every spelled-out count in a Terraform header against the declarations.
+          """Verify the enumerated Terraform header counts below against the declarations.
+
+          Coverage is an EXPLICIT LIST, not a discovery, and this docstring is where that
+          list is published so a green run is not read as a repository-wide guarantee. The
+          headers asserted here are: alb outputs.tf and variables.tf; ecs-service
+          outputs.tf; cloudfront-spa outputs.tf and main.tf; ecs-cluster main.tf against
+          kms main.tf; bootstrap variables.tf; network outputs.tf, main.tf and
+          variables.tf, plus that module's egress and trust-condition properties;
+          s3-datasets variables.tf; the ecr module's inventory, its `for_each` source and
+          its variable count; and both environment roots' variables.tf. Every other
+          Terraform header in the package remains a human-review obligation.
 
           Parameters:
               None. The paths and prose patterns are literals below, one per claim,
@@ -877,18 +1177,28 @@ jobs:
               None. Successful completion lets the workflow step exit zero.
           Raises:
               AssertionError: If a header states a count no declaration supports, if a
-                  claimed sentence is absent from the file that should carry it, or if a
+                  claimed sentence is absent from the file that should carry it, if a
+                  required input is absent from its root's header inventory, or if a
                   header spells a number this module does not recognise.
           """
 
           import re
           from pathlib import Path
 
+          # Assumptions: the map is EXPLICIT and stops where the package's claims stop. An
+          #     unmapped word fails the assertion that reads it rather than being skipped, so
+          #     extending the range is a deliberate edit and a reworded claim cannot go
+          #     unchecked. It was extended to thirty-six for the two environment roots, whose
+          #     headers count inputs rather than outputs.
           SPELLED = {
               "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
               "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
               "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
               "nineteen": 19, "twenty": 20, "twenty-one": 21, "twenty-two": 22,
+              "twenty-three": 23, "twenty-four": 24, "twenty-five": 25, "twenty-six": 26,
+              "twenty-seven": 27, "twenty-eight": 28, "twenty-nine": 29, "thirty": 30,
+              "thirty-one": 31, "thirty-two": 32, "thirty-three": 33, "thirty-four": 34,
+              "thirty-five": 35, "thirty-six": 36,
           }
 
 
@@ -909,6 +1219,41 @@ jobs:
               # Assumptions: the match is anchored at column zero, so a nested block or a
               #   block name quoted inside a comment cannot inflate the count.
               return len(re.findall(r'(?m)^%s "' % kind, body))
+
+
+          def block(path, kind, name):
+              """Return one named top-level Terraform block, bounded by brace balance.
+
+              Parameters:
+                  path (str): Repository-relative path of the Terraform file to read.
+                  kind (str): Block keyword, such as "variable" or "resource".
+                  name (str): Label of the block, such as "repository_names".
+              Returns:
+                  str: The block's source text, from its opening line through the closing
+                      brace that balances it.
+              Raises:
+                  AssertionError: If the file declares no such block, which means it was
+                      renamed or removed -- a failure rather than a skip, because the claim
+                      checked against the block would otherwise go unchecked.
+                  IndexError: If the block is opened and never closed, which is unbalanced
+                      HCL that terraform validate reports in its own words.
+                  OSError: If the path cannot be read.
+              """
+              text = Path(path).read_text()
+              # Assumptions: brace balance rather than "up to the next declaration". A slice
+              #     bounded by whatever happens to follow the block silently changes meaning
+              #     when a neighbour is added or deleted, which is exactly how the ECR
+              #     assertion below came to read a sub-list and certify the wrong inventory.
+              opener = re.search(r'(?m)^%s "%s" \{' % (kind, re.escape(name)), text)
+              assert opener, f"{path}: no top-level {kind} block named {name!r}"
+              depth, index = 1, opener.end()
+              while depth:
+                  if text[index] == "{":
+                      depth += 1
+                  elif text[index] == "}":
+                      depth -= 1
+                  index += 1
+              return text[opener.start():index]
 
 
           def spelled(path, pattern):
@@ -935,6 +1280,107 @@ jobs:
               word = found.group(1).lower()
               assert word in SPELLED, f"{path}: unrecognised number word {word!r}"
               return SPELLED[word]
+
+
+          def required_inputs(path):
+              """Return the names of every variable in one file that declares no default.
+
+              Parameters:
+                  path (str): Repository-relative path of a Terraform variables file.
+              Returns:
+                  list[str]: Declaration-order names of the inputs a caller must supply,
+                      which is the pre-plan checklist a header claims to enumerate.
+              Raises:
+                  AssertionError: If the file declares no variable at all, which would make
+                      an empty required set pass by measuring nothing.
+                  IndexError: If a variable block is opened and never closed, which is
+                      unbalanced HCL that terraform validate reports in its own words.
+                  OSError: If the path cannot be read.
+              """
+              text = Path(path).read_text()
+              names = re.findall(r'(?m)^variable "([^"]+)" \{', text)
+              assert names, f"{path}: declares no variable blocks"
+              required = []
+              for name in names:
+                  # Assumptions: comments are stripped before looking for `default`, so a
+                  #     variable whose prose merely DISCUSSES a default is not mistaken for
+                  #     one that declares it -- which would hide a genuinely required input.
+                  body = "\n".join(
+                      line.split("#", 1)[0]
+                      for line in block(path, "variable", name).splitlines()
+                  )
+                  if not re.search(r"(?m)^\s*default\s*=", body):
+                      required.append(name)
+              return required
+
+
+          def variable_names(path):
+              """Return every variable name one Terraform file declares, in declaration order.
+
+              Parameters:
+                  path (str): Repository-relative path of a Terraform variables file.
+              Returns:
+                  list[str]: The names, in the order the blocks appear, which is the order a
+                      header's declaration-order inventory claims to reproduce.
+              Raises:
+                  AssertionError: If the file declares no variable at all, so an empty
+                      inventory cannot pass by comparing two empty lists.
+                  OSError: If the path cannot be read.
+              """
+              names = re.findall(r'(?m)^variable "([^"]+)" \{', Path(path).read_text())
+              assert names, f"{path}: declares no variable blocks"
+              return names
+
+
+          def validated_inputs(path):
+              """Return the names of every variable in one file carrying a validation block.
+
+              Parameters:
+                  path (str): Repository-relative path of a Terraform variables file.
+              Returns:
+                  list[str]: Declaration-order names of the inputs that reject a value at
+                      plan time, which is what a header's validation count claims to state.
+              Raises:
+                  AssertionError: If the file declares no variable at all.
+                  IndexError: If a variable block is opened and never closed.
+                  OSError: If the path cannot be read.
+              """
+              validated = []
+              for name in variable_names(path):
+                  # Assumptions: comments are stripped first, because these headers DISCUSS
+                  #     validation at length and a prose mention would otherwise be counted as
+                  #     a declared block -- inflating the count the assertion is checking.
+                  body = "\n".join(
+                      line.split("#", 1)[0]
+                      for line in block(path, "variable", name).splitlines()
+                  )
+                  if re.search(r"(?m)^\s*validation\s*\{", body):
+                      validated.append(name)
+              return validated
+
+
+          def section(path, start, end):
+              """Return the text of one header passage, bounded by two literal markers.
+
+              Parameters:
+                  path (str): Repository-relative path of the file to read.
+                  start (str): Literal text opening the passage, such as "# Errors:".
+                  end (str): Literal text closing it, searched for after `start`.
+              Returns:
+                  str: The passage between the two markers, `start` included.
+              Raises:
+                  AssertionError: If either marker is absent, which means the passage was
+                      reworded or moved and any inventory checked against it would be
+                      checked against the wrong text. Failing here rather than falling back
+                      to the whole file is what keeps a passing run meaningful.
+                  OSError: If the path cannot be read.
+              """
+              text = Path(path).read_text()
+              opened = text.find(start)
+              assert opened != -1, f"{path}: passage opening {start!r} is absent"
+              closed = text.find(end, opened + len(start))
+              assert closed != -1, f"{path}: passage closing {end!r} is absent after {start!r}"
+              return text[opened:closed]
 
 
           alb_out = "infra/modules/alb/outputs.tf"
@@ -965,6 +1411,137 @@ jobs:
           assert spelled(cluster, r"the ([A-Za-z-]+) customer-managed keys to `kms`") == len(
               re.findall(r'(?m)^resource "aws_kms_key"',
                          Path("infra/modules/kms/main.tf").read_text()))
+
+          # WHY : Refactoring Rationale: s3-datasets was NOT covered by this gate, and its
+          #       header had drifted three ways at once -- the Purpose sentence said fourteen
+          #       inputs while the Parameters paragraph said thirteen and its
+          #       declaration-order list omitted `source_extract_prefix` outright, and the
+          #       Errors section named two required inputs where three have no default. The
+          #       two count sentences are asserted SEPARATELY because they disagreed with
+          #       each other and not only with the file, and the NAME inventories are
+          #       asserted as well as the counts, because the omission that cost an operator
+          #       a failed plan was a missing name inside a sentence whose number was right.
+          datasets = "infra/modules/s3-datasets/variables.tf"
+          datasets_names = variable_names(datasets)
+          datasets_required = required_inputs(datasets)
+          datasets_validated = validated_inputs(datasets)
+          assert spelled(datasets, r"`s3-datasets` module: ([A-Za-z-]+) variables") == len(
+              datasets_names)
+          assert spelled(datasets, r"The ([A-Za-z-]+) `variable` blocks below ARE") == len(
+              datasets_names)
+          assert spelled(datasets, r"Exactly ([A-Za-z-]+) of them --") == len(datasets_required)
+          assert spelled(datasets, r"([A-Za-z-]+) of the [a-z-]+ carry at least one") == len(
+              datasets_validated)
+          assert spelled(datasets, r"[A-Za-z-]+ of the ([a-z-]+) carry at least one") == len(
+              datasets_names)
+          assert spelled(datasets, r"The ([a-z-]+) with none are") == len(datasets_names) - len(
+              datasets_validated)
+
+          # Assumptions: the declaration-order list is compared as an ORDERED sequence, not a
+          #     set, because it claims to be in declaration order and a reader uses it to
+          #     locate a block. Filtering the passage's words down to declared names is what
+          #     lets the comparison ignore the prose around them without a second pattern.
+          datasets_listed = [
+              word
+              for word in re.findall(
+                  r"[a-z][a-z0-9_]+", section(datasets, "declaration order:", "Exactly")
+              )
+              if word in set(datasets_names)
+          ]
+          assert datasets_listed == datasets_names, (
+              f"{datasets}: the Parameters declaration-order list reads {datasets_listed}, "
+              f"which is not the declarations {datasets_names}. A name missing from that "
+              "list is an input a caller reading the header never learns exists."
+          )
+          # Assumptions: the passage ends at its Refactoring Rationale note, so the LIVE
+          #     claim is what is searched. That note records the omission this assertion
+          #     exists to catch and therefore names the input it omitted; including it would
+          #     let the historical mention satisfy the check for the missing live one, which
+          #     was measured against the pre-fix text and did exactly that.
+          datasets_errors = section(datasets, "# Errors:", "#   Refactoring Rationale:")
+          for name in datasets_required:
+              assert f"`{name}`" in datasets_errors, (
+                  f"{datasets}: `{name}` has no default, so `terraform validate` fails "
+                  "without it, and the Errors section does not name it. That section IS the "
+                  "pre-plan checklist, so an omission there surfaces as an unpredicted "
+                  "missing-variable failure."
+              )
+
+          # WHY : Refactoring Rationale: neither environment root was covered either, and
+          #       infra/envs/dev/variables.tf claimed thirty-four inputs with eleven required
+          #       while declaring thirty-six with twelve, omitting `mask_hmac_secret_kms_key_arn`
+          #       -- a required input, so an operator working from that checklist met "No
+          #       value for required variable" on an input the checklist claimed to
+          #       enumerate. Both roots' counts, both required-name inventories and the
+          #       symmetry BETWEEN the roots are asserted here, because the symmetry is what
+          #       the two headers each cite as their reason for being closed sets.
+          root_names = {}
+          root_required = {}
+          for root in ("dev", "prod"):
+              root_path = f"infra/envs/{root}/variables.tf"
+              root_names[root] = variable_names(root_path)
+              root_required[root] = required_inputs(root_path)
+              # Assumptions: the passage searched is the required-input ENUMERATION itself,
+              #     from "with no default are" to the note that follows it, rather than the
+              #     whole header. Both headers discuss the inputs they once omitted, so a
+              #     header-wide search is satisfied by a historical mention and passes while
+              #     the live checklist is still short a name. The markers are count-agnostic,
+              #     so a change to the number does not silently widen the passage -- and if
+              #     either marker is reworded away, `section` fails rather than falling back.
+              root_header = section(root_path, "with no default are", "Assumptions:")
+              for name in root_required[root]:
+                  assert f"`{name}`" in root_header, (
+                      f"infra/envs/{root}/variables.tf: `{name}` is declared with no default "
+                      "and is absent from the header's required-input inventory. That "
+                      "inventory is what an operator reads before a first apply, so an "
+                      "omission is a plan that stops on a variable nobody was told about."
+                  )
+
+          dev_vars = "infra/envs/dev/variables.tf"
+          assert spelled(dev_vars, r"([A-Za-z-]+) inputs, [A-Za-z-]+ of them required") == len(
+              root_names["dev"])
+          assert spelled(dev_vars, r"[A-Za-z-]+ inputs, ([A-Za-z-]+) of them required") == len(
+              root_required["dev"])
+          # Assumptions: `[\s#]+` spans the comment continuation, because this claim wraps
+          #     across two header lines and a pattern requiring a single space would report
+          #     the sentence as absent -- which this helper treats as a failure, so a
+          #     reflowed comment would redden the gate instead of going unchecked.
+          assert spelled(dev_vars, r"declares the same[\s#]+([a-z-]+) names with the same") == len(
+              root_names["prod"])
+          assert spelled(dev_vars, r"names with the same ([a-z-]+) required") == len(
+              root_required["prod"])
+
+          prod_vars = "infra/envs/prod/variables.tf"
+          assert spelled(prod_vars, r"declares the same ([a-z-]+) variable names as dev") == len(
+              root_names["dev"])
+          assert spelled(prod_vars, r"Parameters -- ([A-Za-z-]+), [A-Za-z-]+ required") == len(
+              root_names["prod"])
+          assert spelled(prod_vars, r"Parameters -- [A-Za-z-]+, ([A-Za-z-]+) required") == len(
+              root_required["prod"])
+          assert spelled(
+              prod_vars, r"([A-Za-z-]+) of the [a-z-]+ inputs carry a `validation` block"
+          ) == len(validated_inputs(prod_vars))
+          assert spelled(
+              prod_vars, r"[A-Za-z-]+ of the ([a-z-]+) inputs carry a `validation` block"
+          ) == len(root_names["prod"])
+          assert spelled(prod_vars, r"and the ([a-z-]+)(?:\s|\n#)+that do not are") == len(
+              root_names["prod"]) - len(validated_inputs(prod_vars))
+
+          assert set(root_names["dev"]) == set(root_names["prod"]), (
+              "infra/envs/dev and infra/envs/prod declare different input names: "
+              f"dev-only {sorted(set(root_names['dev']) - set(root_names['prod']))}, "
+              f"prod-only {sorted(set(root_names['prod']) - set(root_names['dev']))}. Both "
+              "headers state the surfaces are identical and differ only in defaults, and a "
+              "name present in one root alone is a topology divergence between the "
+              "environments rather than a sizing difference."
+          )
+          assert set(root_required["dev"]) == set(root_required["prod"]), (
+              "infra/envs/dev and infra/envs/prod require different inputs: "
+              f"dev-only {sorted(set(root_required['dev']) - set(root_required['prod']))}, "
+              f"prod-only {sorted(set(root_required['prod']) - set(root_required['dev']))}. "
+              "An input required in one root and defaulted in the other means the two "
+              "environments cannot be applied from the same operator checklist."
+          )
 
           boot = "infra/bootstrap/variables.tf"
           assert spelled(boot, r"Parameters -- the ([A-Za-z-]+) inputs") == declared(boot, "variable")
@@ -1190,23 +1767,35 @@ jobs:
           #   cleanly. Reading the literal default here, against a list written out in this
           #   workflow, means changing the inventory requires editing TWO files that no
           #   single-module change touches at once.
+          # WHY : Refactoring Rationale: this assertion read ONLY the deployable variable's
+          #   own default -- it sliced the file at `variable "third_party_mirror_repository_names"`
+          #   so the mirror list could not be seen -- and it therefore reported PASS while
+          #   main.tf unioned that second list into the same `for_each` and provisioned
+          #   ELEVEN repositories. A gate scoped to a sub-list cannot see the total, so the
+          #   inventory it certified was not the inventory that would exist. Both halves are
+          #   asserted now: the deployable default IS the ten, and main.tf's `for_each`
+          #   collection is derived from that variable ALONE, so a re-introduced mirror --
+          #   as a second variable, a hard-coded name or an extra element -- reddens this
+          #   step instead of passing beneath it.
           ecr_vars = Path("infra/modules/ecr/variables.tf").read_text()
 
-          # WHY: slicing to the deployable variable's own block before matching. The mirror
-          #   variable further down carries a name list too, and a file-wide findall would
-          #   fold the two together and report a passing eleven-name inventory.
-          deployable_block = ecr_vars[
-              ecr_vars.index('variable "repository_names"'):
-              ecr_vars.index('variable "third_party_mirror_repository_names"')
-          ]
-          # WHY: bounding the slice to the DEFAULT list alone, not "from default onward".
-          #   The exact-set `validation` that follows the default restates all ten names, so
-          #   a findall running to the end of the block sees each name twice and any
-          #   comparison against it has to fall back to a prefix -- which is precisely how
-          #   an eleventh smuggled entry stays invisible. Terminating at the default's own
+          # WHY : Assumptions: the variable's block is bounded by brace balance rather than by
+          #   the name of whatever declaration follows it. The previous bound was the mirror
+          #   variable's name, so deleting that variable would have raised ValueError from
+          #   `index` and the intent of the slice would have had to be reconstructed; balance
+          #   is a property of the block itself and survives any neighbour being added or
+          #   removed.
+          repository_names_block = block("infra/modules/ecr/variables.tf", "variable", "repository_names")
+          # WHY : Assumptions: bounding the match to the DEFAULT list alone, not "from default
+          #   onward". The exact-set `validation` that follows the default restates all ten
+          #   names, so a findall running to the end of the block sees each name twice and any
+          #   comparison against it has to fall back to a prefix -- which is precisely how a
+          #   smuggled eleventh entry stays invisible. Terminating at the default's own
           #   closing bracket lets the comparison below be a whole-list equality.
-          default_start = deployable_block.index("default = [") + len("default = [")
-          default_body = deployable_block[default_start:deployable_block.index("]", default_start)]
+          default_start = repository_names_block.index("default = [") + len("default = [")
+          default_body = repository_names_block[
+              default_start:repository_names_block.index("]", default_start)
+          ]
           default_names = re.findall(r'"([a-z0-9-]+)"', default_body)
           FROZEN_DEPLOYABLES = [
               "auth-service",
@@ -1222,9 +1811,112 @@ jobs:
           ]
           assert default_names == FROZEN_DEPLOYABLES, (
               f"infra/modules/ecr: the deployable repository inventory is {default_names}, "
-              f"which is not the ten the frozen plan fixes {FROZEN_DEPLOYABLES}. A "
-              "third-party image this migration only caches belongs in "
-              "third_party_mirror_repository_names, not here."
+              f"which is not the ten the frozen plan fixes {FROZEN_DEPLOYABLES}. AAP "
+              "sections 0.4.1.6 and 0.5.1.12 fix this module at ten repositories -- the "
+              "eight Spring Boot services plus ui and data-migration -- and a third-party "
+              "image this migration does not build has no repository here at all."
+          )
+
+          # WHY : Assumptions: the EFFECTIVE inventory is what `for_each` iterates, so the
+          #   collection behind it is read rather than assumed. Both iterating resources take
+          #   the same local, the local is projected from one variable, and each link is
+          #   asserted: a hard-coded name, a second `variable`, a `setunion`/`concat`/`merge`
+          #   or a second `local` folded in at any of those points changes the provisioned
+          #   count without changing the default this step has just certified.
+          ecr_main = Path("infra/modules/ecr/main.tf").read_text()
+          ecr_main_code = "\n".join(
+              line for line in ecr_main.splitlines() if not line.lstrip().startswith("#")
+          )
+          iterating_resources = re.findall(
+              r'(?ms)^resource "(aws_ecr_[a-z_]+)" "this" \{(.*?)^\}', ecr_main_code
+          )
+          assert len(iterating_resources) == 2, (
+              "infra/modules/ecr/main.tf: expected the repository and its lifecycle policy "
+              f"to be the two `this` resources; found {[n for n, _ in iterating_resources]}. "
+              "This step reads each one's for_each, so an unrecognised shape leaves the "
+              "provisioned inventory unchecked."
+          )
+          for resource_type, resource_body in iterating_resources:
+              iterated = re.search(r"^\s+for_each\s*=\s*(.+)$", resource_body, re.M)
+              assert iterated, (
+                  f"infra/modules/ecr/main.tf: {resource_type}.this declares no for_each, so "
+                  "the number of repositories it provisions is not derived from the "
+                  "validated inventory at all."
+              )
+              assert iterated.group(1).strip() == "local.repository_names", (
+                  f"infra/modules/ecr/main.tf: {resource_type}.this iterates "
+                  f"{iterated.group(1).strip()!r} rather than local.repository_names, so the "
+                  "ten-name default this step certifies is not what the module provisions."
+              )
+
+          # WHY : Assumptions: the local's expression is sliced by bracket balance from its own
+          #   assignment, so what is inspected is the projection itself and not a neighbouring
+          #   local. Requiring `for name in var.repository_names :` verbatim is what makes the
+          #   source collection a single variable: `setunion(var.repository_names, ...)` does
+          #   not match it, and neither does iterating a local of unions.
+          local_assignment = re.search(
+              r"(?ms)^\s+repository_names\s*=\s*\{(.*?)^\s+\}$", ecr_main_code
+          )
+          assert local_assignment, (
+              "infra/modules/ecr/main.tf: the local.repository_names projection is absent or "
+              "no longer a brace-delimited expression, so the collection driving for_each "
+              "cannot be read. This gate fails closed rather than reporting a pass it did "
+              "not establish."
+          )
+          projection = local_assignment.group(1)
+          # WHY : Assumptions: the projection is required to be the union of EXACTLY the two
+          #   declared name inputs, written verbatim, rather than `var.repository_names` alone.
+          #   The deployable inventory and the third-party mirror are two separate inputs on
+          #   purpose -- the ten images this migration BUILDS and the one it only CACHES -- and
+          #   `infra/modules/ecs-service` attaches the cached collector to every task while
+          #   `infra/modules/network` enumerates egress rather than allowing 0.0.0.0/0, so a
+          #   task cannot pull that sidecar from the public registry and cannot start without
+          #   the mirror. Pinning the whole expression is what still closes the hole this gate
+          #   exists for: a THIRD collection, a hard-coded name, a `concat`, a `merge` or a
+          #   different local all fail it, because only this exact union passes.
+          assert (
+              "for name in setunion(var.repository_names, var.third_party_mirror_repository_names) :"
+              in projection
+          ), (
+              "infra/modules/ecr/main.tf: local.repository_names is not projected from the "
+              f"union of the two declared name inputs; its expression is {projection.strip()!r}. "
+              "Any other source provisions repositories neither exact-set validation says "
+              "anything about."
+          )
+          folded = sorted(set(re.findall(r"var\.([a-z_]+)", projection)) - {
+              "repository_names", "third_party_mirror_repository_names", "name_prefix",
+              "environment"
+          })
+          assert not folded, (
+              f"infra/modules/ecr/main.tf: local.repository_names also reads var.{folded}; "
+              "only the two validated inventories and the two name segments may appear in "
+              "this projection."
+          )
+
+          # WHY : Assumptions: the module is held to exactly TWO collection-typed inputs, named,
+          #   in declaration order. Every other input is a string, number, bool or the tag map,
+          #   which makes this a structural statement of the topology -- ten built images plus
+          #   one cached third-party image -- rather than a check on a name. A THIRD name list,
+          #   whatever it is called, fails it, and so does renaming or dropping either of these
+          #   two: the mirror cannot be withdrawn without the ECS sidecar and the enumerated
+          #   egress being reconsidered together, which is a decision and not a tidy-up.
+          collection_inputs = [
+              name
+              for name in re.findall(r'(?m)^variable "([^"]+)" \{', ecr_vars)
+              if re.search(
+                  r"(?m)^  type\s+= (?:set|list)\(",
+                  block("infra/modules/ecr/variables.tf", "variable", name),
+              )
+          ]
+          assert collection_inputs == [
+              "repository_names",
+              "third_party_mirror_repository_names",
+          ], (
+              f"infra/modules/ecr/variables.tf declares collection inputs {collection_inputs}; "
+              "exactly these two are permitted, in this order. The first is the ten deployable "
+              "images AAP section 0.4.1.6 fixes; the second is the third-party collector image "
+              "the private mirror caches so a task in an egress-enumerated subnet can pull its "
+              "sidecar at all."
           )
           ecr_claimed = spelled(
               "infra/modules/ecr/variables.tf", r"Parameters -- the ([A-Za-z-]+) `variable` blocks"
@@ -1233,6 +1925,52 @@ jobs:
           assert ecr_claimed == ecr_declared, (
               f"infra/modules/ecr/variables.tf claims {ecr_claimed} variable blocks but "
               f"declares {ecr_declared}"
+          )
+
+          # WHY : Refactoring Rationale: this check was removed with the telemetry sidecar and
+          #       is restored with it. While the sidecar was absent there was nothing for the
+          #       three files to agree about; now that every task runs the collector again,
+          #       the agreement is load-bearing and no other gate reads these files together.
+          # WHY : Assumptions: this is a CROSS-FILE agreement check rather than a count, and
+          #       it is in this step because the values it compares are Terraform prose and
+          #       workflow literals that no other gate reads together. The telemetry sidecar
+          #       is attached to every workload, and three files have to describe the same
+          #       upstream release: both environment roots carry the tag the mirror is
+          #       labelled with, and deploy.yml carries the tag plus the digest it pulls. A
+          #       version advanced in one place and not another mirrors one release and
+          #       registers another, and nothing about that fails -- the tasks start on
+          #       whichever image the mirror happens to hold.
+          # WHY : Trade-offs: the digest is NOT compared to anything, because only one file
+          #       holds it and a second copy would be the drift this check exists to stop.
+          #       What is asserted is that a digest is present and well-formed, so the pull
+          #       cannot silently fall back to a tag.
+          dev_root = Path("infra/envs/dev/main.tf").read_text()
+          prod_root = Path("infra/envs/prod/main.tf").read_text()
+          deploy = Path(".github/workflows/deploy.yml").read_text()
+
+          collector_tags = set()
+          for label, body in (("dev", dev_root), ("prod", prod_root)):
+              found = re.search(r'telemetry_collector_image_tag\s*=\s*"([^"]+)"', body)
+              assert found, f"infra/envs/{label}/main.tf: no telemetry_collector_image_tag"
+              collector_tags.add(found.group(1))
+          assert len(collector_tags) == 1, (
+              f"the two roots pin different telemetry collector tags: {sorted(collector_tags)}"
+          )
+          root_tag = collector_tags.pop()
+
+          workflow_tags = set(re.findall(r'collector_tag="([^"]+)"', deploy))
+          assert workflow_tags, ".github/workflows/deploy.yml: no collector_tag assignment"
+          assert workflow_tags == {root_tag}, (
+              "the deployment workflow and the environment roots name different telemetry "
+              f"collector releases: workflow {sorted(workflow_tags)} versus roots {root_tag}. "
+              "The mirror would hold one release while the task definitions named another."
+          )
+          assert re.search(
+              r'collector_digest="sha256:[0-9a-f]{64}"', deploy
+          ), (
+              ".github/workflows/deploy.yml: the collector mirror must pull by @sha256 digest. "
+              "A tag in a public registry can be moved onto different bytes, so a tag-only "
+              "pull is not a pin."
           )
 
           print("Terraform prose counts: PASS")

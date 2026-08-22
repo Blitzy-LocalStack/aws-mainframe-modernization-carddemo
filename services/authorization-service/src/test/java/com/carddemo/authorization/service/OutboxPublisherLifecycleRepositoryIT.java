@@ -15,6 +15,9 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -119,6 +122,18 @@ class OutboxPublisherLifecycleRepositoryIT {
     private static final String DEDUPLICATION_TOKEN = "DEDUPTOKEN000000000000000000001";
 
     /**
+     * The deduplication attribute of the OLDER of two replies for one card.
+     *
+     * <p>Assumptions: the two identities below are distinguishable at a glance in a failure message,
+     * because the property they serve is an ORDER and a diagnosis that has to count trailing digits is a
+     * diagnosis nobody makes correctly under pressure.</p>
+     */
+    private static final String HEAD_DEDUPLICATION_TOKEN = "DEDUPTOKEN00000000000000000HEAD";
+
+    /** The deduplication attribute of the NEWER of two replies for one card. */
+    private static final String FOLLOWER_DEDUPLICATION_TOKEN = "DEDUPTOKEN0000000000000FOLLOWER";
+
+    /**
      * The reply body the seeded rows carry.
      *
      * <p>Assumptions: it is deliberately not a real encoded reply. Nothing in this class inspects the
@@ -141,8 +156,16 @@ class OutboxPublisherLifecycleRepositoryIT {
     /** The retention window the publishers under test are built with, which no case relies upon. */
     private static final int RETENTION_DAYS = 7;
 
-    /** The attempt ceiling used by every case except the one that asserts abandonment. */
-    private static final int GENEROUS_MAX_ATTEMPTS = 10;
+    /**
+     * The stall-alert threshold used by every case that is not about the escalation itself.
+     *
+     * <p>⚠️ Assumptions: this bounds nothing -- it decides only when a still-failing reply is reported
+     * under {@code event=auth.reply.stalled}. Refactoring Rationale: it was an attempt CEILING at which
+     * the row was abandoned, which lost a reply the committed decision says is owed and, because a
+     * group's head is its lowest unpublished and unquarantined row, released the same card's later
+     * replies past it.</p>
+     */
+    private static final int GENEROUS_STALL_ALERT_ATTEMPTS = 10;
 
     /**
      * The lease a claim writes into the next-attempt column, taken from the production constant's value.
@@ -228,7 +251,7 @@ class OutboxPublisherLifecycleRepositoryIT {
         AtomicReference<RowSnapshot> duringSend = new AtomicReference<>();
         this.sqs.onSend(() -> duringSend.set(snapshotOf(outboxId)));
 
-        int published = publisherWith(GENEROUS_MAX_ATTEMPTS).drain();
+        int published = publisherWith(GENEROUS_STALL_ALERT_ATTEMPTS).drain();
 
         assertThat(published).as("the pass published the one reply it claimed").isEqualTo(1);
         RowSnapshot observed = duringSend.get();
@@ -254,9 +277,10 @@ class OutboxPublisherLifecycleRepositoryIT {
      * A pass whose transport is retried still advances the attempt counter exactly once.
      *
      * <p>Purpose: this is the double increment the lifecycle has to rule out. The transport's own retry
-     * lives inside one pass, and a pass that counted per transport call rather than per claim would burn
-     * a permanently unreachable queue's whole attempt ceiling in a handful of passes and abandon replies
-     * that were never given the tries the configuration promised.
+     * lives inside one pass, and a pass that counted per transport call rather than per claim would cross
+     * the configured stall-alert threshold in a fraction of the passes an operator reading that figure
+     * expects, and would reach the capped backoff sooner than the configuration says -- the backoff being
+     * computed from the same counter.
      *
      * <p>Assumptions: the scripted fault is a client-side transport fault, which the publisher's policy
      * classifies as transient and therefore DOES retry. That choice is what makes the case meaningful: a
@@ -271,7 +295,7 @@ class OutboxPublisherLifecycleRepositoryIT {
         long outboxId = seedOnePendingReply();
         this.sqs.failEverySend();
 
-        int published = publisherWith(GENEROUS_MAX_ATTEMPTS).drain();
+        int published = publisherWith(GENEROUS_STALL_ALERT_ATTEMPTS).drain();
 
         assertThat(published).as("nothing was published").isZero();
         assertThat(this.sqs.sendCount())
@@ -283,7 +307,8 @@ class OutboxPublisherLifecycleRepositoryIT {
                 .isEqualTo(1);
         assertThat(stored.publishedAt()).as("the reply is not published").isNull();
         assertThat(stored.abandonedAt())
-                .as("nor is it abandoned, the ceiling being far above one attempt")
+                .as("nor is it quarantined: no failure count ends a reply, and nothing in this service "
+                        + "writes that column at all")
                 .isNull();
         assertThat(stored.lastError())
                 .as("the failure is kept as a diagnostic so an operator can see why")
@@ -313,7 +338,7 @@ class OutboxPublisherLifecycleRepositoryIT {
     void aBackedOffRowIsNotClaimedBeforeItsInstantArrives() {
         long outboxId = seedOnePendingReply();
         this.sqs.failEverySend();
-        OutboxPublisher publisher = publisherWith(GENEROUS_MAX_ATTEMPTS);
+        OutboxPublisher publisher = publisherWith(GENEROUS_STALL_ALERT_ATTEMPTS);
         publisher.drain();
         int sendsAfterFirstPass = this.sqs.sendCount();
 
@@ -346,7 +371,7 @@ class OutboxPublisherLifecycleRepositoryIT {
     void theNextPassPublishesAndClearsTheError() {
         long outboxId = seedOnePendingReply();
         this.sqs.failEverySend();
-        OutboxPublisher publisher = publisherWith(GENEROUS_MAX_ATTEMPTS);
+        OutboxPublisher publisher = publisherWith(GENEROUS_STALL_ALERT_ATTEMPTS);
         publisher.drain();
         assertThat(snapshotOf(outboxId).lastError())
                 .as("the arrangement is a row that has already failed once")
@@ -368,109 +393,157 @@ class OutboxPublisherLifecycleRepositoryIT {
         assertThat(stored.lastError())
                 .as("the stale diagnostic is cleared, so a published row does not read as failing")
                 .isNull();
-        assertThat(stored.abandonedAt()).as("and the row is not abandoned").isNull();
+        assertThat(stored.abandonedAt())
+                .as("and no quarantine marker was written, that column being an operator's alone")
+                .isNull();
     }
 
     /**
-     * A row that reaches the attempt ceiling is abandoned rather than retried once more.
+     * A row past the stall-alert threshold keeps being claimed, and is delivered when the queue returns.
      *
-     * <p>Purpose: the ceiling is what stops a permanently unreachable queue holding a group's head
-     * forever, and this case covers the first half of that -- that reaching the ceiling RECORDS the
-     * abandonment instead of retrying once more. The second half, that a recorded abandonment is
-     * respected by later passes, needs an arrangement in which the attempt comparison is not already
-     * doing the work, and is asserted in the case below.
+     * <p>⚠️ Purpose: this case replaces one that asserted the OPPOSITE -- that a row reaching a
+     * configured attempt ceiling was abandoned rather than retried again. Refactoring Rationale: that
+     * ceiling broke the guarantee §0.4.3 of the technical specification states as "a reply is published
+     * for every committed authorization", so the property is inverted rather than tuned. Eligibility must
+     * not expire: a reply is retried at its capped backoff until it is delivered, and crossing the
+     * threshold changes only which event name the failure is reported under.
      *
-     * <p>Assumptions: the ceiling is narrowed to two for this case. Reaching a ceiling of ten would take
-     * ten passes and eight clock advances to assert a property that two passes establish exactly, and
-     * the ceiling is a configured value whose own validation is asserted where it is validated.
+     * <p>Assumptions: the threshold is narrowed to two for this case, so that the third pass is
+     * unambiguously a pass BEYOND it. Reaching ten would take ten passes and nine clock advances to
+     * establish what three establish exactly, and the threshold's own validation is asserted where it is
+     * validated.
+     *
+     * <p>Assumptions: the recovery is asserted in the same case rather than in one of its own, because
+     * "still claimable" and "eventually delivered" are one property in two halves and a case proving only
+     * the first would pass for a publisher that claimed the row forever and never sent it.
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("a row at the attempt ceiling is abandoned rather than retried again")
-    void aRowAtTheCeilingIsAbandoned() {
+    @DisplayName("a row past the stall-alert threshold is retried and finally published")
+    void aRowPastTheStallAlertThresholdIsRetriedAndFinallyPublished() {
         long outboxId = seedOnePendingReply();
         this.sqs.failEverySend();
         OutboxPublisher publisher = publisherWith(2);
         publisher.drain();
         this.clock.advance(FIRST_BACKOFF.plusSeconds(1));
-
         publisher.drain();
 
-        RowSnapshot abandoned = snapshotOf(outboxId);
-        assertThat(abandoned.attempts()).as("the second pass took the row to the ceiling").isEqualTo(2);
-        assertThat(abandoned.abandonedAt())
-                .as("reaching the ceiling retires the row rather than retrying it again")
-                .isNotNull();
-        assertThat(abandoned.publishedAt())
-                .as("and abandonment is recorded apart from publication, so neither reads as the other")
+        RowSnapshot atThreshold = snapshotOf(outboxId);
+        assertThat(atThreshold.attempts())
+                .as("the second pass took the row to the escalation threshold")
+                .isEqualTo(2);
+        assertThat(atThreshold.abandonedAt())
+                .as("reaching the threshold escalates the row and must not retire it, since retiring it "
+                        + "would lose an answer the committed decision says is owed")
+                .isNull();
+        assertThat(atThreshold.publishedAt())
+                .as("and an undelivered reply must never read as delivered")
                 .isNull();
 
+        // WHY : Assumptions: the advance is generous rather than exactly the second backoff step, because
+        //       the delay doubles with the attempt count and this case's subject is eligibility rather
+        //       than the arithmetic of the ladder -- which aFailedSendAdvancesTheAttemptOnce... asserts
+        //       precisely, at the one step where the value is unambiguous.
+        this.clock.advance(Duration.ofHours(1));
+        int publishedWhileStillFailing = publisher.drain();
+
+        assertThat(publishedWhileStillFailing).as("the queue is still refusing, so nothing is sent").isZero();
+        RowSnapshot pastThreshold = snapshotOf(outboxId);
+        assertThat(pastThreshold.attempts())
+                .as("a THIRD attempt was made past a threshold of two: eligibility does not expire")
+                .isEqualTo(3);
+        assertThat(pastThreshold.abandonedAt())
+                .as("and the row is still not retired, however far past the threshold it now is")
+                .isNull();
+
+        this.sqs.succeedEverySend();
+        this.clock.advance(Duration.ofHours(1));
+        int publishedAfterRecovery = publisher.drain();
+
+        assertThat(publishedAfterRecovery)
+                .as("the recovered queue receives the reply that every earlier pass could not deliver")
+                .isEqualTo(1);
+        RowSnapshot delivered = snapshotOf(outboxId);
+        assertThat(delivered.publishedAt())
+                .as("the guarantee is discharged by delivery, not by a bound on how long it took")
+                .isNotNull();
+        assertThat(delivered.lastError())
+                .as("and the stale diagnostic is cleared, so a delivered reply does not read as failing")
+                .isNull();
     }
 
     /**
-     * An abandoned row stays abandoned even after an operator raises the attempt ceiling.
+     * A head that cannot be sent holds its own card's later reply until the head itself is delivered.
      *
-     * <p>Purpose: this is the arrangement that makes the abandonment predicate load-bearing rather than
-     * decorative. While the ceiling is unchanged, a row at the ceiling is already excluded by the
-     * attempt comparison alone, so a pass that ignored abandonment would still behave correctly and no
-     * assertion could tell. Raising the ceiling -- which is a configured value and therefore a real
-     * operational act -- removes that cover: the row's attempt count is now BELOW the ceiling, and only
-     * the abandonment keeps it out.
+     * <p>⚠️ Purpose: this is the ordering half of the same guarantee, against the real claiming
+     * statements rather than a double. Refactoring Rationale: it replaces a case that asserted a
+     * quarantined row stays quarantined once the ceiling is raised -- true, but the arrangement it
+     * described is one no code path can now produce, because the publisher no longer writes that column.
+     * What needs asserting instead is the consequence the withdrawn ceiling had: the head claim derives a
+     * group's head as its lowest unpublished, unquarantined identity, so retiring a failing head PROMOTED
+     * the same card's next reply and delivered that card's sequence with a hole in it.
      *
-     * <p>Refactoring Rationale: this case exists because a mutation exposed the gap. Deleting the
-     * claim's abandonment predicate left the previous case green, since the ceiling was doing the work.
-     * The property under test is "an abandoned reply is never sent", not "one particular predicate is
-     * present", so the case was arranged until it could fail for the right reason.
+     * <p>Assumptions: the observation is the deduplication identity of each SEND, not merely the
+     * follower's stored state. A follower left unpublished by a pass that attempted it and failed would
+     * satisfy a state-only assertion, and attempting it is already the reordering -- a first-in-first-out
+     * queue orders by the sequence in which it accepts messages.
      *
-     * <p>Assumptions: the second publisher is a NEW instance with the wider ceiling, which is what an
-     * operator raising the configured value and restarting the service would produce. The row itself is
-     * untouched between the two passes.
+     * <p>Assumptions: the follower's attempt counter is asserted to be zero, which is the strongest
+     * available statement that the claim never offered it to a pass at all: the counter is advanced by
+     * the claiming statement itself, so a zero cannot be explained by a send that was declined later.
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("an abandoned row is not claimed even after the attempt ceiling is raised")
-    void anAbandonedRowSurvivesTheCeilingBeingRaised() {
-        long outboxId = seedOnePendingReply();
+    @DisplayName("a head that keeps failing holds its group, and is delivered before its follower")
+    void aFailingHeadHoldsItsGroupUntilItIsDelivered() {
+        long headId = seedPendingReply(HEAD_DEDUPLICATION_TOKEN);
+        long followerId = seedPendingReply(FOLLOWER_DEDUPLICATION_TOKEN);
         this.sqs.failEverySend();
-        OutboxPublisher narrow = publisherWith(2);
-        narrow.drain();
-        this.clock.advance(FIRST_BACKOFF.plusSeconds(1));
-        narrow.drain();
-        assertThat(snapshotOf(outboxId).abandonedAt())
-                .as("the arrangement is a row that has already been abandoned")
-                .isNotNull();
-        int sendsWhileNarrow = this.sqs.sendCount();
+        OutboxPublisher publisher = publisherWith(2);
+
+        for (int pass = 1; pass <= 3; pass++) {
+            assertThat(publisher.drain())
+                    .as("pass %d publishes nothing, the group's oldest reply being unsendable", pass)
+                    .isZero();
+            this.clock.advance(Duration.ofHours(1));
+        }
+
+        assertThat(this.sqs.sentDeduplicationIds())
+                .as("every attempt of every pass was the HEAD, twice per pass for the transport's own "
+                        + "retry, and the follower was never handed to the queue")
+                .containsOnly(HEAD_DEDUPLICATION_TOKEN);
+        assertThat(snapshotOf(followerId).attempts())
+                .as("the claim never offered the follower to a pass, which is what keeps a later "
+                        + "authorization from being answered before an earlier one for the same card")
+                .isZero();
+        assertThat(snapshotOf(followerId).publishedAt()).isNull();
 
         this.sqs.succeedEverySend();
-        this.clock.advance(Duration.ofDays(1));
-        int published = publisherWith(GENEROUS_MAX_ATTEMPTS).drain();
+        int published = publisher.drain();
 
         assertThat(published)
-                .as("the wider ceiling publishes nothing, the row's fate having been settled")
-                .isZero();
-        assertThat(this.sqs.sendCount())
-                .as("and the queue is not reached, so the abandoned row was not claimed again")
-                .isEqualTo(sendsWhileNarrow);
-        RowSnapshot stored = snapshotOf(outboxId);
-        assertThat(stored.attempts())
-                .as("nor did its counter move, even though it now sits below the ceiling")
+                .as("the recovered pass publishes the head and then advances the group to its follower")
                 .isEqualTo(2);
-        assertThat(stored.publishedAt())
-                .as("and it was certainly not published under the wider ceiling")
-                .isNull();
+        assertThat(this.sqs.sentDeduplicationIds().subList(6, 8))
+                .as("and it does so IN ORDER: the held reply first, the one behind it second")
+                .containsExactly(HEAD_DEDUPLICATION_TOKEN, FOLLOWER_DEDUPLICATION_TOKEN);
+        assertThat(snapshotOf(headId).publishedAt()).isNotNull();
+        assertThat(snapshotOf(followerId).publishedAt()).isNotNull();
     }
 
     /**
      * Builds one publisher over the real repository, the scripted queue and the advanceable clock.
      *
-     * @param maxAttempts the attempt ceiling this publisher is to enforce
+     * @param stallAlertAttempts the attempt count at which this publisher escalates a still-unpublished
+     *     reply, which changes the diagnostic it writes and never the row's eligibility
      * @return a publisher whose only doubles are the queue client and the clock
      */
-    private OutboxPublisher publisherWith(int maxAttempts) {
+    private OutboxPublisher publisherWith(int stallAlertAttempts) {
         return new OutboxPublisher(this.outbox, this.sqs, this.clock, this.transactionManager,
-                BATCH_SIZE, POLL_INTERVAL_MILLIS, RETENTION_DAYS, MAX_ROWS_PER_DRAIN, maxAttempts);
+                BATCH_SIZE, POLL_INTERVAL_MILLIS, RETENTION_DAYS, MAX_ROWS_PER_DRAIN,
+                stallAlertAttempts);
     }
 
     /**
@@ -479,9 +552,26 @@ class OutboxPublisherLifecycleRepositoryIT {
      * @return the surrogate key of the seeded row
      */
     private long seedOnePendingReply() {
+        return seedPendingReply(DEDUPLICATION_TOKEN);
+    }
+
+    /**
+     * Writes one publishable reply row under a stated deduplication identity, and returns its key.
+     *
+     * <p>Assumptions: the ordering group is always the shared one, so two calls produce two replies for
+     * ONE card in the order they were written. That is the arrangement a case needs to state anything
+     * about per-card order at all -- the group is what the claim derives a head over, and two rows in two
+     * groups would be independent of each other by construction.</p>
+     *
+     * @param deduplicationId the deduplication identity to store on the row, which is what a case reads
+     *     back off the send to tell one reply of the group from the other
+     * @return the surrogate key of the seeded row
+     * @throws IllegalStateException if the save returned no row, so no key could be reported
+     */
+    private long seedPendingReply(String deduplicationId) {
         LocalDateTime createdAt = LocalDateTime.ofInstant(START_INSTANT, ZoneOffset.UTC);
         AuthReplyOutbox row = new AuthReplyOutbox(REPLY_QUEUE_URL, CORRELATION_ID, ORDER_GROUP_TOKEN,
-                DEDUPLICATION_TOKEN, OPAQUE_PAYLOAD,
+                deduplicationId, OPAQUE_PAYLOAD,
                 createdAt.plusSeconds(REPLY_DEADLINE_SECONDS), createdAt);
         AuthReplyOutbox stored = this.transactions.execute(status -> this.outbox.save(row));
         return Optional.ofNullable(stored)
@@ -627,6 +717,16 @@ class OutboxPublisherLifecycleRepositoryIT {
         /** How many sends have been asked for. */
         private final AtomicInteger sends = new AtomicInteger();
 
+        /**
+         * The deduplication identity of every send asked for, in call order.
+         *
+         * <p>Assumptions: the identities are recorded rather than only counted, because per-card ORDER is
+         * a statement about which reply reached the queue first and a count cannot express it. The list is
+         * synchronized because the publisher's pass and a hook running inside a send are not guaranteed to
+         * be the same thread.</p>
+         */
+        private final List<String> deduplicationIds = Collections.synchronizedList(new ArrayList<>());
+
         /** Whether every send is to be refused. */
         private volatile boolean failing;
 
@@ -662,6 +762,15 @@ class OutboxPublisherLifecycleRepositoryIT {
         }
 
         /**
+         * Reports the deduplication identity of every send asked for, in call order.
+         *
+         * @return a copy of the recorded identities, never {@code null}
+         */
+        List<String> sentDeduplicationIds() {
+            return List.copyOf(this.deduplicationIds);
+        }
+
+        /**
          * Records the send, runs the hook, and then either accepts or refuses it.
          *
          * <p>Assumptions: the refusal is a CLIENT-side transport fault, which the publisher's retry
@@ -675,6 +784,7 @@ class OutboxPublisherLifecycleRepositoryIT {
         @Override
         public SendMessageResponse sendMessage(SendMessageRequest request) {
             int ordinal = this.sends.incrementAndGet();
+            this.deduplicationIds.add(request.messageDeduplicationId());
             Runnable hook = this.duringSend;
             if (hook != null) {
                 hook.run();

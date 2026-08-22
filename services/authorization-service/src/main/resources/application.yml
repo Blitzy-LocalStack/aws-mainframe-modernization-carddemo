@@ -1227,20 +1227,32 @@ carddemo:
     #       pays some latency and every other claimed group stops waiting behind it.
     outbox-max-rows-per-drain: 500
 
-    # WHY : (1) Assumptions: this is the TERMINAL policy. A reply that has been
-    #       attempted this many times is abandoned -- recorded as given up on, with
-    #       its diagnostic, and never attempted again. Refactoring Rationale: there
-    #       was no such ceiling, so a reply whose queue was permanently unreachable
-    #       (deleted, or its permission revoked) was retried forever and held its
-    #       ordering group's head position forever, blocking every later reply for
-    #       that card with no bound and no operator signal.
-    #       (2) Trade-offs: abandoning gives up on an answer the committed decision
-    #       says was owed, so the row is RETAINED with its payload and reason rather
-    #       than deleted, is excluded from the retention sweep, and is logged at
-    #       error -- an operator removes it once they have read it. Ten attempts
-    #       against the publisher's doubling backoff spans well over an hour, so a
-    #       transient outage is never abandoned.
-    outbox-max-attempts: 10
+    # WHY : (1) Assumptions: this is an ALERT threshold and NOT a terminal policy. A
+    #       reply that has failed this many attempts is reported under its own event
+    #       name, event=auth.reply.stalled, at error -- and is left pending, so the
+    #       next pass attempts it again at the capped backoff. Nothing about the row
+    #       changes when the threshold is crossed; what changes is that an operator
+    #       is told a card has stopped moving.
+    #       (2) ⚠️ Refactoring Rationale: this property was outbox-max-attempts and
+    #       it TERMINATED the reply: at the ceiling the row was abandoned. That lost
+    #       an answer the committed decision says was owed, and it also broke the
+    #       ordering the group exists for, because both claiming statements derive a
+    #       group's head from its lowest unpublished, unabandoned row -- so an
+    #       abandoned head released the SAME card's later replies to be published
+    #       ahead of it, delivering that card's sequence with a hole in it. Section
+    #       0.4.3 of the technical specification states the guarantee the outbox is
+    #       here for as "a reply is published for every committed authorization", so
+    #       the ceiling is gone and this threshold escalates instead.
+    #       (3) Trade-offs: a destination that stays unreachable for one card now
+    #       holds that card's later replies until it recovers or an operator
+    #       reconciles the stuck reply and quarantines its row by governed statement.
+    #       That is preferred to publishing the followers and leaving a gap, which
+    #       hands a requester a sequence it cannot reconcile. Every other card keeps
+    #       moving: a failed row waits out its backoff, so a blocked group costs a
+    #       pass one row-turn rather than the pass.
+    #       (4) Assumptions: ten attempts against the publisher's doubling backoff
+    #       spans well over an hour, so a transient outage never raises this alarm.
+    outbox-stall-alert-attempts: 10
 
     # WHY : (1) Assumptions: a PUBLISHED reply is kept for a bounded window and then
     #       deleted by OutboxPublisher.purgePublished, and a PENDING one is never

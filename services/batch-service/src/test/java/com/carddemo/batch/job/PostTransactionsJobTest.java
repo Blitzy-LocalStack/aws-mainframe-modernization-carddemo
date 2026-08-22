@@ -46,12 +46,12 @@ import com.carddemo.batch.repository.DailyFeedWatermarkRepository;
 import com.carddemo.batch.repository.DailyTransactionRepository;
 import com.carddemo.batch.repository.TransactionCategoryBalanceRepository;
 import com.carddemo.batch.repository.TransactionRejectRepository;
-import com.carddemo.batch.repository.TransactionCategoryBalanceRepository;
 import com.carddemo.batch.repository.TransactionRepository;
 import com.carddemo.batch.service.BatchStepLedger;
 import com.carddemo.batch.service.CategoryBalanceService;
 import com.carddemo.batch.service.DailyFeedWatermarkService;
 import com.carddemo.batch.service.DatasetGenerationService;
+import com.carddemo.batch.service.PostingRecordUnitOfWork;
 import com.carddemo.batch.service.PostingValidationService;
 import com.carddemo.batch.service.PostingValidationService.PostingDecision;
 import com.carddemo.common.codec.CopybookLayout;
@@ -145,9 +145,23 @@ import org.springframework.transaction.support.DefaultTransactionStatus;
  * nowhere else, because this is the only job that can reach any of them. The soft-warn tier, which
  * {@code app/cbl/CBTRN02C.cbl:229-230} is the sole producer of. The two counter lines that
  * {@code app/cbl/CBTRN02C.cbl:227-228} render. The condition-code inversion that carries that tier
- * across the step boundary at {@code app/jcl/TRANBKP.jcl:51}. And the EXTENT of the boundary the
+ * across a STATE boundary in the target chain. And the EXTENT of the boundary the
  * three writes of {@code app/cbl/CBTRN02C.cbl:440-442} commit inside -- one per record, spanning
  * that record's three writes and nothing beyond them.</p>
+ *
+ * <p>Assumptions: the third of those four is a TARGET contract, and the two ends of it sit in
+ * different places. The FORM of the inversion is transcribed from
+ * {@code app/jcl/TRANBKP.jcl:51}, {@code //STEP10 EXEC PGM=IDCAMS,COND=(4,LT)}, which is the only
+ * construct in the thirty-eight files of {@code app/jcl} that tolerates a preceding code of 4 at
+ * all and therefore the only place the baseline demonstrates the inverted sense of a threshold
+ * comparison. The CONSUMER of this program's tier is not that construct and cannot be: a job-control
+ * condition is evaluated only against earlier steps of its own job, and {@code CBTRN02C} runs as
+ * {@code app/jcl/POSTTRAN.jcl}'s single {@code STEP15} under no condition parameter at all. The
+ * consumer is the {@code CheckPostingExitCode} choice state in
+ * {@code infra/modules/step-functions-batch/main.tf}, which admits the warn code and lets the next
+ * state run. Citing the baseline clause as the consumer would assert a cross-job data path the
+ * reference does not have, and a reader who then looked for it would find a gate on another job's
+ * own steps.</p>
  *
  * <p>Alternatives Considered: rendering the two counter lines from
  * {@code com.carddemo.batch.dto.BatchRunSummary} and asserting them there, which is where a reader
@@ -374,14 +388,6 @@ class PostTransactionsJobTest {
     private BatchStepLedger ledgerOfSteps;
 
     /**
-     * The persistence context the pass flushes and clears between batches.
-     *
-     * <p>Assumptions: held on the instance rather than built as a local of the setup method, because
-     * the pair of calls the pass makes at the end of every non-empty page is observable only on the
-     * mock that received them. A local would leave the page-boundary case asserting the records it
-     * processed while saying nothing about the bounded-memory contract that boundary exists for.</p>
-     */
-    /**
      * The watermark table, mocked so each case states what the feed had already consumed.
      *
      * <p>Assumptions: the SERVICE over it is real, not mocked. The service is where the
@@ -407,6 +413,16 @@ class PostTransactionsJobTest {
 
     /** The job configuration, held so a case can rebuild the job over a different collaborator. */
     private PostTransactionsJob configuration;
+
+    /**
+     * The per-record unit of work the job under test brackets.
+     *
+     * <p>Assumptions: held on the instance beside the configuration because the registration method
+     * takes it as an argument rather than the configuration holding it, so a case rebuilding the job
+     * over a different transaction manager has to hand the same unit back. It is the REAL production
+     * component over this class's mocked repositories, never a double of it.</p>
+     */
+    private PostingRecordUnitOfWork perRecord;
 
     /** The appender capturing what the job wrote to its own logger during one case. */
     private ListAppender<ILoggingEvent> captured;
@@ -467,9 +483,17 @@ class PostTransactionsJobTest {
         DailyFeedWatermarkService watermark =
                 new DailyFeedWatermarkService(this.watermarks, clock);
 
+        // WHY : Assumptions: the per-record unit is the REAL PostingRecordUnitOfWork built over this
+        //       class's own mocked repositories and rules, not a mock of it. Every case here asserts
+        //       what that unit does with those collaborators -- the write order, the cycle buckets,
+        //       the reject bytes, the checkpoint -- so mocking it would leave the cases asserting
+        //       against a stub of the code under test. What is mocked stays one layer lower, where
+        //       the boundary between this module and its database is.
+        this.perRecord = new PostingRecordUnitOfWork(this.accounts, this.ledger,
+                this.rejects, this.validation, this.categoryBalances, watermark, clock);
+
         this.configuration = new PostTransactionsJob(this.feed,
-                this.accounts, this.ledger, this.rejects, this.validation, this.categoryBalances,
-                this.generations, this.ledgerOfSteps, watermark, clock);
+                this.generations, this.ledgerOfSteps, watermark);
 
         this.jobRepository = new ResourcelessJobRepository();
         this.job = buildJobOver(new ResourcelessTransactionManager());
@@ -513,7 +537,7 @@ class PostTransactionsJobTest {
     private Job buildJobOver(PlatformTransactionManager transactionManager) {
         JobParametersValidator validator = new BatchConfig().carddemoJobParametersValidator();
         return this.configuration.postTransactions(
-                this.jobRepository, transactionManager, validator);
+                this.jobRepository, transactionManager, validator, this.perRecord);
     }
 
     /**
@@ -536,9 +560,14 @@ class PostTransactionsJobTest {
      * <p>Trade-offs: an intra-file link is not validated by this build -- the Checkstyle documentation
      * gate this module runs checks that a Javadoc block EXISTS and is complete, not that its references
      * resolve, and enabling {@code doclint}'s reference check would gate the whole reactor on a tool the
-     * build does not otherwise run. The mitigation chosen instead is that this is the ONLY intra-file
-     * link in the class, which a single grep verifies; a class that came to rely on many would earn the
-     * doclint step. The name was also corrected against the DECLARATION rather than the declaration
+     * build does not otherwise run. The mitigation chosen instead is that every such link names a
+     * method declared in this class, which a grep for {@code &#123;@link #} against the declaration list
+     * verifies; a class whose links left it would earn the doclint step. Refactoring Rationale: this
+     * sentence claimed the link was the ONLY intra-file link in the class, which a grep for
+     * {@code &#123;@link #} disproves at twelve occurrences -- two of them inside this very block. The
+     * mitigation is restated as the property that actually holds, because an unfalsifiable claim about
+     * a count is worse than no claim: a reader who checks it finds it false and discounts the
+     * surrounding reasoning with it. The name was also corrected against the DECLARATION rather than the declaration
      * renamed to match the link, because the method is referenced by no other member and its own name
      * states which order it pins.</p>
      *
@@ -1027,7 +1056,8 @@ class PostTransactionsJobTest {
      * A rejected record is a business outcome and reaches the warn tier; a pass that cannot complete
      * reaches the failure tier, and the two must not be conflated in either direction. Collapsing warn
      * into failure would stop the nightly chain over an ordinary reject, and collapsing failure into
-     * warn would let {@code app/jcl/TRANBKP.jcl:51} wave a half-posted pass downstream.</p>
+     * warn would let the target chain's {@code CheckPostingExitCode} choice state wave a half-posted
+     * pass on to {@code CalculateInterest}.</p>
      *
      * <p>Assumptions: the failure is provoked by making a collaborator raise rather than by asserting
      * on a mocked return code, because the tier has to be reached the way production reaches it -- the
@@ -1062,12 +1092,21 @@ class PostTransactionsJobTest {
      * place the inversion is asserted. A JCL {@code COND} is a SKIP predicate and a state machine
      * {@code Choice} is a RUN predicate, so {@code app/jcl/TRANBKP.jcl:51},
      * {@code //STEP10 EXEC PGM=IDCAMS,COND=(4,LT)}, reads "skip this step when 4 is less than the
-     * accumulated return code" and therefore inverts to "run while the code is 4 or lower". Producer
-     * and consumer are both named because the tier is meaningless without the pair:
-     * {@code app/cbl/CBTRN02C.cbl:229-230} is the only statement in the reference batch chain that
-     * produces a 4, and that condition is the only one anywhere in the thirty-eight files of
-     * {@code app/jcl} that consumes it. Transcribing the predicate with its original sense would
-     * invert which runs proceed, and every clean run would be the one that stopped the chain.</p>
+     * accumulated return code" and therefore inverts to "run while the code is 4 or lower".
+     * Transcribing the predicate with its original sense would invert which runs proceed, and every
+     * clean run would be the one that stopped the chain.</p>
+     *
+     * <p>Assumptions: that clause is cited for its FORM and not as a data path, and the distinction is
+     * load-bearing because the two ends of the contract sit in different systems. It is the only one of
+     * the ten condition keywords in the thirty-eight files of {@code app/jcl} that tolerates a
+     * preceding 4 -- the other nine being eight {@code COND=(0,NE)} step gates that demand a clean zero
+     * and one record filter -- so it is the only place the baseline demonstrates the inverted sense of a
+     * threshold comparison. It does not consume this program's code: a job-control condition reads
+     * earlier steps of its OWN job, it gates {@code TRANBKP}'s own {@code STEP10}, and posting runs in
+     * {@code app/jcl/POSTTRAN.jcl}, which carries no condition parameter. The predicate asserted below
+     * is therefore the target chain's: {@code app/cbl/CBTRN02C.cbl:229-230} produces the tier, and the
+     * {@code CheckPostingExitCode} choice state in {@code infra/modules/step-functions-batch/main.tf}
+     * consumes it, admitting the clean and warn codes and routing anything else to failure.</p>
      *
      * <p>Assumptions: one baseline construct looks like a step gate and is not, and conflating the two
      * is a real hazard because they share the {@code COND} keyword. {@code app/jcl/TRANREPT.jcl:47}
@@ -1731,7 +1770,12 @@ class PostTransactionsJobTest {
     void everyCommittedScenarioIsReproducedFromItsOwnFixtures(
             String scenario, BatchReturnCode expectedTier) throws Exception {
 
-        FixtureRun run = runOverFixtures(scenario);
+        // WHY : Assumptions: this case drives the module's OWN committed fixture copy, which is what
+        //       makes its claim different from the oracle-driven case below rather than a second run of
+        //       it, and it keeps the boundary-distinguishing transaction manager it has always used so
+        //       the per-record commit the pass performs is a real begin and commit here.
+        PostingRun run = runPostingScenario(scenario, PostingFixtureSource.MODULE_CLASSPATH,
+                new DistinctBoundaryTransactionManager());
         Path tree = goldenPostingRoot().resolve(scenario);
 
         assertThat(run.tier())
@@ -1843,7 +1887,12 @@ class PostTransactionsJobTest {
     void theCommittedPostingScenarioIsReproduced(String scenario, BatchReturnCode expectedTier)
             throws Exception {
 
-        PostingRun pass = runRealPosting(scenario);
+        // WHY : Assumptions: this case drives the PARITY ORACLE's own fixture tree, so the input side
+        //       of the comparison is the reference's rather than this module's copy of it, and it keeps
+        //       the framework's own transaction manager it has always used -- the boundary is not what
+        //       this case asserts, and the two managers are what the sibling boundary cases separate.
+        PostingRun pass = runPostingScenario(scenario, PostingFixtureSource.REFERENCE_ORACLE,
+                new ResourcelessTransactionManager());
 
         assertThat(pass.execution().getStatus())
                 .as("the %s pass completed", scenario)
@@ -1866,8 +1915,8 @@ class PostTransactionsJobTest {
                 .as("scenario %s warns exactly when its committed code is the warn tier", scenario)
                 .isEqualTo(committed == BatchReturnCode.SOFT_WARN);
 
-        assertRejectStreamMatches(scenario, pass.stagedRejects());
-        assertPostedRecordsMatch(scenario, pass.posted());
+        assertRejectStreamMatches(scenario, pass.rejectStream());
+        assertPostedRecordsMatch(scenario, pass.savedLedgerRows());
         assertAccountImagesMatch(scenario, pass.accountsById());
         assertCategoryBalanceImagesMatch(scenario, pass);
     }
@@ -1898,10 +1947,12 @@ class PostTransactionsJobTest {
      * distinguishable failures rather than one wrong total. The feed builder derives each identifier
      * from the record's own ordinal, which is what makes that comparison possible.</p>
      *
-     * <p>Assumptions: the flush-and-clear pair is asserted once per NON-EMPTY page rather than once
-     * per read, because the pass leaves the loop on the empty page before reaching them. Two pages
-     * carried rows, so two of each is the contract; asserting three would be asserting a call the
-     * bounded-memory contract does not ask for.</p>
+     * <p>Assumptions: no flush-and-clear pair is asserted here, and the absence is deliberate rather
+     * than an omission. A per-record transaction IS its own persistence context, so nothing
+     * accumulates across records for a page-boundary clear to discard; the inline note at the foot of
+     * this case records the two verifications that stood here and why they were withdrawn with the
+     * collaborator they observed. What remains asserted is the WALK itself -- the cursors each page
+     * resumed from, the sizes of the three pages, and one posting per staged record in feed order.</p>
      *
      * @throws Exception if the framework's own execution path raises, which this case does not provoke
      */
@@ -2351,20 +2402,109 @@ class PostTransactionsJobTest {
      * back afterwards, because the job deletes its temporary file on every path including success -- so
      * a read afterwards would find nothing at all and an empty comparison would pass.</p>
      *
+     * <p>Refactoring Rationale: this record carries the union of what two separate result shapes
+     * carried, because two harnesses that built the same graph were consolidated into
+     * {@link #runPostingScenario}. The list components report WRITE ORDER and are what an assertion
+     * derived from "did the reference write this master at all" reads; the map components report the
+     * END STATE and are what a whole-image comparison reads. Both are kept because they answer
+     * different questions about the same pass: an empty list proves the pass left a master untouched,
+     * which a map holding the seeded row cannot distinguish from a rewrite of the same bytes.</p>
+     *
      * @param execution the finished execution, whose status and exit status carry the tier
-     * @param stagedRejects the concatenated 430-byte reject records the pass staged, with no delimiter
+     * @param tier the return code the pass reported through the step ledger, which is the value the
+     *     ledger's own outcome carries and the exit status is then derived from
+     * @param rejectStream the concatenated 430-byte reject records the pass staged, with no delimiter
      *     between them
-     * @param posted the ledger rows the pass wrote, in the order it wrote them
+     * @param savedLedgerRows the ledger rows the pass wrote, in the order it wrote them
+     * @param savedRejectRows the queryable reject rows the pass wrote, in write order
+     * @param savedAccounts the account rows the pass wrote, in write order, empty when it wrote none
+     * @param savedBalances the category-balance rows the pass wrote, in write order, empty when it
+     *     wrote none
+     * @param openingLookups one entry per category-balance opening read, {@code true} where a row
+     *     already existed, which is what distinguishes the create arm from the update arm
      * @param accountsById the account rows the pass was driven over, whose state it mutated in place
      * @param balancesByKey the category balances after the pass, being the seeded rows as mutated plus
      *     any the pass created
      * @param seedImages the committed image of each category balance the scenario SEEDED, keyed the
      *     same way, so an update-arm row can be re-encoded over the bytes it was read from
      */
-    private record PostingRun(JobExecution execution, byte[] stagedRejects, List<Transaction> posted,
-            Map<Long, Account> accountsById,
+    private record PostingRun(JobExecution execution, BatchReturnCode tier, byte[] rejectStream,
+            List<Transaction> savedLedgerRows, List<TransactionReject> savedRejectRows,
+            List<Account> savedAccounts, List<TransactionCategoryBalance> savedBalances,
+            List<Boolean> openingLookups, Map<Long, Account> accountsById,
             Map<TransactionCategoryBalanceId, TransactionCategoryBalance> balancesByKey,
             Map<TransactionCategoryBalanceId, byte[]> seedImages) {
+    }
+
+    /**
+     * Where one scenario's four input images are read from.
+     *
+     * <p>Assumptions: the two sources hold the same bytes today and are still two independent
+     * declarations. {@link #REFERENCE_ORACLE} reads the parity oracle's own fixture tree under
+     * {@code tests/fixtures/posting}, which is reference-only and is never written by this module;
+     * {@link #MODULE_CLASSPATH} reads this module's committed copy under
+     * {@code src/test/resources/fixtures/posting}, whose contract and per-scenario census
+     * {@code BatchFixtureContractTest} pins separately. Driving both is what keeps a divergence
+     * between the copy and the reference observable: a run over one source alone would pass while the
+     * other drifted.</p>
+     *
+     * <p>Alternatives Considered: collapsing the two onto the reference tree, which would have made
+     * the consolidated runner take one argument fewer. Rejected because the module tree is what this
+     * module ships and what a checkout without the oracle can still exercise, so dropping it would
+     * narrow the claim these cases make rather than merely simplify how it is made.</p>
+     */
+    private enum PostingFixtureSource {
+
+        /** The parity oracle's committed fixture tree, read from the repository working tree. */
+        REFERENCE_ORACLE {
+            /**
+             * Reads the image from the reference tree, asserting the declared width as it splits.
+             *
+             * @param scenario the scenario directory under {@code tests/fixtures/posting}; must not be
+             *     {@code null}
+             * @param file the image's file name inside that directory; must not be {@code null}
+             * @param layoutName the registered layout whose record length every extracted record is
+             *     asserted against; must not be {@code null}
+             * @return one entry per record, in file order, never {@code null}
+             * @throws IOException if the file cannot be read from the working tree
+             */
+            @Override
+            List<byte[]> records(String scenario, String file, String layoutName) throws IOException {
+                return oracleRecords("fixtures", scenario, file, reclenOf(layoutName));
+            }
+        },
+
+        /** This module's committed fixture tree, read from the test classpath. */
+        MODULE_CLASSPATH {
+            /**
+             * Reads the image from the test classpath, where the production decoder checks the width.
+             *
+             * @param scenario the scenario directory under this module's fixture root; must not be
+             *     {@code null}
+             * @param file the image's file name inside that directory; must not be {@code null}
+             * @param layoutName ignored on this arm, because the classpath reader splits on the line
+             *     feed alone and the production decoder is what refuses a record of the wrong width
+             * @return one entry per record, in file order, never {@code null}
+             */
+            @Override
+            List<byte[]> records(String scenario, String file, String layoutName) {
+                return fixtureRecords(scenario, file);
+            }
+        };
+
+        /**
+         * Reads every record of one committed input image of one scenario.
+         *
+         * @param scenario the scenario directory name, shared by both trees; must not be {@code null}
+         * @param file the image's file name inside that directory; must not be {@code null}
+         * @param layoutName the registered layout whose declared record length applies, used by the
+         *     tree that asserts the width as it reads and ignored by the tree that derives it from the
+         *     production decoder; must not be {@code null}
+         * @return one entry per record, in file order, empty for an empty image, never {@code null}
+         * @throws IOException if the image cannot be read from the tree
+         */
+        abstract List<byte[]> records(String scenario, String file, String layoutName)
+                throws IOException;
     }
 
     /**
@@ -2382,42 +2522,80 @@ class PostTransactionsJobTest {
      * reason 101 needs the account read to miss, and neither is arranged here -- both fall out of the
      * fixture the reference itself was driven over.</p>
      *
-     * <p>Assumptions: the account map holds the SAME instances the walk mutates, and the balance map is
-     * written back by the saving double, so the state compared afterwards is the state the pass left
-     * rather than a copy taken before it. A double that echoed its argument without storing it would
-     * leave a created category row invisible to the comparison.</p>
+     * <p>Assumptions: the repositories are backed by MAPS rather than by stubs returning fixed
+     * answers, because the pass reads a row it has just written -- the category balance is read for its
+     * opening value and written back -- and a fixed answer would let a create arm masquerade as an
+     * update. The account map holds the SAME instances the walk mutates and the balance map is written
+     * back by the saving double, so the state compared afterwards is the state the pass left rather
+     * than a copy taken before it; a double that echoed its argument without storing it would leave a
+     * created category row invisible to the comparison.</p>
      *
-     * <p>Assumptions: the feed ordinals are assigned 1..N in committed file order, because the fixture
-     * is a flat file with no ordinal column and the walk is keyed on one. Section 3.9 of
-     * {@code services/batch-service/src/test/resources/fixtures/README.md} makes file order the
-     * feed's order, so numbering by position reproduces what the loader would have assigned.</p>
+     * <p>Assumptions: every write is ALSO appended to a list in call order, beside the map that holds
+     * the end state. The lists are what let an assertion say "the reference wrote this master exactly
+     * once" or "left it untouched", which a map alone cannot express, and the presence of each opening
+     * category read is recorded for the same reason: both arms end in a save of the same type, so a
+     * caller reading only the saves cannot tell them apart.</p>
+     *
+     * <p>Assumptions: the feed answer honours the ordinal and the limit it is given rather than
+     * returning everything once, and the ordinals are assigned 1..N in committed file order because
+     * the fixture is a flat file with no ordinal column while the walk is keyed on one. Section 3.9 of
+     * {@code services/batch-service/src/test/resources/fixtures/README.md} makes file order the feed's
+     * order, so numbering by position reproduces what the loader would have assigned; an answer that
+     * ignored the ordinal would either loop forever or hide a walk that failed to advance.</p>
+     *
+     * <p>Assumptions: the four record images are decoded with the PRODUCTION mappers, so the offsets
+     * this arrangement depends on are the offsets the pass depends on. Section 5.3 of the fixture
+     * contract records the two-source cross-check behind those offsets, and a reader written here
+     * would be a second place they could drift.</p>
+     *
+     * <p>Refactoring Rationale: this is ONE runner where two stood -- {@code runRealPosting}, which
+     * drove the reference oracle's fixtures through {@code ResourcelessTransactionManager}, and
+     * {@code runOverFixtures}, which drove this module's committed copy through
+     * {@code DistinctBoundaryTransactionManager} and returned a second result shape. The two built the
+     * same repository and service graph twice, with the same six doubles, the same real
+     * {@code PostingValidationService}, {@code CategoryBalanceService} and
+     * {@code DailyFeedWatermarkService}, and the same fixed clock -- so a change to the job's
+     * collaborators had to be made in two places, and each observed only the subset of the pass its
+     * own result record happened to expose. The two axes they genuinely differed on are the two
+     * parameters below; everything else was duplication, and one arrangement observing everything is
+     * what lets both callers keep every assertion they already made.</p>
+     *
+     * <p>Alternatives Considered: keeping two runners and extracting only the shared graph into a
+     * helper. Rejected because the two result shapes were the actual maintenance cost -- each caller's
+     * assertions were written against whichever fields its own harness exposed, so a claim provable
+     * from one pass could not be made from the other without adding a field to one record and leaving
+     * the other behind.</p>
      *
      * @param scenario the committed scenario directory name shared by the fixture and expectation
      *     roots; must name one of the nine
+     * @param source the tree the four input images are read from; must not be {@code null}
+     * @param transactionManager the manager the job opens its per-record boundary through, which the
+     *     caller supplies because the two doubles in this class observe that boundary differently;
+     *     must not be {@code null}
      * @return the finished pass and everything it produced, never {@code null}
      * @throws Exception if the framework's own execution path raises, or a committed fixture cannot be
-     *     read from the repository tree
+     *     read from the tree it was asked of
      */
-    private PostingRun runRealPosting(String scenario) throws Exception {
+    private PostingRun runPostingScenario(String scenario, PostingFixtureSource source,
+            PlatformTransactionManager transactionManager) throws Exception {
+
         Map<Long, Account> accountsById = new LinkedHashMap<>();
-        for (byte[] image : oracleRecords("fixtures", scenario, ACCOUNT_FIXTURE,
-                reclenOf(ACCOUNT_LAYOUT))) {
+        for (byte[] image : source.records(scenario, ACCOUNT_FIXTURE, ACCOUNT_LAYOUT)) {
             Account seeded = AccountRecordMapper.toEntity(image);
             accountsById.put(seeded.getAccountId(), seeded);
         }
 
         Map<String, CardXref> crossReferencesByCard = new LinkedHashMap<>();
         CardXrefRecordMapper crossReferenceMapper = new CardXrefRecordMapper();
-        for (byte[] image : oracleRecords("fixtures", scenario, CROSS_REFERENCE_FIXTURE,
-                reclenOf(CROSS_REFERENCE_LAYOUT))) {
+        for (byte[] image : source.records(scenario, CROSS_REFERENCE_FIXTURE,
+                CROSS_REFERENCE_LAYOUT)) {
             CardXref seeded = crossReferenceMapper.toEntity(image);
             crossReferencesByCard.put(seeded.getCardNum(), seeded);
         }
 
         List<DailyTransaction> feedRows = new ArrayList<>();
-        long ordinal = 0L;
-        for (byte[] image : oracleRecords("fixtures", scenario, FEED_FIXTURE,
-                reclenOf(FEED_LAYOUT))) {
+        long ordinal = FIRST_ORDINAL - 1L;
+        for (byte[] image : source.records(scenario, FEED_FIXTURE, FEED_LAYOUT)) {
             DailyTransaction feedRecord = DailyTransactionMapper.toEntity(image);
             assignIngestSeq(feedRecord, ++ordinal);
             feedRows.add(feedRecord);
@@ -2426,8 +2604,8 @@ class PostTransactionsJobTest {
         Map<TransactionCategoryBalanceId, TransactionCategoryBalance> balancesByKey =
                 new LinkedHashMap<>();
         Map<TransactionCategoryBalanceId, byte[]> seedImages = new LinkedHashMap<>();
-        for (byte[] image : oracleRecords("fixtures", scenario, CATEGORY_BALANCE_FIXTURE,
-                reclenOf(CATEGORY_BALANCE_LAYOUT))) {
+        for (byte[] image : source.records(scenario, CATEGORY_BALANCE_FIXTURE,
+                CATEGORY_BALANCE_LAYOUT)) {
             TransactionCategoryBalance seeded =
                     TransactionCategoryBalanceRecordMapper.toEntity(image);
             balancesByKey.put(seeded.getId(), seeded);
@@ -2445,22 +2623,39 @@ class PostTransactionsJobTest {
                             .toList();
                 });
 
+        List<Account> savedAccounts = new ArrayList<>();
         AccountRepository accountRepository = mock(AccountRepository.class);
         when(accountRepository.findByAccountId(anyLong())).thenAnswer(
                 call -> Optional.ofNullable(accountsById.get(call.<Long>getArgument(0))));
-        when(accountRepository.save(any(Account.class))).thenAnswer(call -> call.getArgument(0));
+        when(accountRepository.save(any(Account.class))).thenAnswer(call -> {
+            Account written = call.getArgument(0);
+            savedAccounts.add(written);
+            accountsById.put(written.getAccountId(), written);
+            return written;
+        });
 
         CardXrefRepository crossReferenceRepository = mock(CardXrefRepository.class);
         when(crossReferenceRepository.findByCardNum(anyString())).thenAnswer(
                 call -> Optional.ofNullable(crossReferencesByCard.get(call.<String>getArgument(0))));
 
+        List<TransactionCategoryBalance> savedBalances = new ArrayList<>();
+        List<Boolean> openingLookups = new ArrayList<>();
         TransactionCategoryBalanceRepository balanceRepository =
                 mock(TransactionCategoryBalanceRepository.class);
-        when(balanceRepository.findByIdIs(any())).thenAnswer(
-                call -> Optional.ofNullable(balancesByKey.get(
-                        call.<TransactionCategoryBalanceId>getArgument(0))));
+        when(balanceRepository.findByIdIs(any(TransactionCategoryBalanceId.class)))
+                .thenAnswer(call -> {
+                    Optional<TransactionCategoryBalance> found = Optional.ofNullable(
+                            balancesByKey.get(call.<TransactionCategoryBalanceId>getArgument(0)));
+                    // WHY : Assumptions: the PRESENCE of each opening read is recorded, not just its
+                    //       value, because it is the only place the create-versus-update arm becomes
+                    //       observable from outside the service -- both arms end in a save of the same
+                    //       type, so a caller reading only the saves cannot tell them apart.
+                    openingLookups.add(found.isPresent());
+                    return found;
+                });
         when(balanceRepository.save(any(TransactionCategoryBalance.class))).thenAnswer(call -> {
             TransactionCategoryBalance written = call.getArgument(0);
+            savedBalances.add(written);
             balancesByKey.put(written.getId(), written);
             return written;
         });
@@ -2473,12 +2668,26 @@ class PostTransactionsJobTest {
             return written;
         });
 
+        List<TransactionReject> rejectRows = new ArrayList<>();
         TransactionRejectRepository rejectRepository = mock(TransactionRejectRepository.class);
-        when(rejectRepository.save(any(TransactionReject.class)))
-                .thenAnswer(call -> call.getArgument(0));
+        when(rejectRepository.save(any(TransactionReject.class))).thenAnswer(call -> {
+            TransactionReject written = call.getArgument(0);
+            rejectRows.add(written);
+            return written;
+        });
 
-        byte[][] staged = new byte[1][];
+        // WHY : Assumptions: the captured payload starts as an EMPTY array rather than as null, so a
+        //       run that staged nothing at all is compared as an empty stream instead of failing on a
+        //       null before the comparison is reached. That the job always stages -- an empty
+        //       generation on a clean pass included -- is asserted separately by
+        //       aCleanPassStillStagesAnEmptyRejectGeneration, so the default stands in for nothing
+        //       that any scenario here reaches.
+        byte[][] staged = {new byte[0]};
         DatasetGenerationService allocator = mock(DatasetGenerationService.class);
+        // WHY : Assumptions: the allocated generation echoes the business date the job PASSED rather
+        //       than a date composed here, so a job that allocated a generation for some other day
+        //       would show up as a mismatched coordinate instead of being normalised away by the
+        //       double.
         when(allocator.allocateNewGeneration(any(DatasetFamily.class), any(BusinessDate.class),
                 anyString())).thenAnswer(call -> new DatasetGeneration(
                         call.getArgument(0), call.getArgument(1), 1));
@@ -2491,27 +2700,32 @@ class PostTransactionsJobTest {
                     return "ledger/dalyrejs/dt=2022-07-18/gen=0001/dalyrejs";
                 });
 
+        BatchReturnCode[] reported = {null};
         BatchStepLedger stepLedger = mock(BatchStepLedger.class);
         when(stepLedger.runStep(anyString(), anyString(), any(BatchJobName.class), any()))
-                .thenAnswer(call -> new BatchStepLedger.StepOutcome(
-                        call.<Supplier<BatchReturnCode>>getArgument(3).get(), false));
+                .thenAnswer(call -> {
+                    reported[0] = call.<Supplier<BatchReturnCode>>getArgument(3).get();
+                    return new BatchStepLedger.StepOutcome(reported[0], false);
+                });
 
         Clock clock = Clock.fixed(POSTED_AT.toInstant(ZoneOffset.UTC), ZoneOffset.UTC);
-        // WHY : Assumptions: the watermark service is REAL over a mocked table, which is the same
+        // WHY : Assumptions: the watermark service is REAL over an unstubbed table, which is the same
         //       arrangement the shared setup uses and for the same reason: an unstubbed table answers
-        //       with no stored row, so the walk starts at the beginning exactly as this case's
-        //       expectations were written against, while the advance-only rule stays the real one.
+        //       with no stored row, so the walk starts at the beginning exactly as the committed
+        //       expectations were derived against, while the advance-only rule and the per-record
+        //       checkpoint stay the real ones rather than a permissive double.
         DailyFeedWatermarkService watermark =
                 new DailyFeedWatermarkService(mock(DailyFeedWatermarkRepository.class), clock);
-        PostTransactionsJob realConfiguration = new PostTransactionsJob(feedRepository,
-                accountRepository, ledgerRepository, rejectRepository,
+        PostingRecordUnitOfWork realPerRecord = new PostingRecordUnitOfWork(accountRepository,
+                ledgerRepository, rejectRepository,
                 new PostingValidationService(crossReferenceRepository, accountRepository),
-                new CategoryBalanceService(balanceRepository), allocator, stepLedger, watermark,
-                clock);
+                new CategoryBalanceService(balanceRepository), watermark, clock);
+        PostTransactionsJob realConfiguration = new PostTransactionsJob(feedRepository,
+                allocator, stepLedger, watermark);
 
         JobRepository repository = new ResourcelessJobRepository();
         Job realJob = realConfiguration.postTransactions(
-                repository, new ResourcelessTransactionManager(), sharedValidator());
+                repository, new ResourcelessTransactionManager(), sharedValidator(), realPerRecord);
 
         JobParameters parameters = new JobParametersBuilder()
                 .addString(BatchApplication.BUSINESS_DATE_PARAMETER, BUSINESS_DATE, true)
@@ -2522,7 +2736,12 @@ class PostTransactionsJobTest {
         repository.update(execution);
         realJob.execute(execution);
 
-        return new PostingRun(execution, staged[0], posted, accountsById, balancesByKey, seedImages);
+        assertThat(execution.getStatus())
+                .as("the pass over the %s fixtures must complete", scenario)
+                .isEqualTo(BatchStatus.COMPLETED);
+
+        return new PostingRun(execution, reported[0], staged[0], posted, rejectRows, savedAccounts,
+                savedBalances, openingLookups, accountsById, balancesByKey, seedImages);
     }
 
     /**
@@ -2967,12 +3186,12 @@ class PostTransactionsJobTest {
         DailyFeedWatermarkService fixtureWatermark = new DailyFeedWatermarkService(
                 mock(DailyFeedWatermarkRepository.class), fixtureClock);
         PostTransactionsJob fixtureConfiguration = new PostTransactionsJob(feedRepository,
-                accountRepository, ledgerRepository, rejectRepository,
-                new PostingValidationService(xrefRepository, accountRepository),
-                new CategoryBalanceService(balanceRepository), stagedGenerations, steps,
-                fixtureWatermark, fixtureClock);
+                stagedGenerations, steps, fixtureWatermark);
 
         this.configuration = fixtureConfiguration;
+        this.perRecord = new PostingRecordUnitOfWork(accountRepository, ledgerRepository,
+                rejectRepository, new PostingValidationService(xrefRepository, accountRepository),
+                new CategoryBalanceService(balanceRepository), fixtureWatermark, fixtureClock);
         this.jobRepository = new ResourcelessJobRepository();
         this.job = buildJobOver(new DistinctBoundaryTransactionManager());
 
@@ -3017,7 +3236,7 @@ class PostTransactionsJobTest {
      * @param run what the pass produced; must not be {@code null}
      * @throws IOException if a committed expectation file cannot be read
      */
-    private static void assertRejectStreamReproduced(String scenario, FixtureRun run)
+    private static void assertRejectStreamReproduced(String scenario, PostingRun run)
             throws IOException {
 
         byte[] committed = expectationImage(scenario, REJECT_STREAM_FILE);
@@ -3078,7 +3297,7 @@ class PostTransactionsJobTest {
      * @param run what the pass produced; must not be {@code null}
      * @throws IOException if a committed file cannot be read
      */
-    private static void assertAccountMasterReproduced(String scenario, FixtureRun run)
+    private static void assertAccountMasterReproduced(String scenario, PostingRun run)
             throws IOException {
 
         byte[] committed = expectationImage(scenario, ACCOUNT_EXPECTATION);
@@ -3123,7 +3342,7 @@ class PostTransactionsJobTest {
      * @param run what the pass produced; must not be {@code null}
      * @throws IOException if a committed file cannot be read
      */
-    private static void assertCategoryBalanceReproduced(String scenario, FixtureRun run)
+    private static void assertCategoryBalanceReproduced(String scenario, PostingRun run)
             throws IOException {
 
         List<byte[]> committed = expectationRecords(scenario, CATEGORY_BALANCE_EXPECTATION);
@@ -3180,7 +3399,7 @@ class PostTransactionsJobTest {
      * @param run what the pass produced; must not be {@code null}
      * @throws IOException if a committed file cannot be read
      */
-    private static void assertLedgerRowReproduced(String scenario, FixtureRun run)
+    private static void assertLedgerRowReproduced(String scenario, PostingRun run)
             throws IOException {
 
         List<byte[]> committed = expectationRecords(scenario, LEDGER_EXPECTATION);

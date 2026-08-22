@@ -173,6 +173,15 @@ class ReleasedMigrationImmutabilityTest {
                 released("auth-service", "V7__auth_identity_sync_provisioning_guard.sql",
                         "fc710d88dcf8bc55a8a86a292b08502a57769497558e1a2abef7f4f69fb5b18d",
                         747237720),
+                // WHY : Assumptions: V8 narrows auth.users.user_id to the URI-safe canonical domain
+                //       that UserController addresses as a single path segment, so it arrives as a NEW
+                //       versioned migration rather than as an edit to V6 -- V6 is released and its
+                //       checksum is recorded in every environment that ran it. Its digests are
+                //       recorded here in the same commit that adds it, which is what this class asks
+                //       of a genuinely new migration.
+                released("auth-service", "V8__auth_addressable_user_id.sql",
+                        "996ce1a6234e696d72e4ffcc22f27d1c068e3f87cb6fa32f5755a6994da4914f",
+                        -553492156),
                 released("authorization-service", "V1__authorization.sql",
                         "8ccf0a709156a16659f0c8afe5311a1c8004484f4d1c2f93fb8aef2a07929b9a",
                         -507180909),
@@ -191,6 +200,23 @@ class ReleasedMigrationImmutabilityTest {
                 released("batch-service", "V2__batch_feed_watermark.sql",
                         "f05eea4859d7b35daca9b7b0819e22a72faad72c407109d5fde814ed7554d789",
                         -1394169399),
+                // WHY : Refactoring Rationale: this entry is the record of the remedy this class
+                //       forced. V1__batch.sql's post-state block miscounts the table it creates --
+                //       it reads "seven columns and five named constraints" where the table has
+                //       eight and seven -- and correcting that block in place is exactly the edit
+                //       this class refuses, because the file has been applied and Flyway's checksum
+                //       covers comments. So the accurate statement arrives as a new migration, which
+                //       also writes the commentary V1 omitted for the eighth column and for all
+                //       seven constraints. Adding it costs this one line, in the commit that adds
+                //       it, which is what this class's own documentation prescribes.
+                // WHY : Trade-offs: V1's frozen block still carries the stale counts and no route
+                //       exists to change that. The remedy makes every OTHER route to the contract
+                //       accurate -- the migration set, the catalogue and the module README -- and
+                //       the alternative, re-recording V1's digests here, would have risked a service
+                //       that will not start for the benefit of one comment.
+                released("batch-service", "V3__batch_run_contract_restatement.sql",
+                        "fe28fc38579cb7c46a4087d1c0cf86dcf666b31f637c619f3747033cd5dd58e2",
+                        -174390203),
                 released("card-service", "V1__card.sql",
                         "8708a75dc3543f58999c666be63ec270f9cfe941a22630f0187d02823f36555a",
                         1450941986),

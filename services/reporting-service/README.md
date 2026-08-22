@@ -577,22 +577,62 @@ because this context owns no table and its login is `SELECT`-only. Trade-offs: t
 searched by **bisection over ranged reads**, roughly twenty 88-byte probes for a million-card
 portfolio, so the cost of one statement read does not grow with the run.
 
-Both artifacts are reachable only through an authenticated operation —
-`GET /api/v1/reports/statements/artifacts/{selector}` — which streams them as an
-`application/octet-stream` attachment. Assumptions: the selector is a **minted opaque token**
-rather than an object name, and the markup artifact is served as a download rather than as
-renderable HTML, because its content is cardholder-derived. Neither a presigned URL nor a
-content-delivery distribution is used: the bucket policy refuses every request that does not
-arrive through the VPC endpoint, so the service is the only reachable path.
+Both artifacts are reachable only through
+`GET /api/v1/reports/statements/artifacts/{selector}`, which requires the **`carddemo-admin`**
+authority and streams the object as an `application/octet-stream` attachment. Assumptions: the
+selector is a **minted opaque token** rather than an object name, and the markup artifact is
+served as a download rather than as renderable HTML, because its content is cardholder-derived.
+Neither a presigned URL nor a content-delivery distribution is used: the bucket policy refuses
+every request that does not arrive through the VPC endpoint, so the service is the only reachable
+path.
 
-### 3.20 A rerun REPLACES, never appends
+⚠️ **The artifact route is the one business address of this service restricted to an
+administrator, and a per-card response no longer carries a selector at all.** Refactoring
+Rationale: this route used to admit `carddemo-user` like every other, and a review found what
+that granted — the objects it streams are run-wide, so a caller entitled to one statement could
+ask for that statement, read the selector out of its own response and collect every cardholder's
+statement in the portfolio. Two changes close it together, because either alone leaves a hole:
+`SecurityConfig` admits the route to `carddemo-admin` only, and `StatementService` assembles a
+**cardholder** response that omits both locations, the production instant and the index position,
+so nothing a per-card caller receives addresses the run. An operator response carries all five,
+which is why the fields are documented as administrator-only in
+[`openapi/reporting-api.yaml`](src/main/resources/openapi/reporting-api.yaml). A cardholder
+still reads its own statement and its own transaction rows through the two per-card operations,
+which remain open to `carddemo-user`.
+
+### 3.20 A rerun SUPERSEDES, never appends and never overwrites
 
 Assumptions: [`app/jcl/CREASTMT.JCL`](../../app/jcl/CREASTMT.JCL) `STEP030` runs `IEFBR14`
 with `DISP=(MOD,DELETE,DELETE)` at **L66 to L75**, and `STEP040` then writes with
 `DISP=(NEW,CATLG,DELETE)` from **L79** onward. The delete-then-create pair is the baseline's
-replace semantic and it is reproduced: a rerun of a period overwrites the artifacts it
-replaces rather than accumulating a second copy. Appending instead would leave two renderings
-of one period in the same location with no way to tell which is current.
+replace semantic, and what is reproduced is its OUTCOME — exactly one rendering of a period is
+current, and nothing is appended — rather than its mechanism. A run publishes its three objects
+under a key prefix carrying a freshly minted 32-character run identifier:
+
+```text
+statements/run=<run-id>/statements.txt
+statements/run=<run-id>/statements.html
+statements/run=<run-id>/statements-index.txt
+statements/statements-manifest.txt        <- written LAST, names the current run
+```
+
+⚠️ Refactoring Rationale: the three objects used to go to fixed keys under `statements/`, and a
+review found that incoherent rather than merely mutable. Each became visible the instant it was
+written, so a reader arriving between an artifact write and the index write held the PREVIOUS
+run's index over the NEW run's artifact — and every position that index named then addressed
+whatever the new run had placed there, so a per-card response could report a range lying inside
+another cardholder's statement with nothing in either object recording the mismatch. Immutable
+per-run keys plus a manifest written last make the last write the only visible change: until the
+manifest names a run, nothing addresses it, and a run that fails part-way leaves the previous run
+whole and current, which is what makes a redrive of the `GenerateStatements` state safe.
+Trade-offs: superseded runs are retained as whole key sets rather than as noncurrent versions of
+a fixed key, so the bucket's five-noncurrent-version lifecycle no longer reclaims them and
+retention of old runs is a lifecycle rule on the `statements/run=` prefixes. Assumptions: every
+one of those keys stays INSIDE the existing `statements/` prefix, because the reporting task role
+is granted its object actions on this service's key prefixes and an object outside them would be
+unwritable and unreadable. A selector is bound to one artifact of one run, so a selector from a
+superseded run answers 404 rather than opening the current run's bytes under the previous run's
+positions.
 
 ### 3.21 Baseline artifact observations are documented honestly, NEVER asserted as defects
 
@@ -1007,6 +1047,15 @@ docker run --rm carddemo/reporting-service:local \
 
 ```bash
 # WHAT: the nightly transaction-report run, over one business date
+# WHY : Assumptions: the date is a PARAMETER, and the rows the report admits are derived from it
+#       rather than from a clock. The baseline does the same thing one layer lower:
+#       app/jcl/TRANREPT.jcl:43-44 declares PARM-START-DATE and PARM-END-DATE as supplied literals
+#       and :47-48 selects records with INCLUDE COND=(TRAN-PROC-DT,GE,PARM-START-DATE,AND,
+#       TRAN-PROC-DT,LE,PARM-END-DATE), which this job carries as a bounded predicate on the same
+#       processing-date column. So rerunning this command with the same date reproduces the same
+#       report bytes -- the property the golden-master comparison rests on -- whereas a clock read
+#       would silently widen the window by a day on every rerun and make a failed night
+#       unreproducible on the morning it has to be diagnosed.
 docker run --rm carddemo/reporting-service:local \
   --job=generate-reports --business-date=2022-07-18
 ```
@@ -1297,18 +1346,30 @@ target behaviour.
 
 ### 10.2 Test inventory
 
-<!-- test-inventory: 34 tests + 8 integration tests -->
-**42** test classes across nine subpackages and the module root: **34** matching `*Test`, run
-by Surefire, and **8** matching `*IT` — `repository/ReportingQueryBootstrapIT`,
+<!-- test-inventory: 35 tests + 9 integration tests -->
+**44** test classes across nine subpackages and the module root: **35** matching `*Test`, run
+by Surefire, and **9** matching `*IT` — `repository/ReportingQueryBootstrapIT`,
 `repository/StatementHeadingChunkIT`, `repository/ReportingDeployedRelationIT`,
 `repository/StatementCardXrefRepositoryIT`,
 `repository/StatementTransactionRepositoryIT`,
 `repository/StatementCustomerRepositoryIT`,
-`repository/StatementAccountRepositoryIT` and
-`repository/TransactionReportRepositoryIT` — run by
+`repository/StatementAccountRepositoryIT`,
+`repository/TransactionReportRepositoryIT` and
+`repository/CategoryBalanceReportRepositoryIT` — run by
 Failsafe against a Testcontainers-backed
 PostgreSQL, with the Testcontainers BOM at **2.0.5** managed by the parent. Every test package
 carries a `package-info.java`, because the documentation gate audits test sources (§8.2).
+
+Refactoring Rationale: this census read **42** classes and **8** `*IT` until
+`repository/CategoryBalanceReportRepositoryIT` was added, and the increment is recorded rather
+than silently applied because the number is load-bearing in two directions at once.
+`ServiceReadmeInventoryTest` in the shared kernel parses the marker comment above and compares
+both tiers against this module's own tree, and it separately holds the bolded total to the sum
+of the two tiers — so 34 + 9 = 43 has to be written in three places that agree, and a partial
+edit fails the shared kernel's build rather than this module's. The class itself exists because
+`CategoryBalanceReportRepository` was the one production repository role of the six with no
+engine-backed control over its declared ordering, which is a property no compiler and no
+stubbed unit test can observe.
 
 One of the four newest is the customer lookup's, and it is named here because what it asserts
 is not obvious from its name. `StatementCustomerRepository.findById` stands in for the keyed read
@@ -1457,6 +1518,16 @@ single component of that key. The other two dimensions carry single-attribute id
 were never affected, which is why the defect survived every earlier gate: two of the three legs
 worked.
 
+Refactoring Rationale: it then moved from 42 to 43 with `repository/RepositoryCharterCensusTest`,
+a Surefire class rather than an integration one, added because the test package's own charter had
+drifted twice unnoticed — it named three integration classes where the directory held eight and
+seven fixtures where it held ten. The two counts were corrected, and the correction alone would
+have left the same drift free to recur, so the census is now derived from the directory and
+asserted: the class counts the files that end in `IT.java` and the files under
+`src/test/resources/fixtures`, and requires the charter to spell both figures. That is the same
+mechanism this section's own marker comment relies on, applied one level down to the charter that
+describes a single package.
+
 Assumptions: the marker comment above this paragraph is **machine-checked**, not decorative.
 `ServiceReadmeInventoryTest` in `common-lib` parses it, re-measures both figures against this
 module's test tree, and additionally requires that the stated total equals their sum — so
@@ -1473,7 +1544,7 @@ fails the build in `common-lib` rather than here.
 | `domain` | 1 |
 | `fixtures` | 1 |
 | `task` | 3 |
-| `repository` | 8 (`ReportingQueryBootstrapIT`, `StatementHeadingChunkIT`, `ReportingDeployedRelationIT`, `StatementCardXrefRepositoryIT`, `StatementTransactionRepositoryIT`, `StatementCustomerRepositoryIT`, `StatementAccountRepositoryIT`, `TransactionReportRepositoryIT`) |
+| `repository` | 9 (the eight integration classes `ReportingQueryBootstrapIT`, `StatementHeadingChunkIT`, `ReportingDeployedRelationIT`, `StatementCardXrefRepositoryIT`, `StatementTransactionRepositoryIT`, `StatementCustomerRepositoryIT`, `StatementAccountRepositoryIT` and `TransactionReportRepositoryIT`, plus `RepositoryCharterCensusTest`, which needs no engine because it measures the directory rather than the database) |
 | module root | 1 |
 
 ### 10.3 What the suites must cover

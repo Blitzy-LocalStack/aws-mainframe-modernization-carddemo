@@ -251,12 +251,25 @@ spring:
     #   drift from the document that holds that authority, and recorded in no
     #   migration history. Placing the prerequisite in the test setup keeps one
     #   authority for the deployed graph and one harness step for the container.
-    # Trade-offs: the two consuming classes therefore each carry a small setup
-    #   step that a reader has to find in java rather than here, and the same
-    #   prerequisite is expressed twice because a shared base class would be a
-    #   new type for two callers. What is bought is that this file names no
-    #   role, grants no right and creates no schema, so it cannot disagree with
-    #   the document that does all three.
+    # Trade-offs: each of the SEVEN consuming classes therefore carries a small
+    #   setup step that a reader has to find in java rather than here -- the
+    #   three statements that create the owning role, grant it CREATE on the
+    #   container's database and create the account schema under it -- so the
+    #   prerequisite is expressed seven times over. What is bought is that this
+    #   file names no role, grants no right and creates no schema, so it cannot
+    #   disagree with the document that does all three.
+    # Refactoring Rationale: this paragraph said TWO classes and justified the
+    #   duplication on the ground that "a shared base class would be a new type
+    #   for two callers". Both halves went stale as the package grew to seven:
+    #   the count was wrong, and an argument that turns on there being two
+    #   callers cannot be read as covering seven. The duplication is retained
+    #   for a reason that does hold at seven -- each class starts its OWN
+    #   container and publishes that container's coordinates through its own
+    #   @DynamicPropertySource, so the statements have to run against the
+    #   instance that class started, which a shared base class would have to be
+    #   given by each subclass anyway -- and the count is now measured from
+    #   `grep -rl '@ActiveProfiles("test")' src/test/java` rather than carried
+    #   forward.
 
 logging:
   level:
@@ -289,8 +302,12 @@ logging:
 # -----------------------------------------------------------------------------
 # Register of deliberate omissions. Each entry below is a value a reasonable
 # reader would expect this overlay to set. Each is absent for a reason that was
-# established by reading the two consuming test classes and the base profile,
-# rather than assumed.
+# established by reading all seven consuming test classes -- the whole of
+# src/test/java/com/carddemo/account/repository, listed in the header -- and the
+# base profile, rather than assumed. Refactoring Rationale: this sentence said
+# "the two consuming test classes", a count that stopped being true as that
+# package grew; the register's entries were re-read against all seven and each
+# still holds, so only the census changed.
 # -----------------------------------------------------------------------------
 #
 #   1. No datasource URL, user name or credential, and no migration pair.
@@ -370,9 +387,11 @@ logging:
 #      the module cannot load.
 #
 #   8. No profile-selection key.
-#      Assumptions: the profile is chosen by the @ActiveProfiles annotation on
-#      the two consuming classes. A document that named its own profile would
-#      either agree redundantly or contradict the annotation that loaded it.
+#      Assumptions: the profile is chosen by the @ActiveProfiles annotation each
+#      of the seven consuming classes carries -- and by nothing else, no build
+#      plugin activating it on their behalf. A document that named its own
+#      profile would either agree redundantly or contradict the annotation that
+#      loaded it.
 #
 #   9. No test-record path.
 #      Assumptions: the flat records this module ships for its tests are

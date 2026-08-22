@@ -8,16 +8,23 @@
  * its own contract names, that the shared frame is mounted around them, and that the administrative
  * routes refuse an ordinary operator.
  *
- * Why these cases render the REAL router
- * -------------------------------------
- * Refactoring Rationale: every other screen test in this tree mounts one screen at one path inside a
- * `MemoryRouter`, which is the right seam for asserting what a screen renders and the wrong one for
- * asserting that the application mounts it. The defect these cases exist to prevent was exactly that
- * gap: `ui/src/screens/signon/signon.test.tsx` declared private `/menu` and `/admin` routes of its own,
- * so it passed while the production table declared neither and a correct credential reached the
+ * Why these cases render the REAL route table
+ * ------------------------------------------
+ * Refactoring Rationale: every other screen test in this tree declares its own routes and mounts one
+ * screen at one of them, which is the right seam for asserting what a screen renders and the wrong one
+ * for asserting that the application mounts it. The defect these cases exist to prevent was exactly
+ * that gap: `ui/src/screens/signon/signon.test.tsx` declared private `/menu` and `/admin` routes of its
+ * own, so it passed while the production table declared neither and a correct credential reached the
  * not-found result. A case that supplies its own route table can only ever prove that a screen works
- * when it is mounted -- never that it is. So these cases render `CardDemoRouter` itself and navigate
- * `jsdom`'s own history, which is the one arrangement in which an unmounted route fails.
+ * when it is mounted -- never that it is.
+ *
+ * ⚠️ Assumptions: what makes these cases production cases is therefore the ROUTES they mount, and not
+ * the history implementation underneath them. They hand `ui/src/router.tsx`'s exported
+ * {@link CARD_DEMO_ROUTES} -- guards, lazy boundaries and both frame branches included -- to a memory
+ * router opened at the address under test, where they previously pushed the address onto jsdom's
+ * history and rendered a router component that built its own browser history. The initial address is an
+ * argument now rather than ambient state, so no case can inherit an address another case left behind,
+ * and an unmounted route still fails exactly as it did.
  *
  * Assumptions: the transport is answered by the shared axios harness rather than by module mocks,
  * because these cases traverse several screens and only one of them -- the transaction-type list --
@@ -34,14 +41,22 @@
 import { ConfigProvider } from 'antd';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { createMemoryRouter, RouterProvider } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type * as AuthModule from './api/auth';
 import { APP_SHELL_TEST_ID } from './layout/AppShell';
 import { PF_KEY_BAR_REGION_LABEL } from './layout/PfKeyBar';
 import { ACCESS_DENIED_ADMIN_ONLY, SCREEN_NOT_AVAILABLE_TITLE } from './messages/messages';
+import { ADMIN_MENU_ROUTE } from './routes/navigation';
 import { ADMIN_MENU_SUBTITLE } from './screens/admin';
 import { MAIN_MENU_SUBTITLE } from './screens/menu';
+/*
+ * Assumptions: the administrative route the refusal case opens is named by the SCREEN that occupies it
+ * rather than by a literal, and its title comes from the same module -- so the case cannot go on
+ * asserting a refusal at a path the browse has moved away from.
+ */
+import { USER_LIST_PATH, USER_LIST_TITLE } from './screens/userList';
 import { cardDemoTheme } from './theme/antdTheme';
 import {
   answerEveryRequestWith,
@@ -91,26 +106,32 @@ async function mockAuthModule(): Promise<typeof AuthModule> {
 
 vi.mock('./api/auth', mockAuthModule);
 
-const { CardDemoRouter } = await import('./router');
+/*
+ * WHY : Assumptions: the route table is imported through a TOP-LEVEL `await import` rather than a static
+ *       import, and the position is load-bearing: it has to be evaluated after the mock registration
+ *       above, because the table's screen chunks reach the stubbed identity module through the shared
+ *       frame. A static import would be hoisted above the registration and would resolve the real one.
+ * WHY : Assumptions: the ROUTES are imported rather than the browser router the module also exports.
+ *       Building a router per case from these routes is what lets each case name its own opening
+ *       address; the exported browser router owns one history for the whole module and could not.
+ */
+const { CARD_DEMO_ROUTES } = await import('./router');
 
 /*
- * WHY : ⚠️ Refactoring Rationale: three `carddemo.*` session-storage key names stood here and
- *       `ui/src/hooks/useAuth.ts` reads none of them -- the session is held in a module variable and the
- *       bearer in one belonging to `ui/src/api/client.ts`, so that nothing script-readable retains a
- *       credential and closing the tab ends the session. Writing the keys established NOTHING, so every
- *       case that called the installer below rendered the guarded route ANONYMOUS and was answered by the
- *       sign-on redirect rather than by the screen it named. The session is now established through the
- *       exchange.
+ * WHY : Assumptions: a session is established ONLY by driving the real exchange, never by writing a
+ *       storage key. `ui/src/hooks/useAuth.ts` holds the session in a module variable and the bearer in
+ *       one belonging to `ui/src/api/client.ts`, so that nothing script-readable retains a credential
+ *       and closing the tab ends the session. A case that wrote `carddemo.*` keys would establish
+ *       NOTHING: it would render the guarded route anonymous and be answered by the sign-on redirect
+ *       rather than by the screen it named.
  */
 
 /**
  * The heading the not-found result paints, which no mounted route may render.
  *
- * Refactoring Rationale: it is READ from the message catalogue where it was previously a literal copy
- * of the heading. A copy asserts that the surface paints this exact sentence, so correcting the
- * sentence in one place left the other asserting text nothing rendered -- and because most cases here
- * assert the heading is ABSENT, a stale copy would have gone on passing while measuring nothing.
- * Reading the constant keeps every case pointed at the catalogued heading.
+ * Assumptions: it is READ from the message catalogue rather than copied as a literal. Most cases here
+ * assert the heading is ABSENT, so a local copy that drifted from the catalogue would go on passing
+ * while measuring nothing -- the one failure mode a copied expectation cannot report.
  */
 const NOT_FOUND_TITLE = SCREEN_NOT_AVAILABLE_TITLE;
 
@@ -122,8 +143,8 @@ const NOT_FOUND_TITLE = SCREEN_NOT_AVAILABLE_TITLE;
  * claim without being able to mint an authority. Every value here is fabricated.
  * Assumptions: the claim carries the OPERATOR as well as the groups, under `cognito:username`, because
  * the hook refuses an issued set whose token names an operator other than the one it was issued for --
- * a check that stops a pool answer for one identifier installing a session for another. A token carrying
- * groups alone is refused outright, which is what every token this file minted used to be.
+ * a check that stops a pool answer for one identifier installing a session for another. A token
+ * carrying groups alone is refused outright, so omitting the operator claim arranges no session at all.
  * @param {readonly string[]} groups - Group names to place in the `cognito:groups` claim.
  * @param {string} userId - Operator the token is issued for.
  * @returns {string} A three-segment token decoding to those groups and that operator.
@@ -138,8 +159,8 @@ function idTokenFor(groups: readonly string[], userId: string): string {
  *
  * Assumptions: the identifier is a PARAMETER rather than a fixed `'USER0001'`, because the outcome's
  * `userId` and its token's operator claim must agree -- the hook refuses the pair otherwise -- and the
- * administrative case signs on as `ADMIN001`. A fixed identifier made that case's answer describe a
- * different operator from the one the form submitted.
+ * administrative case signs on as `ADMIN001`. A fixed identifier would make that case's answer describe
+ * a different operator from the one the form submitted.
  * @param {string} userId - Operator the outcome is issued for.
  * @param {readonly string[]} groups - Group names the identity token's claim carries.
  * @returns {object} An authenticated sign-on outcome in the shape the client publishes.
@@ -173,20 +194,24 @@ async function installSession(groups: readonly string[]): Promise<void> {
 }
 
 /**
- * Renders the production router at one browser path.
+ * Renders the production route table at one address.
  *
- * Assumptions: the path is pushed onto `jsdom`'s history before rendering, because `CardDemoRouter`
- * wraps `BrowserRouter` and therefore reads the location from the document rather than taking initial
- * entries. The theme provider is composed here for the same reason `ui/src/App.tsx` composes it: it is
- * the single injection point, and the router does not include it.
- * @param {string} path - The browser path to open.
+ * Assumptions: the address is passed as the memory router's initial entry rather than pushed onto
+ * jsdom's history, so the location a case opens on is stated in the call instead of being ambient. The
+ * routes are the delivered ones, which is what keeps this a production reachability case.
+ *
+ * Assumptions: the theme provider is composed here for the same reason `ui/src/App.tsx` composes it --
+ * it is the single injection point and the route table does not include it. `App.tsx` itself is not
+ * rendered, because it builds a browser router internally and a case would then have no way to say
+ * which address it opens on.
+ * @param {string} path - The address to open.
  * @returns {void} Nothing; the tree is rendered into the test document.
  */
 function renderRouterAt(path: string): void {
-  window.history.pushState({}, '', path);
+  const router = createMemoryRouter([...CARD_DEMO_ROUTES], { initialEntries: [path] });
   render(
     <ConfigProvider theme={cardDemoTheme}>
-      <CardDemoRouter />
+      <RouterProvider router={router} />
     </ConfigProvider>,
   );
 }
@@ -295,11 +320,18 @@ async function anUnauthenticatedVisitorReachesSignOn(): Promise<void> {
  * Assumptions: the refusal is asserted rather than a redirect, because the operator is signed on
  * correctly -- sending them to sign-on would invite them to fix something that is not broken, which is
  * the distinction `ui/src/routes/guards.tsx` draws between its two guards.
+ *
+ * ⚠️ Refactoring Rationale: the address is the USER BROWSE, where it was the administrative menu. The
+ * gated set is exactly the six options of `app/cpy/COADM02Y.cpy`, and the menu that lists them is not
+ * one of them -- so `/admin` is authenticated, and a case demanding a refusal there would now demand
+ * the opposite of the delivered contract. `/users` is administrative option 1, so this case still
+ * asserts the guard at a gated address; `ui/src/routerRoutes.test.tsx` covers the other side, that the
+ * menu itself renders for an operator without the claim and that its every destination refuses them.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
 async function anOrdinaryOperatorIsRefusedAnAdministrativeRoute(): Promise<void> {
   await installSession(['carddemo-user']);
-  renderRouterAt('/admin');
+  renderRouterAt(USER_LIST_PATH);
 
   // WHY : Assumptions: the catalog constant is TRIMMED for the lookup, because the testing library
   //   normalises the text it reads out of the DOM and compares it against the matcher string as
@@ -307,7 +339,35 @@ async function anOrdinaryOperatorIsRefusedAnAdministrativeRoute(): Promise<void>
   //   carries it across -- so an untrimmed matcher can never equal the normalised DOM text.
   //   `ui/src/screens/signon/signon.test.tsx` trims the farewell constant for the same reason.
   expect(await screen.findByText(ACCESS_DENIED_ADMIN_ONLY.trim())).toBeInTheDocument();
-  expect(screen.queryByRole('heading', { name: ADMIN_MENU_SUBTITLE })).not.toBeInTheDocument();
+  /*
+   * Assumptions: TWO absences are required, because there are two distinct ways this address could
+   * fail to show a refusal and each one is invisible to the other's assertion. The not-found heading
+   * proves the route is MOUNTED -- an unmounted path would also lack the browse. The browse's own
+   * title proves the guard renders the refusal INSTEAD of the screen rather than alongside it.
+   * Asserting only one of them would leave the other failure mode passing.
+   */
+  expect(screen.queryByText(NOT_FOUND_TITLE)).not.toBeInTheDocument();
+  expect(screen.queryByText(USER_LIST_TITLE)).not.toBeInTheDocument();
+}
+
+/**
+ * An ordinary operator reaches the administrative MENU, which grants them nothing.
+ *
+ * Assumptions: this is the other half of the boundary the case above asserts, and it is asserted here
+ * rather than left implied. `app/cpy/COADM02Y.cpy` defines six administrative options and the menu
+ * itself is not one of them, so gating the menu would guard seven paths where the reference defines
+ * six. Nothing is opened up by admitting an operator to it: every option it offers navigates to one of
+ * the six gated paths, and the case above proves what happens when they choose one.
+ * @returns {Promise<void>} Resolves once the menu has painted for a non-administrator.
+ */
+async function anOrdinaryOperatorReachesTheAdministrativeMenu(): Promise<void> {
+  await installSession(['carddemo-user']);
+  renderRouterAt(ADMIN_MENU_ROUTE);
+
+  expect(
+    await screen.findByRole('heading', { name: ADMIN_MENU_SUBTITLE }, QUERY_TIMEOUT),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(ACCESS_DENIED_ADMIN_ONLY.trim())).not.toBeInTheDocument();
 }
 
 /*
@@ -321,14 +381,16 @@ async function anOrdinaryOperatorIsRefusedAnAdministrativeRoute(): Promise<void>
 /**
  * Every path the table declares resolves to a screen inside the shared frame.
  *
- * Purpose: this is the assertion that catches an authored screen module reachable from nothing. Four of
- * these paths had no route at all, so each rendered the not-found result while its module compiled,
- * linted and type-checked -- and no case could see it, because a route table cannot assert what is
- * absent from it.
+ * Purpose: this is the assertion that catches an authored screen module reachable from nothing. A
+ * screen the table does not mount compiles, lints and type-checks exactly as one it does, and its own
+ * test passes against the route that test declares -- so the only thing that can report it is a case
+ * that walks the shipped table and looks for the not-found heading.
  *
- * Assumptions: an administrator's session is installed for all of them, because four of the paths are
- * administrative and this case is about REACHABILITY rather than about authority, which the two guard
- * cases above cover on their own.
+ * Assumptions: an administrator's session is installed for all of them, because two of the paths --
+ * user maintenance and the transaction-type list -- are administrative, and this case is about
+ * REACHABILITY rather than about authority, which the two guard cases above cover on their own. The
+ * administrative MENU is in the list as an authenticated path: it is reachable with any session, and the
+ * claim installed here neither adds nor removes anything at that address.
  *
  * Assumptions: the assertion per path is that the frame is present and the not-found heading is not.
  * It deliberately does not assert what each screen renders -- each screen has its own cases for that,
@@ -355,19 +417,17 @@ async function everyDeclaredPathResolvesToAScreen(): Promise<void> {
     // Assumptions: the frame is awaited rather than asserted synchronously, because seven of the nine
     //   screens arrive through `React.lazy` and are therefore behind one microtask at least.
     /*
-     * WHY : Refactoring Rationale: the wait carries an EXPLICIT budget, and the default one is what
-     *       made this case fail intermittently while asserting nothing wrong. Testing Library's default
-     *       is one second per wait, but this loop visits nine paths and each visit transforms and
-     *       commits a separate `React.lazy` chunk -- the very cost this file's own `TIMEOUT` note
-     *       measures at "just over five seconds" for the first case. A one-second inner budget inside a
-     *       thirty-second case budget meant the case could fail on whichever chunk happened to be
-     *       slowest while the runner was busy, and it did: on a four-core container it reported the
-     *       `Suspense` fallback instead of the frame.
-     * WHY : Assumptions: this widens a WAIT and weakens nothing. Both assertions are unchanged -- the
-     *       frame must appear and the not-found result must not -- so a path that genuinely resolves to
-     *       nothing still fails, and still fails naming the path through the message below. The budget
-     *       reuses this file's own `TIMEOUT` rather than introducing a second number, so the inner wait
-     *       and the case that contains it cannot drift apart.
+     * WHY : Assumptions: the wait carries an EXPLICIT budget rather than Testing Library's
+     *       one-second default, because this loop visits nine paths and each visit transforms and
+     *       commits a separate `React.lazy` chunk -- the cost this file's own `TIMEOUT` note measures
+     *       at just over five seconds for the first case. A one-second inner budget inside a
+     *       thirty-second case budget fails on whichever chunk happens to be slowest while the runner
+     *       is busy, reporting the `Suspense` fallback in place of the frame.
+     * WHY : Assumptions: a wider WAIT weakens nothing. Both assertions stand -- the frame must appear
+     *       and the not-found result must not -- so a path that genuinely resolves to nothing still
+     *       fails, and still fails naming the path through the message below. The budget reuses
+     *       {@link QUERY_TIMEOUT} rather than a second number, so the inner wait and the case that
+     *       contains it cannot drift apart.
      */
     await waitFor(
       /**
@@ -438,10 +498,10 @@ async function theFramePaintsOneKeyLegendOnly(): Promise<void> {
 /**
  * Milliseconds the multi-path reachability case is allowed, in place of the single-case {@link TIMEOUT}.
  *
- * ⚠️ Assumptions: this case is not one navigation but NINE, walked in sequence, and each visits a
+ * Assumptions: this case is not one navigation but NINE, walked in sequence, and each visits a
  * distinct route whose screen arrives through `React.lazy` -- so it pays the chunk-transform cost nine
- * times over where every other case in this file pays it once. Budgeting it like a single case is what
- * left it failing at just over thirty seconds while each of its nine assertions individually passed.
+ * times over where every other case in this file pays it once. Budgeted like a single case it exceeds
+ * thirty seconds while each of its nine assertions individually passes.
  * Trade-offs: a genuinely stuck run takes two minutes to report here rather than thirty seconds. That is
  * accepted for the one case in the file whose cost is a multiple of the others; the alternative is a
  * bound that the case exceeds when it is working correctly, which is a failure that carries no
@@ -452,13 +512,13 @@ const MULTI_PATH_TIMEOUT = 120_000;
 const TIMEOUT = 30_000;
 
 /*
- * WHY : ⚠️ Refactoring Rationale: a QUERY-level ceiling is declared beside the case-level one above,
- *       because the two bound different things and only the first was set. `TIMEOUT` is passed to `it`,
- *       so it bounds the whole case; every `findBy*` and `waitFor` inside a case still took Testing
- *       Library's own one-second default. That is what failed here: the case had thirty seconds to run
- *       while its wait for a lazily loaded screen gave up after one, so the case reported a missing
- *       heading rather than the slow chunk it was actually waiting on -- and it reported it for the
- *       heaviest screens only, which is the signature of a ceiling rather than of a routing defect.
+ * WHY : Assumptions: a QUERY-level ceiling is declared beside the case-level one above, because the
+ *       two bound different things. `TIMEOUT` is passed to `it`, so it bounds the whole case; every
+ *       `findBy*` and `waitFor` inside a case otherwise takes Testing Library's own one-second
+ *       default. Without this constant a case has thirty seconds to run while its wait for a lazily
+ *       loaded screen gives up after one, so it reports a missing heading rather than the slow chunk
+ *       it was waiting on -- and reports it for the heaviest screens only, which is the signature of a
+ *       ceiling rather than of a routing defect.
  * WHY : Assumptions: raising it cannot weaken an assertion, since a wait ends early on success and only
  *       a genuinely unreachable route consumes the whole ceiling before failing.
  * WHY : Alternatives Considered: five seconds, matching the `ASYNC_CONDITION_TIMEOUT_MS` used for the
@@ -503,6 +563,11 @@ function routerReachabilityCases(): void {
   it(
     'refuses an ordinary operator an administrative route with the baseline sentence',
     anOrdinaryOperatorIsRefusedAnAdministrativeRoute,
+    TIMEOUT,
+  );
+  it(
+    'admits an ordinary operator to the administrative menu it gates nothing on',
+    anOrdinaryOperatorReachesTheAdministrativeMenu,
     TIMEOUT,
   );
   it(

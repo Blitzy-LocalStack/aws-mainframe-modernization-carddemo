@@ -73,10 +73,14 @@ The NAT arrow is narrower than it looks, and it is the one place a reader is
 likely to assume more than the configuration grants. The private-application
 route tables do carry a default route to the zone-local NAT gateway, but **no
 application-tier security-group rule permits any public destination**, so no task
-traffic can take that route at all. Every service a task needs — including the
-identity provider and the trace collector — is reached through an interface
-endpoint or the S3 gateway route without leaving the VPC. A default route grants
-nothing on its own; see entries 4 and 5.
+traffic can take that route at all. Every service a task actually calls —
+including the identity provider, whose endpoint is the reason the public rule
+below could be withdrawn — is reached through an interface endpoint or the S3
+gateway route without leaving the VPC. A default route grants nothing on its own;
+see entries 4 and 5. The `xray` endpoint is the one member of the set nothing calls
+today, and the trade-off under
+[Private AWS service paths](#private-aws-service-paths) says so rather than
+counting it among the reached services.
 
 An `identity_provider_egress_cidrs` input and an `app_to_identity_provider` rule
 used to carry TLS 443 to any public destination from this tier, on the premise
@@ -86,9 +90,13 @@ joined the endpoint set, and both are now withdrawn — the reasoning is recorde
 
 ## Private AWS service paths
 
-Eight interface endpoints are created, one per entry in
+Ten interface endpoints are created, one per entry in
 `interface_endpoint_services`, each placing an ENI in the private application
 subnets so that a task reaches the service without its traffic leaving the VPC.
+Eight of the ten are the set AAP §0.4.1.9 enumerates; `xray` and `cognito-idp` are
+the two beyond it, and each is justified below by a function this deployment
+performs rather than by intent.
+
 The column that matters is the second one: it records which part of the migrated
 stack would stop working if the endpoint were removed.
 
@@ -102,7 +110,45 @@ stack would stop working if the endpoint were removed.
 | `sqs` | Carries the authorization, inquiry and error queue traffic |
 | `states` | Starts a batch or report execution from the reporting service |
 | `ssm` | Reads runtime parameters, including the batch read-only flag |
+| `xray` | Carries the trace export of the collector sidecar `infra/modules/ecs-service` attaches to every task. The sidecar is the only X-Ray client in this deployment with no route to the internet -- the operational Lambdas trace too, but they run outside the VPC and reach the public service path -- so this endpoint is what makes the application tier's total absence of public egress compatible with tracing at all |
+| `cognito-idp` | Resolves the issuer and JWKS documents each service's JWT decoder fetches when its context refreshes. Private DNS makes the provider's public API hostname resolve to this endpoint's ENI, which is what allowed the public-egress rule that used to carry the same traffic to be withdrawn rather than merely narrowed |
 | S3 gateway endpoint | Carries dataset, statement and report object traffic. It is a route-table entry pointing at a service prefix list rather than an ENI, so it places no interface, carries no security group and incurs no hourly endpoint charge |
+
+Two of those ten are documented additions beyond the eight AAP section 0.4.1.9
+names, and they are named here rather than folded silently into the count.
+Section 0.4.1.9 lists the ECR API and Docker registry, CloudWatch Logs, Secrets
+Manager, KMS, SQS, Step Functions and SSM — eight. `xray` and `cognito-idp` are
+the ninth and tenth.
+
+Assumptions: `cognito-idp` is load-bearing and is the reason the addition was
+made rather than the specified eight retained. Reaching the identity provider
+over the public path was the earlier arrangement, and it was withdrawn together
+with the `0.0.0.0/0` egress rule that carried it; when the endpoint was first
+introduced the shared account-scoped endpoint policy denied unauthenticated OIDC
+discovery, key-set and sign-on operations, which broke sign-on outright, so
+`main.tf` now attaches a per-endpoint policy admitting exactly those five
+operations by name. `.github/workflows/infra-ci.yml` asserts that `cognito-idp`
+appears in both halves of the variable, so it cannot be dropped from the default
+or from the validation without failing the build.
+
+Trade-offs: `xray` is provisioned and **has no consumer**, and that is registered
+as an open gap rather than presented as a working trace path.
+`services/common-lib/pom.xml` pulls `spring-boot-starter-opentelemetry`, so spans
+*are* created and their trace and span identifiers reach the logs alongside the
+correlation identifier `CorrelationIdFilter` sets — but no OTLP exporter target is
+configured anywhere in the tree, and the collector sidecar that once carried the
+export has been withdrawn from `infra/modules/ecs-service`, which records that
+argument and names span **export** as the thing lost. So no span reaches a managed
+tracing backend, and no statement in this document should be read as claiming one
+does. This leaves the tracing half of AAP section 0.9.3's cross-cutting
+observability expectation **unresolved**: reinstating export has to argue for its
+own exporter configuration on top of the endpoint that is already here. The
+endpoint is kept because withdrawing it would make reinstatement a topology change
+as well as a configuration one, and because its cost is three of the thirty
+endpoint-zone-hours this tier bills — one endpoint in each of the three zones.
+Note that `main.tf` still describes this entry as carrying "the trace export
+section 0.9.3 requires"; that description is the one this document declines to
+repeat, because nothing exports.
 
 Assumptions: the endpoint set is identical in both environments and is validated
 against exactly this list rather than treated as an environment lever. Removing
@@ -760,12 +806,12 @@ hand — regenerate it with the command in [Validation](#validation) instead.
 | <a name="output_data_security_group_id"></a> [data\_security\_group\_id](#output\_data\_security\_group\_id) | Identifier (string) of the isolated-data security group, attached by aurora-postgresql to its cluster. It grants exactly one flow: ingress from the application-tier group on database\_port. It admits no CIDR range, so a host that is not a member of the application group cannot open a database session even from inside the VPC. |
 | <a name="output_database_port"></a> [database\_port](#output\_database\_port) | TCP port (number) this module admits from the application group to the isolated-data group. Both environment roots pass it to aurora-postgresql as its cluster port, so the rule and the engine cannot drift apart. |
 | <a name="output_flow_log_group_name"></a> [flow\_log\_group\_name](#output\_flow\_log\_group\_name) | Exact name (string) of the CloudWatch log group receiving this VPC's flow records. Both environment roots pass it to observability as its required vpc\_flow\_log\_group\_name input, which points that module's Logs Insights widgets at the group this module created rather than at a name reassembled from a prefix and an environment. |
-| <a name="output_interface_vpc_endpoint_ids"></a> [interface\_vpc\_endpoint\_ids](#output\_interface\_vpc\_endpoint\_ids) | Map from short AWS service name to that service's interface VPC endpoint identifier, keyed exactly as var.interface\_endpoint\_services is written: ecr.api, ecr.dkr, logs, secretsmanager, kms, sqs, states and ssm. Its consumer is the environment root, which needs a specific endpoint's identity to attach a metric or an endpoint policy to it; no sibling module reads it today. Each endpoint places an ENI in the private application subnets, which is how a task reaches these services without egressing the VPC. |
+| <a name="output_interface_vpc_endpoint_ids"></a> [interface\_vpc\_endpoint\_ids](#output\_interface\_vpc\_endpoint\_ids) | Map from short AWS service name to that service's interface VPC endpoint identifier, keyed exactly as var.interface\_endpoint\_services is written: ecr.api, ecr.dkr, logs, secretsmanager, kms, sqs, states, ssm, xray and cognito-idp - ten keys, the same ten that variable's exact-set validation admits. No consumer reads it today - neither a sibling module nor either environment root - and it is published because attaching a metric, an alarm or a narrower endpoint policy to one specific endpoint needs that endpoint's identity, which rediscovering by service name from a data source would duplicate. Each endpoint places an ENI in the private application subnets, which is how a task reaches these services without egressing the VPC. |
 | <a name="output_isolated_data_subnet_ids"></a> [isolated\_data\_subnet\_ids](#output\_isolated\_data\_subnet\_ids) | Ordered list of the isolated data subnet identifiers, one per availability zone, forming the DB subnet group read by aurora-postgresql. These subnets have no route to the internet at all - their route tables carry no default route, no NAT and no gateway - which is what makes them the correct home for the database and the wrong home for anything needing egress. |
 | <a name="output_nat_gateway_ids"></a> [nat\_gateway\_ids](#output\_nat\_gateway\_ids) | Map from availability-zone name to the NAT gateway serving that zone's private application subnet. No consumer reads it today - neither a sibling module nor either environment root; observability takes only the flow-log group name from this module. It is published because an alarm on a per-gateway metric - a failed-connection count, for instance - needs the gateway identity, and the zone key is what lets such an alarm name the zone it describes instead of an opaque identifier. |
 | <a name="output_nat_gateway_public_ips"></a> [nat\_gateway\_public\_ips](#output\_nat\_gateway\_public\_ips) | Map from availability-zone name to the Elastic IP address attached to that zone's NAT gateway. No consumer reads it today - neither a sibling module nor either environment root - and it is published so an operator or downstream system that has to allow-list CardDemo's egress can be handed the set. All az\_count entries are present, because egress can leave from any zone. |
 | <a name="output_private_app_subnet_ids"></a> [private\_app\_subnet\_ids](#output\_private\_app\_subnet\_ids) | Ordered list of the private application subnet identifiers, one per availability zone, and the most widely consumed output here. Read by ecs-service for task placement, by step-functions-batch for its Fargate task network configuration, and by api-gateway-http for its VPC Link. NOT read by alb: per AAP 0.4.1.9 the load balancer belongs to the public tier, and the roots place it there. The tier also holds the interface VPC endpoint ENIs, which is how a task reaches ECR, CloudWatch Logs, Secrets Manager, KMS, SQS, Step Functions, SSM, X-Ray and the Cognito identity provider without its traffic leaving the VPC. |
-| <a name="output_public_subnet_ids"></a> [public\_subnet\_ids](#output\_public\_subnet\_ids) | Ordered list of the public subnet identifiers, one per availability zone. This tier is reserved for the two kinds of thing that need a route to the internet gateway: the zone-local NAT gateways this module creates, which are its only current occupants, and an internet-facing load balancer. No consumer reads it today - neither a sibling module nor either environment root - because the load balancer in this deployment is INTERNAL and both roots therefore place it in the private-application subnets, leaving the NAT gateways this module creates as this tier's only occupants. Nothing holding application state or record data belongs here. |
+| <a name="output_public_subnet_ids"></a> [public\_subnet\_ids](#output\_public\_subnet\_ids) | Ordered list of the public subnet identifiers, one per availability zone. This tier is reserved for the two kinds of thing that need a route to the internet gateway: the zone-local NAT gateways this module creates, and the load balancer. Read by alb: both environment roots pass this output as that module's subnet\_ids - infra/envs/dev/main.tf and infra/envs/prod/main.tf - because AAP section 0.4.1.9 places the load balancer in the public tier. Assumptions: an INTERNAL scheme and a public subnet are not in tension. alb sets internal = true, which withholds public addresses and an internet-routable name whatever the selected subnets' route tables carry, so this placement decides where the load balancer's network interfaces live and not whether the internet can address them. Nothing holding application state or record data belongs here. |
 | <a name="output_s3_gateway_endpoint_id"></a> [s3\_gateway\_endpoint\_id](#output\_s3\_gateway\_endpoint\_id) | Identifier (string) of the S3 gateway endpoint. No consumer reads it today - neither a sibling module nor either environment root - and it is published because naming the private path to S3 in a bucket policy that restricts access to this VPC's endpoint needs it. Being a gateway rather than an interface endpoint, it is associated with route tables instead of subnets, places no ENI and carries no security group - so which tiers can reach S3 is decided by route-table association, not by a security-group rule. |
 | <a name="output_vpc_cidr_block"></a> [vpc\_cidr\_block](#output\_vpc\_cidr\_block) | IPv4 CIDR block (string) AWS assigned to this VPC. No consumer reads it today - neither a sibling module nor either environment root - because every tier-to-tier flow this topology allows is expressed group-to-group instead. It is published for a rule or policy that has to be scoped to the whole network rather than to a peer security group. Publishing it means no consumer is ever handed var.vpc\_cidr a second time. |
 | <a name="output_vpc_id"></a> [vpc\_id](#output\_vpc\_id) | Identifier (string) of the VPC that owns every subnet, route table, security group and endpoint this module creates. Read by api-gateway-http for its VPC Link and by ecs-service for its target groups, and required by any further module that creates a VPC-scoped resource. |

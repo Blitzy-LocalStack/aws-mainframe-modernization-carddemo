@@ -13,7 +13,7 @@
  * divergence, and how far the parity claim actually reaches. It declares no type and holds no import, so
  * nothing here executes; its entire effect is on what the classes beside it assert.</p>
  *
- * <h2>The closed inventory: twenty files here, nineteen of them tests</h2>
+ * <h2>The closed inventory: twenty-one files here, twenty of them tests</h2>
  *
  * <p>The parent charter at {@code com.carddemo.authorization} deliberately fixes no leaf-class count and
  * names no leaf class, making each package's own charter the authority for its own inventory. This is that
@@ -23,7 +23,7 @@
  * citation that normalises either half points at nothing.</p>
  *
  * <pre>
- * this directory: 20 java files = 19 tests + 1 charter
+ * this directory: 21 java files = 20 tests + 1 charter
  * </pre>
  *
  * <p>Alternatives Considered: stating the inventory in prose alone, which is what this charter did before
@@ -139,7 +139,11 @@
  *   <li>{@code OutboxPublisherLifecycleRepositoryIT} exercises {@code OutboxPublisher} against a real
  *       engine and a scripted queue client, for the claim-send-transition seam: that the claim has
  *       COMMITTED before the reply is handed to the queue, and that one pass advances the attempt counter
- *       once however many times the transport is retried inside it.</li>
+ *       once however many times the transport is retried inside it. It also asserts the two properties
+ *       divergence D-5 stands or falls on, both of which need the REAL claim statements rather than a
+ *       double: that a reply past its stall-alert threshold is still claimed, still retried and finally
+ *       published, and that a head which keeps failing holds its own order group -- its follower reaching
+ *       the queue only after it does.</li>
  *   <li>{@code PurgeWindowRollbackRepositoryIT} exercises {@code PurgeJob} against a real engine, for the
  *       checkpoint semantic of {@code app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl} lines 358 to
  *       364: that one window's deletes and its summary reduction share a fate, and that a failure in a
@@ -148,6 +152,13 @@
  *       engine, for the atomicity of its two writes -- the fraud row through a native upsert and the
  *       authorization's own two fraud members through the persistence context -- against
  *       {@code app/app-authorization-ims-db2-mq/cbl/COPAUS2C.cbl}.</li>
+ *   <li>{@code LoadServiceAtomicityRepositoryIT} exercises {@code LoadService} against a real engine for
+ *       the one property its unit test cannot reach: that a refused load leaves NO row a separate reader
+ *       can see. It covers both shapes of refusal -- one after a whole chunk has been written, and one in
+ *       the child file after the summary file has been -- and rehearses the recovery the runbook
+ *       prescribes, a re-run after a refusal followed by a second run that changes nothing. Its subject is
+ *       {@code app/app-authorization-ims-db2-mq/cbl/PAUDBLOD.CBL}, whose unit of work is the transaction
+ *       monitor's commit at program end.</li>
  *   <li>{@code AuthorizationDiagnosticDisclosureTest} exercises {@code LoadService} and
  *       {@code PurgeJob} for one property neither of their behavioural tests can observe: that no log
  *       template and no throwable message in either class names an account or customer identifier, as
@@ -158,10 +169,10 @@
  *       why it is a class of its own rather than cases inside the round-trip and purge tests.</li>
  * </ul>
  *
- * <p>Refactoring Rationale: four of the last five entries are a SECOND class over a subject that
- * already has one, and the division is by TIER rather than by subject. Each of those four subjects makes a claim about what
- * a database RETAINS after a failure, and a mocked collaborator can only record what was asked of it, so
- * the claims were documented and unproven until these classes were added. Their names end in
+ * <p>Refactoring Rationale: five entries in the roster are a SECOND class over a subject that already
+ * has one, and the division is by TIER rather than by subject. Each of those five subjects makes a claim
+ * about what a database RETAINS after a failure, and a mocked collaborator can only record what was asked
+ * of it, so the claims were documented and unproven until these classes were added. Their names end in
  * {@code RepositoryIT} because the module's Failsafe configuration includes exactly that suffix; the
  * suffix names the tier they run in and not the subject they exercise, so reading it as a claim about a
  * repository is a misreading the naming convention makes easy.</p>

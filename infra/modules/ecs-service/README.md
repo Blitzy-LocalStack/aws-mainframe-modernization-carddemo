@@ -118,7 +118,7 @@ connections.
 
 ## 4. What one instantiation provisions
 
-The generated contract in [§7](#7-inputs-and-outputs) lists all 13 resources.
+The generated contract in [§7](#7-inputs-and-outputs) lists all 14 resources.
 Their runtime responsibilities are:
 
 | Shape | Provisioned responsibility |
@@ -127,6 +127,7 @@ Their runtime responsibilities are:
 | Always | An execution role and inline policy scoped to the selected ECR repository, this log group, exact Parameter Store and Secrets Manager references, and constrained KMS keys |
 | Always | An application task role with a same-account permissions boundary; business-resource access arrives only through caller-selected policy inputs, exact SQS queue sets, or managed-policy attachments |
 | Always | A Fargate task definition using `awsvpc`, Linux/X86_64, the selected CPU/memory pair, an unprivileged container user, `awslogs`, a read-only root, and one ephemeral volume per writable path |
+| Telemetry shape | An AWS Distro for OpenTelemetry collector sidecar in the same task definition, with its own scratch volume and an inline task-role policy granting X-Ray trace submission; it scrapes a serving workload's `/actuator/prometheus` and receives OTLP from a task-only one, exporting metrics to CloudWatch and spans to X-Ray |
 | Online-service shape | An IP target group using HTTPS for traffic and health checks on `/actuator/health`, with stickiness disabled |
 | Online-service shape | An ECS service using the `ECS` rolling controller, an explicit capacity-provider strategy, private application subnets, no public IP, and the pinned Fargate platform version |
 | Online-service shape | An Application Auto Scaling target and CPU target-tracking policy |
@@ -135,21 +136,52 @@ Assumptions: the task role starts free of **business-resource** access, not
 literally empty. Exact queue grants, a caller-owned business policy and optional
 managed policies are separate because they have different owners and lifecycles.
 
-Refactoring Rationale: this module composed an AWS Distro for OpenTelemetry
-collector sidecar into every task, and that shape -- together with its four inputs,
-its X-Ray export policy and its scratch volume -- has been **withdrawn**. The frozen
-specification contains no collector, and the sidecar could not be delivered inside
-the numbers the specification does state: pulling its image from a private
-application subnet needed an eleventh ECR repository against the ten of section
-0.4.1.6, because Amazon ECR Public is not served by the `ecr.api` and `ecr.dkr`
-endpoints, and exporting its spans needed a ninth interface endpoint for `xray`
-against the eight of section 0.4.1.9. What is kept for this concern is every
-artifact the specification names: container logs in this module's own log group,
-the `/actuator/prometheus` surface each service already exposes,
-`common-lib`'s `MetricsConfig` common tags, and end-to-end request correlation
-through `common-lib`'s `CorrelationIdFilter`. What is lost is span export to a
-managed tracing backend; re-introducing it has to argue for its own endpoint or its
-own egress, which is the argument that was previously skipped.
+Assumptions: every task this module registers carries an AWS Distro for
+OpenTelemetry collector **sidecar**, and it is what gives this deployment's metrics
+and traces a destination. It is created by default, `enable_telemetry_collector`
+turns it off for a caller that does not want it, and it is `essential` -- so a task
+whose collector cannot start does not run, which is deliberate: a workload silently
+publishing telemetry nobody collects is the state this replaces.
+
+Assumptions: the metrics channel is chosen by `create_service` so that no meter is
+exported twice. A **serving** workload publishes `/actuator/prometheus` and the
+collector scrapes it over task loopback every sixty seconds, so its
+`OTEL_METRICS_EXPORTER` is `none`. A **task-only** workload has no listener to scrape
+for the few minutes it exists, so its value is `otlp` and it pushes to the sidecar on
+`127.0.0.1:4318` every fifteen seconds. Both channels leave through one `awsemf`
+exporter into the `CardDemo` namespace that `infra/modules/observability`'s dashboard
+reads, and spans leave through `awsxray` to AWS X-Ray over the `xray` interface
+endpoint. `infra/modules/step-functions-batch` overrides the exporter to `otlp` for
+the reporting runs it starts as tasks, because `reporting-service` is a serving
+workload whose task definition therefore says `none`.
+
+Assumptions: the collector's receivers bind **loopback** and this container publishes
+no port. Under `awsvpc` the whole task shares one network namespace and one elastic
+network interface, so a producer in the same task reaches `127.0.0.1` while nothing
+outside the task can, and a `portMappings` entry would publish an unauthenticated
+telemetry ingest port on that interface rather than merely describing a listener.
+
+Refactoring Rationale: this shape -- together with its four inputs, its X-Ray export
+policy and its scratch volume -- had been **withdrawn**, on the ground that the frozen
+specification names no collector and that the sidecar could not be delivered inside
+the numbers the specification does state: pulling its image from a private application
+subnet needs an ECR repository beside the ten of section 0.4.1.6, and exporting its
+spans needs an `xray` interface endpoint beside the eight of section 0.4.1.9. It is
+**restored**, because that withdrawal discharged a count by deleting a deliverable:
+sections 0.2.1.4 and 0.9.3 make centralised metrics *and* tracing a cross-cutting
+deliverable, and without the sidecar two of the three signals had no destination at
+all -- every service published `/actuator/prometheus` to nothing, and the shared
+OpenTelemetry starter created spans no exporter carried. Both count objections are
+answered rather than ignored: the ten deployables of section 0.4.1.6 are provisioned
+from `infra/modules/ecr`'s `repository_names` and gated in CI as an exact set, while
+the collector mirror is a separate `third_party_mirror_repository_names` entry holding
+a third-party image this repository does not build; and `xray` is one of the ten
+interface endpoints `infra/modules/network` validates rather than a ninth beside
+eight. What was already kept is unchanged and still the signal every operational
+procedure reads: container logs in this module's own log group -- the collector writes
+its own diagnostics there too, under its own stream prefix -- `common-lib`'s
+`MetricsConfig` common tags, and end-to-end request correlation through
+`common-lib`'s `CorrelationIdFilter`.
 
 Trade-offs: `readonly_root_filesystem` is a fleet invariant and defaults to
 `true`. Each path in `writable_mount_paths` becomes task-local ephemeral
@@ -296,8 +328,15 @@ through `terraform -chdir=infra/envs/<env> ...`.
 
 ## 7. Inputs and outputs
 
-The generated region represents all 56 inputs and all 17 outputs declared by
-the sibling HCL.
+The generated region represents all 58 inputs and all 17 outputs declared by
+the sibling HCL. Both figures are re-measured from the declarations rather than
+carried forward: `variables.tf` declares 58 top-level `variable` blocks and
+`outputs.tf` declares 17 `output` blocks, and the generated tables below carry one
+row each. Assumptions: a hand-authored count beside a generated table is the one
+number the drift gate cannot check — `--output-check` compares the region between
+the markers and reads nothing outside it — so this sentence is the only place in
+this section where the two can disagree, and it said 56 while the region below
+listed 58.
 
 `target_group_arn` is the hard service-routing contract: `infra/modules/alb`
 attaches it to the listener rule that module owns. `container_name` and the
@@ -338,6 +377,7 @@ would be overwritten locally and rejected by the check-only CI drift gate.
 | [aws_iam_role_policy.task](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
 | [aws_iam_role_policy.task_online_write_gate](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
 | [aws_iam_role_policy.task_sqs](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
+| [aws_iam_role_policy.task_telemetry](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy) | resource |
 | [aws_iam_role_policy_attachment.task](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role_policy_attachment) | resource |
 | [aws_lb_target_group.this](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/lb_target_group) | resource |
 | [aws_caller_identity.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/caller_identity) | data source |
@@ -345,6 +385,7 @@ would be overwritten locally and rejected by the check-only CI drift gate.
 | [aws_iam_policy_document.task_assume_role](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.task_online_write_gate](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_iam_policy_document.task_sqs](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
+| [aws_iam_policy_document.task_telemetry](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/iam_policy_document) | data source |
 | [aws_partition.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/partition) | data source |
 | [aws_region.current](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/region) | data source |
 
@@ -381,6 +422,7 @@ would be overwritten locally and rejected by the check-only CI drift gate.
 | <a name="input_desired_count"></a> [desired\_count](#input\_desired\_count) | Task count the ECS service is created with. Only the initial value: the<br/>module stops tracking it afterwards so Application Auto Scaling can own<br/>the running count without every later plan proposing to undo it. Use<br/>min\_capacity to raise the floor the service is held at. Expected to<br/>differ between the dev and prod roots. | `number` | `2` | no |
 | <a name="input_enable_autoscaling"></a> [enable\_autoscaling](#input\_enable\_autoscaling) | Whether to register an Application Auto Scaling target for the service<br/>and attach a CPU target-tracking policy to it. Required whenever<br/>create\_service is true so Application Auto Scaling is the sole runtime<br/>owner of desired\_count; the batch instance leaves both false. | `bool` | `true` | no |
 | <a name="input_enable_deployment_circuit_breaker"></a> [enable\_deployment\_circuit\_breaker](#input\_enable\_deployment\_circuit\_breaker) | Whether ECS aborts a rolling deployment whose tasks never reach a steady<br/>state and restores the previous task definition. Operates entirely within<br/>the rolling controller: no second target group, no alternate task set and<br/>no weighted traffic shifting are involved. | `bool` | `true` | no |
+| <a name="input_enable_telemetry_collector"></a> [enable\_telemetry\_collector](#input\_enable\_telemetry\_collector) | Whether to add the AWS Distro for OpenTelemetry collector sidecar that receives<br/>this workload's telemetry and exports it: traces over OTLP to AWS X-Ray, and<br/>metrics to CloudWatch through the embedded-metric-format exporter in the<br/>`CardDemo` namespace. Metrics reach it one of two ways, selected by<br/>create\_service so that no meter is exported twice -- a serving workload's<br/>Actuator Prometheus endpoint is scraped over loopback, while a task-only<br/>workload pushes through Micrometer's OTLP registry. Setting it false removes the<br/>container, its ephemeral volume, its OTEL\_* environment variables and the task<br/>role's telemetry policy together, which leaves that workload's container logs as<br/>its only signal. | `bool` | `true` | no |
 | <a name="input_environment_variables"></a> [environment\_variables](#input\_environment\_variables) | Non-secret environment variables for the container, as a map of name to<br/>literal value: the active Spring profile and similar plain settings. Values<br/>appear in clear text in the task definition, in plan output and in state, so<br/>anything sensitive belongs in ssm\_parameter\_arns or secret\_sources instead --<br/>and a name that reads as a secret is refused here rather than trusted.<br/>Accepted keys are upper-case, begin with one of the namespaces the CardDemo<br/>services read, and do not end in a secret-bearing word. | `map(string)` | `{}` | no |
 | <a name="input_execution_secret_kms_key_arns"></a> [execution\_secret\_kms\_key\_arns](#input\_execution\_secret\_kms\_key\_arns) | Exact KMS key ARNs protecting the Secrets Manager entries in secret\_arns.<br/>Used only by the ECS EXECUTION role, and only through a statement carrying<br/>the Secrets Manager ViaService and SecretARN encryption-context conditions,<br/>so the key cannot be used against unrelated ciphertext. A key the<br/>APPLICATION itself must use -- to read an object, decrypt a queue message or<br/>open a database connection -- belongs in a statement of<br/>task\_role\_policy\_json, which is attached to the task role; this module<br/>composes no key permission for that role. | `list(string)` | `[]` | no |
 | <a name="input_health_check_grace_period_seconds"></a> [health\_check\_grace\_period\_seconds](#input\_health\_check\_grace\_period\_seconds) | Seconds after a task starts during which ECS disregards failing<br/>load-balancer health checks, giving the Spring context time to finish<br/>refreshing before the first probe is allowed to count. Applies only when<br/>attach\_load\_balancer is true; the module resolves it to null otherwise,<br/>because AWS rejects the argument on a service with no load balancer. | `number` | `60` | no |
@@ -408,6 +450,9 @@ would be overwritten locally and rejected by the check-only CI drift gate.
 | <a name="input_task_memory"></a> [task\_memory](#input\_task\_memory) | Task-level memory in MiB for aws\_ecs\_task\_definition. Must be a value<br/>Fargate permits alongside the chosen task\_cpu, so the two are always<br/>changed together. The matrix below covers the seven CPU sizes this module<br/>admits; it is a deliberate subset of Fargate's, which also has a 32 vCPU<br/>row. Expected to differ between the dev and prod roots for the same reason<br/>task\_cpu does. | `number` | `2048` | no |
 | <a name="input_task_role_managed_policy_arns"></a> [task\_role\_managed\_policy\_arns](#input\_task\_role\_managed\_policy\_arns) | ARNs of existing managed policies to attach to the task role in addition to<br/>task\_role\_policy\_json. For permission sets a root already owns and shares<br/>across services; the role's effective permissions are the union of these<br/>and the inline document. | `list(string)` | `[]` | no |
 | <a name="input_task_role_policy_json"></a> [task\_role\_policy\_json](#input\_task\_role\_policy\_json) | Complete IAM policy document, as JSON, granting this one service the AWS<br/>API permissions it needs at run time. Attached to the task role, which the<br/>module otherwise leaves free of business-resource access. Leave null for a<br/>service that needs none, in which case the role carries no inline policy at<br/>all. This is the TASK role used by<br/>the application, not the execution role the ECS agent uses to pull the image<br/>and read parameters. | `string` | `null` | no |
+| <a name="input_telemetry_collector_image"></a> [telemetry\_collector\_image](#input\_telemetry\_collector\_image) | Pinned AWS Distro for OpenTelemetry collector image used by the telemetry<br/>sidecar. Either a private Amazon ECR reference -- which is what both environment<br/>roots pass, from the mirror repository the ecr module provisions, because the<br/>application tier's egress is enumerated and admits no public registry -- or the<br/>upstream public reference for a caller whose egress reaches it. A private<br/>reference must carry an explicit non-latest tag or a digest; the public reference<br/>must carry a digest, because only the private registry is configured for<br/>immutable tags. The default is the upstream v0.49.0 index digest, so a collector<br/>upgrade stays a reviewed task-definition change rather than something a moved<br/>label delivers. | `string` | `"public.ecr.aws/aws-observability/aws-otel-collector@sha256:d2bdfff2c377c3d71d78bd5d9ce9862fd535b12134a5739d87a07801297cf9fd"` | no |
+| <a name="input_telemetry_collector_repository_arn"></a> [telemetry\_collector\_repository\_arn](#input\_telemetry\_collector\_repository\_arn) | ARN of the Amazon ECR repository holding the mirrored telemetry collector image,<br/>added to the task execution role's image-pull statement so the sidecar can be<br/>fetched. Null when the collector is disabled or when telemetry\_collector\_image<br/>names a registry this role needs no grant for, in which case no second repository<br/>is authorized. | `string` | `null` | no |
+| <a name="input_telemetry_success_sample_percentage"></a> [telemetry\_success\_sample\_percentage](#input\_telemetry\_success\_sample\_percentage) | Percentage of SUCCESSFUL traces retained by the collector's tail-sampling<br/>processor, after its always-keep policy for traces carrying an ERROR status.<br/>Accepts 0 through 100 and may differ by environment without changing task<br/>topology; 0 keeps error traces only. | `number` | `5` | no |
 | <a name="input_unhealthy_threshold"></a> [unhealthy\_threshold](#input\_unhealthy\_threshold) | Consecutive failed probes after which the target group deregisters a task<br/>and ECS replaces it. Together with health\_check\_interval this is what<br/>bounds how long a wedged task can keep receiving requests. | `number` | `2` | no |
 | <a name="input_writable_mount_paths"></a> [writable\_mount\_paths](#input\_writable\_mount\_paths) | Absolute container paths to keep writable when readonly\_root\_filesystem is<br/>true, each backed by its own Fargate ephemeral volume that is encrypted at<br/>rest and destroyed with the task. Defaults to the single temporary directory<br/>the JVM writes to, which is all the service images require. Must be<br/>non-empty whenever readonly\_root\_filesystem is true. | `list(string)` | <pre>[<br/>  "/tmp"<br/>]</pre> | no |
 
@@ -430,7 +475,7 @@ would be overwritten locally and rejected by the check-only CI drift gate.
 | <a name="output_task_definition_arn"></a> [task\_definition\_arn](#output\_task\_definition\_arn) | Revision-qualified ARN string of the task definition, so the value changes<br/>every time a new revision is registered. Consumed by<br/>infra/modules/step-functions-batch, whose responsibility includes<br/>task-definition wiring: its state machine starts a task through the<br/>synchronous run-task integration, and its execution role scopes<br/>ecs:RunTask to this ARN alongside ecs:StopTask, ecs:DescribeTasks and<br/>iam:PassRole. Never null -- the task definition is created for all nine<br/>instantiations, including the two -- batch and data-migration -- that have a<br/>task definition and no service. |
 | <a name="output_task_definition_family"></a> [task\_definition\_family](#output\_task\_definition\_family) | Family name string of the task definition, carrying no revision suffix.<br/>Consumed by a caller that wants ECS to resolve the family's latest active<br/>revision at run time instead of the revision this apply registered -- a<br/>Step Functions state that should pick up a redeployed image without a<br/>Terraform apply, for instance. Never null. |
 | <a name="output_task_definition_family_arn"></a> [task\_definition\_family\_arn](#output\_task\_definition\_family\_arn) | Revisionless task-definition family ARN assembled from the module's provider-resolved partition, Region and account identity. Step Functions consumes this form so workflow creation does not depend on the reporting task definition that later reads the workflow ARN from Parameter Store. |
-| <a name="output_task_role_arn"></a> [task\_role\_arn](#output\_task\_role\_arn) | ARN string of the IAM role the APPLICATION assumes at run time, as<br/>distinct from execution\_role\_arn below, which ECS assumes in order to<br/>start the task. This ARN is the identity least privilege is expressed<br/>against, and both roots read it: infra/modules/step-functions-batch takes<br/>the batch, data-migration and reporting values as the Resource of its one<br/>iam:PassRole statement, and a resource-owning module names it in a resource<br/>policy where a grant belongs with the resource rather than with the<br/>workload. The role is not empty when it arrives: main.tf attaches the<br/>caller's task\_role\_policy\_json plus two module-composed statements -- the<br/>exact-queue actions and the one-parameter write-gate read -- so what the<br/>service may reach is those three things and nothing besides. Never null: both<br/>roles are<br/>created for all nine instantiations. |
+| <a name="output_task_role_arn"></a> [task\_role\_arn](#output\_task\_role\_arn) | ARN string of the IAM role the APPLICATION assumes at run time, as<br/>distinct from execution\_role\_arn below, which ECS assumes in order to<br/>start the task. This ARN is the identity least privilege is expressed<br/>against, and both roots read it: infra/modules/step-functions-batch takes<br/>the batch, data-migration and reporting values as the Resource of its one<br/>iam:PassRole statement, and a resource-owning module names it in a resource<br/>policy where a grant belongs with the resource rather than with the<br/>workload. The role is not empty when it arrives: main.tf attaches the<br/>caller's task\_role\_policy\_json plus three module-composed statements -- the<br/>exact-queue actions, the one-parameter write-gate read, and the telemetry<br/>grant covering this workload's own log group and X-Ray segment ingestion -- so<br/>what the service may reach is those four things and nothing besides. Never null: both<br/>roles are<br/>created for all nine instantiations. |
 | <a name="output_task_role_name"></a> [task\_role\_name](#output\_task\_role\_name) | Name string -- not the ARN -- of the same application task role. Consumed<br/>by an environment root that attaches a further policy to the role after<br/>this module returns, since the Terraform resources that attach a policy<br/>take a role name while the resource policies that grant to a role take the<br/>ARN above. Never null. |
 <!-- END_TF_DOCS -->
 
@@ -525,16 +570,21 @@ Refactoring Rationale: AAP §0.7.8 does not pretend RACF has a cloud analogue.
 The target maps its control objective to least-privilege task identities and a
 managed user pool rather than claiming a syntax-level port.
 
-Assumptions: the only wildcard **resource** in the role policies accompanies the
-one API that does not support resource scoping, ECR authorization-token retrieval.
-No wildcard IAM **action** is present; image pull, configuration read, queue use,
-logging, KMS, and business permissions all name their permitted actions.
+Assumptions: two wildcard **resources** appear in the role policies, and each
+accompanies an API that does not support resource scoping: ECR authorization-token
+retrieval on the execution role, and X-Ray trace ingestion on the task role. No
+wildcard IAM **action** is present; image pull, configuration read, queue use,
+logging, KMS, X-Ray and business permissions all name their permitted actions.
 
-Refactoring Rationale: this paragraph also named X-Ray ingestion as a wildcard
-resource. That statement went with the withdrawn collector sidecar's task-role
-policy, so the task role now holds neither a wildcard action nor a wildcard
-resource -- a stronger property than the sentence was conceding, and worth stating
-rather than leaving as a stale concession.
+Assumptions: the X-Ray grant is two write-only actions, `PutTraceSegments` and
+`PutTelemetryRecords`. Neither has a resource form to scope to -- a segment does not
+exist until it is submitted -- so the narrowing available is on the action, and no
+read action is granted: a task can submit its own traces and cannot read anyone's.
+
+Refactoring Rationale: this paragraph read "the only wildcard resource", on the
+grounds that the X-Ray statement had gone with the withdrawn collector sidecar. The
+sidecar is restored, so the concession is restored with it rather than left
+understating what the role holds -- an accurate two is worth more than a stale one.
 
 Refactoring Rationale: a public IP is withheld rather than offered as an
 opt-out variable. The network module supplies private routes and VPC endpoints

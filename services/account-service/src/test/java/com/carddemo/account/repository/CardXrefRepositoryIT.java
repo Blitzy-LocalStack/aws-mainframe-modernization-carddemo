@@ -700,10 +700,15 @@ class CardXrefRepositoryIT {
      * significant in that value and sixteen significant digits exceed what binary floating point holds
      * exactly, so the key is compared as characters at every hop and never rendered as a number.</p>
      *
-     * <p>Assumptions: the inherited keyed read and the named one are asserted to agree, because the
-     * interface offers both and a reader needs to know they resolve to the same row rather than to two
-     * subtly different statements. The named one exists because a call site reading the inherited form
-     * gives a reviewer no indication that the value being passed is a primary account number.</p>
+     * <p>Refactoring Rationale: this case asserted the named read and an INHERITED {@code findById}
+     * against each other, because the interface offered both and a reader needed to know they resolved
+     * to the same row. It offers one now: {@code CardXrefRepository} extends the Spring Data marker
+     * rather than {@code JpaRepository}, so nothing is inherited and the named read is the whole of the
+     * by-key path. The two assertions are withdrawn rather than repointed -- an agreement between two
+     * routes is not a fact about a table when only one route exists, and re-declaring
+     * {@code findById} purely so this case could keep making the comparison would reintroduce the
+     * second route to test it. What the named read must do is unchanged and is asserted below: resolve
+     * the seeded row through {@code pk_card_xref}, and report an unknown card as absence.</p>
      *
      * <p>Assumptions: an unknown card yields an absent result rather than a raised condition, which is the
      * shape the reference's own not-found arm has -- at L741 of {@code app/cbl/COACTVWC.cbl} it sets an
@@ -715,27 +720,17 @@ class CardXrefRepositoryIT {
     @Test
     @DisplayName("The keyed read on the CHAR(16) card number round-trips, and an unknown card is absent")
     void theKeyedReadByCardNumberRoundTripsAndAnUnknownCardIsAbsent() {
-        Optional<CardXref> byIdentity = this.crossReferences.findById(FIXTURE_CARD_NUMBER);
-        assertThat(byIdentity)
-                .as("the seeded card must resolve through the primary key declared as pk_card_xref")
+        Optional<CardXref> byCardNumber = this.crossReferences.findByCardNum(FIXTURE_CARD_NUMBER);
+        assertThat(byCardNumber)
+                .as("the seeded card must resolve through the primary key declared as pk_card_xref,"
+                        + " which is the card-number key of app/cbl/CBACT03C.cbl L32")
                 .isPresent();
-        assertThat(byIdentity.get().getCardNum()).isEqualTo(FIXTURE_CARD_NUMBER);
-        assertThat(byIdentity.get().getCustomerId()).isEqualTo(FIXTURE_CUSTOMER_ID);
-        assertThat(byIdentity.get().getAccountId()).isEqualTo(FIXTURE_ACCOUNT_ID);
-
-        assertThat(this.crossReferences.findByCardNum(FIXTURE_CARD_NUMBER))
-                .as("the named keyed read must resolve the same row as the inherited one, both being the"
-                        + " card-number key of app/cbl/CBACT03C.cbl L32")
-                .isPresent()
-                .get()
-                .extracting(CardXref::getCardNum)
-                .isEqualTo(FIXTURE_CARD_NUMBER);
+        assertThat(byCardNumber.get().getCardNum()).isEqualTo(FIXTURE_CARD_NUMBER);
+        assertThat(byCardNumber.get().getCustomerId()).isEqualTo(FIXTURE_CUSTOMER_ID);
+        assertThat(byCardNumber.get().getAccountId()).isEqualTo(FIXTURE_ACCOUNT_ID);
 
         assertThat(this.crossReferences.findByCardNum(CARD_NUMBER_NOT_CROSS_REFERENCED))
                 .as("a card that is not cross-referenced is an empty result, never a raised condition")
-                .isEmpty();
-        assertThat(this.crossReferences.findById(CARD_NUMBER_NOT_CROSS_REFERENCED))
-                .as("the inherited read answers an unknown key the same way")
                 .isEmpty();
     }
 

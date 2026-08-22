@@ -43,8 +43,15 @@
 #         and the fourth is authorised by the very token it revokes.
 #       - components.headers: the response header every operation returns,
 #         declared once.
-#       - components.responses: the two error responses that are identical across
-#         all five user-administration operations.
+#       - components.responses: the SEVEN failures whose body and headers are
+#         identical wherever they occur -- the two authorisation refusals
+#         (Unauthorized, Forbidden), the read-only-window refusal
+#         (ServiceUnavailable) and the four request-envelope refusals the shared
+#         advice answers (MethodNotAllowed, UnsupportedMediaType, NotAcceptable,
+#         PayloadTooLarge). Refactoring Rationale: this said two, the figure that
+#         was correct when only the authorisation pair was shared; the other five
+#         were added without it being re-measured, so it is now counted from
+#         components.responses itself.
 #       - components.schemas: twenty-one payload shapes -- ELEVEN of this context's
 #         own and TEN that mirror types the shared kernel owns, among the latter the
 #         error body every failing operation returns together with the two nested
@@ -54,9 +61,17 @@
 #         inventory that was wrong before the addition stays wrong after it.
 #
 # WHY (non-obvious design decisions):
-#       (0) Assumptions: components.parameters declares one entry, the correlation
-#       header every operation accepts, referenced rather than re-typed at each
-#       operation.
+#       (0) Assumptions: components.parameters declares FIVE entries -- the
+#       correlation header every operation accepts, the three inputs the user list
+#       takes (StartUserId, Cursor, PagingDirection) and the identifier path segment
+#       the read, update and delete operations carry (UserIdPath) -- each referenced
+#       rather than re-typed at every operation that takes it. Refactoring
+#       Rationale: this said one entry, then four; each figure was correct when it
+#       was written and neither was incremented into the next -- both were counted
+#       from components.parameters itself, because a count nobody re-measures is a
+#       statement that becomes false without anything being edited. The list's three
+#       inputs are two positions and a direction, and the two positions are mutually
+#       exclusive: StartUserId opens a browse, Cursor continues one.
 #       (1) Assumptions: the comment conventions in this file. Purpose is stated
 #       once, in this header block, which is the analogue of a docstring for a
 #       format that has none; no statement-level "# WHAT:" comment sits above any
@@ -109,10 +124,13 @@
 #       Its shape is the pool's own documented challenge exchange rather than a
 #       guess, and its members are named on SignOnChallenge and
 #       SignOnChallengeRequest below.
-#       (4) Refactoring Rationale: no password is carried anywhere except the
-#       sign-on request, which forwards it to the identity provider and keeps
-#       nothing. The baseline handled the credential three ways and this contract
-#       ends all three: it was stored in the record, at
+#       (4) Refactoring Rationale: no password is ACCEPTED anywhere except the
+#       sign-on and challenge requests, which forward it to the identity provider
+#       and keep nothing, and exactly one credential is RETURNED anywhere: the
+#       generated one-time value on the create response, described on
+#       CreatedUserResponse.oneTimeCredential, which no column stores and no
+#       second operation re-issues. The baseline handled the credential three ways
+#       and this contract ends all three: it was stored in the record, at
 #       app/cpy/CSUSR01Y.cpy line 21 ("05 SEC-USR-PWD PIC X(08)."); it was
 #       compared in the clear, at app/cbl/COSGN00C.cbl line 223
 #       ("IF SEC-USR-PWD = WS-USER-PWD"); and it was written back onto the 3270
@@ -120,9 +138,18 @@
 #       ("MOVE SEC-USR-PWD TO PASSWDI OF COUSR2AI"), so the update screen
 #       displayed every user's password to whoever opened it. The sibling
 #       migration db/migration/V1__auth.sql creates no password column, so there
-#       is nothing for a create, update or read operation here to accept or
-#       return. This is the one place where fidelity to the baseline is declined
-#       rather than preserved, and it is declined openly.
+#       is nothing for a create, update or read operation here to accept, and
+#       nothing for a read or update operation to return. This is the one place
+#       where fidelity to the baseline is declined rather than preserved, and it
+#       is declined openly.
+#       Assumptions: the one-time credential on the create response is not an
+#       exception to any of the three endings above and is stated here so a reader
+#       does not take it for one. It is not stored, since there is no column; it is
+#       not compared here, since the pool holds the verifier; and it is not
+#       redisplayed, since it exists in that one response and nowhere else. What it
+#       replaces is a gap rather than a baseline behaviour -- the baseline's
+#       administrator typed a password into the create screen, and a managed pool
+#       generates one instead.
 #       (5) Assumptions: this contract is not verifiable by the repository's
 #       golden-master suite. tests/README.md lines 83 to 85 record that the
 #       online CO* CICS programs cannot run end to end without a CICS runtime,
@@ -485,12 +512,27 @@ paths:
           #   literal is not a response of this operation. It is cited by the
           #   register entry above and carried in the browser application's
           #   message catalogue, so the lineage stays discoverable.
+          # Assumptions: the identity checks named below are the reason this status
+          #   covers more than a wrong password. A token set the pool issues is bound
+          #   to a row of auth.users through the sub claim it carries, which is the
+          #   column auth.users declares NOT NULL UNIQUE, and the row's identifier,
+          #   the token's cognito:username claim and the submitted identifier must be
+          #   one identifier with a group membership matching the row's stored type.
+          #   Each of those is a statement about provisioning rather than about the
+          #   credential, so each is answered with this one sentence and none is
+          #   distinguished: a caller told which comparison failed would learn which
+          #   identifiers exist, which subjects they carry or which authority they
+          #   hold, and that is the disclosure D-SIGNON-EXISTENCE-UNIFORM withholds.
           description: >-
             The credential was refused. The message is
             "Wrong Password. Try again ..." (app/cbl/COSGN00C.cbl lines 242 to
-            243, where the literal continues onto line 243) for both an unknown
-            user identifier and an incorrect password, because the pool returns
-            uniform user-existence errors. It is the only message this status
+            243, where the literal continues onto line 243) for an unknown user
+            identifier, for an incorrect password, and for a pool identity that
+            does not bind to a row of this service -- its subject resolving no
+            row, the row disagreeing with the identifier presented, or its group
+            membership disagreeing with the row's stored type -- because the pool
+            returns uniform user-existence errors and because none of these may be
+            distinguished from the others. It is the only message this status
             carries: the baseline's "User not found. Try again ..." (line 249) is
             not reachable through this operation, and the divergence is
             registered as D-SIGNON-EXISTENCE-UNIFORM. No fieldErrors entry
@@ -530,7 +572,11 @@ paths:
           #   above, carrying the challenge shape, because the credential was in fact
           #   accepted.
           description: >-
-            The credential could not be evaluated. The message is
+            The credential could not be evaluated -- the pool was unreachable or
+            answered a fault, the request signature was rejected, the pool raised a
+            challenge this flow publishes no answer path for, the local store could
+            not be read, or the pool issued an identity token this service cannot
+            read an identity from. The message is
             "Unable to verify the User ..." (app/cbl/COSGN00C.cbl line 254). The
             body carries a correlation identifier and, where the failure was an
             abend, the externally safe abend aggregate described under
@@ -612,10 +658,18 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "401":
+          # Assumptions: "not issued to the identifier supplied" is decided from the
+          #   renewed token set's own sub claim rather than from its user name alone,
+          #   because the pool permits a user name to be reassigned and never reissues
+          #   a subject -- so the name claim cannot say which pool account a token was
+          #   minted for, and auth.users.cognito_sub can.
           description: >-
-            The refresh token was expired, revoked, or not issued to the identifier
-            supplied. The caller signs on again; no distinction between the three is
-            reported, for the same non-disclosure reason sign-on gives.
+            The refresh token was expired, revoked, or renewed a token set that does
+            not bind to a row of this service -- its subject resolving no row, the row
+            disagreeing with the identifier supplied, or its group membership
+            disagreeing with the row's stored type. The caller signs on again; no
+            distinction between them is reported, for the same non-disclosure reason
+            sign-on gives.
           headers:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
@@ -633,7 +687,10 @@ paths:
           $ref: "#/components/responses/UnsupportedMediaType"
         "500":
           description: >-
-            The renewal could not be evaluated. The message is
+            The renewal could not be evaluated -- the pool was unreachable or answered
+            a fault, it answered with no token set or an incomplete one, the local
+            store could not be read, or the identity token carries no identity this
+            service can read. The message is
             "Unable to verify the User ..." (app/cbl/COSGN00C.cbl line 254) and the
             body never carries a provider diagnostic.
           headers:
@@ -733,8 +790,11 @@ paths:
           #   the same in every case: sign on again.
           description: >-
             The session could not be accepted -- it has expired, has already been
-            used, was altered, or was not issued for the identifier supplied. The
-            body names no reason beyond that, and the remedy is to sign on again.
+            used, was altered, was not issued for the identifier supplied, or the
+            token set it produced does not bind to a row of this service, its subject
+            resolving no row, the row disagreeing with the identifier supplied, or its
+            group membership disagreeing with the row's stored type. The body names no
+            reason beyond that, and the remedy is to sign on again.
           headers:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
@@ -753,9 +813,10 @@ paths:
         "500":
           description: >-
             The exchange could not be evaluated -- the pool was unreachable, the
-            request signature was rejected, or the pool raised a further challenge
-            this flow does not publish a contract for. The body carries a
-            correlation identifier and never a provider diagnostic.
+            request signature was rejected, the pool raised a further challenge this
+            flow does not publish a contract for, the local store could not be read,
+            or the issued identity token carries no identity this service can read.
+            The body carries a correlation identifier and never a provider diagnostic.
           headers:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
@@ -898,6 +959,13 @@ paths:
         back, with direction naming which of the two you sent.
 
 
+        The first page may be POSITIONED instead of opened at the start of the
+        set: send startUserId to begin at or after an identifier, which is the
+        baseline's search field. It is the opening turn's input and cannot be
+        combined with a cursor -- send one or the other, and page on from the
+        cursors the positioned page returns.
+
+
         Reaching an end of the file is a success, never a failure. A request that
         lands on the last page returns 200 with hasNext false, and a request that
         cannot move at all -- because the caller asked to go back from the first
@@ -912,6 +980,12 @@ paths:
       x-required-authority: carddemo-admin
       parameters:
         - $ref: "#/components/parameters/CorrelationIdHeader"
+        # Assumptions: the opening position is declared FIRST among the query inputs,
+        #   ahead of the cursor, and api/UserController.java declares its handler's
+        #   parameters in the same order. That is the order the refusal naming both of
+        #   them uses, so a client rendering field errors in the order this document
+        #   declares them draws them in the order it receives them.
+        - $ref: "#/components/parameters/StartUserId"
         # Alternatives Considered: positioning a page by an ordinal or a row
         #   offset, which is the obvious shape and is rejected on a specific
         #   defect. Under concurrent insertion the number of rows preceding a
@@ -1037,12 +1111,23 @@ paths:
               schema:
                 $ref: "#/components/schemas/PageResponse"
         "400":
+          # Refactoring Rationale: this named "both cursors supplied at once" as a
+          #   refusal case, and there has only ever been ONE cursor parameter -- the
+          #   sentence was left behind by the decision recorded beside the Cursor
+          #   parameter, which rejected a lastKey/firstKey pair precisely so that
+          #   case could not arise. The case that DOES pair two inputs is a position
+          #   and a cursor, and it is named below with the message the service raises.
           description: >-
-            A supplied cursor could not be opened -- it was malformed, altered,
-            expired, or presented for a different query or subject than it was
-            issued for -- or both cursors were supplied at once, or direction did
-            not name one of the two permitted values. The fieldErrors array
-            identifies the offending parameter by name.
+            One of four things. A supplied cursor could not be opened -- it was
+            malformed, altered, expired, or presented for a different query,
+            subject or direction than it was issued for. Or startUserId and cursor
+            were supplied together, which is refused with
+            "User ID can NOT be combined with paging. Clear one and try again...",
+            naming both parameters, because a request stating two positions cannot
+            say which the caller meant. Or startUserId fell outside the identifier
+            domain or the stored width, carrying that domain's own sentence. Or
+            direction did not name one of the two permitted values. The fieldErrors
+            array identifies every offending parameter by name.
           headers:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
@@ -1133,27 +1218,49 @@ paths:
         "201":
           description: >-
             The row was created. The body is the stored row as a subsequent read
-            would return it, PLUS credentialSecretName -- the NAME of the managed-secret
-            entry holding the one-time credential for its owner's first sign-on. The
-            Location header addresses the row.
+            would return it, PLUS two values a later read cannot answer with:
+            oneTimeCredential, the credential the new pool account was created with,
+            and credentialSecretName, the NAME of the managed-secret entry that same
+            credential was archived to. The Location header addresses the row.
 
 
-            NO CREDENTIAL IS IN THIS BODY. Onboarding is a two-step act: read this
-            locator, then retrieve the value from that entry with
-            secretsmanager:GetSecretValue and the customer-managed key's grant, and hand
-            THAT over. The retrieval is privileged and audited, which is the point of it;
-            a browser session cannot perform it and a task role can.
+            THIS RESPONSE CARRIES A LIVE CREDENTIAL AND IS THE ONLY PLACE IT
+            APPEARS. Nothing in this service persists it -- auth.users declares no
+            password column -- and no operation re-issues it, so a client that
+            discards this body cannot ask for the value again. Hand it to the new
+            user, then discard it. Its lifetime is exactly one sign-on: the account
+            stands in the provider's force-change state, so presenting the value
+            raises the new-password challenge that POST /api/v1/auth/challenge
+            answers, and once that challenge is answered the value verifies nothing.
+            It buys one authentication and cannot be replayed.
 
 
-            Refactoring Rationale: this description asserted that the credential itself
-            was in the body and appeared nowhere else. Both halves were wrong and the
-            schema below, the response record and the later prose on
-            CreatedUserResponse all already said so -- the value is published to a
-            per-user managed-secret entry, so the response was never its only home, and
-            what crosses the wire is a name. The claim is corrected rather than softened
-            because an operator acting on it looked for a credential property that does
-            not exist, concluded the create had failed to produce one, and had no reason
-            to look in the secret store where it actually was.
+            The response is marked Cache-Control: no-store, and a client is obliged
+            to honour that: do not write the value to session or local storage, to a
+            URL, a query string, a route parameter, a form field or a log, and clear
+            it from memory once it has been handed over. A client that renders it
+            should render it once, on a surface the operator dismisses.
+
+
+            An operator who loses this body -- a closed tab, a dropped connection
+            after the commit -- recovers the value from the entry named by
+            credentialSecretName, using secretsmanager:GetSecretValue and the
+            customer-managed key's grant. That retrieval is privileged and audited,
+            which is why the locator is kept beside the value rather than replaced
+            by it: the two answer different failures and neither substitutes for the
+            other.
+
+
+            Refactoring Rationale: this description twice said the wrong thing about
+            the same value. It first claimed the credential was in the body when the
+            code published a locator, and was then corrected to claim NO CREDENTIAL
+            IS IN THIS BODY and that onboarding ended with a privileged secret-store
+            read. That second claim was accurate about the code and wrong about the
+            outcome: the principal who must hand the credential over is the
+            administrator who performed the create, whose browser session holds
+            neither the read action nor the key grant, so every account created
+            through this operation was stranded. The credential is returned here for
+            that reason, and this contract now states what the code does.
           headers:
             Location:
               description: >-
@@ -1341,18 +1448,18 @@ paths:
         "400":
           description: >-
             The path segment was blank, was wider than eight characters, or
-            carried a character the stored key cannot be drawn from. A blank segment
+            carried a character outside the addressable domain. A blank segment
             carries "User ID can NOT be empty..." (app/cbl/COUSR02C.cbl lines 148
             and 182, and app/cbl/COUSR03C.cbl lines 147 and 179), with no space
             before the ellipsis. An over-wide one carries
             "User ID must be at most 8 characters...", a sentence this service
             authors rather than transcribes, because an eight-position screen field
             could not submit a ninth character for the baseline to refuse. A segment
-            carrying a character outside the printable single-byte range PIC X(08)
-            means carries "User ID contains an unsupported character..." -- which is
-            also what refuses a segment that would have folded WIDER than eight
-            positions, since only a character from outside that range can change a
-            value's width when it is upper-cased. Each of these is keyed userId in
+            carrying anything other than an ASCII letter or digit carries
+            "User ID must be letters and digits only..." -- which is also what
+            refuses a segment that would have folded WIDER than eight positions,
+            since only a character from outside that alphabet can change a value's
+            width when it is upper-cased. Each of these is keyed userId in
             the fieldErrors array, and none is reported as a 404 instead: a value
             the column could not hold is not a key any row could carry.
           headers:
@@ -1485,10 +1592,10 @@ paths:
             delete operations, and before the body is examined: blank carries
             "User ID can NOT be empty..." (app/cbl/COUSR02C.cbl lines 148 and 182),
             wider than eight characters carries
-            "User ID must be at most 8 characters...", and a character outside the
-            printable single-byte range PIC X(08) means -- including one that would
-            widen the derived key past eight positions when upper-cased -- carries
-            "User ID contains an unsupported character...". All three are keyed
+            "User ID must be at most 8 characters...", and anything other than an
+            ASCII letter or digit -- including a character that would widen the
+            derived key past eight positions when upper-cased -- carries
+            "User ID must be letters and digits only...". All three are keyed
             userId, and in each case the stored row is neither read nor changed.
           headers:
             X-Correlation-Id:
@@ -1608,17 +1715,17 @@ paths:
         "400":
           description: >-
             The confirmation was absent or was not true, or the path segment was
-            blank, wider than eight characters, or carried a character the stored key
-            cannot be drawn from. In the confirmation case the fieldErrors array
+            blank, wider than eight characters, or carried a character outside the
+            addressable domain. In the confirmation case the fieldErrors array
             carries a single entry keyed confirmed and nothing is deleted; in the
             identifier case the entry is keyed userId and carries
             "User ID can NOT be empty..." (app/cbl/COUSR03C.cbl lines 147 and 179)
             when the segment is blank,
             "User ID must be at most 8 characters..." when it is over-wide, or
-            "User ID contains an unsupported character..." when it carries a
-            character outside the printable single-byte range PIC X(08) means --
-            which includes any character that would widen the derived key when
-            upper-cased. Nothing is deleted in any of them.
+            "User ID must be letters and digits only..." when it carries anything
+            other than an ASCII letter or digit -- which includes any character
+            that would widen the derived key when upper-cased. Nothing is deleted
+            in any of them.
           headers:
             X-Correlation-Id:
               $ref: "#/components/headers/XCorrelationId"
@@ -1781,8 +1888,27 @@ components:
         greater than it in ascending order, previous reads keys strictly less than
         it in descending order. It is meaningful only alongside a cursor, and the
         two are sent together or not at all. Defaults to next, which with no
-        cursor supplied returns the first page. A direction whose cursor is
-        absent, or a cursor sealed for the other direction, is a 400.
+        cursor supplied returns the first page. A direction that arrives WITHOUT a
+        cursor names no page to step from and is canonicalised to that same first
+        page rather than refused, whichever direction it named. A cursor sealed for
+        the other direction IS a 400.
+      # WHY : Refactoring Rationale: this description stated that a direction whose
+      #   cursor is absent "is a 400", in the same sentence that promised the first
+      #   page for a request carrying no cursor -- two answers for one request, and
+      #   the runtime gives the second. com.carddemo.auth.service.UserService reads
+      #   the direction only when a cursor accompanies it and otherwise opens the
+      #   ascending first page, and its own rationale records that it does so
+      #   BECAUSE this document publishes that promise. The refusal clause was the
+      #   half that had no implementation, so it is withdrawn rather than built: a
+      #   conforming client sends the pair together, and the one client that exists
+      #   refuses the mismatched pair before dispatch.
+      # WHY : Trade-offs: the seven contracts of this migration do not agree on this
+      #   combination -- reference and authorization refuse it, this contract and the
+      #   account and card contracts answer the opening page -- and the disagreement
+      #   is left standing rather than harmonised here, because each answer matches
+      #   the baseline browse its service migrates. ui/src/api/client.ts carries the
+      #   measured census and refuses the pair client-side for every service, so no
+      #   screen depends on which answer its service would have given.
       schema:
         $ref: "#/components/schemas/PageDirection"
 
@@ -1795,6 +1921,71 @@ components:
     #   accepts an inbound value and refuses one that is over-long or carries an
     #   unsafe character, and the browser client sends the header on every request
     #   from ui/src/api/client.ts.
+    # Assumptions: this parameter is named for what it holds, a user identifier, and
+    #   NOT startKey. The page envelope's firstKey and lastKey members are the sealed
+    #   cursors, so a request member ending in Key would invite a client to send one
+    #   of those here -- the same confusion the Cursor parameter above records
+    #   rejecting a lastKey/firstKey pair for.
+    # Assumptions: it is refused ALONGSIDE a cursor rather than one of the two being
+    #   ignored, with 400 naming both, because a request stating two positions cannot
+    #   say which the caller meant and either silent choice discards a stated intent.
+    #   The baseline cannot express the pair at all: one turn reads the search field
+    #   (app/cbl/COUSR00C.cbl lines 218 to 222) or moves by the saved key pair (lines
+    #   435 and 389), never both.
+    # Refactoring Rationale: this parameter did not exist and the browser client
+    #   filtered the page it already held instead, so an identifier sorting beyond the
+    #   first ten rows produced an empty table where the baseline showed the page.
+    #   Positioning belongs to the server because only the server can read past the
+    #   page the client holds.
+    StartUserId:
+      name: startUserId
+      in: query
+      required: false
+      description: >-
+        Identifier to open the browse AT OR AFTER, which is the baseline's search
+        field: app/cbl/COUSR00C.cbl reads USRIDINI on the ENTER turn and seeks the
+        browse on it, so an operator could jump straight to an identifier without
+        paging to it. Send it on the first page only, and never together with a
+        cursor.
+
+
+        Positioning is INCLUSIVE, unlike the cursor beside it. A row whose identifier
+        equals this value is the FIRST row of the page -- the baseline skips its
+        stepping read on the ENTER turn, guarded at line 288, so the row it seeks to
+        is the row at the top of the screen -- and a value no row carries positions on
+        the next identifier after it rather than refusing, which is why the baseline
+        answers an unmatched seek with a boundary sentence at line 603 and not with a
+        not-found. A value past every stored identifier returns an empty items array
+        with 200.
+
+
+        Omitting it, or sending it empty, opens the browse at the start of the set,
+        which is what the baseline's blank search field means: it seeks on LOW-VALUES
+        at line 219. The pattern below admits the empty form for that reason. The
+        runtime is a shade more tolerant than that pattern in exactly one direction:
+        it trims surrounding blanks and treats a value of nothing but blanks as
+        omission, so a padded identifier positions where the bare one would. That
+        tolerance is bounded by the width stated below and not by the trimmed length,
+        because the width is applied to the value AS SENT -- the same order the
+        identifier path segment is checked in -- so a value whose blanks push it past
+        eight characters is refused with the width sentence rather than trimmed into
+        range. Every value this parameter admits is accepted, which is the safe
+        direction for a caller generating requests from this document.
+
+
+        The character domain and the width are the stored identifier's own, because
+        this value is compared against the stored key: at most eight characters drawn
+        from the ASCII letters and digits, folded to derive the key, so either case
+        positions at the same row. A value outside the domain carries
+        "User ID must be letters and digits only..." and one wider than eight carries
+        "User ID must be at most 8 characters...", each refused with 400 keyed
+        startUserId -- the key names this search input rather than a row's identifier,
+        so a form marks the control the operator filled in.
+      schema:
+        type: string
+        maxLength: 8
+        pattern: "^[A-Za-z0-9]{0,8}$"
+
     CorrelationIdHeader:
       name: X-Correlation-Id
       in: header
@@ -1829,45 +2020,63 @@ components:
       in: path
       required: true
       description: >-
-        Identifier of the user this request addresses. At most eight characters,
-        the width SEC-USR-ID is declared with at app/cpy/CSUSR01Y.cpy line 18 and
-        the width the users table stores it at. The value is folded -- trimmed and
+        Identifier of the user this request addresses, carried as ONE path segment.
+        At most eight characters, the width SEC-USR-ID is declared with at
+        app/cpy/CSUSR01Y.cpy line 18 and the width the users table stores it at, and
+        drawn from the ASCII letters and digits. The value is folded -- trimmed and
         upper-cased -- to derive the key that is looked up, so either case reaches
         the same row.
 
 
-        Two rules govern the value beyond that width. It must be drawn from the
-        printable single-byte range PIC X(08) means, and the key it folds to must
-        occupy at most those eight positions; a value failing either is refused with
-        400 keyed userId rather than reported as a row that was not found, because a
-        value the column could not hold is not a key any row could carry. No
-        narrower character class is imposed: the field declares none, so the
-        addressable range is kept as wide as an eight-position single-byte key can
-        express, and all ten identifiers the seed security file carries -- upper-case
-        letters and digits -- sit well inside it.
+        The character domain is what makes the key addressable, and it is narrower
+        than the field declares for that reason alone. PIC X(08) imposes no
+        character class, so the stored key could once be drawn from the whole
+        printable single-byte range -- which contains the slash that would split this
+        segment in two, the percent that opens an escape the container decodes before
+        any handler runs, the hash that is never transmitted at all, and the question
+        mark that opens a query. A row keyed with one of those was storable and then
+        reachable by none of the three single-user operations. All ten identifiers the
+        seed security file carries are upper-case letters and digits, so the narrowing
+        costs the reference nothing; it is registered as D-USER-ID-CANONICAL-DOMAIN in
+        docs/architecture/cobol-to-service-traceability.md.
 
 
-        No pattern facet is asserted for the range. An expression anchored tightly
-        enough to state it would also refuse a segment with a surrounding blank,
-        which this service trims rather than rejects, and the same range is stated
-        in prose on the request-body property for the same reason -- so the two
-        routes into one rule are documented the same way rather than one being
-        expressed and the other described.
+        A value outside the domain carries
+        "User ID must be letters and digits only...", and one wider than eight
+        characters carries "User ID must be at most 8 characters...". Either is
+        refused with 400 keyed userId rather than reported as a row that was not
+        found, because a value the column could not hold is not a key any row could
+        carry.
+
+
+        The pattern facet states the whole domain as one expression, matching the
+        create body's property character for character, and it admits both cases
+        because the service folds the segment. It admits no surrounding blank, which
+        the service would trim: the runtime therefore accepts a shade more than this
+        parameter admits, which is the safe direction -- every value stated here is
+        accepted -- while publishing the padded form would describe it as a normal
+        way to address a row, and a blank cannot survive a path segment unencoded.
       schema:
         type: string
         minLength: 1
         maxLength: 8
+        pattern: "^[A-Za-z0-9]{1,8}$"
 
-  # WHY : Trade-offs: only these two are shared, and the others are written out at
+  # WHY : Trade-offs: only these SEVEN are shared, and the others are written out at
   #       each operation even though that is more text. The reason is that every
   #       other failure carries a message literal belonging to a specific program
   #       line, and those literals differ per operation -- the create conflict
   #       says one thing, the delete failure another. Sharing those would have
   #       forced a single generic wording and lost the message fidelity this
-  #       contract exists to record. These two carry no baseline literal at all,
-  #       because the baseline had no analogue for them: a 3270 user reached these
-  #       screens through a signed-on CICS session, so there was no
-  #       missing-credential or wrong-authority path to produce a message for.
+  #       contract exists to record. None of these seven carries a baseline literal
+  #       at all, because the baseline had no analogue for any of them: a 3270 user
+  #       reached these screens through a signed-on CICS session, so there was no
+  #       missing-credential, wrong-authority, quiesced-window or request-envelope
+  #       path to produce a message for.
+  #       Refactoring Rationale: this said "only these two", which counted the
+  #       authorisation pair alone and was left behind when the outage refusal and
+  #       the four envelope refusals joined them. The census is stated here and in
+  #       this file's header from the mapping below rather than from memory.
   responses:
     Unauthorized:
       description: >-
@@ -2018,33 +2227,6 @@ components:
             $ref: "#/components/schemas/ApiError"
 
 
-  # WHY : Assumptions: the seven mirrored shapes -- the cursor token, the paging
-  #       direction, the correlation identity, the page envelope, the error body,
-  #       its per-field entry and its abend aggregate -- describe types published by
-  #       services/common-lib and are NOT local redefinitions of them. A contract
-  #       cannot reference a Java type, so the shape has to be written out here;
-  #       what must never happen is that the written shape drifts from the published
-  #       one, because a locally invented error or paging shape would compile, serve
-  #       and disagree with the eight services that share the originals. This is the
-  #       same discipline the reference suite states for record layouts, where a
-  #       layout is resolved through one include path and never duplicated. Every
-  #       property name and order below is the shared record's own.
-  # WHY : Assumptions: property names are the record component names exactly,
-  #       because no property-naming strategy is configured anywhere in this service
-  #       or in the shared defaults it imports, so the serialiser emits component
-  #       names verbatim. Renaming one here would produce a contract the runtime
-  #       contradicts on the first response.
-  # WHY : Assumptions: the nine schemas this context owns take their field widths
-  #       from two independent readings apiece, the 80-byte record at
-  #       app/cpy/CSUSR01Y.cpy lines 17 to 23 and the symbolic maps cited on each
-  #       property, which is why the widths are expressed as constraints a caller is
-  #       held to rather than as documentation.
-  # WHY : Refactoring Rationale: the fixed-length record's padding is not carried
-  #       across. SEC-USR-FILLER at app/cpy/CSUSR01Y.cpy line 23 is twenty-three
-  #       bytes that exist to make the record eighty bytes long; it addresses no
-  #       data, no program reads it, and a JSON payload has no length to pad, so it
-  #       appears in no schema.
-
     # WHY : Refactoring Rationale: a SECOND definition of MethodNotAllowed, NotAcceptable and
     #   UnsupportedMediaType stood here and all three are withdrawn. They were a whole earlier
     #   generation of the same three components, merged alongside the surviving generation, and a
@@ -2094,6 +2276,48 @@ components:
           schema:
             $ref: "#/components/schemas/ApiError"
   schemas:
+
+    # WHY : Assumptions: the TEN mirrored shapes -- the cursor token, the paging
+    #       direction, the correlation identity, the page envelope, the severity and
+    #       subsystem enumerations, the field validation state, the error body, its
+    #       per-field entry and its abend aggregate -- describe types published by
+    #       services/common-lib and are NOT local redefinitions of them. A contract
+    #       cannot reference a Java type, so the shape has to be written out here;
+    #       what must never happen is that the written shape drifts from the published
+    #       one, because a locally invented error or paging shape would compile, serve
+    #       and disagree with the eight services that share the originals. This is the
+    #       same discipline the reference suite states for record layouts, where a
+    #       layout is resolved through one include path and never duplicated. Every
+    #       property name and order below is the shared record's own.
+    # WHY : Assumptions: property names are the record component names exactly,
+    #       because no property-naming strategy is configured anywhere in this service
+    #       or in the shared defaults it imports, so the serialiser emits component
+    #       names verbatim. Renaming one here would produce a contract the runtime
+    #       contradicts on the first response.
+    # WHY : Assumptions: the ELEVEN shapes this context owns are the six sign-on and
+    #       session shapes, the list element, the two write bodies, the created-row
+    #       acknowledgement and the single-user view. Ten of the eleven restate at
+    #       least one stored field's width -- the identifier, one of the two names, or
+    #       the type -- and each of those widths comes from two independent readings,
+    #       the 80-byte record at app/cpy/CSUSR01Y.cpy lines 17 to 23 and the symbolic
+    #       map cited on the property itself, which is why they are expressed as
+    #       constraints a caller is held to rather than as documentation. SignOutRequest
+    #       is the one that restates none: it carries a refresh token alone, whose
+    #       bound comes from the pool rather than from the record.
+    # WHY : ⚠️ Refactoring Rationale: this census said seven mirrored and nine owned,
+    #       and it sat under components.responses rather than over the mapping it
+    #       describes. Both were drift rather than disagreement -- the mirrored set
+    #       gained the two enumerations and the field validation state, the owned set
+    #       gained the sign-out request and the challenge request, and neither figure
+    #       was re-measured -- and the misplacement is why: a census that does not sit
+    #       on its own block is not re-read when that block changes. Eleven owned plus
+    #       ten mirrored is the twenty-one this file's header states, and all three
+    #       numbers are now counted from this mapping.
+    # WHY : Refactoring Rationale: the fixed-length record's padding is not carried
+    #       across. SEC-USR-FILLER at app/cpy/CSUSR01Y.cpy line 23 is twenty-three
+    #       bytes that exist to make the record eighty bytes long; it addresses no
+    #       data, no program reads it, and a JSON payload has no length to pad, so it
+    #       appears in no schema.
 
     SignOnRequest:
       type: object
@@ -2705,38 +2929,48 @@ components:
           type: string
           minLength: 1
           maxLength: 8
-          pattern: "\\S"
+          pattern: "^[A-Za-z0-9]{1,8}$"
           description: >-
             Identifier for the new row and its primary key, at most eight
-            characters. Must not be blank, per app/cbl/COUSR01C.cbl line 132 -- a
-            value of only whitespace is refused by the pattern, matching that
-            check -- and must not already exist: a duplicate is refused with 409
-            rather than overwriting the existing row.
+            characters drawn from the ASCII letters and digits. Must not be blank,
+            per app/cbl/COUSR01C.cbl line 132 -- a value of only whitespace is
+            refused by the pattern, matching that check -- and must not already
+            exist: a duplicate is refused with 409 rather than overwriting the
+            existing row.
 
 
             The value is folded -- trimmed and upper-cased -- to derive the stored
-            key, and two further rules govern that derivation. A value carrying a
-            character outside the printable single-byte range PIC X(08) means
-            (app/cpy/CSUSR01Y.cpy line 18) is refused, and so is one whose derived
-            key occupies more than those eight positions. The first rule is what
-            makes maxLength above sufficient for the second: upper-casing is
-            length-preserving only within that range -- eight sharp-s characters
-            are eight positions submitted and sixteen once folded -- so without it
-            a value satisfying maxLength could still exceed the positions the
-            column stores. Both refusals are 400 keyed userId and both are raised
-            before the duplicate check and before any pool account is created, so a
-            refused identifier leaves nothing behind.
+            key, so either case reaches one row and the key itself is drawn from
+            [A-Z0-9]. That is what makes it ADDRESSABLE: the key is spoken as one
+            path segment on the read, update and delete operations and is returned
+            in this operation's Location header, and a character with a meaning in
+            a URI -- the slash, the question mark, the hash, the percent, the
+            backslash -- would name something other than the created row. A value
+            outside the domain carries "User ID must be letters and digits only...",
+            and one wider than eight characters carries
+            "User ID must be at most 8 characters...". Both are 400 keyed userId
+            and both are raised before the duplicate check and before any pool
+            account is created, so a refused identifier leaves nothing behind.
+            Because the fold is length-preserving inside this alphabet, a value
+            that would grow when folded -- eight sharp-s characters becoming
+            sixteen capital S -- is refused for its characters and never reaches
+            the width rule.
 
 
-            Neither rule is published as a pattern facet, and the reason is that
-            this property already carries one. JSON Schema admits a single pattern
-            per property, the one declared here refuses a whitespace-only value to
-            match the record's non-blank constraint, and the character range cannot
-            be folded into it: an expression anchored tightly enough to state the
-            range would also refuse a value with a surrounding blank, which this
-            service trims rather than rejects. The rules are therefore stated here
-            in prose for both routes into them, rather than expressed for one and
-            described for the other.
+            The domain is stated by the pattern facet as ONE expression carrying
+            both the alphabet and the width, rather than being assembled from
+            pattern, minLength and maxLength by every reader: a JSON Schema pattern
+            is unanchored, so an expression naming only the alphabet would admit an
+            over-long value on its own. The expression admits both cases while the
+            stored key is upper case, because this property is the value as
+            submitted and the service folds it -- the baseline's own sign-on folds
+            the identifier too, at app/cbl/COSGN00C.cbl lines 211 to 256. The
+            service additionally trims a surrounding blank, which this expression
+            refuses; the runtime therefore accepts a shade more than the contract
+            admits, which is the safe direction -- every value the contract admits
+            is accepted -- while a pattern permitting surrounding blanks would
+            describe a padded identifier as a normal way to address a row, and it
+            cannot be one in a path segment.
         userType:
           type: string
           minLength: 1
@@ -2852,10 +3086,9 @@ components:
       type: object
       description: >-
         The body of a successful create: the five stored columns exactly as
-        UserResponse publishes them, plus credentialSecretName -- the NAME of the
-        managed-secret entry the new pool account's one-time credential was published
-        to. The credential itself is NOT here, and the Refactoring Rationale below
-        records why.
+        UserResponse publishes them, plus oneTimeCredential -- the credential the new
+        pool account was created with -- and credentialSecretName, the NAME of the
+        managed-secret entry that same credential was archived to.
 
 
         Assumptions: the five row properties are REPEATED here rather than composed
@@ -2864,42 +3097,47 @@ components:
         schema which forbids additional properties is ill-defined -- several
         validators refuse every instance of it. Repeating the properties keeps this
         body a strict superset of the read body, so a client that ignores the new
-        property reads exactly what it read before.
+        properties reads exactly what it read before.
 
 
-        Refactoring Rationale: NO credential crosses the wire in this response. What
-        this body adds to the read body is the NAME of the managed-secret entry the
-        credential was published to, and three properties of the credential itself
-        keep the handover safe from there. It is single-use: the account stands in
-        the provider's force-change state, so presenting it raises the new-password
+        Refactoring Rationale: the credential IS in this response, and an earlier
+        revision of this schema carried the locator alone and said so at length. That
+        revision was authored to keep a credential out of a response body and it
+        produced a worse defect: reading the archived entry needs
+        secretsmanager:GetSecretValue and a grant on the customer-managed key, which
+        the task role holds and the administrator's browser session does not, so the
+        one principal obliged to hand the credential over was the one principal who
+        could not read it, and every account created through this operation was
+        unusable.
+
+
+        Trade-offs: the value reaches a response body, and four controls bound that
+        exposure rather than one. It is single-use: the account stands in the
+        provider's force-change state, so presenting it raises the new-password
         challenge and can do nothing else. It is never persisted:
         db/migration/V1__auth.sql declares no password column, deliberately,
         undoing SEC-USR-PWD PIC X(08) at app/cpy/CSUSR01Y.cpy line 21 which the
         baseline stored in the clear, compared in the clear at
         app/cbl/COSGN00C.cbl line 223 and wrote back onto a screen at
-        app/cbl/COUSR02C.cbl line 169. And it is never logged: both the response
-        record and the provisioning result override their diagnostic rendering to
-        withhold what they hold.
+        app/cbl/COUSR02C.cbl line 169. It is never logged: both the response record
+        and the provisioning result override their diagnostic rendering to withhold
+        what they hold. And the response carrying it is marked
+        Cache-Control: no-store, so no cache, proxy or browser history entry may
+        retain a copy. What remains is that a proxy configured to log bodies would
+        capture it; what is bought is that onboarding needs no privileged read.
 
 
-        Alternatives Considered: answering with the generated credential itself.
-        Rejected because a credential in a response body is copied into every proxy
-        log and browser history between the service and the operator, and the
-        migration forbids a credential reaching a place with no audit trail; the
-        value is published to a per-user managed-secret entry encrypted with the
-        customer-managed key instead, and this body names that entry. Alternatives
-        Considered: answering with the read body and nothing else, leaving the name
-        to be recomputed from the identifier. Rejected because that tells an operator
-        the derivation rule rather than the answer, while a locator is not a secret.
-
-
-        Trade-offs: reading the entry needs secretsmanager:GetSecretValue and the
-        key's grant, which the task role holds and a browser session does not, so
-        onboarding ends with one privileged read. That is accepted: it is an audited
-        step in a store that already has rotation and an audit trail.
+        Alternatives Considered: granting the browser client the secret-store read
+        action so it could collect the value itself. Rejected as a strictly larger
+        disclosure than one value in one response -- that grant outlives the
+        handover, spans every entry the policy admits, and is exercisable by anything
+        holding the session. Alternatives Considered: carrying the credential and
+        dropping credentialSecretName. Rejected because a response is delivered once,
+        so a closed tab or a connection dropped after the commit would strand the
+        account with no operational recovery and no audit trail.
       additionalProperties: false
       required:
-        [userId, firstName, lastName, userType, cognitoSub, credentialSecretName]
+        [userId, firstName, lastName, userType, cognitoSub, credentialSecretName, oneTimeCredential]
       properties:
         userId:
           type: string
@@ -2935,21 +3173,55 @@ components:
           type: string
           minLength: 1
           description: >-
-            The name of the managed-secret entry holding the one-time credential the
-            account was created with. Collect the value from that entry and present it
-            once at first sign-on: the account is in the provider's force-change
-            state, so POST /api/v1/auth/signon answers with the new-password challenge
-            and POST /api/v1/auth/challenge completes the exchange. The credential
-            itself never appears in this body.
+            The name of the managed-secret entry the one-time credential was archived
+            to, for an operator who lost this response. Reading it needs
+            secretsmanager:GetSecretValue and the customer-managed key's grant, and
+            that read is audited -- which is why the locator is kept beside the value
+            rather than replaced by it: the two answer different failures.
 
 
             Assumptions: the property is REQUIRED, not optional. An absent locator
-            would mean an account nobody can reach, and a client handling both shapes
+            would mean an account nobody can recover, and a client handling both shapes
             could not tell that from an omission of its own. No format is declared,
             because the value is a resource name rather than a secret; minLength is a
             floor rather than the derived length, which is deliberately not published
             -- the derivation is a property of the service and this contract should not
             invite a client to validate against it.
+        oneTimeCredential:
+          type: string
+          minLength: 1
+          format: password
+          description: >-
+            The credential the new pool account was created with. THIS IS THE ONLY
+            PLACE IT APPEARS: nothing in this service persists it -- there is no
+            password column -- and no operation re-issues it, so a client that
+            discards this property cannot ask for the value again. Hand it to the new
+            user and discard it.
+
+
+            Its lifetime is exactly one sign-on. The account stands in the provider's
+            force-change state, so POST /api/v1/auth/signon answers a presentation of
+            this value with the new-password challenge and
+            POST /api/v1/auth/challenge completes the exchange; once that challenge is
+            answered the value verifies nothing.
+
+
+            A client is obliged to honour the response's no-store directive for this
+            property specifically: do not write it to session or local storage, to a
+            URL, a query string, a route parameter, a form field or a log; render it
+            once, on a surface the operator dismisses, and clear it from memory
+            afterwards.
+
+
+            Assumptions: the property is REQUIRED, not optional. An absent credential
+            would mean an account whose owner cannot sign on, and a client handling
+            both shapes could not tell that from an omission of its own.
+            format: password is declared so that generated clients and documentation
+            renderers mask it by default rather than printing it beside the row's
+            name; no minimum or maximum length beyond the non-empty floor is
+            published, because the length is a property of the pool's password policy
+            and publishing it would invite a client to validate against a rule the
+            provider owns and can change.
 
     UserResponse:
       type: object

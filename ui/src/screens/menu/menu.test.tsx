@@ -5,9 +5,14 @@
  * -------
  * Assert the observable contract of the screen that replaces `app/cbl/COMEN01C.cbl`: the eleven
  * option lines composed exactly as `BUILD-MENU-OPTIONS` composes them, the option field at its
- * declared width, the three-way refusal the program applies to a bad entry, the not-installed
- * sentence for an option whose program this application does not serve, the PF3 exit destination,
- * the invalid-key sentence, and the exit message a departing screen hands over.
+ * declared width, the three-way refusal the program applies to a bad entry, the destination each
+ * option enters -- including the two whose screens are addressed only per record, which enter the
+ * browse that selects the record -- the PF3 exit destination, the invalid-key sentence, and the exit
+ * message a departing screen hands over.
+ *
+ * ⚠️ Assumptions: the not-installed sentence is NOT asserted here any longer, because no live option can
+ * produce it: all eleven now enter a screen. `ui/src/screens/menuScreens.test.tsx` holds that arm at the
+ * resolution level instead, where an unregistered program can still be presented to it.
  *
  * Assumptions: no API client is stubbed, because this screen calls none. `COMEN01C` reads no file
  * and links to no program — it paints options from `app/cpy/COMEN02Y.cpy` and transfers control — so
@@ -25,9 +30,10 @@ import { ConfigProvider } from 'antd';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactElement } from 'react';
-import { MemoryRouter, Route, Routes } from 'react-router';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { describe, expect, it } from 'vitest';
 
+import { AppShell } from '../../layout/AppShell';
 import { MESSAGE_BAND_TEST_ID, MESSAGE_BAND_TEST_IDS } from '../../layout/MessageBand';
 import {
   INVALID_KEY_PRESSED,
@@ -41,6 +47,11 @@ import {
 } from '../../messages/messages';
 import type { MainMenuOption } from '../../messages/messages';
 import { PF_KEY_BAR_REGION_LABEL } from '../../layout/PfKeyBar';
+// Assumptions: the transaction browse route is imported from the module that OWNS the menu's
+//   program-to-route resolution rather than from `ui/src/routes/navigation.ts`, which declares no
+//   constant for it. That keeps this harness declaring the same value the screen navigates through, which
+//   is the property this file's overview relies on when it asserts destinations by arrival.
+import { TRANSACTION_LIST_ROUTE } from '../../routes/navigation';
 
 /**
  * A sentence a departing screen could carry in through the router's transition state.
@@ -57,8 +68,9 @@ import {
   CARD_LIST_ROUTE,
   MAIN_MENU_ROUTE,
   TRANSACTION_ADD_ROUTE,
+  screenTransitionState,
 } from '../../routes/navigation';
-import { MainMenuScreen } from './index';
+import { MainMenuScreen, normaliseOptionEntry } from './index';
 
 /** Marker text rendered at each destination route, keyed by the route it stands at. */
 const DESTINATION_MARKERS: Readonly<Record<string, string>> = {
@@ -68,7 +80,38 @@ const DESTINATION_MARKERS: Readonly<Record<string, string>> = {
   [CARD_LIST_ROUTE]: 'CARD LIST REACHED',
   [TRANSACTION_ADD_ROUTE]: 'TRANSACTION ADD REACHED',
   [AUTHORIZATION_SUMMARY_ROUTE]: 'AUTHORIZATION SUMMARY REACHED',
+  [TRANSACTION_LIST_ROUTE]: 'TRANSACTION LIST REACHED',
 };
+
+/** Test id the destination probe reports the origin it was handed under. */
+const ORIGIN_TEST_ID = 'carried-origin';
+
+/**
+ * Stands at one destination route and reports both its arrival and the origin it was handed.
+ *
+ * Assumptions: the origin is read through `screenTransitionState` rather than off
+ * `useLocation().state` directly, so this probe observes exactly what a real destination screen
+ * observes -- a member of the wrong type is dropped by that reader, and a probe that cast the state
+ * itself could report a value no screen would act on.
+ *
+ * Assumptions: an absent origin renders as the empty string rather than a placeholder word, so the
+ * two cases reading it can distinguish "handed nothing" from "handed a route" by exact comparison
+ * instead of by matching prose.
+ * @param {object} props - Probe properties.
+ * @param {string} props.marker - Arrival text the case queries for.
+ * @returns {ReactElement} The arrival marker and the received origin, in separate elements so a
+ *   query for the marker is unaffected by the origin beside it.
+ */
+function DestinationProbe({ marker }: { readonly marker: string }): ReactElement {
+  const origin = screenTransitionState(useLocation().state).from ?? '';
+
+  return (
+    <div>
+      <div>{marker}</div>
+      <div data-testid={ORIGIN_TEST_ID}>{origin}</div>
+    </div>
+  );
+}
 
 /**
  * Renders the menu inside the theme and a router that reports which destination was entered.
@@ -90,19 +133,29 @@ function renderMenu(carriedMessage?: string): ReactElement {
   return (
     <ConfigProvider>
       <MemoryRouter initialEntries={[entry]}>
-        <Routes>
-          <Route path={MAIN_MENU_ROUTE} element={<MainMenuScreen />} />
-          {Object.entries(DESTINATION_MARKERS).map(
-            /**
-             * Declares one destination route rendering its marker.
-             * @param {[string, string]} entryPair - The route path and the marker it renders.
-             * @returns {ReactElement} The declared route.
-             */
-            ([path, marker]) => (
-              <Route key={path} path={path} element={<div>{marker}</div>} />
-            ),
-          )}
-        </Routes>
+        {/*
+          Refactoring Rationale: ⚠️ the screen is rendered INSIDE `AppShell`, where it was rendered bare.
+          It now DELEGATES its title band, its row-23 message line and its row-24 legend to the shell
+          rather than composing them, so a bare mount would leave all three rendered by nothing and the
+          band and legend assertions below unsatisfiable. `ui/src/App.tsx` mounts the shell around the
+          router, and `AppShell` renders `children ?? <Outlet />`, so both forms paint the same frame --
+          which is what makes this the same arrangement the entry-screen and sign-on suites use.
+        */}
+        <AppShell>
+          <Routes>
+            <Route path={MAIN_MENU_ROUTE} element={<MainMenuScreen />} />
+            {Object.entries(DESTINATION_MARKERS).map(
+              /**
+               * Declares one destination route rendering its marker.
+               * @param {[string, string]} entryPair - The route path and the marker it renders.
+               * @returns {ReactElement} The declared route.
+               */
+              ([path, marker]) => (
+                <Route key={path} path={path} element={<DestinationProbe marker={marker} />} />
+              ),
+            )}
+          </Routes>
+        </AppShell>
       </MemoryRouter>
     </ConfigProvider>
   );
@@ -381,38 +434,34 @@ async function anOptionRowIsNotActivatable(): Promise<void> {
 }
 
 /**
- * An option whose program this application does not serve reports the not-installed sentence.
+ * Option 7 enters the transaction browse, which is where a transaction is selected.
  *
- * ⚠️ Refactoring Rationale: this case reads option 7 where it previously read option 6. Option 6 named
- * `COTRN00C`, and it was the right carrier for this assertion only while no transaction browse existed;
- * `ui/src/screens/transactionList/index.tsx` is now authored, `ui/src/router.tsx` mounts it at the
- * literal `/transactions`, and `ui/src/routes/programRoutes.ts` registers it -- so option 6 now ENTERS a
- * screen and could no longer report an absent one. Left as it was, this case would have failed for the
- * best possible reason, and moving it keeps the reference behaviour covered instead of deleting the
- * coverage.
+ * ⚠️ Refactoring Rationale: this case asserted that option 7 reported itself NOT INSTALLED, and it
+ * ratified a defect. `COTRN01C`'s screen is delivered and `ui/src/router.tsx` mounts it at
+ * `/transactions/:id`, so the sentence -- which reports a program the CICS region does not HOLD -- named
+ * a screen this application does hold. The option refused was the only main-menu route to the transaction
+ * detail screen, which AAP section 0.1.3.1 requires to stay reachable: program flow preserves the
+ * reachability graph of the eighteen transactions, and `app/csd/CARDDEMO.CSD` L429-L430 makes `COTRN01C`
+ * one of them.
  *
- * Assumptions: option 7 is `COTRN01C`, and it is the one main-menu option that still takes the
- * reference's own not-installed arm. Its screen IS mounted, but only at `/transactions/:id`, which needs
- * a transaction identifier a menu option does not carry -- the reason `programRoutes.ts` records for
- * omitting it. So the sentence is asserted against a genuine absence of a reachable destination rather
- * than against a contrived one, which is what this case has always been for.
+ * Assumptions: the destination is the BROWSE and not the per-transaction path, and that is the same
+ * resolution options 4 and 5 take to the card browse under `D-CARD-SELECTOR`. A menu option carries no
+ * selection -- `app/cbl/COTRN01C.cbl` L109 pre-fills the identifier only when `CDEMO-CT01-TRN-SELECTED`
+ * arrives non-blank, so a menu arrival is a screen waiting for a key -- and the browse is the control
+ * that names one transaction and enters the detail screen with it.
  *
- * Assumptions: the expected sentence is composed through the catalog template, whose value part is
- * delimited by TWO spaces — which is what strips the option name's 35-character padding, so the
- * assertion also pins that the padding does not reach the middle of the sentence.
- * @returns {Promise<void>} Resolves once the assertion has run.
+ * Assumptions: the not-installed sentence keeps its own coverage in
+ * `ui/src/screens/menuScreens.test.tsx`, which asserts the catalogued template and that an unregistered
+ * program still resolves to nothing. No live option can reach that arm now that all eleven enter a
+ * screen, so proving it at the resolution level is the only honest place left for it.
+ * @returns {Promise<void>} Resolves once the destination has been reached.
  */
-async function reportsNotInstalledForAnUnservedOption(): Promise<void> {
+async function entersTheTransactionBrowseOnOptionSeven(): Promise<void> {
   render(renderMenu());
 
   await selectByTyping('07');
 
-  const expected = formatMessageTemplate(MESSAGE_TEMPLATES.MENU_OPTION_NOT_INSTALLED, {
-    'CDEMO-MENU-OPT-NAME': optionLine(7).slice('07. '.length),
-  });
-
-  expect(expected).toBe('This option Transaction View is not installed...');
-  expect(await screen.findByText(expected)).toBeInTheDocument();
+  expect(await screen.findByText('TRANSACTION LIST REACHED')).toBeInTheDocument();
 }
 
 /**
@@ -432,10 +481,10 @@ async function reportsNotInstalledForAnUnservedOption(): Promise<void> {
  * typed card number is exchanged for one — which is what the reference's own first turn of `COCRDSLC`
  * does with its empty account and card fields.
  *
- * Assumptions: the baseline's not-installed sentence keeps its own coverage independently of this case,
- * in {@link reportsNotInstalledForAnUnservedOption}, which uses option 7 — the one option left with no
- * reachable destination, its screen being addressable only by a transaction identifier the menu has not
- * got. So repairing this case removes no assertion about reference behaviour.
+ * Assumptions: option 7 resolves the same way for the same reason, which
+ * {@link entersTheTransactionBrowseOnOptionSeven} asserts separately -- both cases are kept because the
+ * two selectors differ in kind, an opaque service-minted card key here against a transaction identifier
+ * there, so one passing does not establish the other.
  * @returns {Promise<void>} Resolves once the destination has been reached.
  */
 async function entersTheBrowseForASelectorSealedRoute(): Promise<void> {
@@ -467,26 +516,30 @@ async function echoesTheNormalisedEntryIntoTheField(): Promise<void> {
 /**
  * A single typed digit is echoed back in the reference's zero-filled two-digit form.
  *
- * ⚠️ Refactoring Rationale: the digit typed here is `7` where it was previously `9`. This case needs a
- * single digit whose turn is REFUSED, because the field it reads back only survives if the screen stays
- * mounted — a digit that reaches a destination navigates away and leaves nothing to read. Option 9 was
- * that digit only while the reports screen was unmounted; `ui/src/screens/reports/index.tsx` is now
- * authored, `ui/src/router.tsx` mounts it at `/reports` and `ui/src/routes/programRoutes.ts` registers
- * it, so typing `9` now enters the report screen and this case would read an unmounted field.
+ * ⚠️ Refactoring Rationale: the digit typed here is `0` where it was previously `7`, and the property is
+ * additionally asserted against the screen's own normaliser. This case needs a single digit whose turn is
+ * REFUSED, because the field it reads back only survives while the screen stays mounted -- a digit that
+ * reaches a destination navigates away and leaves nothing to read. Option 7 was the last such digit, and
+ * `ui/src/routes/programRoutes.ts` now registers `COTRN01C` on the transaction browse, so all NINE
+ * single-digit options enter a screen and `0` is the only single character left that the reference's own
+ * `WS-OPTION = ZEROS` test at `app/cbl/COMEN01C.cbl` L133 refuses.
  *
- * Assumptions: option 7 is `COTRN01C` and is the only single digit still without a reachable
- * destination — its screen is mounted at `/transactions/:id`, which needs a transaction identifier the
- * menu has not got — so the turn is refused and the field survives to be read. The echo is `07`, which
- * is what `WS-OPTION-X PIC X(02) JUST RIGHT` plus the zero-fill produces and what was measured from the
- * compiled reference; the property under test is the two-digit echo, not which option carries it.
+ * ⚠️ Assumptions: typing `0` alone would be a weak demonstration of the padding, because the character
+ * typed IS the pad character -- an implementation that answered `'00'` for everything would satisfy it.
+ * So the two-digit form of a NON-pad digit is asserted directly against `normaliseOptionEntry`, which is
+ * the same function the screen calls before it echoes: `app/cbl/COMEN01C.cbl` L123-L125 zero-fills the
+ * right-justified field and moves the result into `OPTIONO` before validating anything, so the padding
+ * and the echo are one behaviour observed at its two ends.
  * @returns {Promise<void>} Resolves once the field has been read back.
  */
 async function echoesASingleDigitAsTwo(): Promise<void> {
+  expect(normaliseOptionEntry('7')).toBe('07');
+
   render(renderMenu());
 
-  await selectByTyping('7');
+  await selectByTyping('0');
 
-  expect(screen.getByLabelText(MAIN_MENU_HEADINGS.OPTION_PROMPT)).toHaveValue('07');
+  expect(screen.getByLabelText(MAIN_MENU_HEADINGS.OPTION_PROMPT)).toHaveValue('00');
 }
 
 /**
@@ -532,6 +585,30 @@ async function refusesABlankEntry(): Promise<void> {
 }
 
 /**
+ * The dispatched option is handed this screen's own route as the origin its exit key returns to.
+ *
+ * ⚠️ Assumptions: this is the caller's half of a contract that had no caller. `app/cbl/COMEN01C.cbl`
+ * L153-L154 and L178-L180 move this program's transaction and program name into
+ * `CDEMO-FROM-TRANID` and `CDEMO-FROM-PROGRAM` immediately before each dispatching `XCTL`, and
+ * `app/cbl/COACTVWC.cbl` L328-L339 is the receiving program preferring that carrier over its own
+ * hard-coded menu destination. Five delivered screens read the migrated carrier and none was being
+ * given one, so each took its fallback arm unconditionally.
+ *
+ * Assumptions: the account-enquiry option carries the case because its screen is one of the five
+ * that reads the origin, so the value asserted here is the value a real destination consumes rather
+ * than one only the probe can see.
+ * @returns {Promise<void>} Resolves once the destination has reported the origin it received.
+ */
+async function handsItsOwnRouteToTheDispatchedOption(): Promise<void> {
+  render(renderMenu());
+
+  await selectByTyping('01');
+
+  expect(await screen.findByText('ACCOUNT VIEW REACHED')).toBeInTheDocument();
+  expect(screen.getByTestId(ORIGIN_TEST_ID).textContent).toBe(MAIN_MENU_ROUTE);
+}
+
+/**
  * The exit key transfers to sign-on, which is the reference's only PF3 destination here.
  * @returns {Promise<void>} Resolves once the assertion has run.
  */
@@ -541,6 +618,15 @@ async function exitsToSignOn(): Promise<void> {
   await userEvent.click(screen.getByRole('button', { name: MAIN_MENU_KEY_LABELS.PFK03.trim() }));
 
   expect(await screen.findByText('SIGN ON REACHED')).toBeInTheDocument();
+  /*
+   * WHY : ⚠️ Assumptions: sign-off hands over NO origin, and that is asserted rather than assumed
+   *       because the dispatch path now hands one over and the two must not be conflated.
+   *       `app/cbl/COMEN01C.cbl` L196-L203 transfers to `COSGN00C` with no `COMMAREA` clause at all,
+   *       so the arriving program starts with no identity and no origin; `ui/src/routes/navigation.ts`
+   *       correspondingly excludes sign-on from the routes it admits as an origin, since no screen
+   *       with an exit key is ever entered from it.
+   */
+  expect(screen.getByTestId(ORIGIN_TEST_ID).textContent).toBe('');
 }
 
 /**
@@ -672,16 +758,17 @@ function mainMenuScreenCases(): void {
   );
   it('accepts a single-digit entry as the zero-filled equivalent', acceptsASingleDigitEntry);
   it('offers no activatable option row', anOptionRowIsNotActivatable);
-  it(
-    'reports the not-installed sentence for an unserved option',
-    reportsNotInstalledForAnUnservedOption,
-  );
+  it('enters the transaction browse on option 7', entersTheTransactionBrowseOnOptionSeven);
   it('enters the browse for a selector-sealed route', entersTheBrowseForASelectorSealedRoute);
   it('echoes the normalised entry into the field', echoesTheNormalisedEntryIntoTheField);
   it('echoes a single typed digit as two', echoesASingleDigitAsTwo);
   it('refuses an option above the catalogued count', refusesAnOptionAboveTheCount);
   it('refuses a zero entry', refusesAZeroEntry);
   it('refuses a blank entry', refusesABlankEntry);
+  it(
+    'hands its own route to the dispatched option as the origin',
+    handsItsOwnRouteToTheDispatchedOption,
+  );
   it('exits to sign-on when the exit key is pressed', exitsToSignOn);
   it('offers exactly the two keys the legend paints', offersExactlyTheTwoLegendKeys);
   it('reports an unmapped attention key', reportsAnUnmappedKey);

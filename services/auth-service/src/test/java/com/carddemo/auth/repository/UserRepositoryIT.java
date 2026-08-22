@@ -91,8 +91,8 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 //       a missing companion surfaces here and nowhere else, and it surfaces as a RUN-TIME failure to
 //       resolve a database type rather than as a compilation error -- which is why it cannot be
 //       caught by building the module and must be named here.
-// WHY : Alternatives Considered: offset pagination was rejected for the two browse queries, and with
-//       it every framework shape that expresses one -- the paging request abstraction and its
+// WHY : Alternatives Considered: offset pagination was rejected for every browse query on this
+//       boundary, and with it every framework shape that expresses one -- the paging request abstraction and its
 //       implementation, the paged and sliced result types, a SQL offset clause, a criteria
 //       specification wrapped around one, and any derived method taking a page ordinal. The specific
 //       damage is skip-and-repeat: an offset locates its first row by counting from the start of the
@@ -103,16 +103,22 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 //       reference program is already keyed this way: its three positioned verbs at lines 588 to 595,
 //       621 to 629 and 655 to 663 each pass RIDFLD and KEYLENGTH and never a row count, so keyset
 //       paging preserves the page boundary the source produces and offset paging would change it.
-// WHY : Refactoring Rationale: two of the four file verbs have NO counterpart to assert, and their
+// WHY : Refactoring Rationale: ONE of the four file verbs has no counterpart to assert, and its
 //       absence is the transformation rather than an omission in this class. In the baseline the
 //       browse position lives in a CICS cursor opened against the file and in the identifier pair
 //       the program hands back to itself between screen turns, declared at lines 68 and 69, so it
 //       survives only as long as the task and its cursor do. A single SQL statement carries its
-//       position in its own predicate and releases its own result set, so there is no handle to open
-//       and none to close. ENDBR is the clearest case: its verb at lines 689 to 691 is BARE, naming
-//       only DATASET with no RESP and no RESP2, so there is not even a status a caller here could
-//       inspect. Both the call sites at lines 325 and 374 and the paragraph at line 687 disappear
-//       together, which is why no case below opens or closes anything.
+//       position in its own predicate and releases its own result set, so there is no handle to
+//       close. ENDBR is that verb: its own at lines 689 to 691 is BARE, naming only DATASET with no
+//       RESP and no RESP2, so there is not even a status a caller here could inspect. Both the call
+//       sites at lines 325 and 374 and the paragraph at line 687 disappear together, which is why no
+//       case below closes anything.
+// WHY : ⚠️ Refactoring Rationale: this said TWO verbs had no counterpart, counting STARTBR alongside
+//       ENDBR, and that reading is what left the positioned opening read unbuilt and untested. The two
+//       verbs are not alike: ENDBR carries nothing, while STARTBR carries the POSITION -- and on the
+//       enter turn that position is the identifier the operator typed into the search field, moved into
+//       the seek field at line 221. It therefore has two counterparts here, one per value it can be
+//       given, and the cases below assert both.
 // WHY : Trade-offs: these cases read at PostgreSQL's READ COMMITTED default, which is STRICTER than
 //       the READINTEG(UNCOMMITTED) recorded at app/csd/CARDDEMO.CSD line 90. The baseline could
 //       return a row a concurrent task had written and not committed; no query below can. The
@@ -386,12 +392,19 @@ class UserRepositoryIT {
     //       HIGH-VALUES when the last-key cursor is blank. The mechanism there is therefore one verb
     //       fed a sentinel, not two verbs, so the opening page here is one query fed a sentinel that
     //       orders below every storable key.
-    // WHY : Assumptions: the initial positioning the source INTENDED is greater-or-equal, and the
-    //       evidence is that its GTEQ option is present but COMMENTED OUT at line 592 of
-    //       app/cbl/COUSR00C.cbl. That is recorded separately from the sentinel decision because it
-    //       explains why an opening seek is INCLUSIVE of the lowest key while every CONTINUATION is
-    //       strictly exclusive: the sentinel is below every real key, so one strictly-greater
-    //       predicate delivers both behaviours and no second predicate is needed.
+    // WHY : ⚠️ Assumptions: an opening seek is INCLUSIVE of the key it names while every CONTINUATION is
+    //       strictly exclusive, and the evidence is the number of READS the reference issues rather than
+    //       the GTEQ option at line 592 of app/cbl/COUSR00C.cbl -- that option is COMMENTED OUT, so it
+    //       states an intent and never executed. What does execute is the guard at line 288, which
+    //       skips the stepping read on the enter turn so the row the seek landed on is displayed, and
+    //       lets it through on a page turn so the cursor row is consumed.
+    //       Refactoring Rationale: this block used to conclude that "one strictly-greater predicate
+    //       delivers both behaviours and no second predicate is needed", which holds only for the
+    //       sentinel below -- it is not a stored key, so nothing is excluded by comparing strictly
+    //       against it. It does not hold for a key a CALLER supplies, which the strict comparison would
+    //       hide, and that is exactly the row an operator typing an identifier expects to see first.
+    //       The inclusive predicate is asserted separately below, which is why the count of browse
+    //       queries on this boundary is four.
     @Test
     void anEmptyTableYieldsNoRowsForTheOpeningCursor() {
         List<User> openingPage = forwardPageFrom(UserRepository.BEFORE_FIRST_USER_ID);
@@ -593,6 +606,78 @@ class UserRepositoryIT {
     }
 
     /**
+     * A positioned opening page begins ON the key it names, not after it.
+     *
+     * <p>Purpose: this is the enter turn of the reference browse with a value typed into its search
+     * field. {@code app/cbl/COUSR00C.cbl} moves that value into the seek field at line 221 and then
+     * skips its stepping read, because the guard at line 288 excludes the enter key, so the row the
+     * seek landed on is the first row of the screen. This case is what holds the INCLUSIVE comparison
+     * that reproduces it; the strict predicate asserted above would drop that row.
+     */
+    @Test
+    void aPositionedOpeningPageBeginsOnTheKeyItNames() {
+        seedOrderedUsers(SPANNING_ROW_COUNT);
+        String seekKey = orderedUserId(4);
+
+        List<User> positionedPage = positionedOpeningPageFrom(seekKey);
+
+        assertThat(userIdsOf(positionedPage).get(0))
+                .as("the identifier typed into the search field is the first row of the page")
+                .isEqualTo(seekKey);
+        // Assumptions: the run is the seek key through the LAST seeded key, ten rows of the thirteen
+        //   stored, because the query asks for eleven and only ten remain at or after the fourth. That
+        //   is the boundary worth asserting here: a short result is the end of the set and not a
+        //   truncation, and it is short by the same arithmetic the surplus-row probe relies on.
+        assertThat(userIdsOf(positionedPage))
+                .as("the page continues in ascending key order from the key named")
+                .containsExactlyElementsOf(orderedUserIds(4, SPANNING_ROW_COUNT));
+    }
+
+    /**
+     * A positioned opening page on a key no row carries positions at the next higher key.
+     *
+     * <p>Purpose: the reference answers an unsatisfiable seek with a boundary sentence rather than a
+     * not-found -- its arm at {@code app/cbl/COUSR00C.cbl} line 600 keys on the NOT-FOUND response and
+     * writes "You are at the top of the page..." at line 603 -- which is coherent only if a key naming
+     * no row positions on the next one. This case asserts that behaviour of the predicate rather than
+     * inferring it, and it is the reason a caller may type a partial or a since-deleted identifier and
+     * still receive a page.
+     */
+    @Test
+    void aPositionedOpeningPageOnAnUnmatchedKeyPositionsAtTheNextKey() {
+        seedOrderedUsers(SPANNING_ROW_COUNT);
+        String unmatchedKey = USER_ID_PREFIX + "0000";
+
+        assertThat(this.users.findById(unmatchedKey))
+                .as("the seek key for this case must genuinely match no stored row")
+                .isEmpty();
+
+        List<User> positionedPage = positionedOpeningPageFrom(unmatchedKey);
+
+        assertThat(userIdsOf(positionedPage).get(0))
+                .as("an unmatched seek positions at the lowest key above it, never empties the page")
+                .isEqualTo(orderedUserId(1));
+    }
+
+    /**
+     * A positioned opening page past every stored key is an empty result rather than a failure.
+     *
+     * <p>Purpose: this is the one outcome in which the reference genuinely reaches the end of the file
+     * from a seek, and it repaints the screen rather than abending. The empty result is what lets the
+     * service answer 200 with an empty array, which is the published contract for this case.
+     */
+    @Test
+    void aPositionedOpeningPagePastEveryKeyIsEmpty() {
+        seedOrderedUsers(SPANNING_ROW_COUNT);
+
+        List<User> positionedPage = positionedOpeningPageFrom("ZZZZZZZZ");
+
+        assertThat(positionedPage)
+                .as("seeking past the last key is an empty read, not an error")
+                .isEmpty();
+    }
+
+    /**
      * The key column is fixed-width character and is the table's primary key.
      *
      * <p>Assumptions: {@code CHAR} is asserted rather than tolerated, because fixed width is part of
@@ -603,7 +688,7 @@ class UserRepositoryIT {
      * against the catalogue rather than left to the migration's wording.
      */
     // WHY : Assumptions: the primary-key index is asserted here because it is the ONLY ordering
-    //       structure the two browse queries can use. V1__auth.sql creates this table in a single
+    //       structure any of the browse queries can use. V1__auth.sql creates this table in a single
     //       statement and declares no further index over user_id, and none is needed: a keyset
     //       predicate over the key column is served by the key's own index. Asserting the constraint
     //       rather than the index name keeps this independent of the identifier the engine generates.
@@ -1351,13 +1436,14 @@ class UserRepositoryIT {
      * later reader from "fixing" the constraint into one that admits nothing.</p>
      *
      * <p>Assumptions: the LEADING-BLANK refusal is matched on the shared prefix {@code ck_users_user_id}
-     * rather than on one guard's full name, and so is the unfolded one. Both shapes violate BOTH deployed
-     * guards -- {@code V5__auth_folded_user_id_trim.sql} widened the fold guard to
-     * {@code upper(btrim(...))} too -- and PostgreSQL does not document which of two violated CHECK
-     * constraints it reports. Measured on this engine it reports the canonical one for both, but that is
-     * an evaluation-order detail rather than a contract, so naming one guard here would assert the
-     * detail instead of the invariant. The cases that DO name a guard are the ones where only a single
-     * predicate is violated: the domain case beside this one, and the all-blank case.</p>
+     * rather than on one guard's full name, and so is the unfolded one. Both shapes violate ALL THREE
+     * deployed guards -- {@code V5__auth_folded_user_id_trim.sql} widened the fold guard to
+     * {@code upper(btrim(...))}, and the space and the lower-case letters are outside both character sets
+     * -- and PostgreSQL does not document which of several violated CHECK constraints it reports.
+     * Measured on this engine it reports the canonical one, but that is an evaluation-order detail rather
+     * than a contract, so naming one guard here would assert the detail instead of the invariant. The
+     * cases that DO name a guard are the ones where only a single predicate is violated: the punctuation
+     * cases beside this one, which the two wider guards admit, and the all-blank case.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
@@ -1387,14 +1473,16 @@ class UserRepositoryIT {
     }
 
     /**
-     * The canonical-key constraint refuses every character outside the invariant printable domain.
+     * The key guards refuse every character outside the ADDRESSABLE domain of letters and digits.
      *
-     * <p>⚠️ Purpose: the domain term is what makes the service's definition of the key and the column's
-     * guard the SAME definition. Java folds under the root locale; the engine's {@code upper()} folds
-     * through the database collation, and the two are only guaranteed to agree inside the invariant set.
-     * Outside it a value can satisfy one and violate the other -- measured on this engine, {@code 'ÄBC'}
-     * satisfies the fold term and is refused only by the domain term -- so without this term the two
-     * definitions could disagree on the same input and the single-definition property would be lost.</p>
+     * <p>⚠️ Purpose: the character-set terms are what make the service's definition of the key and the
+     * column's guards the SAME definition. Java folds under the root locale; the engine's {@code upper()}
+     * folds through the database collation, and the two are only guaranteed to agree inside the invariant
+     * set. Outside it a value can satisfy one and violate the other -- measured on this engine,
+     * {@code 'ÄBC'} satisfies the fold term and is refused only by a set term -- so without those terms
+     * the two definitions could disagree on the same input and the single-definition property would be
+     * lost. The narrower of the two sets carries a second obligation: the key is spoken in a URI path
+     * segment, so it must be a value a path segment can carry.</p>
      *
      * <p>Assumptions: the interior blank is asserted alongside the non-invariant letter and the control
      * character, because the three fail for the same reason and a term written to catch only one of them
@@ -1403,54 +1491,88 @@ class UserRepositoryIT {
      * L319 render the identifier {@code DELIMITED BY SPACE}, so the confirmation a user reads names a
      * different identifier from the one stored.</p>
      *
-     * <p>Assumptions: punctuation INSIDE the domain is asserted to be admitted. Restricting the domain to
-     * the letters and digits the committed extract uses was rejected as narrower than necessary, and this
-     * assertion is what pins that decision -- a later narrowing to {@code [A-Z0-9]} would fail here
-     * rather than silently refusing values the reference terminal can send.</p>
+     * <p>⚠️ Refactoring Rationale: punctuation inside the invariant set used to be asserted as ADMITTED
+     * here, pinning a decision that has since been reversed. {@code V8__auth_addressable_user_id.sql}
+     * narrows the stored key to the upper-case letters and digits, because the key is spoken in a URI path
+     * segment on the read, update and delete routes and returned in the created row's location header --
+     * and the invariant set contains {@code /}, {@code ?}, {@code #}, {@code %} and {@code \}, each of
+     * which makes that segment name something other than the row. The two admitted values below are
+     * therefore now refusals, and they name the addressable guard rather than the canonical one, because
+     * that is the only one of the three whose term they violate.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    void theCanonicalKeyConstraintRefusesEveryCharacterOutsideTheInvariantDomain() {
+    void theKeyGuardsRefuseEveryCharacterOutsideTheAddressableDomain() {
+        // WHY : ⚠️ Refactoring Rationale: these three refusals are matched on the shared prefix and used
+        //       to name ck_users_user_id_canonical. They violate the addressable guard's set as well --
+        //       the space, the tab and the non-invariant letter are outside BOTH character sets -- so
+        //       naming one of two violated constraints would assert the engine's evaluation order rather
+        //       than the invariant, which is the reasoning the leading-blank case beside this one already
+        //       records for the same situation.
         assertThatThrownBy(() -> insertUserRow("CAN ON5"))
                 .as("an interior blank truncates the reference's own confirmation message")
                 .isInstanceOf(ConstraintViolationException.class)
                 .satisfies(failure -> assertThat(causeChainText(failure))
-                        .contains("ck_users_user_id_canonical"));
+                        .contains("ck_users_user_id"));
         assertThatThrownBy(() -> insertUserRow("CAN\tON6"))
                 .as("a control character is outside the domain the service's pattern admits")
                 .isInstanceOf(ConstraintViolationException.class)
                 .satisfies(failure -> assertThat(causeChainText(failure))
-                        .contains("ck_users_user_id_canonical"));
+                        .contains("ck_users_user_id"));
         assertThatThrownBy(() -> insertUserRow("\u00c4NON7"))
                 .as("a non-invariant letter folds identically under upper() and differently under the "
-                        + "root locale, so only the domain term can refuse it")
+                        + "root locale, so only a character-set term can refuse it")
                 .isInstanceOf(ConstraintViolationException.class)
                 .satisfies(failure -> assertThat(causeChainText(failure))
-                        .contains("ck_users_user_id_canonical"));
+                        .contains("ck_users_user_id"));
 
-        insertUserRow("CAN-ON8");
-        insertUserRow("CAN_ON9");
+        assertThatThrownBy(() -> insertUserRow("CAN-ON8"))
+                .as("punctuation inside the invariant set is now refused, because a key that needs "
+                        + "escaping to be spoken in a path segment cannot address its own row")
+                .isInstanceOf(ConstraintViolationException.class)
+                .satisfies(failure -> assertThat(causeChainText(failure))
+                        .contains("ck_users_user_id_addressable"));
+        assertThatThrownBy(() -> insertUserRow("CAN%ON9"))
+                .as("the percent is the sharpest case: the container decodes an escape before any "
+                        + "handler sees the segment, so this key is unreachable rather than awkward")
+                .isInstanceOf(ConstraintViolationException.class)
+                .satisfies(failure -> assertThat(causeChainText(failure))
+                        .contains("ck_users_user_id_addressable"));
+        assertThatThrownBy(() -> insertUserRow("CAN/ON1"))
+                .as("the slash splits one segment into two, so no single-user route matches the key")
+                .isInstanceOf(ConstraintViolationException.class)
+                .satisfies(failure -> assertThat(causeChainText(failure))
+                        .contains("ck_users_user_id_addressable"));
+
+        insertUserRow("CANON10");
+        insertUserRow("CAN0N11");
 
         assertThat(nativeStringColumn(
                         "select user_id from " + IDENTITY_SCHEMA + ".users"
-                                + " where user_id like 'CAN%ON%' order by user_id"))
-                .as("punctuation inside the invariant set is admitted, which pins the decision not to "
-                        + "narrow the domain to letters and digits alone")
-                .containsExactly("CAN-ON8 ", "CAN_ON9 ");
+                                + " where user_id like 'CAN%' order by user_id"))
+                .as("the letters and digits the committed extract draws on are admitted unchanged, so "
+                        + "the narrowing costs the parity oracle nothing")
+                .containsExactly("CAN0N11 ", "CANON10 ");
     }
 
     /**
-     * Both identifier guards stand on the deployed schema, and neither one subsumes the other.
+     * All three identifier guards stand on the deployed schema, and none of them subsumes another.
      *
-     * <p>⚠️ Purpose: the two guards are COMPLEMENTARY, and this case is what stops either being removed
-     * as redundant. Each refuses one shape the other admits, measured against the engine on the applied
-     * pair: {@code ck_users_user_id_canonical} carries the character-domain term and is the only guard
-     * that refuses {@code 'CAN ON5'}, while {@code ck_users_user_id_folded} carries an explicit
+     * <p>⚠️ Purpose: the three guards are COMPLEMENTARY, and this case is what stops any of them being
+     * removed as redundant. Each refuses one shape the other two admit, measured against the engine on the
+     * applied set: {@code ck_users_user_id_canonical} carries the fold-and-trim comparison and is the only
+     * guard that refuses {@code ' CANON1'}, {@code ck_users_user_id_folded} carries an explicit
      * {@code btrim(...) <> ''} term and is the only guard that refuses a key of eight blanks -- a value
-     * the canonical predicate ADMITS, because on a {@code CHAR(8)} column it converts to the empty
-     * string and both canonical terms hold on it. Dropping the fold guard as implied would therefore
-     * open exactly the unreachable-row defect this pair exists to close.</p>
+     * both other predicates ADMIT, because on a {@code CHAR(8)} column it converts to the empty string --
+     * and {@code ck_users_user_id_addressable} carries the letters-and-digits set and is the only guard
+     * that refuses {@code 'CAN-ON8'}. Dropping any one of them would open exactly one shape of the
+     * unreachable-row defect the set exists to close.</p>
+     *
+     * <p>Refactoring Rationale: the case named two guards until
+     * {@code V8__auth_addressable_user_id.sql} added the third, and it is the census rather than a spot
+     * check for that reason: a guard added without this list being updated fails here, which is the only
+     * place the deployed set is compared against the intended one.</p>
      *
      * <p>Refactoring Rationale: a sibling case asserted the opposite -- that the fold guard had been
      * RETIRED and the canonical one stood alone -- on the reasoning that one invariant should carry one
@@ -1469,7 +1591,7 @@ class UserRepositoryIT {
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    void bothIdentifierGuardsStandAndNeitherSubsumesTheOther() {
+    void allIdentifierGuardsStandAndNoneSubsumesAnother() {
         List<String> checks = nativeStringColumn(
                 "select c.conname from pg_catalog.pg_constraint c"
                         + " join pg_catalog.pg_class t on t.oid = c.conrelid"
@@ -1480,8 +1602,10 @@ class UserRepositoryIT {
                 IDENTITY_SCHEMA);
 
         assertThat(checks)
-                .as("both identifier guards are deployed, because each refuses a shape the other admits")
-                .containsExactly("ck_users_user_id_canonical", "ck_users_user_id_folded");
+                .as("all three identifier guards are deployed, because each refuses a shape the other"
+                        + " two admit")
+                .containsExactly("ck_users_user_id_addressable", "ck_users_user_id_canonical",
+                        "ck_users_user_id_folded");
 
         assertThat(String.valueOf(singleNativeResult(
                         "select pg_get_constraintdef(c.oid) from pg_constraint c"
@@ -1501,25 +1625,46 @@ class UserRepositoryIT {
                 .as("the fold guard carries the non-blank term the canonical guard has not, which is why "
                         + "it is not redundant")
                 .contains("<>");
+
+        // WHY : Assumptions: the addressable guard's definition is read for its OWN set rather than for
+        //       the presence of a term, because its predicate has the same btrim shape as the canonical
+        //       guard's second term and only the set tells the two apart. The absence of the punctuation
+        //       the canonical set opens with is what proves this guard is the narrow one.
+        String addressable = String.valueOf(singleNativeResult(
+                "select pg_get_constraintdef(c.oid) from pg_constraint c"
+                        + " join pg_class t on t.oid = c.conrelid"
+                        + " join pg_namespace n on n.oid = t.relnamespace"
+                        + " where n.nspname = ?1 and t.relname = ?2 and c.conname = ?3",
+                IDENTITY_SCHEMA, IDENTITY_TABLE, "ck_users_user_id_addressable"));
+        assertThat(addressable)
+                .as("the addressable guard carries the letters-and-digits set, which is what makes every"
+                        + " stored key a legal single URI path segment")
+                .contains("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+        assertThat(addressable)
+                .as("and it carries none of the punctuation the canonical set admits, which is the whole"
+                        + " of the narrowing")
+                .doesNotContain("!\"#$%&");
     }
 
     /**
-     * Both key constraints are VALIDATED on a database no defective write ever reached.
+     * All three key constraints are VALIDATED on a database no defective write ever reached.
      *
      * <p>Purpose: a constraint marked {@code NOT VALID} makes no assertion about the rows already present,
-     * and both key constraints are added that way on purpose -- a validating {@code ADD} scans the table
-     * and fails on exactly the databases that still hold a non-canonical row, which would replace a data
-     * defect a query can find with a service that will not start. {@code V6__auth_canonical_user_id.sql}
-     * reconciles what it can and then promotes BOTH constraints when nothing violates them, which is what
-     * this case asserts. Without it, a fresh database would carry two permanently unvalidated constraints
-     * and a later reader would have no way to tell an unproven invariant from a proven one.</p>
+     * and all three key constraints are added that way on purpose -- a validating {@code ADD} scans the
+     * table and fails on exactly the databases that still hold a key outside the invariant, which would
+     * replace a data defect a query can find with a service that will not start.
+     * {@code V6__auth_canonical_user_id.sql} reconciles what it can and then promotes the two guards it
+     * governs when nothing violates them, and {@code V8__auth_addressable_user_id.sql} promotes the third
+     * on the same condition. Without those conditional promotions a fresh database would carry three
+     * permanently unvalidated constraints and a later reader would have no way to tell an unproven
+     * invariant from a proven one.</p>
      *
      * <p>Assumptions: this container is such a database. It is created by the migrations alone and no case
      * in this class can write a non-canonical key -- the constraints refuse one -- so the conditional
      * promotion in that migration must have taken its validating branch.</p>
      */
     @Test
-    void bothKeyConstraintsAreValidatedOnAFreshDatabase() {
+    void allKeyConstraintsAreValidatedOnAFreshDatabase() {
         assertThat(nativeStringColumn(
                         "select c.conname from pg_catalog.pg_constraint c"
                                 + " join pg_catalog.pg_class t on t.oid = c.conrelid"
@@ -1529,9 +1674,10 @@ class UserRepositoryIT {
                                 + " and c.convalidated order by c.conname",
                         IDENTITY_SCHEMA,
                         IDENTITY_TABLE))
-                .as("both key constraints are validated once the reconciliation left nothing violating"
-                        + " them")
-                .containsExactly("ck_users_user_id_canonical", "ck_users_user_id_folded");
+                .as("all three key constraints are validated once the reconciliation left nothing"
+                        + " violating them")
+                .containsExactly("ck_users_user_id_addressable", "ck_users_user_id_canonical",
+                        "ck_users_user_id_folded");
     }
 
     /**
@@ -1764,6 +1910,22 @@ class UserRepositoryIT {
      */
     private List<User> forwardPageFrom(String cursor) {
         return this.users.findByUserIdGreaterThanOrderByUserIdAsc(cursor, Limit.of(FETCH_LIMIT));
+    }
+
+    /**
+     * Reads the opening page positioned at or after a stated key, with the probe row included.
+     *
+     * @param startUserId the key the page begins AT, of type {@code String}; a row carrying it is the
+     *     first row returned, and a key no row carries positions on the next one
+     * @return the rows the inclusive query produced, in ascending key order, of type {@code List} of
+     *     {@code User}, at most one longer than a page, never {@code null}
+     */
+    // WHY : Assumptions: this reads through the INCLUSIVE member and the case above reads through the
+    //       strict one, so the two helpers name the distinction the two predicates make rather than
+    //       leaving a reader to spot it in a method name at each call site.
+    private List<User> positionedOpeningPageFrom(String startUserId) {
+        return this.users.findByUserIdGreaterThanEqualOrderByUserIdAsc(
+                startUserId, Limit.of(FETCH_LIMIT));
     }
 
     /**

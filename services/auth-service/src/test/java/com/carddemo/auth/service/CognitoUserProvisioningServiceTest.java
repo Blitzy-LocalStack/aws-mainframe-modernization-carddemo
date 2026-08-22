@@ -260,14 +260,35 @@ class CognitoUserProvisioningServiceTest {
                 CognitoUserProvisioningService.USER_TYPE_ADMIN);
 
         assertThat(provisioned.subject()).isEqualTo(SUBJECT);
-        // WHY : Assumptions: the returned pair names the managed entry the credential was published to
-        //       and never the credential, so an administrator is told where to collect it while the
-        //       value stays in the store. The name is derived, so it is asserted against the same
-        //       derivation the service publishes rather than against a copied literal.
+        // WHY : ⚠️ Assumptions: the returned credential is asserted as an EQUALITY against the value the
+        //       pool RECEIVED, not as a non-blank check on the return value. A non-blank check passes
+        //       against any string, and a credential that is not the one the pool holds leaves the
+        //       account exactly as unreachable as no credential at all -- reached invisibly. This is the
+        //       one assertion that distinguishes a working handover from a plausible-looking broken one.
+        // WHY : Refactoring Rationale: this assertion read that the returned record "names the managed
+        //       entry the credential was published to and never the credential", which described the
+        //       revision it was written against and not a correct design: the archived entry is readable
+        //       only with the secret-store read action and a grant on the customer-managed key, which
+        //       the task role holds and the administrator's browser session does not, so the caller was
+        //       handed a locator it could not resolve.
+        assertThat(provisioned.oneTimeCredential())
+                .isEqualTo(capturedCreate(AdminCreateUserRequest::temporaryPassword));
+        // WHY : Assumptions: the locator is asserted TOO, and against the same derivation the service
+        //       publishes rather than against a copied literal. It is not a substitute for the value --
+        //       a response is delivered once, so an operator who loses it recovers the credential from
+        //       that entry under the store's own audit trail -- and it is not the value either, which is
+        //       what the inequality below states.
         assertThat(provisioned.credentialSecretName())
                 .isEqualTo(this.service.credentialSecretName(USER_ID));
         assertThat(provisioned.credentialSecretName())
                 .isNotEqualTo(capturedCreate(AdminCreateUserRequest::temporaryPassword));
+        // WHY : Assumptions: the record's diagnostic rendering is asserted to withhold the credential
+        //       even though the record carries it. Those are not in tension: one value returned once to
+        //       one caller is bounded, and the same value in a log line is retained by whatever
+        //       aggregates the logs. A record logged as `{}` renders every component, so the overridden
+        //       rendering is the only thing between the two.
+        assertThat(provisioned.toString())
+                .doesNotContain(capturedCreate(AdminCreateUserRequest::temporaryPassword));
         assertThat(capturedCreate(AdminCreateUserRequest::userPoolId)).isEqualTo(POOL_ID);
         assertThat(capturedCreate(AdminCreateUserRequest::username)).isEqualTo(USER_ID);
         assertThat(capturedCreate(AdminCreateUserRequest::messageAction))

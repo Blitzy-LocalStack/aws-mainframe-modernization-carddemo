@@ -176,6 +176,8 @@ architecture test is a build **failure**, not a silent pass, because the
 this file is run **from the repository root**, not from this module directory.
 
 ```bash
+# WHAT: put the pinned JDK 21 and Maven on the tool path of the current shell, so
+#       every command in this section resolves the same toolchain.
 # WHY : Assumptions: the toolchain profile script is LOGIN-only, so a
 #       non-interactive shell -- which is what a script, an editor task or a CI
 #       step gets -- starts without it. Exporting both here rather than relying
@@ -188,6 +190,8 @@ export PATH="$JAVA_HOME/bin:/opt/maven/bin:$PATH"
 ### Build
 
 ```bash
+# WHAT: prove the whole reactor still builds and passes every gate -- this module's
+#       acceptance criterion, and the command to trust before pushing.
 # WHY : Assumptions: `common-lib` must be built first and is never published to
 #       a registry, so the reactor is the only place its jar and its test-jar
 #       come from. This command also runs Surefire over `*Test`, Failsafe over
@@ -198,6 +202,8 @@ mvn -B -f services/pom.xml clean verify
 ```
 
 ```bash
+# WHAT: the same proof narrowed to this module and the shared kernel it depends on,
+#       for iterating without paying for the other seven services.
 # WHY : Trade-offs: `-am` ("also make") is REQUIRED and is not an optimisation.
 #       Without it Maven resolves `com.carddemo:common-lib:1.0.0-SNAPSHOT` from
 #       the local repository, so the build either fails outright on a clean
@@ -209,6 +215,7 @@ mvn -B -f services/pom.xml -pl account-service -am clean verify
 ```
 
 ```bash
+# WHAT: answer the documentation gate alone, in the shortest run that can answer it.
 # WHY : Trade-offs: `validate` is the phase the gate is bound to, so this stops
 #       before compiling, testing or packaging anything. It is the fastest way
 #       to answer "does my Javadoc satisfy Rule 1" and it is deliberately the
@@ -218,6 +225,8 @@ mvn -B -f services/account-service/pom.xml validate
 ```
 
 ```bash
+# WHAT: assemble this module's container image and prove the offline reactor and the
+#       documentation gate both succeed inside the image build. It publishes nothing.
 # WHY : Assumptions: the build context is the REPOSITORY ROOT -- the trailing
 #       `.` is the whole point of this command and is not interchangeable with
 #       the module directory. The Dockerfile reaches THREE paths outside this
@@ -372,6 +381,8 @@ CARDDEMO_ACCOUNT_INQUIRY_ERROR_QUEUE_URL=
 ```
 
 ```bash
+# WHAT: put an empty, owner-only, git-ignored file in place to hold the local
+#       credentials, and prove from git itself that it cannot be committed.
 # WHY : Assumptions: `umask 077` is set BEFORE the file is created, not fixed
 #       afterwards with `chmod`. A `chmod` after the fact leaves a window in
 #       which the file existed group- and world-readable, and on a shared
@@ -394,6 +405,8 @@ git check-ignore -v .env.account-service.local   # prints the rule that protects
 ```
 
 ```bash
+# WHAT: the COMPLETE local launch contract -- everything that has to be true for the
+#       process to reach a serving state, in the order it has to be done.
 # WHY : Assumptions: the credentials arrive by SOURCING the prepared file, so no
 #       secret is typed on this command line, appears in shell history, or shows
 #       up in the process table of a machine other developers can read.
@@ -465,6 +478,9 @@ java -jar services/account-service/target/account-service.jar
 Confirm the binding rather than trusting it — the check costs one command:
 
 ```bash
+# WHAT: settle whether the loopback binding actually took effect -- read the bound
+#       address from the kernel, then confirm the port answers on loopback and is
+#       refused from this host's routable address.
 # WHY : Alternatives Considered: `ss -lntp` or `netstat -lntp`. Rejected because
 #       neither is present in every container this repository is developed in,
 #       and their absence produces a "nothing is listening" answer that reads as
@@ -489,6 +505,8 @@ curl -sf --noproxy '*' --max-time 5 "http://$(hostname -i | awk '{print $1}'):80
 ```
 
 ```bash
+# WHAT: run the image just built against the same prepared environment file, reachable
+#       from this host only.
 # WHY : Alternatives Considered: passing each variable with a repeated `-e`
 #       flag. Rejected because the values include credentials and key material,
 #       and a `-e` list puts every one of them in this shell's history and in
@@ -597,6 +615,27 @@ was accepted; a connection error, a `401` or a `403` does not, and those are the
 statuses this service reports as the reference context being unavailable:
 
 ```bash
+# WHAT: prove the cross-service hop end to end before trusting an update that depends
+#       on it -- one lookup that is expected to be found and one that is expected not
+#       to be, so both halves of the contract are exercised rather than only the
+#       happy one.
+# WHY : Assumptions: the two calls are BOTH required, because a 404 and a transport
+#       failure are indistinguishable to a reader who only ever ran the seeded one.
+#       This service treats 200 and 404 as two answers to the same question -- "is
+#       this code in a list" -- and treats a connection error, a 401 and a 403 as the
+#       reference context being unavailable, which is a different outcome for the
+#       edit being validated. Trade-offs: `--cacert` names the certificate minted in
+#       the block above rather than installing it into the system trust store, so this
+#       verification leaves no trust anchor behind on the host once the run is over.
+#       Alternatives Considered: `-k` to skip verification entirely. Rejected -- it
+#       would also pass against an impostor on that port, which is the one thing the
+#       minted certificate exists to rule out.
+# WHY : Assumptions: `$TOKEN` holds an access token the caller obtains from the
+#       identity provider and exports itself; it is deliberately a variable and never
+#       a literal, so no credential reaches this file or the shell history. A run with
+#       it unset sends the header `Bearer ` and earns a 401, which is the reference
+#       context refusing the call rather than answering the lookup -- so read a 401
+#       here as "no token", not as "code not found".
 # a seeded general-purpose code answers 200 with {"areaCd":"908","codeClass":"G"}
 curl -s --cacert "$TLS/listener.crt" -w ' [%{http_code}]\n' \
   -H "Authorization: Bearer $TOKEN" \
@@ -1102,19 +1141,25 @@ of composing a new one.
 | `sent_at` | `TIMESTAMP(6)` nullable | When it reached the queue; tied to `status` by `ck_inquiry_reply_ledger_sent_instant` |
 | `attempts` | `INTEGER NOT NULL DEFAULT 0` | **Deliveries of this request that reached the send step** — the claim records the delivery it admits, each redelivery that re-sends records itself, and the retirement records none |
 
-⚠ Refactoring Rationale: `attempts` counted **completed sends**, and the column's own
-comment in `V2__account_inquiry_reply_ledger.sql` still says so. Under that rule the
-column carried nothing an operator could use — it was `0` for every outstanding claim
-and `1` for every retired one, which is exactly what `status` already says — and it
-was silent for the one condition it is worth reading: a reply whose send keeps
-failing never reached the retirement, so it stayed at `0` across every one of its
-redeliveries, right up to the dead-letter queue. Counting deliveries instead makes the
-value equal the number of times the send of this one reply was attempted, so a row
-whose `attempts` has reached the request queue's `maxReceiveCount` of **5** is a reply
-that could not be delivered at all. The DDL is unchanged — `INTEGER NOT NULL` admits
-the new values without alteration — so only the write pattern moved, in
-`InquiryReplyLedger`, whose four statements each carry the reasoning at the point of
-use.
+Assumptions: `attempts` counts **deliveries that reached the send step**, and nothing
+about how any of them turned out. `CLAIM_REPLY` inserts the value `1` and is committed
+before the first send is attempted; `COUNT_SEND_ATTEMPT` increments it and must be
+committed before a re-send; `MARK_SENT` does not touch it; and the path that finds a
+retired claim and suppresses its duplicate does not touch it either, because no send is
+attempted there. Counting at the delivery rather than at the retirement is what makes
+redelivery pressure visible at all: a counter advanced only by a successful send would
+read `0` for every outstanding claim and `1` for every retired one, which is exactly
+what `status` already says, and would stay at `0` for the one condition worth reading it
+for — a reply whose send keeps failing.
+
+Trade-offs: the column therefore answers "how many deliveries reached the send" and not
+"whether the reply got out", and the two are not the same question. It cannot distinguish
+a send that succeeded from one whose subsequent mark failed, so a value equal to the
+request queue's `maxReceiveCount` of **5** says five deliveries reached the send step, not
+that no reply was ever delivered. A value above one is the operational signal that the
+window between send and mark was entered. The DDL is unchanged — `INTEGER NOT NULL`
+admits these values without alteration — so the discipline lives entirely in
+`InquiryReplyLedger`, whose four statements each carry the reasoning at the point of use.
 
 Assumptions: that migration's comment is deliberately left stating the narrower rule,
 for the reason [§5 of the batch service's own README](../batch-service/README.md)
@@ -1126,11 +1171,15 @@ rejected: it would leave two migrations describing one column, and a reader woul
 to know to read the later one. The correction lives here and in the repository class,
 which are the two places a reader of that column actually looks.
 
-Assumptions: the identically shaped ledger in `reference-service` carries the same
-rule, changed in the same edit. The two are copies by design — schema-per-service
-means neither can import the other's table — so the counting discipline is kept in
-step deliberately; two sibling ledgers counting two different things is how one of
-them later gets read as the other.
+Assumptions: this is the ONE active reply ledger, and it covers both exchanges the shared
+inquiry request queue carries. `reference-service` declares no messaging starter and no
+listener, so the identically shaped table its `V3__reference_inquiry_reply_ledger.sql`
+created could never be written to; `V4__drop_reference_inquiry_reply_ledger.sql` withdraws
+it, and `V3` is retained rather than deleted because Flyway validates applied history
+against the scripts it can resolve. A second ledger would be the more obvious arrangement
+and it is the wrong one: two sibling tables counting deliveries for one consumer is how one
+of them later gets read as the other, and a table nothing inserts into supplies no
+idempotency at all.
 
 One index exists, and like the cross-reference index above it is not an optimisation
 of a read this module performs:
@@ -1957,7 +2006,7 @@ census check said so before a reader could: TWO classes were added to the `servi
 package and the marker above was not moved with either of them.
 `AddressValidationServiceTest` holds the allow-list edits directly, and
 `AccountViewServiceTest` holds the view composition. The figure is re-measured rather
-than incremented — `find src/test -name '*Test.java' | wc -l` gives 34 and
+than incremented — `find src/test -name '*Test.java' | wc -l` gave 34 at that point and
 `-name '*IT.java'` gives eight — and the `service` row below names both new classes,
 so the row and the figure can still be compared by reading. Assumptions: the two
 additions are recorded against one re-measurement rather than two, because they landed
@@ -1973,7 +2022,18 @@ endpoint aggregated the datasource, the disk and the readiness state and nothing
 all about the listener container, so a consumer that had stopped consuming reported
 `UP`. `find src/test -name '*Test.java' | wc -l` gives 37 and `-name '*IT.java'` gives
 eight, and the `service` row below names the new class so the row and the figure can
-still be compared by reading.
+still be compared by reading. **37 and 8 are the current figures**, and they are the
+pair the marker above publishes; every figure quoted in the paragraphs of this
+chronology other than this one is a record of what a past build measured, not a
+statement about the tree as it stands.
+
+Assumptions: this chronology is kept rather than collapsed to its latest entry, because
+each entry records a distinct class landing without its marker being moved and that is
+the evidence the census check is doing work. Trade-offs: the cost is that a reader
+skimming it meets several different figures, which is why the current pair is stated
+once, here, and why the superseded entries are written in the past tense. The one
+figure a reader should ever act on is the marker's, and
+`find src/test -name '*Test.java' | wc -l` settles it without reading any of this.
 
 Refactoring Rationale: `AddressValidationServiceTest` is not a duplicate of
 `AccountAddressValidationTest`, which is why both are named. The two ask different
@@ -2017,9 +2077,9 @@ Refactoring Rationale: the unit figure then read 34 while the tree held 35, and 
 census check said so on the first build after the class landed. `AccountUpdateServiceTest`
 was added to the `service` package to hold the edit surface itself, and the marker above
 was not moved with it. The figure is re-measured rather than incremented —
-`find src/test -name '*Test.java' | wc -l` gives 35 and `-name '*IT.java'` gives eight
-— and the `service` row below names the new class, so the row and the figure can still
-be compared by reading.
+`find src/test -name '*Test.java' | wc -l` gave 35 at that point and `-name '*IT.java'`
+gives eight — and the `service` row below names the new class, so the row and the figure
+can still be compared by reading.
 
 Refactoring Rationale: `AccountUpdateServiceTest` is not a duplicate of either COACTUPC
 class already in that row, which is why all three are named. The three ask different
@@ -2053,9 +2113,12 @@ All eight integration tests are named individually rather than described as a
 `IT` suffix, not on the package.
 
 ```bash
+# WHAT: run BOTH test tiers of this module -- the unit tier and the
+#       container-backed integration tier -- which is the only invocation that
+#       exercises the database assertions.
 # WHY : Assumptions: Failsafe binds to `integration-test` and `verify`, so the
 #       eight `*IT` classes run under `verify` and NOT under `test`. A run that
-#       stops at `test` therefore exercises the 35 `*Test` classes and skips all
+#       stops at `test` therefore exercises the 37 `*Test` classes and skips all
 #       eight, and with them every Testcontainers-backed database assertion --
 #       including the by-account query that stands in for the CXACAIX alternate
 #       index and the plan assertion that proves it resolves through an index,
@@ -2064,6 +2127,8 @@ mvn -B -f services/pom.xml -pl account-service -am verify
 ```
 
 ```bash
+# WHAT: narrow a run to one test class and then to one method pattern, for the
+#       edit-and-rerun loop on a single assertion.
 # WHY : Assumptions: these are scoped with `-pl account-service` and deliberately
 #       WITHOUT `-am`, which is the opposite of every other command in this
 #       section. A `-Dtest=` filter is a GLOBAL property: with `-am` the reactor
@@ -2099,6 +2164,8 @@ mvn -B -f services/pom.xml -pl account-service test -Dtest='AccountMapperTest#*I
 ```
 
 ```bash
+# WHAT: run the integration tier ALONE against a real PostgreSQL, skipping the unit
+#       tier -- the fast loop for a change to a query, a migration or a constraint.
 # WHY : Assumptions: a working container runtime is required -- Testcontainers
 #       starts a real PostgreSQL rather than substituting an in-memory engine. That
 #       is deliberate: an in-memory database would not enforce `CHAR(n)` padding,

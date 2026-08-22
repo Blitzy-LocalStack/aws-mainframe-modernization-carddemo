@@ -314,17 +314,35 @@ automation silently repair and hide the drift.
 Output names are a one-way contract with the environment roots. The module
 publishes identifiers and runtime selectors only:
 
-| Output | Consumer-facing contract |
-|---|---|
-| `service_credential_secrets` | Role-keyed secret ARN, name, username selector, and password selector for task-role IAM and ECS injection |
+| Output | Consumer-facing contract | Consumers (measured) |
+|---|---|---|
+| `service_credential_secrets` | Role-keyed secret ARN, name, username selector, and password selector for task-execution-role IAM and ECS injection | Both roots, in four distinct places each. Measured in `infra/envs/dev/main.tf`: the database-bootstrap Lambda's `secretsmanager:GetSecretValue` statement and its matching key condition (L1919, L1950), the by-name role-to-secret map handed to that bootstrap (L2236, L2369), the per-workload `secret_arns` projection into `ecs-service` that carries both the runtime and the migrator credential (L3464-L3479), and a further read-scope statement at L4449-L4475. `infra/envs/prod/main.tf` mirrors all four. Each root also republishes the map from its own `outputs.tf` |
+| `service_credential_revision` | The write-only version number every credential document in this module was written at. Non-secret: it names the generation of the stored values, never a value | Both roots, in the **database bootstrap invocation's trigger** — `infra/envs/dev/main.tf` L2392 and `infra/envs/prod/main.tf` L2224. This is the load-bearing consumer: without the revision in that trigger, a re-issue writes new passwords into Secrets Manager while every PostgreSQL role keeps the password `ALTER ROLE` last set, and the next task rollout authenticates with credentials the database does not hold |
 
-That is the module's entire public surface: **one** output. Assumptions: an output
-exists only where a caller cannot obtain the value another way, which is why there
-is no TLS handle, no rotation-function identifier and no rotation log-group name
-here — this module creates none of those objects. Trade-offs: a caller that wants
-a rotation function's identity holds it already, because the root that supplies
-the function is the root that creates it, so an output here would only echo an
-input back.
+That is the module's entire public surface: **two** outputs, and both are read by
+both environment roots. Assumptions: an output exists only where a caller cannot
+obtain the value another way, which is why there is no TLS handle, no
+rotation-function identifier and no rotation log-group name here — this module
+creates none of those objects. Trade-offs: a caller that wants a rotation
+function's identity holds it already, because the root that supplies the function
+is the root that creates it, so an output here would only echo an input back.
+
+Assumptions: `service_credential_revision` is a second output rather than a member
+of the map above, and the separation is what makes it usable. It is module-wide —
+one shared literal governs every document this module writes — whereas the map is
+keyed per role, so folding a module-wide generation number into a per-role entry
+would repeat one value sixteen times and invite a consumer to trigger on one role's
+copy of it. A caller that must re-bind credentials needs the number once, for the
+whole set.
+
+Refactoring Rationale: this section previously listed only
+`service_credential_secrets` and called it "the module's entire public surface:
+**one** output", while `outputs.tf` declared two and both roots consumed the
+second. Understating an output surface is not a harmless omission here: the
+undocumented output is precisely the one whose absence from a bootstrap trigger
+produces a total authentication outage from an apply whose plan showed nothing but
+a secret version changing, so a reader working from this table alone would have
+built the trigger without it.
 
 This module holds no reference to the master credential in either direction. The
 Aurora module creates and owns the RDS-managed master secret and publishes its

@@ -114,6 +114,7 @@ from carddemo_migration.config import (
     resolve_card_verification_value_key_id,
     resolve_customer_identifier_key_id,
     resolve_dataset_staging_settings,
+    resolve_master_settings,
     resolve_migration_settings,
     resolve_seed_user_subjects,
     role_for_schema,
@@ -2342,9 +2343,17 @@ def _load_dataset(arguments: argparse.Namespace) -> int:
     Returns
     -------
     int
-        :data:`EXIT_OK` when the load committed, and also when the direct-COPY precondition
-        DECLINED it because the target was already populated -- a declined load is the restart
-        case succeeding, not failing. :data:`EXIT_FAILED` when it was rolled back.
+        :data:`EXIT_OK` when the load committed, whatever the merge inserted: the printed line
+        carries :meth:`carddemo_migration.loaders.aurora.LoadOutcome.describe`, which states the
+        rows staged and the rows the table gained, and appends the rows the target already held
+        identically only when that count is non-zero. A re-run of a completed load therefore
+        reports every row staged and none inserted, which is the restart case succeeding rather
+        than a refusal to run. :data:`EXIT_FAILED` when nothing was loaded -- a source that could
+        not be read or decoded, a record that does not carry a mapped field, a projection that
+        cannot be applied, a staged key the table already holds against different content, an
+        extract presenting one business key twice, or a failure of the staging, the copy, the
+        conflict probe, the merge or the commit. :data:`EXIT_FATAL` when the environment could not
+        be resolved, which no retry of this step can change.
 
     Raises
     ------
@@ -2392,7 +2401,7 @@ def _load_dataset(arguments: argparse.Namespace) -> int:
     #   load that staged every row and inserted none is a success -- the seed migration had already
     #   written them -- and an operator reading a line that said only "loaded 7 row(s)" would
     #   believe seven rows had been added. The outcome renders the skipped count only when it is
-    #   non-zero, so the direct path's line does not carry a number that is always zero.
+    #   non-zero, so a first load's line does not carry a number that is always zero.
     # Refactoring Rationale: there is no DECLINED branch, and there was one. Every target now
     #   stages and merges, so a re-run of a completed load reports staged rows with none inserted
     #   rather than refusing to run -- the same information, reached without a row-count
@@ -2499,6 +2508,115 @@ def _reconcile_sequences(arguments: argparse.Namespace) -> int:
             reconciliation.next_value_after,
         )
     print(f"reconciled {TRANSACTION_ID_SEQUENCE}: {reconciliation.describe()}")
+    return EXIT_OK
+
+
+def _refresh_card_identity(arguments: argparse.Namespace) -> int:
+    """Bring the reporting per-card identity relation level with the card cross-reference.
+
+    Purpose
+    -------
+    Give the cutover the step that has to happen between the last load into
+    ``account.card_xref`` and the first statement or report run. ``reporting.card_identity``
+    holds one row per card, carrying the keyed fingerprint every card-bearing reporting
+    projection publishes and the whole card number those projections join on, and it is what
+    makes a fingerprint lookup an indexed read rather than a scan of every transaction row. Its
+    rows are DERIVED from the cross-reference and are backfilled by
+    ``sql/V1__reporting_views.sql`` at the moment the relation is created -- which on a cutover
+    is before the extract is loaded, so it is backfilled from nothing. Until this step runs,
+    every card the load wrote is absent from ``reporting.v_card_xref`` and therefore gets no
+    statement, with nothing in the chain reporting the omission.
+
+    Parameters
+    ----------
+    arguments : argparse.Namespace
+        Carries nothing. The step takes no options for the same reason ``reconcile-sequences``
+        takes none: there is exactly one identity relation and one correct state for it, so an
+        option could only create a way to reach a wrong one.
+
+    Returns
+    -------
+    int
+        :data:`EXIT_OK` when the relation is level with the cross-reference -- whether this run
+        made it so or found it so -- :data:`EXIT_FATAL` when the environment could not be
+        resolved, and :data:`EXIT_FAILED` when the reconciliation could not be performed, in
+        which case a statement run must not proceed.
+
+    Raises
+    ------
+    None
+    """
+    # WHY : Assumptions: the MASTER credential is resolved, and this is the one step that needs it
+    #   for a reason other than role administration. `refresh_card_identity` reaches its authority
+    #   by `SET ROLE carddemo_reporting_owner`, and `reporting` is the one context with no
+    #   `_migrator` login -- `sql/V0__schemas_and_roles.sql` creates seven of those and the
+    #   reporting schema's objects are applied by the bootstrap principal instead, because
+    #   reporting-service ships no Flyway migration. So there is no per-context credential that is
+    #   a member of that owner, and `resolve_migration_settings("reporting")` raises rather than
+    #   returning one.
+    # WHY : Alternatives Considered: resolving the runtime credential, and making
+    #   `carddemo_reporting` a member of the owner so it could. Both rejected. The runtime role
+    #   holds SELECT on two of the relation's three columns and nothing else, so the procedure's
+    #   writes fail; and granting it the owner would let the read-only reporting identity assume
+    #   the role that can read every whole card number, which is the entire boundary the
+    #   column-level grant exists to draw. Using the principal that applied the definition to
+    #   maintain what the definition created keeps that boundary intact.
+    # WHY : Assumptions: this import is local for the reason the module header records -- a defect
+    #   in the loader must not fail the commands that do not touch it. It resolves once per
+    #   invocation, from the interpreter's module cache on any later call.
+    from carddemo_migration.loaders.aurora import (
+        AuroraLoadError,
+        connect,
+        refresh_card_identity,
+    )
+
+    del arguments
+    try:
+        connection = connect(resolve_master_settings())
+    except ConfigurationError as exc:
+        # WHY : Assumptions: the FATAL tier, caught ahead of the operational tuple below for the
+        #   reason recorded on the load command: 8 is retried by the batch state and a retry cannot
+        #   publish a parameter that was never published.
+        _LOGGER.error("the environment could not be resolved: %s", _reported(exc))
+        return EXIT_FATAL
+    except _step_errors() as exc:
+        _LOGGER.error("%s", exc)
+        return EXIT_FAILED
+    try:
+        refresh = refresh_card_identity(connection)
+    except AuroraLoadError as exc:
+        _LOGGER.error("%s", exc)
+        return EXIT_FAILED
+    finally:
+        connection.close()
+    # Trade-offs: a run that changed nothing reports success rather than a distinct status, for
+    #   the reason the allocator step records -- the step is defined by its POSTCONDITION, which
+    #   holds equally whether this run reached it or found it reached, and that is what makes the
+    #   step safe to leave in a cutover script that may be re-run. Which of the two happened is
+    #   still in the rendered line.
+    if refresh.was_stale:
+        # Assumptions: logged at WARNING, because this is the omission having been caught. A
+        #   statement run against a stale relation produces no document for the affected
+        #   cardholders and reports nothing, so an operator reading a cutover log afterwards needs
+        #   to see that the step was not merely ceremonial.
+        _LOGGER.warning(
+            "reconciled relation=%s gained=%d removed=%d cards_published=%d",
+            refresh.relation,
+            refresh.gained,
+            refresh.removed,
+            refresh.cards_published,
+        )
+    else:
+        _LOGGER.info(
+            "relation=%s already level with the cross-reference at cards_published=%d",
+            refresh.relation,
+            refresh.cards_published,
+        )
+    # WHY : Assumptions: the rendered line is the description ALONE and is not prefixed with the
+    #   relation name, because `CardIdentityRefresh.describe` already opens with it. The allocator
+    #   step above does prefix its own, and the difference is in the two descriptions rather than
+    #   in the two commands: that one renders the movement without naming its subject.
+    print(refresh.describe())
     return EXIT_OK
 
 
@@ -4214,6 +4332,33 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     reconcile_sequences.set_defaults(handler=_reconcile_sequences)
+
+    # WHY : Assumptions: this is a SEPARATE command rather than a step folded into the cross-
+    #   reference load, and the reason is a credential rather than a preference. `load-records`
+    #   holds a connection authenticated as the schema being loaded -- for this dataset that is the
+    #   account context's migrator role, which holds nothing at all in the reporting schema -- so
+    #   the reconciliation cannot run on that connection whatever the ordering. It needs its own
+    #   connection under the reporting migrator, and a command is what gives it one.
+    # WHY : Trade-offs: that makes the step something a cutover script has to invoke rather than
+    #   something it gets for free, and the cost of forgetting it is a statement run that omits
+    #   every card loaded after the reporting definition was applied. The step is therefore
+    #   documented at both ends -- here and in the runbook's ordered step list -- and reports
+    #   whether it found the relation stale, so a log makes the omission visible after the fact
+    #   rather than only the missing statements doing so.
+    refresh_card_identity = subcommands.add_parser(
+        "refresh-card-identity",
+        help="bring the reporting per-card identity relation level with the cross-reference",
+        description=(
+            "Reconcile reporting.card_identity with account.card_xref. Run after the last "
+            "load into the cross-reference and BEFORE any statement or report run. The "
+            "relation is created and backfilled by data-migration/sql/V1__reporting_views.sql, "
+            "which on a cutover runs against an empty cross-reference, so every card the "
+            "extract then loads is absent from it until this step runs -- and a card absent "
+            "from it gets no statement. Idempotent, so a repeat run is a no-op. Takes no "
+            "options."
+        ),
+    )
+    refresh_card_identity.set_defaults(handler=_refresh_card_identity)
 
     # Assumptions: the four commands below share one option set -- --dataset, --source and
     #   --encoding -- because they are four questions about the same pairing of a dataset and a

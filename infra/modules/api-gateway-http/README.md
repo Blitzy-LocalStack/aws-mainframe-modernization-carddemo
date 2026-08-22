@@ -30,7 +30,7 @@ fixes.
 
 ## 1. What this module provisions
 
-Eleven resources that only make sense as a set, in the order they appear in
+Ten resources that only make sense as a set, in the order they appear in
 [`main.tf`](main.tf):
 
 1. `aws_apigatewayv2_api.this` — the HTTP API, which also carries the
@@ -72,6 +72,14 @@ Eleven resources that only make sense as a set, in the order they appear in
 10. `aws_apigatewayv2_stage.this` — the single stage, which binds access
     logging and the throttle limits to everything above.
 
+Refactoring Rationale: this heading said eleven while the list below it — and
+[`main.tf`](main.tf) — carried ten. The count was correct before the withdrawal
+recorded under item 4 removed `aws_security_group.vpc_link`, and the enumeration
+was updated at the time while the number above it was not. The two now agree, and
+the generated Resources table below — which terraform-docs derives from the HCL
+rather than from this prose — is the third place to check them against; it lists
+the same ten.
+
 The request path, end to end:
 
 ```mermaid
@@ -89,7 +97,7 @@ Seven of the eight migrated services are published here — auth, accounts,
 cards, transactions, reference, authorizations and reports. Two of those seven
 own a second top-level path segment, because their own OpenAPI contract
 publishes one: `card-service` serves its administrative card-detail read at
-`/api/v1/admin/cards/{cardNumber}` beside the card subtree at `/api/v1/cards`,
+`/api/v1/admin/cards/{cardKey}` beside the card subtree at `/api/v1/cards`,
 and `transaction-service` serves its single bill-payment operation at
 `/api/v1/billpay` beside `/api/v1/transactions`. Assumptions: a route key is
 required for every segment a contract publishes, not for every service — an
@@ -215,10 +223,19 @@ the service tier and lets a caller reach the services without passing the
 authorizer, which is exactly the property §2.2 exists to establish.
 Assumptions: the link places its network interfaces in the private application
 subnets, alongside the tasks they serve, so the hop never traverses a public
-subnet; and reachability is narrowed to a single group pair, because this
-module creates a dedicated security group whose only egress is 443 to the load
-balancer's group and owns the matching ingress rule rather than widening the
-application task group.
+subnet; and reachability is narrowed to a single group pair, because the link
+attaches to the load balancer's own group (`var.alb_security_group_id`) and this
+module declares both halves of the one flow it needs — a 443 egress rule and the
+matching ingress rule on that group — rather than widening the application task
+group.
+
+Refactoring Rationale: this paragraph said the module "creates a dedicated
+security group whose only egress is 443". That group was withdrawn for the reason
+recorded under item 4 of §1 — it took the delivered topology to five functional
+security groups against the three AAP §0.5.1.12 freezes — and the `vpc_id` input
+it needed went with it, which is why the input table above no longer lists one.
+The narrowing property the sentence was defending is unchanged: the link's
+reachable destination is still exactly one group pair on one port.
 
 Recorded in [ADR-008](../../../docs/adr/ADR-008-security-and-identity.md).
 
@@ -322,7 +339,6 @@ module "api_gateway" {
   route_authorization_scopes  = module.cognito.interactive_route_authorization_scopes
   alb_listener_arn            = module.alb.https_listener_arn
   private_app_subnet_ids      = module.network.private_app_subnet_ids
-  vpc_id                      = module.network.vpc_id
   alb_security_group_id       = module.network.alb_security_group_id
   spa_cors_allow_origins      = [local.spa_origin]
   log_retention_days          = var.log_retention_days
@@ -330,6 +346,13 @@ module "api_gateway" {
   integration_tls_server_name = local.internal_service_dns_name
 }
 ```
+
+Refactoring Rationale: this example passed `vpc_id = module.network.vpc_id`, and
+the module declares no such variable — it went out with the security group
+described under item 4 of §1, so a root that copied this block verbatim would have
+failed `terraform validate` with "An argument named vpc_id is not expected here".
+The block above is now the exact argument set both environment roots pass, which
+is the only version of a usage example that is worth having.
 
 Three things this folder deliberately does not contain:
 
@@ -349,11 +372,18 @@ Three things this folder deliberately does not contain:
 Trade-offs: the first of those has a consequence for tagging that is easy to
 miss. Because there is no provider block here there is no provider
 `default_tags` to inherit, so `tags` is the only tag channel available and is
-merged onto each taggable resource individually. Five of the eleven resources
-accept tags — the API, the dedicated security group, the VPC Link, the log
-group and the stage. The two security-group rules, the authorizer, the
-integration and both route resources expose no `tags` argument at all, so their
-absence from the tag set is the provider's shape rather than an omission here.
+merged onto each taggable resource individually. Four of the ten resources
+accept tags — the API, the VPC Link, the log group and the stage. The two
+security-group rules, the authorizer, the integration and both route resources
+expose no `tags` argument at all, so their absence from the tag set is the
+provider's shape rather than an omission here.
+
+Refactoring Rationale: this sentence read "five of the eleven … the API, the
+dedicated security group, the VPC Link, the log group and the stage", and the
+dedicated security group is the resource withdrawn under item 4 of §1. Both
+figures and the member list were counted from `main.tf` again rather than
+decremented, because a stale total and a stale member are two different errors
+and correcting one by arithmetic leaves the other.
 
 ### 5.1 Where the operator commands live
 
@@ -385,8 +415,7 @@ provenance instead: which sibling produces a value, and what it controls.
 | `route_authorization_scopes` | `cognito` | The scope every authorized route requires, which is what rejects an identity token |
 | `alb_listener_arn` | `alb` | The private integration's target — the internal HTTPS listener |
 | `private_app_subnet_ids` | `network` | Where the VPC Link places its network interfaces |
-| `vpc_id` | `network` | The VPC in which the VPC Link's dedicated security group is created |
-| `alb_security_group_id` | `network` | The group this module's egress rule targets, and whose matching ingress rule it owns |
+| `alb_security_group_id` | `network` | The group the VPC Link attaches to, which this module's egress rule targets and whose matching ingress rule it owns |
 | `spa_cors_allow_origins` | `cloudfront-spa` | The exact browser origins permitted to call this API |
 | `access_log_kms_key_arn` | `kms` | The customer-managed key encrypting the access-log group |
 | `integration_tls_server_name` | the environment root | The name verified against the certificate the internal listener presents |

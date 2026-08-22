@@ -22,12 +22,15 @@ import com.carddemo.reporting.repository.StatementCardXrefRepository;
 import com.carddemo.reporting.repository.StatementCardXrefRepository.StatementHeadingRow;
 import com.carddemo.reporting.repository.StatementCustomerRepository;
 import com.carddemo.reporting.repository.StatementTransactionRepository;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.Objects;
+import java.util.UUID;
+import java.util.regex.Pattern;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Limit;
@@ -315,6 +318,63 @@ public class StatementService {
     public static final String INDEX_OBJECT = STATEMENT_OBJECT_STEM + "-index" + PLAIN_TEXT_SUFFIX;
 
     /**
+     * Object name of the manifest naming the run every read resolves against, being
+     * {@code statements-manifest.txt}.
+     *
+     * <p>⚠️ Refactoring Rationale: this object is the commit point of a statement run, and it exists
+     * because a review found the run publishing INCOHERENTLY. The three objects of a run were written
+     * to fixed keys one after another, so each became visible the instant it was written: a reader
+     * arriving between an artifact write and the index write held the PREVIOUS run's index over the NEW
+     * run's artifact, and every position that index named then addressed whatever the new run had
+     * placed there. A per-card response could therefore report a position lying inside another
+     * cardholder's statement, with nothing in either object recording the mismatch. Writing a run's
+     * objects under a per-run key prefix and naming the run here makes the last write the only visible
+     * change: until this object names a run, that run's objects are addressed by nothing at all.
+     *
+     * <p>Assumptions: ONE small object is the commit record, rather than a marker beside each artifact,
+     * because the property wanted is that exactly one run is current -- three markers can disagree with
+     * each other and one cannot. Alternatives Considered: relying on the bucket's own versioning and
+     * reading a matched version of each of the three objects, which the store supports; rejected
+     * because a reader would then have to learn three version identifiers from somewhere, which is this
+     * manifest again with more moving parts, and because a lifecycle rule expiring a noncurrent version
+     * would break the pairing with nothing detecting it.
+     *
+     * <p>Assumptions: the manifest sits INSIDE the statement key prefix, beside the run prefixes it
+     * names. The reporting task role is granted its object actions on the reporting key prefixes of the
+     * dataset bucket, so an object introduced outside them would be unwritable and unreadable until an
+     * environment root was changed too -- and a run that cannot publish its manifest is a run no reader
+     * can see.
+     */
+    public static final String MANIFEST_OBJECT =
+            STATEMENT_OBJECT_STEM + "-manifest" + PLAIN_TEXT_SUFFIX;
+
+    /**
+     * Key segment introducing one run's immutable object set, being {@code run=}.
+     *
+     * <p>Assumptions: the {@code name=value} shape matches the {@code dt=} and {@code gen=} segments
+     * the dataset bucket already uses for the nightly generation families, so an operator listing the
+     * bucket reads one convention rather than two. Trade-offs: a run prefix accumulates one directory
+     * per run, where the retired fixed keys accumulated none; the bucket's noncurrent-version lifecycle
+     * does not reclaim them because each key is written exactly once, so retention of superseded runs
+     * is a lifecycle rule on the prefix rather than a property of the writer -- which is the honest
+     * place for it, since only the deployment knows how long a superseded statement run must be
+     * readable.
+     */
+    public static final String RUN_SEGMENT = "run=";
+
+    /**
+     * Number of characters a run identifier carries, being thirty-two.
+     *
+     * <p>Assumptions: thirty-two lower-case hexadecimal characters is a rendered version-4 UUID with
+     * its hyphens removed, which is 122 bits of randomness -- so two runs, even two started in the same
+     * second by two orchestrations, cannot collide in practice and neither can overwrite the other's
+     * objects. Alternatives Considered: the business date, or a date and a sequence number; both were
+     * rejected because a rerun of one date would then reuse the prefix of the run it is replacing,
+     * which reintroduces exactly the mutation this scheme exists to remove.
+     */
+    public static final int RUN_ID_LENGTH = 32;
+
+    /**
      * Path the statement surface is served under, being {@code /api/v1/reports/statements}.
      *
      * <p>Assumptions: declared here and ALIASED by {@code StatementController.BASE_PATH}, for the same
@@ -468,6 +528,32 @@ public class StatementService {
     private static final List<String> ARTIFACT_OBJECT_NAMES =
             List.of(PLAIN_TEXT_OBJECT, HTML_OBJECT);
 
+    /**
+     * The shape a run identifier must have before any part of it reaches an object key.
+     *
+     * <p>Assumptions: the identifier is validated on the way OUT of the manifest as strictly as on the
+     * way in, and the pattern is anchored to the whole value by {@link java.util.regex.Matcher#matches}
+     * rather than searched for. The manifest is an object in a bucket, so its content is not something
+     * this class produced within the request it is serving; a value read from it is concatenated into a
+     * key, and admitting {@code ../} or a leading slash there would let a manifest select an object
+     * outside the statement prefix. Alternatives Considered: trusting the manifest because only this
+     * service writes it, which is true today and is exactly the kind of assumption that stops being
+     * true when a second writer appears.
+     */
+    private static final Pattern RUN_ID_PATTERN =
+            Pattern.compile("[0-9a-f]{" + RUN_ID_LENGTH + "}");
+
+    /**
+     * Greatest number of bytes read from the manifest, being one identifier and a line ending's slack.
+     *
+     * <p>Assumptions: the manifest is read through a BOUNDED range rather than opened whole, because it
+     * is a pointer file and an unbounded read of an object whose size this service does not control
+     * would size an allocation from the store's answer. Sixteen bytes of slack past the identifier
+     * covers a trailing newline of either convention and leaves a longer body to fail validation rather
+     * than to be truncated into something that happens to validate.
+     */
+    private static final int MANIFEST_MAX_BYTES = RUN_ID_LENGTH + 16;
+
     private static final String ABEND_CULPRIT = "CBSTM03A";
 
     // WHY : Assumptions: four characters is what ABEND-CODE declares, so the code is chosen to fit
@@ -476,6 +562,45 @@ public class StatementService {
     //       either -- 9999-ABEND-PROGRAM at L921 is reached from three different reads and displays
     //       the same text for all of them -- and the reason component carries what separates them.
     private static final String ABEND_CODE = "STMT";
+
+    /**
+     * Names how much of a statement run a response may disclose to the caller that asked for it.
+     *
+     * <p>⚠️ Refactoring Rationale: this distinction exists because a review found a CONFIDENTIALITY
+     * defect in the statement response, not because two callers wanted two shapes. A statement is
+     * requested for one card, and the response carried the selectors of the run-wide plain-text and
+     * markup artifacts -- objects holding every cardholder's statement in the portfolio -- so any
+     * caller holding an ordinary group claim could ask for one card it was entitled to and be handed
+     * the address of the whole run. The artifact route is now admitted to the administrative group
+     * alone, and a response is assembled to match: a cardholder audience is answered with the figures
+     * of its own statement and no handle to anything wider.
+     *
+     * <p>Assumptions: the audience is decided at the request edge from validated claims and passed in,
+     * rather than read here from a security context. This class is called from a task with no request
+     * and no principal at all -- {@code GenerateStatementsTask} -- so a class that reached for an
+     * ambient principal would have to decide what an absent one means, and the safe answer there is not
+     * the useful answer at the edge. Alternatives Considered: assembling the full response always and
+     * redacting it in the controller; rejected because the redaction would then have to be extended by
+     * hand every time a run-wide field is added, and because the position lookup it discards costs
+     * several ranged reads of the index that a cardholder request now never performs.
+     *
+     * <p>Trade-offs: the two values are not a permission model and must not grow into one. They name
+     * one decision -- whether run-wide detail is admissible in this answer -- and the authorization that
+     * makes the decision lives in {@code SecurityConfig}, where it is enforced for the collection route
+     * as well.
+     */
+    public enum ArtifactAudience {
+
+        /**
+         * A caller reading one card's statement, answered with that card's figures and nothing wider.
+         */
+        CARDHOLDER,
+
+        /**
+         * An operator reading a run, answered with the run's artifact handles and index positions too.
+         */
+        OPERATOR
+    }
 
     /**
      * Receives the records of one statement run, in the order the reference writes them.
@@ -874,8 +999,11 @@ public class StatementService {
      * {@code NUMERIC(11,2)} column so it stays exact.</p>
      *
      * @param request the card or account the statement is wanted for
-     * @return the heading figures, the accumulated total, the row count, and the location and write
-     *     instant of each rendered artifact the store holds
+     * @param audience how much of the run this answer may disclose: an operator audience carries the
+     *     current run's artifact locations, its write instant and this card's position within it, and a
+     *     cardholder audience carries none of the three; must not be {@code null}
+     * @return the heading figures, the accumulated total and the row count, with the run-wide fields
+     *     present only for an operator audience and only where the store holds the artifact
      * @throws ClientInputException if the request does not name exactly one of a card and an account,
      *     or if the named account holds more than one card
      * @throws NoSuchElementException if no card with the requested number exists, or the requested
@@ -883,11 +1011,11 @@ public class StatementService {
      * @throws IllegalStateException if the cross-reference names a customer or an account that does
      *     not resolve, which the reference treats as an abend rather than as an omission
      */
-    public StatementResponse describe(StatementRequest request) {
+    public StatementResponse describe(StatementRequest request, ArtifactAudience audience) {
         StatementHeading heading = resolveHeading(request);
         StatementTransactionRepository.StatementAggregate totals =
                 transactions.aggregateByCardFingerprint(heading.cardFingerprint());
-        return headingResponse(heading, Money.of(totals.getTotal()), totals.getLineCount());
+        return headingResponse(heading, Money.of(totals.getTotal()), totals.getLineCount(), audience);
     }
 
     /**
@@ -906,6 +1034,8 @@ public class StatementService {
      * be told.</p>
      *
      * @param request the card or account the statement is wanted for
+     * @param audience how much of the run the heading beside the rows may disclose, on the terms
+     *     {@link #describe(StatementRequest, ArtifactAudience)} records; must not be {@code null}
      * @return the heading and at most {@value #MAX_RESPONSE_TRANSACTIONS} lines, in transaction order
      * @throws ClientInputException if the request does not name exactly one of a card and an account,
      *     or if the named account holds more than one card
@@ -914,7 +1044,7 @@ public class StatementService {
      * @throws IllegalStateException if the cross-reference names a customer or an account that does
      *     not resolve, which the reference treats as an abend rather than as an omission
      */
-    public StatementDocument compose(StatementRequest request) {
+    public StatementDocument compose(StatementRequest request, ArtifactAudience audience) {
         StatementHeading heading = resolveHeading(request);
         String fingerprint = heading.cardFingerprint();
         StatementTransactionRepository.StatementAggregate totals =
@@ -927,8 +1057,8 @@ public class StatementService {
             lines.add(toLine(heading.cardNum(), row));
         }
 
-        StatementResponse response =
-                headingResponse(heading, Money.of(totals.getTotal()), totals.getLineCount());
+        StatementResponse response = headingResponse(
+                heading, Money.of(totals.getTotal()), totals.getLineCount(), audience);
         return new StatementDocument(response, List.copyOf(lines));
     }
 
@@ -1089,10 +1219,25 @@ public class StatementService {
      * writable relation and its database role is {@code SELECT}-only, which is the property
      * {@code CrossSchemaPrivilegeContractTest} asserts.
      *
-     * <p>Assumptions: the two artifacts are described INDEPENDENTLY even though one run writes both.
-     * A run interrupted between the two writes, or a lifecycle rule that expires one, leaves the store
-     * holding one artifact, and reporting the one that exists is more useful than reporting neither and
-     * more honest than reporting both.
+     * <p>Assumptions: the two artifacts are described INDEPENDENTLY even though one run writes both,
+     * and they are described within the run the manifest names. A lifecycle rule that expires one of a
+     * superseded run's objects leaves the store holding the other, and reporting the one that exists is
+     * more useful than reporting neither and more honest than reporting both. Note what this no longer
+     * covers: a run INTERRUPTED between its two writes used to be observable here, and it no longer is,
+     * because an incomplete run never reaches the manifest at all.
+     *
+     * <p>⚠️ Assumptions: every run-wide field is withheld from a CARDHOLDER audience. The artifacts
+     * hold the whole portfolio's statements and the index positions are coordinates into them, so a
+     * per-card answer carrying either is a per-card answer carrying a handle to every other cardholder
+     * -- which is the defect this parameter was introduced for, recorded in full on
+     * {@link ArtifactAudience}. The withholding is done HERE, at the one point both request-edge
+     * operations assemble their response through, so a third operation added later inherits it rather
+     * than having to remember it.
+     *
+     * <p>Assumptions: the manifest is resolved ONCE per response and both artifacts, the index and the
+     * published locations are all derived from that one run identity. Resolving it per field would let
+     * a manifest switching mid-response pair one run's artifact with another run's position, which is
+     * the incoherence the manifest exists to remove.
      *
      * <p>Assumptions: the produced-at stamp is taken from whichever artifact is present, preferring the
      * plain-text one because that is the artifact the reference job writes first at L87 of
@@ -1113,23 +1258,36 @@ public class StatementService {
      * @param total the exact sum of the card's transaction amounts; must not be {@code null}
      * @param lineCount how many transactions the card has, which is the true count and not the number
      *     of rows any body carries
-     * @return the heading response, with each artifact location and the produced-at stamp present only
-     *     where the store holds the artifact; never {@code null}
+     * @param audience how much of the run this answer may disclose; must not be {@code null}
+     * @return the heading response, with each artifact location, the produced-at stamp and the index
+     *     position present only for an operator audience and only where the store holds the artifact;
+     *     never {@code null}
      * @throws ArithmeticException if the total needs more than
      *     {@value #STATEMENT_TOTAL_INTEGER_DIGITS} integer positions
+     * @throws IllegalStateException if the manifest names something that is not a run identifier this
+     *     service could have published
      */
     private StatementResponse headingResponse(
-            StatementHeading heading, Money total, long lineCount) {
+            StatementHeading heading, Money total, long lineCount, ArtifactAudience audience) {
         requireStatementTotalMagnitude(total);
+        Objects.requireNonNull(audience, "audience must not be null");
+        // WHY : Assumptions: a cardholder audience consults the STORE NOT AT ALL, rather than reading
+        //       the run and then discarding what it read. Every field those reads would fill is
+        //       withheld from this audience, so the manifest read, the two metadata reads and the
+        //       index search would be four requests to the object store per statement whose only
+        //       effect is latency.
+        Optional<String> runId = audience == ArtifactAudience.OPERATOR
+                ? publishedRunId()
+                : Optional.empty();
         Optional<ArtifactStore.ArtifactDescriptor> plainText =
-                artifacts.describe(statementPrefix + PLAIN_TEXT_OBJECT);
+                runId.flatMap(run -> artifacts.describe(runPrefix(run) + PLAIN_TEXT_OBJECT));
         Optional<ArtifactStore.ArtifactDescriptor> markup =
-                artifacts.describe(statementPrefix + HTML_OBJECT);
+                runId.flatMap(run -> artifacts.describe(runPrefix(run) + HTML_OBJECT));
         // WHY : Assumptions: the index is searched only when the artifact it indexes EXISTS. A position
         //       into an artifact the store does not hold locates nothing, so the search would spend
         //       several ranged reads to produce a pair the response must report as absent anyway.
         Optional<StatementIndexEntry> position = plainText.isPresent()
-                ? locateInArtifact(heading.cardFingerprint())
+                ? locateInArtifact(runId.orElseThrow(), heading.cardFingerprint())
                 : Optional.empty();
         return new StatementResponse(
                 heading.cardNum(),
@@ -1137,13 +1295,129 @@ public class StatementService {
                 assembleName(heading),
                 total,
                 Math.toIntExact(lineCount),
-                plainText.isPresent() ? artifactLocation(PLAIN_TEXT_OBJECT) : null,
-                markup.isPresent() ? artifactLocation(HTML_OBJECT) : null,
+                plainText.isPresent() ? artifactLocation(runId.orElseThrow(), PLAIN_TEXT_OBJECT) : null,
+                markup.isPresent() ? artifactLocation(runId.orElseThrow(), HTML_OBJECT) : null,
                 plainText.or(() -> markup)
                         .map(ArtifactStore.ArtifactDescriptor::lastModified)
                         .orElse(null),
                 position.map(StatementIndexEntry::firstRecord).orElse(null),
                 position.map(StatementIndexEntry::recordCount).orElse(null));
+    }
+
+    /**
+     * Reads the manifest and reports which run every read of this response must resolve against.
+     *
+     * <p>Purpose: this is the one place the current run is decided. A statement run publishes its two
+     * artifacts and its index under an immutable per-run key prefix and then writes this manifest, so
+     * the value read here names a run whose objects are all present -- and a run that failed part-way
+     * never appears here at all.
+     *
+     * <p>Assumptions: an ABSENT manifest is an ordinary state and yields nothing rather than failing.
+     * A deployment whose first statement run has not happened has no manifest, which is the same state
+     * as the one in which no artifact exists, and a statement response answers it by reporting no
+     * artifact. A manifest that is PRESENT but does not name a well-formed run identifier is a failure,
+     * because the alternative is to compose an object key out of whatever it holds.
+     *
+     * @return the run identifier the manifest names, or empty when no run has been published
+     * @throws IllegalStateException if the manifest holds something other than one run identifier
+     */
+    private Optional<String> publishedRunId() {
+        byte[] recorded;
+        try {
+            recorded = artifacts.readRange(manifestKey(this.statementPrefix), 0, MANIFEST_MAX_BYTES - 1);
+        } catch (NoSuchElementException noRunPublished) {
+            return Optional.empty();
+        }
+        String named = new String(recorded, StandardCharsets.US_ASCII).trim();
+        if (!RUN_ID_PATTERN.matcher(named).matches()) {
+            throw new IllegalStateException("the statement manifest does not name a run this service "
+                    + "published, so no artifact of it can be addressed");
+        }
+        return Optional.of(named);
+    }
+
+    /**
+     * Composes the key prefix one run's objects sit under.
+     *
+     * @param runId the run identifier, already validated by whichever of
+     *     {@link #publishedRunId()} or {@link #runKeyPrefix(String, String)} obtained it
+     * @return the prefix each object name of that run is appended to; never {@code null}
+     */
+    private String runPrefix(String runId) {
+        return this.statementPrefix + RUN_SEGMENT + runId + "/";
+    }
+
+    /**
+     * Mints the identifier of one statement run.
+     *
+     * <p>Assumptions: the identifier is random and is minted by the writer at the start of a run, so a
+     * rerun of a business date never reuses the prefix of the run it replaces. The reasoning for the
+     * width and the alternative of a date-derived identifier are recorded on {@link #RUN_ID_LENGTH}.
+     *
+     * @return {@value #RUN_ID_LENGTH} lower-case hexadecimal characters; never {@code null}
+     */
+    public static String mintRunId() {
+        return UUID.randomUUID().toString().replace("-", "");
+    }
+
+    /**
+     * Composes the key prefix a writer publishes one run's objects under, validating the identifier.
+     *
+     * <p>Assumptions: this is the writer's counterpart to {@link #runPrefix(String)} and is static
+     * because the writing task holds the prefix as configuration and has no instance of this class's
+     * read side. The identifier is validated HERE as well as on the read path, so a caller cannot
+     * publish under a prefix that no reader would ever be allowed to resolve.
+     *
+     * @param statementPrefix the configured statement key prefix, ending in a separator; must not be
+     *     {@code null}
+     * @param runId the run identifier from {@link #mintRunId()}; must be
+     *     {@value #RUN_ID_LENGTH} lower-case hexadecimal characters
+     * @return the prefix each object name of that run is appended to; never {@code null}
+     * @throws IllegalArgumentException if the identifier is not of the published shape
+     */
+    public static String runKeyPrefix(String statementPrefix, String runId) {
+        Objects.requireNonNull(statementPrefix, "statementPrefix must not be null");
+        Objects.requireNonNull(runId, "runId must not be null");
+        if (!RUN_ID_PATTERN.matcher(runId).matches()) {
+            throw new IllegalArgumentException("a statement run identifier is " + RUN_ID_LENGTH
+                    + " lower-case hexadecimal characters");
+        }
+        return statementPrefix + RUN_SEGMENT + runId + "/";
+    }
+
+    /**
+     * Names the manifest object within one statement key prefix.
+     *
+     * @param statementPrefix the configured statement key prefix, ending in a separator; must not be
+     *     {@code null}
+     * @return the manifest's key; never {@code null}
+     */
+    public static String manifestKey(String statementPrefix) {
+        Objects.requireNonNull(statementPrefix, "statementPrefix must not be null");
+        return statementPrefix + MANIFEST_OBJECT;
+    }
+
+    /**
+     * Encodes the manifest body naming one run as current.
+     *
+     * <p>Assumptions: the body is the identifier and a newline, in US-ASCII, and nothing else. A
+     * structured body -- a timestamp, a record count, the object names -- was considered and rejected:
+     * every one of those is already recoverable from the run's own objects, and each field added is a
+     * field a reader has to parse before it may compose a key. Trade-offs: the manifest carries no
+     * record of WHEN it was switched; the store's own last-modified metadata carries that, and the
+     * response publishes the artifact's instant rather than the manifest's in any case.
+     *
+     * @param runId the run identifier to publish as current; must be of the published shape
+     * @return the bytes to write to {@link #manifestKey(String)}; never {@code null}
+     * @throws IllegalArgumentException if the identifier is not of the published shape
+     */
+    public static byte[] encodeManifest(String runId) {
+        Objects.requireNonNull(runId, "runId must not be null");
+        if (!RUN_ID_PATTERN.matcher(runId).matches()) {
+            throw new IllegalArgumentException("a statement run identifier is " + RUN_ID_LENGTH
+                    + " lower-case hexadecimal characters");
+        }
+        return (runId + "\n").getBytes(StandardCharsets.US_ASCII);
     }
 
     /**
@@ -1179,14 +1453,14 @@ public class StatementService {
     }
 
     /**
-     * Builds the published location of one artifact from its opaque selector.
+     * Builds the published location of one artifact of one run from its opaque selector.
      *
-     * @param objectName the artifact's object name within the statement prefix; must not be
-     *     {@code null}
+     * @param runId the run the artifact belongs to, already validated; must not be {@code null}
+     * @param objectName the artifact's object name within that run's prefix; must not be {@code null}
      * @return the path a caller collects the artifact from, never {@code null}
      */
-    private String artifactLocation(String objectName) {
-        return ARTIFACT_LOCATION_PREFIX + artifactSelector(objectName);
+    private String artifactLocation(String runId, String objectName) {
+        return ARTIFACT_LOCATION_PREFIX + artifactSelector(runId, objectName);
     }
 
     /**
@@ -1827,12 +2101,27 @@ public class StatementService {
      * pair of artifacts -- and a caller wanting one card's own content uses the two per-card operations
      * this contract publishes instead.
      *
-     * @param objectName the artifact's object name within the statement prefix; must not be {@code null}
+     * <p>⚠️ Assumptions: the RUN is part of the tokenised value, so a selector names one artifact of one
+     * run and not an artifact name in the abstract. That is what makes a selector stop working when the
+     * manifest moves on: a caller holding yesterday's selector is answered as though the artifact were
+     * absent, rather than being handed today's bytes under yesterday's understanding of what they
+     * contain. This is the read-side half of the coherence fix recorded on {@link #MANIFEST_OBJECT};
+     * without it, immutable keys alone would still let a stale selector resolve against a newer run.
+     *
+     * <p>Trade-offs: a selector is therefore no longer stable across runs, which the retired form was.
+     * A caller that stored one and comes back after the next run is answered 404 and asks for the
+     * statement again, which is one extra request; the alternative -- a stable selector that follows the
+     * current run -- is the mutable read this fix removes.
+     *
+     * @param runId the run the artifact belongs to, of the shape {@link #RUN_ID_LENGTH} declares; must
+     *     not be {@code null}
+     * @param objectName the artifact's object name within that run's prefix; must not be {@code null}
      *     or blank
-     * @return the opaque selector for that artifact, never {@code null}
+     * @return the opaque selector for that artifact of that run, never {@code null}
      */
-    public String artifactSelector(String objectName) {
-        return this.artifactIdentity.token(ARTIFACT_TOKEN_PURPOSE, objectName);
+    public String artifactSelector(String runId, String objectName) {
+        Objects.requireNonNull(runId, "runId must not be null");
+        return this.artifactIdentity.token(ARTIFACT_TOKEN_PURPOSE, runId + "/" + objectName);
     }
 
     /**
@@ -1844,6 +2133,12 @@ public class StatementService {
      * selector for an artifact this deployment does not publish resolves to nothing rather than to a
      * probe of the bucket.</p>
      *
+     * <p>⚠️ Assumptions: the table is built for the run the MANIFEST names, so the only two selectors
+     * that resolve are the two of the current run. A selector minted for a superseded run therefore
+     * resolves to nothing even though its objects are still stored, which is the point: it was published
+     * alongside an index and a set of positions that described that run, and answering it with the
+     * current run's bytes is precisely the mismatch the manifest exists to prevent.</p>
+     *
      * <p>Measured: replacing the lookup with a composition -- returning the prefix concatenated with
      * the selector, which is the shape an object-key parameter would have had -- fails three cases of
      * {@code StatementServiceTest}. {@code anUnmintedSelectorIsRefused} reports
@@ -1853,15 +2148,22 @@ public class StatementService {
      * report {@code expected: "statements/statements.html" but was: "statements/Zk1yZpeITFLYiKrzFIk5nG"}.
      *
      * @param selector the opaque selector from a statement response; may be {@code null}
-     * @return the object key, or empty when the selector names neither artifact
+     * @return the object key, or empty when the selector names neither artifact of the published run,
+     *     and empty when no run has been published at all
+     * @throws IllegalStateException if the manifest holds something other than one run identifier
      */
     public Optional<String> resolveArtifactKey(String selector) {
         if (selector == null) {
             return Optional.empty();
         }
+        Optional<String> published = publishedRunId();
+        if (published.isEmpty()) {
+            return Optional.empty();
+        }
+        String runId = published.get();
         for (String objectName : ARTIFACT_OBJECT_NAMES) {
-            if (artifactSelector(objectName).equals(selector)) {
-                return Optional.of(this.statementPrefix + objectName);
+            if (artifactSelector(runId, objectName).equals(selector)) {
+                return Optional.of(runPrefix(runId) + objectName);
             }
         }
         return Optional.empty();
@@ -1882,21 +2184,28 @@ public class StatementService {
      * cost is the entire index transferred on every statement read; and recording the positions in a
      * relation, which this context cannot do because its database role is {@code SELECT}-only.
      *
-     * <p>Assumptions: an absent index artifact yields nothing rather than a failure, because a
-     * deployment whose statement run has not happened yet has no index and that is an ordinary state --
-     * the same state in which neither artifact exists. A PRESENT index whose size is not a whole number
-     * of entries is a failure, because it means the artifact was truncated and every position derived
-     * from it would be wrong.
+     * <p>Assumptions: an absent index yields nothing rather than a failure. A run reaches the manifest
+     * only after its index has been written, so the run named there normally has one; what remains
+     * possible is a lifecycle rule expiring one object of a superseded run, and reporting no position
+     * for it is more useful than failing a statement read over it. A PRESENT index whose size is not a
+     * whole number of entries is a failure, because it means the object was truncated and every
+     * position derived from it would be wrong.
      *
+     * @param runId the run whose index is searched, as the manifest named it; must not be {@code null}
      * @param cardFingerprint the fingerprint naming the card whose position is wanted; must not be
      *     {@code null}
      * @return the entry naming the card's first record and record count, or empty when no index is
      *     stored or the index does not name the card
      * @throws IllegalStateException if the stored index is not a whole number of entries
      */
-    public Optional<StatementIndexEntry> locateInArtifact(String cardFingerprint) {
+    public Optional<StatementIndexEntry> locateInArtifact(String runId, String cardFingerprint) {
+        Objects.requireNonNull(runId, "runId must not be null");
         Objects.requireNonNull(cardFingerprint, "cardFingerprint must not be null");
-        String key = statementPrefix + INDEX_OBJECT;
+        // WHY : Assumptions: the index is read from the SAME run prefix the artifact was described
+        //       under, which is what makes a position mean something. An index and an artifact from two
+        //       runs agree on nothing: the ordinal of a card in one run's index is a byte offset into
+        //       that run's artifact and names an unrelated cardholder in another's.
+        String key = runPrefix(runId) + INDEX_OBJECT;
         Optional<ArtifactStore.ArtifactDescriptor> index = artifacts.describe(key);
         if (index.isEmpty()) {
             return Optional.empty();
@@ -1968,7 +2277,15 @@ public class StatementService {
      * <p>Assumptions: an unknown selector and an absent artifact are reported the SAME way, as
      * {@link NoSuchElementException}, which the request edge renders as 404. Distinguishing them would
      * tell an unauthenticated-in-effect caller which selectors are real, and neither state is actionable
-     * differently by a caller that holds a selector from a response body.
+     * differently by a caller that holds a selector from a response body. A selector of a SUPERSEDED
+     * run now falls into the same answer, for the reason recorded on
+     * {@link #artifactSelector(String, String)}.
+     *
+     * <p>⚠️ Assumptions: the artifacts this opens hold EVERY cardholder's statement in the portfolio,
+     * so the route that reaches this method is admitted to the administrative group alone --
+     * {@code SecurityConfig} enforces that, and a cardholder response no longer publishes a selector at
+     * all. This method deliberately performs no authorization of its own: a second check here would
+     * either duplicate the chain's rule or drift from it, and the chain refuses before the handler runs.
      *
      * @param selector the opaque selector taken from a statement response; may be {@code null}, which is
      *     reported as an absent artifact rather than as a parameter fault

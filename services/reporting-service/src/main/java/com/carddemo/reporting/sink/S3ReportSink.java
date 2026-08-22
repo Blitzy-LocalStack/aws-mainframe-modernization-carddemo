@@ -26,6 +26,12 @@ import java.util.Objects;
  *
  * <p>Assumptions: this class is created per run rather than registered as a singleton bean, for the reason
  * recorded on the statement sink: it holds an open upload and its lifecycle is exactly one run's.</p>
+ *
+ * <p>Refactoring Rationale: publication moved from {@link #close()} to {@link #complete()}, following the
+ * writer this class wraps. The reasoning is recorded in full on {@code S3ArtifactWriter}: a report
+ * generation that failed part way used to publish whatever had been written, because every caller holds
+ * this sink in a try-with-resources and the unwind reached the publishing call. A caller now completes on
+ * the success path only, and the resource clause aborts on every other.</p>
  */
 public final class S3ReportSink implements TransactionReportService.ReportRecordSink, AutoCloseable {
 
@@ -56,12 +62,25 @@ public final class S3ReportSink implements TransactionReportService.ReportRecord
     }
 
     /**
-     * Publishes the artifact.
+     * Publishes the artifact, which a caller reaches only when the whole report was written.
      *
-     * @throws IOException if the artifact could not be published
+     * @throws IOException if the artifact could not be published, in which case nothing is stored at the
+     *     key and the previous object there is unchanged
+     * @throws IllegalStateException if this sink has already been completed or already been closed
+     */
+    public void complete() throws IOException {
+        artifact.complete();
+    }
+
+    /**
+     * Discards an artifact that was never completed, publishing nothing.
+     *
+     * <p>Assumptions: this declares no checked exception, matching the writer, so a failed generation's
+     * own exception reaches the caller unaccompanied by a storage-housekeeping failure it did not cause.
+     * The reasoning is recorded on {@code S3ArtifactWriter#close()}.</p>
      */
     @Override
-    public void close() throws IOException {
+    public void close() {
         artifact.close();
     }
 }

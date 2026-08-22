@@ -25,11 +25,13 @@
  * sufficient for the three properties this package exists for, because each of them IS the engine:</p>
  *
  * <ul>
- *   <li>that the production Flyway migration applies, creating {@code batch.batch_run} and the Spring
- *       Batch job-repository tables under the ownership a deployed environment gives them;</li>
- *   <li>that the ten entities this module maps across FIVE schemas -- four of which it does not own --
- *       resolve against real tables with real declared widths, real check constraints and real secondary
- *       indexes;</li>
+ *   <li>that the production Flyway migration applies, creating BOTH tables this module owns --
+ *       {@code batch.batch_run} from V1 and {@code batch.daily_feed_watermark} from V2 -- together with
+ *       the Spring Batch job-repository tables, under the ownership a deployed environment gives
+ *       them;</li>
+ *   <li>that the eleven entities this module maps across FIVE schemas -- four of which it does not own
+ *       -- resolve against real tables with real declared widths, real check constraints and real
+ *       secondary indexes;</li>
  *   <li>that the posting unit of work -- transcribed from {@code app/cbl/CBTRN02C.cbl}, whose
  *       {@code 2000-POST-TRANSACTION} paragraph opens at L424 and performs the category-balance update at
  *       L440, the account update at L441 and the transaction write at L442 -- both COMMITS and ROLLS BACK
@@ -51,15 +53,15 @@
  *
  * <h2>The closed inventory</h2>
  *
- * <p>This directory holds eleven files and a twelfth is prohibited: this charter, together with
+ * <p>This directory holds twelve files and a thirteenth is prohibited: this charter, together with
  * {@code BatchRunRepositoryIT}, {@code CrossSchemaFeedRepositoryIT}, {@code CardXrefRepositoryIT},
  * {@code DailyTransactionRepositoryIT}, {@code TransactionRepositoryIT},
  * {@code TransactionCategoryBalanceRepositoryIT}, {@code TransactionRejectRepositoryIT},
- * {@code PostingUnitOfWorkIT}, {@code AccountRepositoryIT} and
- * {@code DisclosureGroupRepositoryIT}.</p>
+ * {@code PostingUnitOfWorkIT}, {@code AccountRepositoryIT},
+ * {@code DailyFeedWatermarkRepositoryIT} and {@code DisclosureGroupRepositoryIT}.</p>
  *
  * <pre>
- * this directory: 11 java files = 10 tests + 1 charter
+ * this directory: 12 java files = 11 tests + 1 charter
  * </pre>
  *
  * <p>Refactoring Rationale: this section counted four files and three tests, and admitted a fourth test
@@ -162,6 +164,23 @@
  * prohibition the prose carries moves up a number rather than being dropped, because what a prohibition
  * must not do is bar a proof the package needs.</p>
  *
+ * <p>Refactoring Rationale: this inventory then read eleven files and named a twelfth prohibited, and it
+ * is raised to twelve because {@code batch.daily_feed_watermark} -- the SECOND table this module owns,
+ * created by {@code db/migration/V2__batch_feed_watermark.sql} -- had no engine-backed owner while this
+ * charter's opening claimed the module's owned persistence was covered. That is the same failure this
+ * section has now corrected three times, and the table makes it the most consequential instance of it:
+ * the row decides where the nightly posting pass RESUMES, so a defect in it re-posts a whole night --
+ * adding every amount to its account balance a second time under the additive model of
+ * {@code app/cbl/CBTRN02C.cbl:202-219} -- or skips one, and neither outcome is visible in any single
+ * record's assertions. Every property that guards against those two outcomes is an engine behaviour and
+ * none of them could be reached from the mocked-repository unit test that already existed: a primary key
+ * refusing a SECOND consumer at the moment two first passes insert it, a row lock making a later pass
+ * WAIT and then see what the earlier one left, four CHECK predicates firing at their statements, a
+ * rollback discarding an in-flight advance, and the advance committing in the same transaction as the
+ * postings it accounts for. Assumptions: the harness statement above is unaffected and stays at four
+ * schemas and nine tables -- the new entity is batch-OWNED and arrives from Flyway, so it is the tenth
+ * mapped table this package reaches and the ninth foreign one is still the ninth.</p>
+ *
  * <p>Trade-offs: the count case in {@code CrossSchemaFeedRepositoryIT} is RETAINED rather than removed
  * now that a dedicated owner exists, on the reasoning this section already records for the reject stream
  * and the cross-reference. That case reads the seeded total as one of the harness post-state facts its
@@ -171,7 +190,7 @@
  * second encounter reads as a boundary rather than as a duplicated proof.</p>
  *
  * <p>Refactoring Rationale: this section previously described eight entities across FOUR schemas, and the
- * directory had moved past it in both figures. The count is ten entities across five, because
+ * directory had moved past it in both figures. The count is eleven entities across five, because
  * {@code CBEXPORT} reads five masters and the export job could reach only three of them, so the customer
  * and card phases published empty on every run; the customer and card interfaces and their two entities
  * were the whole of that shortfall, and the {@code card} schema arrived with them. The production charter
@@ -186,7 +205,8 @@
  * harness would have to be chased through all of them. The property worth proving about posting is not a
  * property of any single interface at all: it spans four of them in one commit, so no per-interface class
  * could hold it without either splitting the proof or duplicating it. The classes below are
- * therefore partitioned by PROPERTY rather than by interface, and between them they reach all ten.</p>
+ * therefore partitioned by PROPERTY rather than by interface, and between them they reach all
+ * eleven.</p>
  *
  * <p>Assumptions: none of the three classes named for a single interface is a departure from that
  * partition but an application of it. Each is named for an interface because it happens to reach only
@@ -263,14 +283,14 @@
  * expect a mechanism that cannot resolve here.</p>
  *
  * <p>Alternatives Considered: one shared abstract base class holding the container, the property
- * registration and the schema prerequisite once for all ten. Rejected: a container held in a base class
- * is shared mutable state, so rows one class inserts are rows another reads, and the failure then names
- * whichever class happened to run second. That hazard is concrete rather than hypothetical here, because
- * four of the ten arrange rows in {@code account.card_xref} and each empties it for itself. Each class
- * starts its own container and owns its own schema state, which is what lets any one of the ten be run
- * alone and still mean something. Trade-offs: the
- * accepted cost is ten container starts and ten copies of the container declaration, paid every time
- * that declaration changes.</p>
+ * registration and the schema prerequisite once for all eleven. Rejected: a container held in a base
+ * class is shared mutable state, so rows one class inserts are rows another reads, and the failure then
+ * names whichever class happened to run second. That hazard is concrete rather than hypothetical here,
+ * because five of the eleven arrange rows in {@code account.card_xref} and each empties it for itself.
+ * Each class starts its own container and owns its own schema state, which is what lets any one of the
+ * eleven be run alone and still mean something. Trade-offs: the
+ * accepted cost is eleven container starts and eleven copies of the container declaration, paid every
+ * time that declaration changes.</p>
  *
  * <p>Alternatives Considered: an in-memory engine, rejected more firmly here than anywhere else in the
  * build. Two of the three properties this package exists for are engine behaviours -- cross-schema
@@ -355,13 +375,25 @@
  * <h2>What each member owns, so that no proof is duplicated and none is orphaned</h2>
  *
  * <ul>
- *   <li>{@code BatchRunRepositoryIT} across 12 cases -- the step ledger this module OWNS, and the only
- *       table it does own. It holds the unique constraint over the run and step pair that makes a
- *       redriven step which already completed a no-op, and it is the class that proves the production
- *       migration applies at all. The ledger is a documented IMPROVEMENT rather than a port: the only
- *       {@code RESTART=} anywhere in the reference is commented out, at {@code app/jcl/DEFGDGD.jcl:2},
- *       and no checkpoint clause appears in any of its jobs, so there is no baseline capability here to
- *       be faithful to.</li>
+ *   <li>{@code BatchRunRepositoryIT} across 13 cases -- the step ledger, the FIRST of the two tables
+ *       this module owns. It holds the unique constraint over the run and step pair that makes a
+ *       redriven step which already completed a no-op, the durability of a reopened attempt's own start
+ *       time, and the exact catalog the production migration deposits -- all six Spring Batch tables
+ *       and all three of their sequences, named rather than counted by prefix. The ledger is a
+ *       documented IMPROVEMENT rather than a port: the only {@code RESTART=} anywhere in the reference
+ *       is commented out, at {@code app/jcl/DEFGDGD.jcl:2}, and no checkpoint clause appears in any of
+ *       its jobs, so there is no baseline capability here to be faithful to.
+ *       Refactoring Rationale: this entry called the ledger "the only table it does own", which was
+ *       true when it was written and stopped being true when {@code V2__batch_feed_watermark.sql}
+ *       added {@code batch.daily_feed_watermark}. The sentence mattered more than it looked: it was the
+ *       reason a reader auditing this module's owned persistence would have stopped at one class, and
+ *       the second owned table had no engine-backed test at all while it stood. Its owner is
+ *       {@code DailyFeedWatermarkRepositoryIT} below. The count then rose from twelve to thirteen with
+ *       the case asserting that no column and no constraint of the ledger is left uncommented in the
+ *       catalogue: {@code V1__batch.sql} declares that its comments exist for the operator inspecting
+ *       the table from a session with no access to this repository, and it commented seven of its
+ *       eight columns and none of its seven constraints -- so the claim was checkable and unchecked,
+ *       which is the pairing this package exists to close.</li>
  *   <li>{@code CrossSchemaFeedRepositoryIT} across 9 cases -- the harness post-state and the six
  *       read-only feeds: the card, cross-reference, customer, daily-transaction, disclosure-group and
  *       reject interfaces. Of the daily-transaction interface it owns ONE bounded walk asking whether the
@@ -498,15 +530,21 @@
  *       fetch window, so neither insertion order nor a single-level ordering can satisfy it; a
  *       companion case pins the account identifier as ordered by MAGNITUDE using identifiers of
  *       differing digit counts, which equal-width padded values could not distinguish. It also owns the
- *       keyed read and the two arms at the DATABASE level: that an absent row is an empty result rather
- *       than a raise, which is the relational form of the not-found status
- *       {@code app/cbl/CBTRN02C.cbl:481} accepts alongside success, and that the create arm at
- *       {@code :503-524} stores exactly the posted amount while the update arm at {@code :526-542} adds
- *       to the balance already read -- asserted as separate cases against the two committed vectors, so
- *       which arm ran stays observable. Two applications of an amount distinguish addition from
- *       assignment, and a CONSTRUCTED negative case covers the sign that no shipped posting fixture
- *       reaches. It owns the CATEGORY-BALANCE half of the accumulation obligation only; the account
- *       cycle buckets are the entry above's.</li>
+ *       keyed read and the two arms at the DATABASE level, every accumulation case DRIVING the
+ *       production service {@code CategoryBalanceService.accumulate} against the real repository inside
+ *       a transaction the case opens: that an absent row is an empty result rather than a raise, which
+ *       is the relational form of the not-found status {@code app/cbl/CBTRN02C.cbl:481} accepts
+ *       alongside success, and that the create arm at {@code :503-524} stores exactly the posted amount
+ *       while the update arm at {@code :526-542} adds to the balance already read -- asserted as
+ *       separate cases against the two committed vectors, so which arm ran stays observable, with the
+ *       arm the service REPORTS asserted beside the stored figure. Two applications of an amount
+ *       distinguish addition from assignment, and a CONSTRUCTED negative case covers the sign that no
+ *       shipped posting fixture reaches. Refactoring Rationale: the arms were previously applied by two
+ *       private helpers of the test that opened a transaction, performed the addition and saved the row
+ *       themselves, so the arithmetic, the arm selection and the save under assertion were the test's
+ *       own and a production service that ASSIGNED instead of adding would have left every case green.
+ *       It owns the CATEGORY-BALANCE half of the accumulation obligation only; the account cycle
+ *       buckets are the entry above's.</li>
  *   <li>{@code TransactionRejectRepositoryIT} across 7 cases -- the reject stream's 430-byte
  *       composition, and specifically the property that phrase turns on: that the stored image is the
  *       daily-transaction record AS READ. {@code app/cbl/CBTRN02C.cbl:447} moves
@@ -527,22 +565,44 @@
  *       asserts ROWS and not BYTES -- {@code TransactionRejectRecordMapper} owns the byte image and the
  *       job tier owns whole-stream parity against the committed reject expectations -- and it asserts no
  *       return code, a graded exit status being a process concern rather than a repository's.</li>
- *   <li>{@code AccountRepositoryIT} across 16 cases -- the account master's three durable rulings, each
- *       read from a SECOND CONNECTION taken straight from the pool rather than through the writing
- *       session. It owns the atomicity proof in the form ruling four prescribes: that the three flushed
- *       writes are INVISIBLE to another session until the commit, which is the single assertion
- *       distinguishing one transaction from three and the one that makes the plan's rejection of a
- *       compensating-reversal design checkable rather than asserted; that a refusal at EACH of the three
- *       positions leaves nothing in either schema, the first two positions having had no case before;
- *       that no partial posting state is observable in either direction; and the ORDER itself, proved by
- *       making two positions refusable at once so that the refusal which arises reports which write was
- *       reached first. It owns the ACCOUNT half of the accumulation obligation across all three arms of
- *       the sign partition -- the category-balance half is the entry above's -- including the two arms no
- *       shipped row reaches, and it owns the interest control break's THIRD state change, the reset of
- *       both cycle accumulators at {@code app/cbl/CBACT04C.cbl:353-354} that a balance-only assertion
- *       misses. It owns the whole of the version ruling: that the column advances at all, that a lost
- *       race is propagated rather than re-read behind the caller, and the composite in which a race lost
- *       at the SECOND write rolls back the first and prevents the third. Two of its cases are
+ *   <li>{@code AccountRepositoryIT} across 17 cases -- the account master's durable rulings, each read
+ *       from a SECOND CONNECTION taken straight from the pool rather than through the writing session,
+ *       and each driven through the PRODUCTION per-record unit,
+ *       {@code PostingRecordUnitOfWork.applyOneRecord}, inside a transaction the case opens around it.
+ *       That seam is what the file's rulings rest on: they were previously issued by a private helper of
+ *       the test that re-implemented the cross-reference resolution, the accumulation call, the account
+ *       transition and the posted insert, so what the ordering and rollback cases pinned was the order of
+ *       a COPY and a production reordering would have left them green. It owns the atomicity proof in the
+ *       form ruling four prescribes: that the FOUR flushed writes are INVISIBLE to another session until
+ *       the commit, which is the single assertion distinguishing one transaction from four and the one
+ *       that makes the plan's rejection of a compensating-reversal design checkable rather than asserted;
+ *       that a refusal at EACH of the three write positions leaves nothing in any schema, the first two
+ *       positions having had no case before; that no partial posting state is observable in either
+ *       direction; and the ORDER itself, proved by making two positions refusable at once so that the
+ *       refusal which arises reports which write was reached first. The fourth effect is the migrated
+ *       unit's own and the reference has no counterpart for it -- the feed position in
+ *       {@code batch.daily_feed_watermark}, advanced once per record accounted for -- and this file owns
+ *       its CO-COMMIT with the other three: present at the record's own ordinal on every commit, absent
+ *       after a refusal at any position, and absent after a lost version race. That pairing is what
+ *       decides whether a re-run double-posts or skips a record, and it is unassertable from the
+ *       component's own unit test, which has no engine to roll back. It owns the ACCOUNT half of the
+ *       accumulation obligation across all three arms of the sign partition -- the category-balance half
+ *       is the entry above's -- including the two arms no shipped row reaches, and it owns the interest
+ *       control break's THIRD state change, the reset of both cycle accumulators at
+ *       {@code app/cbl/CBACT04C.cbl:353-354} that a balance-only assertion misses. That one transition is
+ *       still applied by a helper rather than called from production, because it is transcribed inside
+ *       {@code CalculateInterestJob} with no injectable component of its own; the case says so and
+ *       asserts the paragraph's durable consequence rather than claiming to drive it. It owns the whole
+ *       of the version ruling: that the column advances at all, that a lost race is propagated rather
+ *       than re-read behind the caller, and the composite in which a race lost at the SECOND write rolls
+ *       back the first, prevents the third and leaves no checkpoint behind. Its seventeenth case owns
+ *       something no other case can: the two properties of the card number this file COMMITS to the
+ *       repository -- an unassigned {@code 9900} major-industry prefix and a deliberately failing Luhn
+ *       check -- asserted mechanically against the constant, with a control value proving the check can
+ *       report validity. It replaces an attestation that was measurably false, the previous fixture
+ *       being checksum-valid and issuer-shaped while its comment said the opposite, and it is a test
+ *       rather than a sentence precisely so that editing a digit cannot silently re-create that. Two of
+ *       its cases are
  *       CONSTRUCTED because the reference supplies no vector -- a zero amount appears in no fixture and
  *       in none of the three hundred shipped feed rows, and no posting fixture is negative although
  *       fifty of those rows are -- and one records a MEASURED divergence rather than a predicted
@@ -557,6 +617,34 @@
  *       and deleting either would leave one of the two readings unowned. The residual cost is that a
  *       reader meets the posting commit in two files; it is recorded here so the second encounter reads
  *       as a boundary rather than as a duplicated proof.</li>
+ *   <li>{@code DailyFeedWatermarkRepositoryIT} across 12 cases -- the consumed position of the
+ *       accumulating feed, which is the module's OTHER owned table and the only one whose row decides
+ *       where a nightly pass resumes. It owns V2's schema read from the catalog by NAME -- the primary
+ *       key on the feed name alone, which is what makes the single-result contract on
+ *       {@code findByFeedName} earned rather than assumed, the four CHECK constraints, and the
+ *       non-nullability of all five columns -- and, separately, that each of those four checks REFUSES
+ *       the row it exists to refuse, provoked by statement because the mapping refuses all four in
+ *       memory and the constraint is what protects the table from every other writer. It owns the
+ *       MANDATORY propagation on the locked read, which is the difference between a lock held while its
+ *       holder uses the value and a lock released as the call returns, contrasted in the same case
+ *       against the unlocked reporting read that needs no caller transaction. It owns the two
+ *       concurrency properties nothing else in this build can host: that two first passes racing on an
+ *       ABSENT row leave exactly one committed consumer, refused by
+ *       {@code pk_daily_feed_watermark} rather than by the lock -- which is the gap the repository's own
+ *       contract documents and accepts -- and that the pessimistic lock SERIALISES two later passes,
+ *       established by a result an unlocked read cannot produce rather than by a measured duration. It
+ *       owns monotonicity as a durable fact on both arms of the comparison, with the injected clock
+ *       MOVED between the seeding advance and the refused one so that an implementation rewriting the
+ *       row on an equal request is caught by the stamp; both rollback arms, the update's and the
+ *       insert's; and the co-commit of the checkpoint with the postings it accounts for, driven through
+ *       {@code PostingRecordUnitOfWork} from an EXISTING position rather than an absent one.
+ *       Trade-offs: {@code AccountRepositoryIT} above also reads this table, and the overlap is
+ *       deliberate and disjoint -- that class starts from an absent row and owns the checkpoint as one
+ *       of four durable effects of one accepted record, where this class owns the states that class
+ *       never reaches. Trade-offs: two cases hold a transaction open on a background thread for a
+ *       bounded interval, which is the only timing device in this package; each wait has a timeout and
+ *       each case is written so that a second transaction failing to block produces a DIFFERENT
+ *       asserted outcome rather than a slower identical one.</li>
  *   <li>{@code DisclosureGroupRepositoryIT} across 10 cases -- the interest-rate lookup, which is the one
  *       table in this package on which this module holds no write privilege at all, the plan scoping the
  *       batch role's cross-schema writes to {@code ledger} and {@code account} only. It owns the

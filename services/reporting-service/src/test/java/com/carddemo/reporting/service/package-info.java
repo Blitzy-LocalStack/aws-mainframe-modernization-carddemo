@@ -152,21 +152,46 @@
  *
  * <h2>Naming, and what the wrong suffix costs</h2>
  *
- * <p>Every unit test class in this package MUST end in {@code Test}. {@code services/pom.xml} binds
- * Surefire to that pattern, so a class named with any other suffix -- {@code Tests},
- * {@code TestCase}, {@code Spec} -- is not collected. Assumptions: the failure mode is the reason this
- * is stated as a rule rather than a convention. An uncollected class does not run and therefore cannot
- * fail: it is absent from the run, absent from the report, and green. For a body of cases whose whole
- * job is to hold a must-be-green assertion, silence is the worst available outcome, because a deleted
- * test at least leaves a diff behind while a misnamed one looks like coverage forever.
+ * <p>Every unit test class in this package MUST end in {@code Test}. What enforces that is convention
+ * plus one measured fact about the build: {@code services/pom.xml} overrides Surefire's
+ * {@code includes} in exactly one place -- the {@code architecture-rules} execution at its L1191, which
+ * narrows that execution to {@code **}{@code /LayeringRulesTest.java} -- and declares no
+ * {@code includes} for the default test execution at all. The default execution therefore runs
+ * Surefire's own four default patterns, read from the resolved plugin descriptor of
+ * {@code maven-surefire-plugin} 3.5.6: {@code Test*}, {@code *Test}, {@code *Tests} and
+ * {@code *TestCase}. A class named {@code StatementServiceTests} or {@code StatementServiceTestCase}
+ * would consequently RUN, and a class named for anything outside those four -- {@code *Spec},
+ * {@code *Should}, {@code Check*} -- is collected by nothing and is silently never executed.
+ *
+ * <p>Assumptions: the uncollected case is the reason this is stated as a rule rather than a
+ * convention. A class no pattern selects does not run and therefore cannot fail: it is absent from the
+ * run, absent from the report, and green. For a body of cases whose whole job is to hold a
+ * must-be-green assertion, silence is the worst available outcome, because a deleted test at least
+ * leaves a diff behind while an unselected one looks like coverage forever. Refactoring Rationale: this
+ * paragraph previously said Surefire was bound to {@code Test} alone and listed {@code Tests} and
+ * {@code TestCase} among the suffixes that are "not collected". Both are in fact collected, and the
+ * error pointed the wrong way: a maintainer reading it could rename a class to {@code ...Tests}
+ * believing that stops it running, and then be surprised by the case that still executes -- or, worse,
+ * trust the same sentence about {@code *Spec}, where the warning happens to be true, without
+ * distinguishing the two. One convention is still worth holding to, and it is the plural-free
+ * {@code Test} suffix: uniformity is what lets a reader predict which phase a class runs in from its
+ * name alone.
  *
  * <p>The {@code IT} suffix belongs to Failsafe and never appears here. That split is the module's
  * convention rather than this directory's, and it is load-bearing: Failsafe runs after packaging and
  * asserts its results in {@code verify}, so a container-backed class named {@code Test} would start a
  * container inside the unit-test phase, and a unit test named {@code IT} would not run until later or
- * would not run at all. The module's integration tests live in the sibling
- * {@code com.carddemo.reporting.repository} test package, as {@code ReportingQueryBootstrapIT} and
- * {@code StatementHeadingChunkIT}, and every class here is a plain unit test measured in milliseconds.
+ * would not run at all. Failsafe's own defaults, from the same resolved descriptor set, are
+ * {@code IT*}, {@code *IT} and {@code *ITCase}, and {@code services/pom.xml} leaves them alone; the
+ * two default sets do overlap for a name satisfying both, so a class called {@code TestSomethingIT}
+ * would run twice, once before packaging and once after. The invariant that holds this directory is
+ * therefore stated as a property rather than as a tally: every integration test of this module lives in
+ * the sibling {@code com.carddemo.reporting.repository} test package and carries the {@code IT} suffix,
+ * and every class in THIS package is a plain unit test measured in milliseconds. Trade-offs: an
+ * invariant is less informative than a roster -- a reader wanting the current list runs
+ * {@code ls services/reporting-service/src/test/java/com/carddemo/reporting/repository} -- and it is
+ * chosen anyway, because a roster in this file goes stale the next time a class is added and nothing in
+ * the build notices.
  *
  * <h2>Which assertions live here, and which do not</h2>
  *
@@ -213,7 +238,10 @@
  * reactor and renders this module's migration path as none; the read-only pool posture belongs to
  * {@code DataSourceConfigTest} in the sibling {@code com.carddemo.reporting.config} test package,
  * which requires a pool not declared read-only to stop the service at startup; and the privileges
- * themselves are asserted against a real engine by the two integration tests named above.
+ * themselves are asserted against a real engine in the sibling repository test package, where
+ * {@code ReportingDeployedRelationIT} carries the module-wide form of the claim -- "the reporting role
+ * cannot write through any relation it can read" -- and the per-relation integration tests beside it
+ * each refuse a write against the relation they read.
  *
  * <p>Two complementary boundaries close the set. The sibling {@code com.carddemo.reporting.mapper}
  * test package owns per-band byte arithmetic and the edit-mask cases -- among them
@@ -304,21 +332,27 @@
  * <ul>
  *   <li>No {@code SpringBootTest} and no context-loading test of any kind. Every class here is a plain
  *       unit test that wires its subject by constructor and mocks its collaborators. Assumptions: the
- *       module does hold exactly one context-loading test, and it is NOT in this package --
- *       {@code ReportingQueryBootstrapIT} in the sibling repository test package is the one class that
- *       loads a Spring context, under the {@code test} profile, reaching a database through a
- *       container. The claim is scoped to this package precisely because the module-wide version of it
- *       would be false.</li>
+ *       module does hold context-loading tests and NONE of them is in this package -- every one lives
+ *       in the sibling repository test package, carries the {@code IT} suffix and declares
+ *       {@code @ActiveProfiles("test")}, and reaches a database through a container. The invariant is
+ *       two-sided and both sides are checkable by grep: no class in this package declares
+ *       {@code @ActiveProfiles} or {@code @SpringBootTest}, and no class outside the repository test
+ *       package declares either. Refactoring Rationale: this entry previously said the module held
+ *       "exactly one" such test and named {@code ReportingQueryBootstrapIT} as that one, while the
+ *       naming section of this same file named two -- so the file contradicted itself, and both figures
+ *       were already behind the tree. A count of classes in another package is a fact this file cannot
+ *       keep true; the invariant it was standing in for can be, so the invariant is what is written
+ *       here.</li>
  *   <li>No emulated AWS endpoint. {@code org.testcontainers:testcontainers-localstack} is absent from
  *       this module's POM by design, and the POM records the reasoning: what is worth proving about the
  *       state-machine submission is which input is sent and that a failure propagates, and a
  *       Mockito-verified assertion on the start-execution request proves both without a container.</li>
  *   <li>No {@code Container} or {@code ServiceConnection} database container. The module does depend on
- *       the PostgreSQL Testcontainers modules, and that mechanism belongs to the two integration tests
- *       in the sibling repository test package. Assumptions: the dependency being present is not a
- *       licence to use it here -- starting a container is measured in seconds against unit tests
- *       measured in milliseconds, and a container in this package would buy nothing, since the
- *       decisions asserted here are visible in a captured argument.</li>
+ *       the PostgreSQL Testcontainers modules, and that mechanism belongs exclusively to the
+ *       {@code IT} classes in the sibling repository test package. Assumptions: the dependency being
+ *       present is not a licence to use it here -- starting a container is measured in seconds against
+ *       unit tests measured in milliseconds, and a container in this package would buy nothing, since
+ *       the decisions asserted here are visible in a captured argument.</li>
  *   <li>No data-definition statement, no {@code db/migration} directory and no Flyway artifact. This
  *       context owns no table, so a migration directory in this module would be an affirmative defect
  *       rather than a gap.</li>
@@ -375,14 +409,37 @@
  * category make it silently partial, and a rationale a search cannot find is a rationale a review
  * cannot count.
  *
- * <p>The house idiom for NON-Javadoc comments in this tree pairs a what-line whose colon follows the
- * keyword immediately with a why-line carrying one space before its colon, so the two colons align in a
- * column. That idiom originates in the reference suite, at {@code tests/README.md} L178 and L180, and
- * again at L217 and L218, L254 and L256, and L267 and L270. Trade-offs: it is deliberately NOT used
- * inside a Javadoc block, here or in any class beside this one. A Javadoc block is rendered prose whose
- * first sentence is audited as a summary, and a bare what-line placed there narrates the code, which is
- * the one thing the rule forbids outright. Inside Javadoc the equivalent is a labelled sentence opening
- * with one of the four canonical labels above; the paired form stays in implementation comments, where
- * the alignment it buys is worth having.
+ * <p>An implementation comment in this tree -- every {@code //} comment in every class of this package
+ * and of its two siblings -- carries a canonical WHY rationale and nothing else. It opens with one of
+ * the four labels above and gives the reason and the consequence under the alternative. It may not open
+ * with a statement-level what-line, and no comment outside a file's leading header block may carry the
+ * token {@code WHAT} followed by a colon at all. Purpose belongs in the Javadoc, which every type and
+ * method in this package has; a what-line placed above a statement restates the statement, which is
+ * Rule 1's first forbidden pattern. Inside a Javadoc block the same obligation is met by a labelled
+ * sentence opening with one of the four canonical labels, because a Javadoc block is rendered prose
+ * whose first sentence is audited as a summary.
+ *
+ * <p>The paired idiom -- a what-line whose colon follows the keyword immediately, above a why-line
+ * carrying one space before its colon so the two colons align in a column -- does have a legitimate
+ * home, and naming it is how this register stops the form leaking back into code. Per
+ * {@code docs/CODE_DOCUMENTATION_STANDARD.md} L985 to L1015, whose own heading reads "prose command
+ * blocks only", it belongs to FENCED COMMAND BLOCKS IN PROSE and nowhere else: that document, every new
+ * {@code README.md}, and {@code docs/runbooks/**}. Assumptions: a shell pipeline inside a fenced block
+ * has no docstring construct available to carry its purpose and is often long enough that its effect is
+ * genuinely not evident from its tokens, which is what earns the twin form there; a Java statement has a
+ * Javadoc above it and earns nothing.
+ *
+ * <p>Refactoring Rationale: this register previously ENDORSED the paired form for implementation
+ * comments, deriving it from the reference suite's alignment idiom at {@code tests/README.md} L178 and
+ * L180, L217 and L218, L254 and L256, and L267 and L270, and confining its prohibition to Javadoc
+ * blocks alone. That was wrong in the direction that matters: it read as licence for a
+ * {@code //} what-line above a statement in any class this package charters, which the normative
+ * standard forbids outright in every {@code .java} file and which {@code config/rule1/rule1_gate.py}
+ * fails a build over through its {@code what} check. A charter that teaches the violation its own gate
+ * rejects is worse than a silent one, because a reader who follows it writes a comment that compiles
+ * and then fails the required gate step at L914 of {@code .github/workflows/services-ci.yml}, which is a
+ * confusing place to learn it. The reference suite's idiom is left where it is -- that tree is
+ * reference-only and is not retyped -- and the alignment it buys is not traded for a form the gate
+ * refuses.
  */
 package com.carddemo.reporting.service;

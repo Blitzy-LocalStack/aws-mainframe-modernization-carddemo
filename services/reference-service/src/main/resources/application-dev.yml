@@ -8,24 +8,35 @@
 #   migrations carry a reference-DATA SEED rather than schema alone.
 #
 #   ⚠️ Refactoring Rationale: that clause read "the only module in the migration
-#   that carries two migrations", and it was false in the plainest way -- three
-#   modules carry two, two carry three, one carries five and one carries one. The
-#   count was never the distinguishing fact anyway; the CONTENT is.
+#   that carries two migrations", and it was false in the plainest way. Its
+#   replacement then rested on a per-module distribution -- "three modules carry
+#   two, two carry three, one carries five and one carries one" -- which drifted in
+#   turn, because this module's own history is now four scripts: V1__reference.sql,
+#   V2__seed_reference.sql, and the create-then-drop pair
+#   V3__reference_inquiry_reply_ledger.sql and
+#   V4__drop_reference_inquiry_reply_ledger.sql. No count is stated here for that
+#   reason. The distinguishing fact was never the count; the CONTENT is.
 #   V2__seed_reference.sql in this module's db/migration directory is the only
 #   migration in the whole reactor holding INSERT statements -- six of them, loading
 #   the transaction types, the transaction categories, the mandatory DEFAULT
 #   disclosure group and the three lookup tables -- and that is why this module's
-#   second migration dominates its startup cost, which is the fact the sizing below
-#   and in application.yml is actually reasoning from. Assumptions: the inventory
-#   moves as schemas evolve, so it is deliberately NOT restated here; the claim
-#   above is stated in a form that a directory listing settles.
+#   seed dominates its startup cost, which is the fact the sizing below and in
+#   application.yml is actually reasoning from. Assumptions: the reactor's migration
+#   inventory moves as schemas evolve, so the claim above is stated in a form a grep
+#   for INSERT across db/migration settles rather than as a tally to re-measure.
 #
-#   It overrides ELEVEN values that
+#   It overrides NINE values that
 #   application.yml in this same directory already declares, and it declares
 #   nothing else. Every key below is a key the base file already has, and every
 #   key below carries a value different from the base's; a key that merely
 #   repeated a base value would be noise and has been removed rather than left
 #   to read as a decision.
+#   Refactoring Rationale: this said ELEVEN while the Effect section below said
+#   nine, and nine is what the payload holds -- five pool keys, two health-detail
+#   keys and two logger levels. The eleven predated the withdrawal of the two
+#   queue-consumer bounds and was corrected in one place and not the other, which
+#   is the failure a reader meets first: two counts in one file cannot both be
+#   checked, so neither gets checked.
 #
 #   The base file is the property-key contract for this module. This file is an
 #   overlay on it, never a replacement, so everything the base settles continues

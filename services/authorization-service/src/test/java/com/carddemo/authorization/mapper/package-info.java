@@ -105,8 +105,12 @@
  *       value ordering the recent-first index depends on. Assumptions: it belongs to the
  *       segment-conversion responsibility for the same reason the detail class does -- every member it
  *       reaches is part of projecting one 200-byte conversion onto a row -- and it exists as its own class
- *       because eleven members of {@code AuthFraudMapper} had no caller anywhere in this tree, which is
- *       the same gap and the same argument.</li>
+ *       because eight members of {@code AuthFraudMapper} had no caller anywhere in this tree, which is
+ *       the same gap and the same argument. Refactoring Rationale: that figure read ELEVEN until the
+ *       mapper's three per-column boundary methods were withdrawn as callerless in PRODUCTION too, for
+ *       the reason its own class documentation records; this class was their only caller anywhere, so
+ *       the count it reports and the count that justified withdrawing them are the same measurement
+ *       read from the two ends.</li>
  * </ul>
  *
  * <p>Refactoring Rationale: the planned inventory for this package was five files naming four test

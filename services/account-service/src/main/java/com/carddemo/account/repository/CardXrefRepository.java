@@ -4,8 +4,8 @@ import com.carddemo.account.domain.CardXref;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.data.domain.Limit;
-import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.Repository;
 import org.springframework.data.repository.query.Param;
 
 /**
@@ -35,23 +35,63 @@ import org.springframework.data.repository.query.Param;
  * L40 the thirty-four-byte remainder, which together are again the declared fifty. L45 of that
  * program confirms the copybook above is the contract it reads through.</p>
  *
- * <h2>The keyed read, and why a named method stands beside the inherited one</h2>
+ * <h2>The keyed read is declared here, because nothing is inherited</h2>
  *
- * <p>Assumptions: the by-key access path is the {@code findById} inherited from the Spring Data
- * interface, keyed on the card-number column, and it is not redeclared or overridden here. Its
- * argument type is the reason this interface's key type parameter is textual rather than numeric,
- * which is the one detail about it a reader is most likely to expect wrongly: the two sibling
- * repositories in this package key on whole numbers because their records do, and this one keys on
- * sixteen characters because L5 of the copybook declares characters.</p>
+ * <p>Assumptions: the by-key access path is the named method below, keyed on the card-number column,
+ * and this interface inherits no read of any kind --
+ * {@code org.springframework.data.repository.Repository} is a marker that contributes no member
+ * while still giving Spring Data enough to build a proxy. The key's type is the one detail about it a
+ * reader is most likely to expect wrongly: the two sibling repositories in this package key on whole
+ * numbers because their records do, and this one keys on sixteen characters because L5 of the
+ * copybook declares characters.</p>
  *
- * <p>Alternatives Considered: leaving the inherited method as the only keyed read, so that this
- * interface declared nothing at all in the way both siblings declare nothing. Rejected on one
- * concrete ground rather than on style. On the two sibling records the key is a surrogate whose name
- * carries no obligation, whereas here the key IS a primary account number, and a call site reading
+ * <p>Alternatives Considered: naming that read {@code findById}, which is the conventional name for a
+ * lookup on a primary key and which the card number genuinely is. Declined, and the choice is purely
+ * one of name rather than of surface, because the marker base declares no {@code findById} to inherit
+ * and one would have to be written out either way. Given that, naming the property is the more
+ * informative of the two: here the key IS a primary account number, and a call site reading
  * {@code findById(value)} gives a reviewer no indication that the value being passed is one and must
- * be handled as one. The named method below says which value is being looked up, and it is the
- * method the read path in {@code com.carddemo.account.service} already calls. Both remain available
- * and they resolve to the same statement, so the choice costs nothing at the store.</p>
+ * be handled as one, whereas {@code findByCardNum} says which column answers the query. It is also
+ * the name the read path in {@code com.carddemo.account.service} already calls, and it keeps every
+ * member here in one derived-or-declared idiom with none looking like the special case.</p>
+ *
+ * <h2>Why the marker base, and not the one both siblings extend</h2>
+ *
+ * <p>Refactoring Rationale: this interface extended {@code JpaRepository}, which inherits
+ * {@code save}, {@code saveAll}, {@code saveAndFlush}, {@code delete}, {@code deleteById},
+ * {@code deleteAll} and {@code flush} onto the published surface of a relation whose charter below
+ * records that it HAS NO UPDATE PATH -- a claim three other artifacts of this module make
+ * independently, on the entity, on the controller and in the test package descriptor. The inherited
+ * members were reachable, appeared in every completion list, and had no production caller: the
+ * service layer of this context reaches only the five reads declared below. Narrowing the base is
+ * what turns that charter from a sentence into a property of the type, and the reachable surface is
+ * now exactly those five reads.</p>
+ *
+ * <p>Assumptions: the DATABASE cannot express this distinction, which is precisely why the type has
+ * to. {@code data-migration/sql/V0__schemas_and_roles.sql} conveys privilege a schema at a time --
+ * {@code GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA account TO carddemo_account} -- and
+ * this context genuinely needs insert and update there, for the account and customer masters the
+ * update flow rewrites. So the grant reaches {@code account.card_xref} too, and an inherited
+ * {@code save} against this relation would have SUCCEEDED rather than been refused. Only
+ * {@code delete} would have failed at the store, since that same file conveys no delete privilege on
+ * the schema at all -- which is the worse pairing of the two, because the write that no rule permits
+ * is the one that would have gone through quietly.</p>
+ *
+ * <p>Alternatives Considered: keeping the wider base and relying on review, or on the absent delete
+ * privilege, to catch a write. Rejected on the strength of the guarantee: a convention is relaxed by
+ * one added call and a privilege refuses only the operation it names, whereas a base type that
+ * declares nothing leaves no write to call. Considered and also rejected: declaring the interface
+ * over the marker but adding back a keyed read named {@code findById} so existing call sites reading
+ * the inherited form kept working. There were two such call sites and both were in this module's own
+ * test tree, so the change cost is a test edit rather than a compatibility problem -- and the reads
+ * they performed are the same statement the named method issues. The precedent is not new either:
+ * {@code com.carddemo.batch.repository.CardXrefRepository} already reads this same relation over the
+ * marker base for the same reason, and every repository of the reporting context does.</p>
+ *
+ * <p>Trade-offs: what is given up is that a caller cannot count rows, page by ordinal or flush
+ * through this interface, and nothing here wants to. The bounded reads below carry
+ * {@code org.springframework.data.domain.Limit} as an ordinary parameter, which Spring Data honours
+ * on a declared query irrespective of the base type, so narrowing costs the cursor pair nothing.</p>
  *
  * <h2>Ruling: the second access path is a real index, not decoration</h2>
  *
@@ -309,7 +349,7 @@ import org.springframework.data.repository.query.Param;
  * short-method escape exists. A clean run of that gate is nevertheless not evidence of compliance
  * with the rule, only of compliance with what a parser can see.</p>
  */
-public interface CardXrefRepository extends JpaRepository<CardXref, String> {
+public interface CardXrefRepository extends Repository<CardXref, String> {
 
     /**
      * Returns the cross-reference row entered on one card number.

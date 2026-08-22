@@ -42,8 +42,13 @@ import type { ApiError, PageResponse } from '../api/types';
 import type { UsePagedQueryResult } from './usePagedQuery';
 import { usePagedQuery } from './usePagedQuery';
 
-/** The base address the client is configured with; no request leaves the process. */
-const API_BASE_URL = 'https://api.carddemo.example';
+/**
+ * The base address the client is configured with; no request leaves the process.
+ *
+ * Assumptions: it carries the `/api/v1` operation prefix because `normalizeApiBaseUrl` requires it,
+ * and the prefix changes no assertion here because the cases assert relative request paths.
+ */
+const API_BASE_URL = 'https://api.carddemo.example/api/v1';
 
 /** The correlation header name the client is configured to send and read back. */
 const CORRELATION_HEADER = 'X-Correlation-Id';

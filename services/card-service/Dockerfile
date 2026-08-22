@@ -421,29 +421,37 @@ EXPOSE 8080
 #       ceiling is 256 MiB and three quarters of the task's paid-for memory is
 #       unavailable to it; at 50.0 the same limit yields 512 MiB.
 # WHY : Refactoring Rationale: the ratio was 75.0 and is now 50.0, because 75.0
-#       was derived from an assumption this task does not satisfy -- that the whole
-#       allocation belongs to one JVM. It does not: infra/modules/ecs-service adds
-#       an ESSENTIAL aws-otel-collector sidecar to every workload, and neither
-#       container carries a container-level hard memory limit, so the JVM's cgroup
-#       view is the WHOLE task allocation and 75.0 sized the heap as though the
-#       sidecar were not there. The budget that replaces the assumption, at the
-#       1024 MiB dev allocation: 192 MiB for the collector (its memory_limiter is
-#       configured at limit_mib 128 with spike_limit_mib 32, plus Go runtime
-#       overhead), about 250 MiB of JVM non-heap that MaxRAMPercentage does not
-#       govern at all -- metaspace, code cache, thread stacks, GC structures and
-#       direct buffers -- and the heap ceiling on top. At 75.0 that totals roughly
-#       1210 MiB against a 1024 MiB task and the task is OOM-killed under load; at
-#       50.0 it totals roughly 954 MiB and fits. The same ratio against the 2048 MiB
-#       prod allocation yields a 1024 MiB heap and about 580 MiB of headroom.
-# WHY : Alternatives Considered: keeping 75.0 and giving each container an explicit
-#       hard `memory` limit in the task definition instead -- the collector at its
-#       reservation and the application at the remainder -- so that the JVM's cgroup
-#       limit excluded the sidecar. Rejected for two reasons measured from the
-#       module: a hard limit on an ESSENTIAL container turns a collector spike into
-#       a killed TASK rather than degraded telemetry, and even with the sidecar
-#       excluded, 75.0 of the remaining 832 MiB plus 250 MiB of non-heap still
-#       exceeds that container's own limit. The ratio had to come down either way,
-#       so the change that fixes it is the ratio alone.
+#       treated MaxRAMPercentage as though it governed the whole task allocation.
+#       It governs the HEAP only. The budget at the 1024 MiB dev allocation is
+#       about 250 MiB of JVM non-heap that MaxRAMPercentage does not govern at all
+#       -- metaspace, code cache, thread stacks, GC structures and direct buffers --
+#       plus the heap ceiling on top. At 75.0 that totals roughly 1018 MiB against a
+#       1024 MiB task, which leaves the container runtime nothing and is OOM-killed
+#       under load; at 50.0 it totals roughly 762 MiB and fits with real headroom.
+#       The same ratio against the 2048 MiB prod allocation yields a 1024 MiB heap
+#       and about 770 MiB of headroom.
+# WHY : Refactoring Rationale: this note derived the same 50.0 from a second premise
+#       -- that infra/modules/ecs-service adds an ESSENTIAL aws-otel-collector
+#       sidecar to every workload, budgeted at 192 MiB -- and that premise is
+#       WITHDRAWN. That module composes no collector container: the sidecar was
+#       outside the frozen specification and was forcing an eleventh ECR repository
+#       against the ten of section 0.4.1.6 and a ninth interface endpoint against
+#       the eight of section 0.4.1.9, so the component went and the mirror with it.
+#       The ratio is unchanged because the non-heap argument above carries it on its
+#       own; the premise is withdrawn rather than the number re-derived downwards,
+#       because raising the ratio on the strength of 192 MiB that is no longer spent
+#       would spend the headroom this task's own direct buffers need. Recorded
+#       instead of deleted so a reader who finds the collector in the git history
+#       does not conclude the ratio is now unjustified.
+# WHY : Alternatives Considered: keeping 75.0 and giving the application container an
+#       explicit hard `memory` limit in the task definition, so that its cgroup limit
+#       were smaller than the task's and the ratio applied to a tighter number.
+#       Rejected because it moves the same arithmetic into a second file that has to
+#       be edited in step with this one, and because 75.0 of any limit plus 250 MiB
+#       of non-heap exceeds that limit whenever the limit is below about 1000 MiB --
+#       which both allocations are, once the runtime's own share is counted. The
+#       ratio had to come down either way, so the change that fixes it is the ratio
+#       alone.
 # WHY : Refactoring Rationale: an earlier revision of this file rejected "-Xmx or
 #       -XX container flags" as a single category, on the ground that a hard-coded
 #       ceiling would silently override the task definition's memory and have to be

@@ -5,20 +5,26 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.carddemo.batch.domain.Account;
 import com.carddemo.batch.domain.CardXref;
-import com.carddemo.batch.domain.Transaction;
+import com.carddemo.batch.domain.DailyTransaction;
 import com.carddemo.batch.domain.TransactionCategoryBalance;
 import com.carddemo.batch.domain.TransactionCategoryBalance.TransactionCategoryBalanceId;
+import com.carddemo.batch.dto.BusinessDate;
 import com.carddemo.batch.service.CategoryBalanceService;
+import com.carddemo.batch.service.DailyFeedWatermarkService;
+import com.carddemo.batch.service.PostingRecordUnitOfWork;
+import com.carddemo.batch.service.PostingValidationService;
 import com.carddemo.common.money.Money;
 import jakarta.persistence.EntityManager;
-import jakarta.persistence.PersistenceException;
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Clock;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Optional;
 import java.util.stream.Stream;
 import javax.sql.DataSource;
@@ -34,7 +40,9 @@ import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.persistence.autoconfigure.EntityScan;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Bean;
+import org.springframework.dao.DataAccessException;
 import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
@@ -56,14 +64,20 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * each is verified here from a connection that is not the one doing the writing.</p>
  *
  * <ul>
- *   <li><b>Obligation A -- the posting unit of work is ONE transaction across TWO schemas.</b>
+ *   <li><b>Obligation A -- the posting unit of work is ONE transaction across THREE schemas.</b>
  *       {@code app/cbl/CBTRN02C.cbl:424} opens {@code 2000-POST-TRANSACTION} and performs exactly three
  *       writes: {@code :440} the category balance, {@code :441} the account, {@code :442} the posted
  *       transaction. In the target the first and third land in {@code ledger} and the second in
  *       {@code account}, and the migration plan's section 0.4.1.3 records that split as the single
  *       documented exception to database-per-service purity, reached through the narrowly-scoped
  *       cross-schema write grants that {@code data-migration/sql/V0__schemas_and_roles.sql} declares.
- *       This class documents those grants and neither creates nor issues them.</li>
+ *       This class documents those grants and neither creates nor issues them. The migrated unit adds a
+ *       FOURTH durable effect the reference has no counterpart for -- the feed's consumed position in
+ *       {@code batch.daily_feed_watermark}, advanced once per record accounted for -- and it commits
+ *       inside the same transaction as the three writes. That co-commit is the property that decides
+ *       whether a re-run can double-post or skip a record, so it is asserted here beside them rather
+ *       than left to the component's own unit test: a checkpoint that committed independently would
+ *       either mark a rolled-back record consumed or re-present a committed one.</li>
  *   <li><b>Obligation B -- the account half of the cycle-bucket accumulation.</b>
  *       {@code app/cbl/CBTRN02C.cbl:545} is {@code 2800-UPDATE-ACCOUNT-REC}: {@code :547} advances the
  *       running balance unconditionally, {@code :548} tests the amount with an INCLUSIVE comparison,
@@ -101,10 +115,43 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * contracts belong to {@code TransactionCategoryBalanceRepositoryIT} and {@code TransactionRepositoryIT}
  * and are not re-asserted.</p>
  *
- * <p>Assumptions: the reject stream is NOT a fourth participant in the unit of work.
+ * <h2>The seam these cases drive, and why it is the production one</h2>
+ *
+ * <p>Refactoring Rationale: every posting case below calls
+ * {@code PostingRecordUnitOfWork.applyOneRecord} -- the production per-record unit -- inside a
+ * transaction this class opens, and asserts what the engine then holds. It did NOT, and that is the
+ * defect this arrangement replaces: the sequence was re-issued from a private helper of this file that
+ * resolved the cross-reference, called the accumulation rule, applied the amount to the account and
+ * inserted a hand-built posted row, so what the ordering, cycle-bucket and rollback cases pinned was
+ * the order of a COPY. A production change that reordered the writes, dropped the checkpoint, applied
+ * the amount to the wrong accumulator or inverted the sign test would have left every case here green,
+ * and the copy additionally had no fourth write at all, so the checkpoint was unasserted anywhere
+ * against a real engine.</p>
+ *
+ * <p>Trade-offs: driving the production unit gives up the ability to place a flush between two of its
+ * writes, because the unit issues them without one and this class may not reach inside it. What that
+ * costs, and how each of the three positions is still refused separately, is recorded under the
+ * failure-position heading below. Alternatives Considered: driving the whole posting JOB instead, which
+ * would need no seam at all. Rejected because a job run is a pass over a feed and would make every
+ * case here a statement about a step's return code, its generation staging and its reject dataset --
+ * which is tier two's subject and {@code PostTransactionsJobParityIT}'s -- rather than about what one
+ * record's transaction made durable.</p>
+ *
+ * <p>Assumptions: one transition in this class is still applied by a helper rather than called from
+ * production, and the exception is deliberate and narrow. The interest control break at
+ * {@code app/cbl/CBACT04C.cbl:350} is transcribed inside {@code CalculateInterestJob}, whose per-account
+ * update has no injectable component of its own; extracting one would be a change to a job this
+ * checkpoint's finding does not reach. The case that asserts it therefore documents its transition as a
+ * transcription and asserts the DURABLE CONSEQUENCE of the paragraph -- balance advanced, both cycle
+ * accumulators reset -- while the posting transition beside it is production code.</p>
+ *
+ * <p>Assumptions: the reject arm's two writes are NOT participants in the accepted unit of work.
  * {@code app/cbl/CBTRN02C.cbl:211-216} branches to post OR to count and write a reject, never to both,
- * so a rejected record reaches {@code TransactionRejectRepositoryIT}'s table and never these three.
- * A reader expecting a fourth write is reading the two arms as a sequence.</p>
+ * so a rejected record reaches {@code TransactionRejectRepositoryIT}'s table and never the three
+ * asserted here. What the two arms DO share is the checkpoint: the production unit advances the
+ * watermark on both, because a rejected record is consumed as surely as a posted one. Only the accepted
+ * arm is driven below, the reject arm's row and its 430-byte stream record belonging to the reject
+ * table's own owner in this package.</p>
  *
  * <p>Assumptions: tier one owns and this class does not restate the reject-reason precedence, the
  * verbatim reject literals, both inclusive VALIDATION boundaries, and ALL interest arithmetic. The
@@ -139,22 +186,54 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * connection auto-commit off, which is exactly what an outside observer and a version race both
  * require; a pool of one would deadlock the observation rather than fail it.</p>
  *
- * <p>Assumptions: each of the three writes is FLUSHED inside the boundary before the next is issued, and
- * that is load-bearing rather than tidy. Without it the provider queues all three and emits them
- * together at commit, so the position a refusal arises at would be decided by the action queue rather
- * than by the call order, and no case could attribute a rollback to a particular write. Flushing per
- * write also models the reference faithfully, where three separate file verbs each reach the dataset
- * immediately inside one commit scope. It is additionally what makes the in-flight case meaningful: an
- * unflushed row is not at the server at all, so its invisibility elsewhere would be vacuous.</p>
+ * <h2>How each write position is refused, now that the unit issues its own writes</h2>
  *
  * <p>Alternatives Considered: forcing the refusal at one write position only, as a single rollback case
  * would. Rejected because the claim being defended is about ORDERING -- three writes in a fixed sequence
  * under one commit -- so a refusal at the last position leaves the two earlier positions unproven, and
  * an implementation that committed after the first write would still satisfy a last-position case. Each
- * of the three positions is refused separately below, by a genuine refusal raised on the production code
- * path -- the engine's column contract, the provider's version check, or the domain type's own picture
- * guard -- rather than by a manufactured exception or a rollback-only flag, either of which would
- * merely show that the framework can roll a transaction back.</p>
+ * of the three positions is refused separately below, and every refusal is raised on the production code
+ * path -- the domain type's own picture guard, the shared money domain, the provider's identifier
+ * requirement or its version check -- rather than by a manufactured exception or a rollback-only flag,
+ * either of which would merely show that the framework can roll a transaction back.</p>
+ *
+ * <p>Assumptions: the production unit issues its three writes through repository {@code save} calls and
+ * flushes none of them, so a refusal cannot be attributed to a position by watching WHICH statement the
+ * engine rejects -- at commit the provider emits the queued statements in its own order. Attribution
+ * comes from WHERE the refusal arises in the call sequence instead, and that is what makes the choice of
+ * mechanism at each position load-bearing rather than incidental:</p>
+ *
+ * <ul>
+ *   <li><b>Position one, the category balance.</b> The accumulated total is pushed one cent past
+ *       {@link #CATEGORY_BALANCE_CEILING}, and the category-balance entity's own nine-integer-digit
+ *       picture refuses it IN MEMORY, inside the accumulation rule. The unit therefore aborts before it
+ *       reads the account at all, so the account and the ledger being untouched is a statement about
+ *       ordering as well as about rollback.</li>
+ *   <li><b>Position two, the account.</b> The seeded balance sits at {@link #ACCOUNT_BALANCE_CEILING}
+ *       and the posted amount carries it past the shared money domain, which refuses it IN MEMORY
+ *       inside the account transition -- after the category balance has been accumulated and before the
+ *       posted row is built. This exploits a second real asymmetry: the validation rule projects a
+ *       balance from the CYCLE accumulators rather than from the running balance, so an account may sit
+ *       at the domain ceiling and still be accepted for posting.</li>
+ *   <li><b>Position three, the posted ledger row.</b> The feed row carries NO transaction identifier,
+ *       which {@code ledger.daily_transactions} admits and {@code ledger.transactions} refuses -- the
+ *       one nullability asymmetry the two tables declare, and the harness records why the feed has it.
+ *       The provider refuses the insert for want of an assigned identifier, at the third write, after
+ *       the first two have already been issued.</li>
+ *   <li><b>Position two again, from the engine rather than from memory.</b> The version race supplies
+ *       the one refusal that arises at the COMMIT flush, so its case is the one in which the earlier
+ *       writes genuinely reached the server before the unit failed. The two mechanisms at this position
+ *       are complementary: the in-memory one proves the account is written before the ledger, and the
+ *       flush-time one proves that statements the engine has already accepted are rolled back with
+ *       it.</li>
+ * </ul>
+ *
+ * <p>Assumptions: the in-flight case flushes the unit's writes EXPLICITLY, once, after the production
+ * call returns and before the observation. That is the one place a flush is added, and it is
+ * load-bearing there: an unflushed row is not at the server at all, so its invisibility to another
+ * session would be vacuous. It is added after the unit rather than between its writes, which is all this
+ * class can do without reaching inside the component, and it is enough -- the property under test is
+ * that NONE of the four effects is visible before the commit.</p>
  *
  * <p>Alternatives Considered: a transactional outbox with compensating reversals, or a distributed
  * two-phase commit across the two schemas. Both were evaluated and rejected at the migration plan's
@@ -189,10 +268,14 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * fails the build on a violation.</p>
  *
  * <p>Assumptions: this class writes ROWS only, into {@code account.accounts},
- * {@code ledger.transaction_category_balances} and {@code ledger.transactions}. It creates, alters and
- * seeds no STRUCTURE in any schema: that data definition belongs to {@code account-service}'s
- * {@code V1__account.sql} and {@code transaction-service}'s {@code V1__ledger.sql}, and the test-time
- * shape is supplied by the harness script this container runs. Every path under {@code app/} it cites is
+ * {@code account.card_xref}, {@code ledger.daily_transactions},
+ * {@code ledger.transaction_category_balances}, {@code ledger.transactions} and
+ * {@code batch.daily_feed_watermark}. It creates, alters and seeds no STRUCTURE in any schema: that data
+ * definition belongs to {@code account-service}'s {@code V1__account.sql} and
+ * {@code transaction-service}'s {@code V1__ledger.sql} for the five foreign tables, whose test-time
+ * shape the harness script this container runs supplies, and to this module's OWN
+ * {@code db/migration/V2__batch_feed_watermark.sql} for the watermark, which Flyway applies against the
+ * container because the test profile leaves it enabled. Every path under {@code app/} it cites is
  * reference material, read as the specification and never modified, as are the oracle suite under
  * {@code tests/} and the runners under {@code scripts/}.</p>
  *
@@ -253,10 +336,29 @@ class AccountRepositoryIT {
      * The card number the cross-reference resolves to that account.
      *
      * <p>Assumptions: sixteen characters, the width {@code XREF-CARD-NUM PIC X(16)} declares at
-     * {@code app/cpy/CVACT03Y.cpy}. It is fabricated, fails the Luhn check and identifies nothing. It is
-     * referred to in every message below by {@link #CARD_LAST_FOUR} rather than in full.</p>
+     * {@code app/cpy/CVACT03Y.cpy}. Two properties together make it unroutable, and both are COMPUTED
+     * by {@link #theCardFixtureIsUnroutableAndFailsTheLuhnCheck} rather than merely attested here: it
+     * begins {@code 9900}, whose leading major industry identifier 9 is reserved for national use and
+     * assigned to no card issuer, so the range routes to nobody; and its final digit is deliberately not
+     * the Luhn check digit, so it fails the checksum every network applies before a number reaches an
+     * issuer at all. It is referred to in every message below by {@link #CARD_LAST_FOUR} rather than in
+     * full.</p>
+     *
+     * <p>Refactoring Rationale: the value was {@code 4000000000000077} and this block attested that it
+     * "fails the Luhn check". The attestation was false -- its Luhn contribution sum is 20, a multiple
+     * of ten, so the value is checksum-VALID, and a leading 4 sits in an allocated issuer range -- which
+     * made it a routable-looking primary account number committed under a safety claim a reviewer would
+     * have trusted without recomputing. It is replaced rather than re-documented, under the convention
+     * this repository already applies to fabricated card numbers in
+     * {@code services/reporting-service/src/test/java/com/carddemo/reporting/fixtures/ReportingFixtureContractTest.java}:
+     * the {@code 9900} prefix plus a deliberately wrong check digit. Alternatives Considered: keeping
+     * the value and correcting only the sentence, which is cheaper. Rejected because the number would
+     * still be checksum-valid and issuer-shaped, so the fixture would still be the thing a scanner or a
+     * reviewer flags; and Alternatives Considered: a documented network test credential, rejected
+     * because those are Luhn-VALID by design and this file's whole claim is that its value cannot be
+     * one.</p>
      */
-    private static final String CARD_NUM = "4000000000000077";
+    private static final String CARD_NUM = "9900000000000078";
 
     /**
      * The masked rendering of the card number, used wherever a message names the card at all.
@@ -265,10 +367,40 @@ class AccountRepositoryIT {
      * permits a diagnostic to carry. A failing visibility assertion prints its description, so the
      * masked form is the only form this class holds in a message.</p>
      */
-    private static final String CARD_LAST_FOUR = "0077";
+    private static final String CARD_LAST_FOUR = "0078";
+
+    /**
+     * The prefix that makes the card fixture unroutable, asserted rather than assumed.
+     *
+     * <p>Assumptions: ISO/IEC 7812 assigns major industry identifier 9 to national use and no card
+     * network issues under it, so a number beginning with this prefix belongs to no issuer range. It is
+     * named as a constant because the case that checks it must compare against the same value this
+     * block documents, and a literal in the assertion could drift from the prose.</p>
+     */
+    private static final String UNROUTABLE_PREFIX = "9900";
 
     /** The customer the cross-reference names, fabricated at the declared nine-digit width. */
     private static final long CUSTOMER_ID = 900000077L;
+
+    /**
+     * The orchestrator execution identifier every checkpoint in this class is attributed to.
+     *
+     * <p>Assumptions: it is carried verbatim into {@code batch.daily_feed_watermark.run_id}, whose
+     * column is {@code VARCHAR(80)} and whose CHECK constraint refuses a blank, so the value is a short
+     * non-blank literal. It names WHICH RUN moved the position for an operator reading the row and
+     * reaches no posted or rejected record.</p>
+     */
+    private static final String RUN_ID = "account-repository-it";
+
+    /**
+     * The injected business date every unit of work in this class is driven with.
+     *
+     * <p>Assumptions: a literal date rather than a clock read, for the reason the reference itself
+     * gives -- {@code app/jcl/INTCALC.jcl:22} injects the business date as a job parameter so a re-run
+     * reproduces its inputs. The separated ISO layout is used because it is the one the migrated chain
+     * injects, and it is exactly ten characters, which the watermark's own CHECK constraint requires.</p>
+     */
+    private static final BusinessDate BUSINESS_DATE = new BusinessDate("2022-07-18");
 
     /** The transaction type every posting in this class carries. */
     private static final String TYPE_CD = "01";
@@ -278,6 +410,15 @@ class AccountRepositoryIT {
 
     /** The identifier of the transaction an accepted unit of work posts. */
     private static final String TRANSACTION_ID = "0000000000000077";
+
+    /**
+     * The identifier of a SECOND accepted transaction, posted by the case that needs two commits.
+     *
+     * <p>Assumptions: it differs from {@link #TRANSACTION_ID} because {@code ledger.transactions} keys
+     * on the identifier, so two units posting the same one would update a single row rather than commit
+     * two rewrites of the account -- which is precisely what the version case has to distinguish.</p>
+     */
+    private static final String SECOND_TRANSACTION_ID = "0000000000000088";
 
     /**
      * The amount the accepted posting carries, taken from the committed parity vector.
@@ -392,23 +533,27 @@ class AccountRepositoryIT {
     private static final String DESCRIPTION = "Account repository unit of work fixture";
 
     /**
-     * The declared width of the description, from which the refused value below is derived.
+     * The source channel every seeded feed record carries, blank-padded to its declared width.
      *
-     * <p>Assumptions: one hundred, the width the copybook declares and the width the owning migration
-     * gives the column. It is named so the refused value is derived from the contract rather than
-     * written as a literal that would not move with it.</p>
+     * <p>Assumptions: {@code DALYTRAN-SOURCE PIC X(10)} in {@code app/cpy/CVTRA06Y.cpy} and
+     * {@code source CHAR(10)} in both the feed and the posted table, so the value is padded to ten. It
+     * is carried through the production mapper unaltered and no case asserts it: a fixed-length column
+     * compares ignoring trailing blanks, so an assertion on it would report on the column type rather
+     * than on the unit of work.</p>
      */
-    private static final int DESCRIPTION_WIDTH = 100;
+    private static final String FEED_SOURCE = "POS       ";
 
-    /**
-     * A description exactly one character wider than the ledger column admits.
-     *
-     * <p>Assumptions: the width is COMPUTED from the declared one rather than written as 101, so the
-     * value moves with the column if the copybook ever does. One character over is the narrowest
-     * violation available, which keeps the refusal attributable to the width and to nothing else about
-     * the value.</p>
-     */
-    private static final String OVERLONG_DESCRIPTION = "x".repeat(DESCRIPTION_WIDTH + 1);
+    /** The merchant identifier every seeded feed record carries, fabricated and identifying nothing. */
+    private static final long MERCHANT_ID = 900000001L;
+
+    /** The merchant name every seeded feed record carries, inside the fifty characters declared. */
+    private static final String MERCHANT_NAME = "Fixture Merchant";
+
+    /** The merchant city every seeded feed record carries, inside the fifty characters declared. */
+    private static final String MERCHANT_CITY = "Fixture City";
+
+    /** The merchant postal code every seeded feed record carries, padded to the ten declared. */
+    private static final String MERCHANT_ZIP = "12345     ";
 
     /**
      * The largest balance the category-balance column can hold, used to provoke the write-one refusal.
@@ -422,6 +567,23 @@ class AccountRepositoryIT {
      * refused by the engine without a manufactured exception.</p>
      */
     private static final BigDecimal CATEGORY_BALANCE_CEILING = new BigDecimal("999999999.99");
+
+    /**
+     * The largest running balance the shared money domain admits, used to provoke the write-two refusal.
+     *
+     * <p>Assumptions: {@code ACCT-CURR-BAL} is {@code PIC S9(10)V99} in {@code app/cpy/CVACT01Y.cpy},
+     * the column is {@code NUMERIC(12,2)} and the shared money type's domain is sized to exactly that
+     * ten-integer-digit picture, so this value is the last one both admit. Adding any positive amount to
+     * it produces an eleven-digit total that {@code Money} refuses in memory, inside the account
+     * transition of the production unit.</p>
+     *
+     * <p>Assumptions: an account seeded here is still ACCEPTED by the validation rule, which is what
+     * makes the arrangement reachable at all rather than a rejected record. The over-limit projection at
+     * {@code app/cbl/CBTRN02C.cbl:403-405} is the cycle credit MINUS the cycle debit plus the amount --
+     * the running balance is not in it -- so an account at this ceiling with both accumulators at zero
+     * projects the amount alone against its credit limit and passes.</p>
+     */
+    private static final BigDecimal ACCOUNT_BALANCE_CEILING = new BigDecimal("9999999999.99");
 
     /**
      * The interest the control-break case adds to the account balance.
@@ -470,16 +632,42 @@ class AccountRepositoryIT {
     private TransactionCategoryBalanceRepository categoryBalances;
 
     /**
-     * The production accumulation rule, exercised rather than substituted.
+     * The production accumulation rule, used here only to ARRANGE the row a refused unit updates.
      *
-     * <p>Assumptions: the real service is used because the first write of the unit of work is the one it
-     * performs, and a substitute would leave the branch deciding whether a row is inserted or updated
-     * unexercised against the real composite primary key. The service declares no transaction of its
-     * own -- no method in the production service package does -- so it runs inside whichever boundary
-     * its caller opened, which is what lets a case here drive it INSIDE the boundary under test.</p>
+     * <p>Assumptions: the rule is reached directly for one purpose -- seeding the category balance at
+     * its ceiling -- so that the row a later refused unit meets is one the rule itself created and the
+     * refusal arises on its own update arm. Every posting case drives the rule through
+     * {@link #perRecord} instead, which is the production caller. Assumptions: the service declares no
+     * transaction of its own, so it runs inside whichever boundary its caller opened; the one production
+     * service in this module that does declare one is the step ledger's writer, which is deliberately
+     * {@code REQUIRES_NEW} so a failed step's row survives the rollback of the step it records.</p>
      */
     @Autowired
     private CategoryBalanceService balances;
+
+    /**
+     * The unposted feed, read exactly as the production job reads it.
+     *
+     * <p>Assumptions: the feed record handed to the production unit is READ THROUGH THIS INTERFACE
+     * rather than constructed, and that is a requirement rather than a preference. The unit checkpoints
+     * the record's own ingestion ordinal, and that column is
+     * {@code BIGINT GENERATED BY DEFAULT AS IDENTITY} whose value the engine assigns -- so a constructed
+     * instance carries none, and the checkpoint would fail on an absent ordinal rather than on anything
+     * this class is asserting.</p>
+     */
+    @Autowired
+    private DailyTransactionRepository feed;
+
+    /**
+     * The production per-record unit of work, which every posting case below drives.
+     *
+     * <p>Assumptions: it is the REAL component over the real repositories, injected as the production
+     * job injects it, and it declares no transaction of its own -- the boundary belongs to its caller,
+     * which is this class standing in for the tasklet step. That is what lets a case observe the unit in
+     * flight and roll it back.</p>
+     */
+    @Autowired
+    private PostingRecordUnitOfWork perRecord;
 
     /** The persistence context, used to flush inside a boundary and to detach after one. */
     @Autowired
@@ -526,7 +714,7 @@ class AccountRepositoryIT {
     }
 
     /**
-     * Empties the three written tables and commits one seeded account and its cross-reference.
+     * Empties every written table and commits one seeded account and its cross-reference.
      *
      * <p>Assumptions: the seed is COMMITTED before each case rather than shared across the class or
      * held open in a transaction, so a case that provokes a rollback still starts from a known balance
@@ -535,8 +723,11 @@ class AccountRepositoryIT {
      * declaration.</p>
      *
      * <p>Assumptions: the delete order is not a foreign-key order, there being no inter-table foreign
-     * key in the harness; it is simply the three written tables plus the cross-reference each case
-     * resolves through.</p>
+     * key in the harness; it is simply every table a case writes plus the cross-reference each one
+     * resolves through. Assumptions: the watermark is emptied too, and that is load-bearing rather than
+     * tidy -- the production unit advances a position MONOTONICALLY and treats a request at or below the
+     * stored one as a no-op, so a row surviving from an earlier case would make the next case's
+     * checkpoint silently do nothing and its watermark assertion report the earlier case's ordinal.</p>
      *
      * <p>This setup method takes no parameter and returns no value.</p>
      */
@@ -546,8 +737,11 @@ class AccountRepositoryIT {
         this.transactionTemplate.executeWithoutResult(status -> {
             this.jdbc.update("DELETE FROM ledger.transactions");
             this.jdbc.update("DELETE FROM ledger.transaction_category_balances");
+            this.jdbc.update("DELETE FROM ledger.transaction_rejects");
+            this.jdbc.update("DELETE FROM ledger.daily_transactions");
             this.jdbc.update("DELETE FROM account.accounts");
             this.jdbc.update("DELETE FROM account.card_xref");
+            this.jdbc.update("DELETE FROM batch.daily_feed_watermark");
         });
         this.transactionTemplate.executeWithoutResult(status -> {
             this.accounts.save(seedAccount(OPENING_BALANCE, BigDecimal.ZERO, BigDecimal.ZERO));
@@ -563,13 +757,14 @@ class AccountRepositoryIT {
     }
 
     /**
-     * Confirms all three writes become visible to another session together, on the commit.
+     * Confirms all four durable effects become visible to another session together, on the commit.
      *
      * <p>Purpose: this is obligation A read from the committed side. It pins
      * {@code app/cbl/CBTRN02C.cbl:440-442} -- the category balance, the account and the posted
-     * transaction -- as one durable outcome spanning {@code ledger} and {@code account}, and the balance
-     * it asserts is the committed parity vector's: {@code 193.00} advancing to {@code 697.77} on an
-     * amount of {@code 504.77}, from {@code tests/fixtures/posting/happy_path/acctdata.txt} to
+     * transaction -- together with the migrated unit's checkpoint as ONE durable outcome spanning
+     * {@code ledger}, {@code account} and {@code batch}, and the balance it asserts is the committed
+     * parity vector's: {@code 193.00} advancing to {@code 697.77} on an amount of {@code 504.77}, from
+     * {@code tests/fixtures/posting/happy_path/acctdata.txt} to
      * {@code tests/golden/posting/happy_path/acctdat.expected}.</p>
      *
      * <p>Assumptions: the reading is taken through the OUTSIDE observer rather than through the writing
@@ -577,12 +772,18 @@ class AccountRepositoryIT {
      * commit through a cleared persistence context. A commit is only durable if a session that never
      * participated in it can see it.</p>
      *
+     * <p>Assumptions: the checkpoint is asserted at the record's OWN ingestion ordinal rather than at a
+     * literal, and the ordinal comes back from the seeding statement. The identity sequence behind the
+     * feed is not reset between cases, so a literal would pass only on whichever case happened to run
+     * first, and the value the checkpoint must carry is exactly the one the next pass compares against
+     * when it resumes.</p>
+     *
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("all three writes become visible to another session together on the commit")
-    void allThreeWritesBecomeVisibleTogetherOnCommit() {
-        postAccepted(TRANSACTION_ID, POSTED_AMOUNT);
+    @DisplayName("all four durable effects become visible to another session together on the commit")
+    void allFourDurableEffectsBecomeVisibleTogetherOnCommit() {
+        long consumed = postAccepted(TRANSACTION_ID, POSTED_AMOUNT);
 
         ObservedUnit committed = observeFromOutsideTheTransaction();
 
@@ -601,10 +802,22 @@ class AccountRepositoryIT {
         assertThat(committed.cycleDebit())
                 .as("the cycle debit accumulator is untouched by a positive amount")
                 .isEqualByComparingTo(BigDecimal.ZERO);
+        assertThat(committed.watermark().ordinal())
+                .as("the checkpoint is durable in the BATCH schema, in the same unit of work, at the"
+                        + " record's own ingestion ordinal")
+                .isEqualTo(consumed);
+        assertThat(committed.watermark().runId())
+                .as("the advance names the run that made it, so an operator reading a recovered night"
+                        + " can attribute the position")
+                .isEqualTo(RUN_ID);
+        assertThat(committed.watermark().businessDate())
+                .as("and the injected business date rather than a clock read, so a re-run reproduces"
+                        + " the attribution")
+                .isEqualTo(BUSINESS_DATE.token());
     }
 
     /**
-     * Confirms the three flushed writes stay invisible to another session until the commit.
+     * Confirms the four flushed writes stay invisible to another session until the commit.
      *
      * <p>Purpose: this is the load-bearing case of the class and the one that distinguishes ONE
      * transaction from three. All three writes of {@code app/cbl/CBTRN02C.cbl:440-442} are issued and
@@ -623,8 +836,8 @@ class AccountRepositoryIT {
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("the three flushed writes stay invisible to another session until the commit")
-    void theThreeFlushedWritesStayInvisibleToAnotherSessionUntilCommit() {
+    @DisplayName("the four flushed writes stay invisible to another session until the commit")
+    void theFourFlushedWritesStayInvisibleToAnotherSessionUntilCommit() {
         ObservedUnit inFlight = postAndObserveBeforeCommit(TRANSACTION_ID, POSTED_AMOUNT);
 
         assertThat(inFlight.categoryBalanceRows())
@@ -640,6 +853,10 @@ class AccountRepositoryIT {
         assertThat(inFlight.cycleCredit())
                 .as("the uncommitted cycle credit is invisible to the observing session too")
                 .isEqualByComparingTo(BigDecimal.ZERO);
+        assertThat(inFlight.watermark().rows())
+                .as("the checkpoint is flushed but uncommitted, so another session finds no consumed"
+                        + " position at all -- a resume starting here would re-present the record")
+                .isZero();
 
         ObservedUnit committed = observeFromOutsideTheTransaction();
         assertThat(committed.categoryBalanceRows())
@@ -647,6 +864,9 @@ class AccountRepositoryIT {
                         + " isolation and not an arrangement that never wrote anything")
                 .isEqualTo(1L);
         assertThat(committed.balance()).isEqualByComparingTo(POSTED_BALANCE);
+        assertThat(committed.watermark().rows())
+                .as("and finds the checkpoint, so its earlier absence was isolation too")
+                .isEqualTo(1L);
     }
 
     /**
@@ -675,8 +895,8 @@ class AccountRepositoryIT {
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("a refusal at the category balance write leaves nothing in either schema")
-    void aRefusalAtTheCategoryBalanceWriteLeavesNothingInEitherSchema() {
+    @DisplayName("a refusal at the category balance write leaves nothing in any schema")
+    void aRefusalAtTheCategoryBalanceWriteLeavesNothingInAnySchema() {
         seedCategoryBalanceAtItsCeiling();
 
         assertThatThrownBy(() -> postAccepted(TRANSACTION_ID, new BigDecimal("1.00")))
@@ -692,19 +912,30 @@ class AccountRepositoryIT {
         assertThat(afterRefusal.ledgerRows())
                 .as("the ledger write was never reached, so no posted transaction exists")
                 .isZero();
+        assertThat(afterRefusal.watermark().rows())
+                .as("and the checkpoint was never reached either, so the record stays unconsumed and the"
+                        + " next pass re-presents it whole rather than skipping it")
+                .isZero();
         assertThat(storedCategoryBalance().orElseThrow().getBalance())
                 .as("the refused accumulation was rolled back, so the row still holds its ceiling value")
                 .isEqualByComparingTo(CATEGORY_BALANCE_CEILING);
     }
 
     /**
-     * Confirms a refusal at the THIRD write rolls back both earlier writes, seen from another session.
+     * Confirms a refusal at the THIRD write rolls back the earlier writes, seen from another session.
      *
      * <p>Purpose: the third of the three failure positions, and the one in which a non-atomic
      * implementation would leave the two earlier rows behind -- an advanced balance with no posted
      * transaction, which is precisely the observable intermediate state the migration plan rejected a
-     * compensating-reversal design in order to avoid. The refusal is a genuine engine refusal of a
-     * description one character wider than {@code ledger.transactions.description} admits.</p>
+     * compensating-reversal design in order to avoid. The refusal is provoked by a feed record carrying
+     * NO transaction identifier: {@code ledger.daily_transactions} admits that and
+     * {@code ledger.transactions} keys on it, so the posted row has nothing to be keyed by and the
+     * provider refuses it where the unit saves it.</p>
+     *
+     * <p>Assumptions: the refusal is asserted by TYPE and not by message. What the provider says about a
+     * missing assigned identifier is its own wording and would pin a library string that no contract in
+     * this repository owns; that it is refused at all, and that the whole unit including its checkpoint
+     * disappears, is the property under test.</p>
      *
      * <p>Assumptions: the survivors are read through the OUTSIDE observer. The sibling
      * {@code PostingUnitOfWorkIT} already asserts this position through a cleared persistence context on
@@ -715,13 +946,12 @@ class AccountRepositoryIT {
      * <p>This test takes no parameter and returns no value.</p>
      */
     @Test
-    @DisplayName("a refusal at the ledger write rolls back both earlier writes, seen from outside")
-    void aRefusalAtTheLedgerWriteRollsBackBothEarlierWrites() {
-        assertThatThrownBy(() -> postRefusedAtLedgerWrite(TRANSACTION_ID, POSTED_AMOUNT))
-                .as("the description column refuses a value wider than it admits")
-                .isInstanceOf(PersistenceException.class)
-                .rootCause()
-                .hasMessageContaining("value too long");
+    @DisplayName("a refusal at the ledger write rolls back the earlier writes, seen from outside")
+    void aRefusalAtTheLedgerWriteRollsBackTheEarlierWrites() {
+        assertThatThrownBy(() -> postRefusedAtTheLedgerWrite(POSTED_AMOUNT))
+                .as("the posted master refuses a row that has no identifier to key it by, which is the"
+                        + " one nullability asymmetry the feed and the posted table declare")
+                .isInstanceOf(DataAccessException.class);
 
         ObservedUnit afterRefusal = observeFromOutsideTheTransaction();
 
@@ -737,6 +967,10 @@ class AccountRepositoryIT {
         assertThat(afterRefusal.cycleCredit())
                 .as("the cycle accumulator of the refused unit was rolled back too")
                 .isEqualByComparingTo(BigDecimal.ZERO);
+        assertThat(afterRefusal.watermark().rows())
+                .as("and the checkpoint went with them, so a record the posted master could not accept"
+                        + " is not silently marked consumed")
+                .isZero();
     }
 
     /**
@@ -759,8 +993,8 @@ class AccountRepositoryIT {
     @Test
     @DisplayName("no posted transaction is observable without its category balance, or the reverse")
     void noPartialPostingStateIsObservableInEitherDirection() {
-        assertThatThrownBy(() -> postRefusedAtLedgerWrite(TRANSACTION_ID, POSTED_AMOUNT))
-                .isInstanceOf(PersistenceException.class);
+        assertThatThrownBy(() -> postRefusedAtTheLedgerWrite(POSTED_AMOUNT))
+                .isInstanceOf(DataAccessException.class);
 
         ObservedUnit afterRefusal = observeFromOutsideTheTransaction();
 
@@ -790,10 +1024,19 @@ class AccountRepositoryIT {
      * reaches first, so the identity of the refusal reports the order. A single failing position could
      * not distinguish an order at all.</p>
      *
-     * <p>Assumptions: the two violations are of different kinds -- a picture-domain refusal on the
-     * category balance and a lost version race on the account -- so the refusal names its own position
-     * unambiguously. Two violations of the same kind would leave the assertion unable to say which
-     * write produced the message it matched.</p>
+     * <p>Assumptions: both violations are domain refusals raised IN MEMORY, and they are told apart by
+     * their message rather than by their type -- the category balance names the nine-integer-digit
+     * picture its own copybook declares, the account names the shared money domain sized to the wider
+     * ten-digit one. The assertion therefore checks both directions: that the message names the
+     * category-balance domain AND that it does not name the account's. Matching one text alone would
+     * pass against either refusal if the two messages ever converged.</p>
+     *
+     * <p>Refactoring Rationale: the account position was previously violated by a lost version race, and
+     * that pairing no longer reports an order. The production unit issues its writes without flushing
+     * between them, so a version failure arises at the COMMIT -- after the third write has been issued --
+     * whereas the category-balance refusal arises during the first. An in-memory refusal at the account
+     * position is what keeps both violations on the same side of the flush, so the one that arises is the
+     * one the unit reached first.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>
      */
@@ -801,23 +1044,28 @@ class AccountRepositoryIT {
     @DisplayName("the category balance write precedes the account write")
     void theCategoryBalanceWritePrecedesTheAccountWrite() {
         seedCategoryBalanceAtItsCeiling();
-        Account stale = detachedAccountSnapshot();
-        advanceTheAccountOnACompetingSession(new BigDecimal("250.00"));
+        seedAccountAtItsBalanceCeiling();
 
-        assertThatThrownBy(() -> postWithStaleAccount(TRANSACTION_ID, new BigDecimal("1.00"), stale))
+        assertThatThrownBy(() -> postAccepted(TRANSACTION_ID, new BigDecimal("1.00")))
                 .as("both positions would be refused, and the refusal that arises is the category"
                         + " balance's picture domain, so write one precedes write two")
                 .isInstanceOf(ArithmeticException.class)
-                .hasMessageContaining("9-integer-digit picture domain");
+                .hasMessageContaining("9-integer-digit picture domain")
+                .hasMessageNotContaining("reference money domain");
     }
 
     /**
      * Confirms the account write precedes the ledger write.
      *
      * <p>Purpose: the second half of the ordering, which together with the case above fixes all three
-     * positions transitively. The account is made to lose a version race while the ledger row carries a
-     * description wider than its column admits, so both positions would be refused; the refusal that
-     * arises is the account's, which places {@code app/cbl/CBTRN02C.cbl:441} ahead of {@code :442}.</p>
+     * positions transitively. The account sits at the money domain's ceiling while the feed record
+     * carries no transaction identifier, so both positions would be refused; the refusal that arises is
+     * the account's, which places {@code app/cbl/CBTRN02C.cbl:441} ahead of {@code :442}.</p>
+     *
+     * <p>Assumptions: the two violations are of different KINDS here -- an in-memory money-domain
+     * refusal at the account and a provider refusal at the posted row -- so the type of the exception
+     * names the position on its own and no message match is needed. The ledger table is additionally
+     * asserted empty, which says the third write was never issued rather than merely rolled back.</p>
      *
      * <p>Assumptions: a third pairwise comparison is deliberately not made. Category balance before
      * account and account before ledger already order all three, and a further case would restate what
@@ -828,14 +1076,21 @@ class AccountRepositoryIT {
     @Test
     @DisplayName("the account write precedes the ledger write")
     void theAccountWritePrecedesTheLedgerWrite() {
-        Account stale = detachedAccountSnapshot();
-        advanceTheAccountOnACompetingSession(new BigDecimal("275.00"));
+        seedAccountAtItsBalanceCeiling();
 
-        assertThatThrownBy(() -> postWithStaleAccount(
-                TRANSACTION_ID, POSTED_AMOUNT, stale, OVERLONG_DESCRIPTION))
-                .as("both positions would be refused, and the refusal that arises is the account's lost"
-                        + " version race, so write two precedes write three")
-                .isInstanceOf(OptimisticLockingFailureException.class);
+        assertThatThrownBy(() -> postRefusedAtTheLedgerWrite(new BigDecimal("1.00")))
+                .as("both positions would be refused, and the refusal that arises is the account's"
+                        + " money domain, so write two precedes write three")
+                .isInstanceOf(ArithmeticException.class)
+                .hasMessageContaining("reference money domain");
+
+        ObservedUnit afterRefusal = observeFromOutsideTheTransaction();
+        assertThat(afterRefusal.ledgerRows())
+                .as("the ledger write was never issued at all, the unit having stopped at write two")
+                .isZero();
+        assertThat(afterRefusal.watermark().rows())
+                .as("and the checkpoint was never issued either")
+                .isZero();
     }
 
     /**
@@ -894,7 +1149,7 @@ class AccountRepositoryIT {
     void theAmountSignSelectsTheCycleAccumulatorItReaches(String member, BigDecimal amount,
             BigDecimal expectedBalance, BigDecimal expectedCycleCredit, BigDecimal expectedCycleDebit) {
 
-        postAccepted(TRANSACTION_ID, amount);
+        long consumed = postAccepted(TRANSACTION_ID, amount);
 
         ObservedUnit committed = observeFromOutsideTheTransaction();
 
@@ -910,6 +1165,10 @@ class AccountRepositoryIT {
                 .as("the cycle debit accumulator holds what the paragraph directs for the %s member,"
                         + " with the amount stored as is rather than negated", member)
                 .isEqualByComparingTo(expectedCycleDebit);
+        assertThat(committed.watermark().ordinal())
+                .as("every accepted member is checkpointed at its own ordinal, whichever accumulator it"
+                        + " reached, for the %s member", member)
+                .isEqualTo(consumed);
     }
 
     /**
@@ -964,7 +1223,7 @@ class AccountRepositoryIT {
     void aZeroAmountPostingCommitsAndLeavesTheAccountRowUnwritten() {
         long seededVersion = storedAccount().getVersion();
 
-        postAccepted(TRANSACTION_ID, new BigDecimal("0.00"));
+        long consumed = postAccepted(TRANSACTION_ID, new BigDecimal("0.00"));
 
         ObservedUnit committed = observeFromOutsideTheTransaction();
         assertThat(committed.version())
@@ -983,6 +1242,10 @@ class AccountRepositoryIT {
         assertThat(committed.categoryBalanceRows())
                 .as("and its category balance row, so the unit committed rather than being skipped")
                 .isEqualTo(1L);
+        assertThat(committed.watermark().ordinal())
+                .as("and its checkpoint, so a record that moved no money is still consumed and is not"
+                        + " presented again by the next pass")
+                .isEqualTo(consumed);
     }
 
     /**
@@ -1070,7 +1333,7 @@ class AccountRepositoryIT {
         postAccepted(TRANSACTION_ID, POSTED_AMOUNT);
         long afterFirst = observeFromOutsideTheTransaction().version();
 
-        postAccepted("0000000000000078", POSTED_AMOUNT);
+        postAccepted(SECOND_TRANSACTION_ID, POSTED_AMOUNT);
         long afterSecond = observeFromOutsideTheTransaction().version();
 
         assertThat(afterFirst)
@@ -1108,15 +1371,10 @@ class AccountRepositoryIT {
     @Test
     @DisplayName("a lost version race is propagated rather than retried in place")
     void aLostVersionRaceIsPropagatedRatherThanRetriedInPlace() {
-        Account stale = detachedAccountSnapshot();
         BigDecimal competing = new BigDecimal("321.00");
-        advanceTheAccountOnACompetingSession(competing);
 
-        assertThatThrownBy(() -> this.transactionTemplate.executeWithoutResult(status -> {
-            applyAmountToAccount(stale, POSTED_AMOUNT);
-            this.accounts.save(stale);
-            this.entityManager.flush();
-        }))
+        assertThatThrownBy(() ->
+                postWithASupersededAccountVersion(TRANSACTION_ID, POSTED_AMOUNT, competing))
                 .as("the write carrying the superseded version fails instead of re-reading the row")
                 .isInstanceOf(OptimisticLockingFailureException.class);
 
@@ -1144,20 +1402,23 @@ class AccountRepositoryIT {
     @Test
     @DisplayName("a lost race at the account write rolls back the other two writes")
     void aLostVersionRaceAtTheAccountWriteRollsBackTheOtherTwoWrites() {
-        Account stale = detachedAccountSnapshot();
         BigDecimal competing = new BigDecimal("410.00");
-        advanceTheAccountOnACompetingSession(competing);
 
-        assertThatThrownBy(() -> postWithStaleAccount(TRANSACTION_ID, POSTED_AMOUNT, stale))
+        assertThatThrownBy(() ->
+                postWithASupersededAccountVersion(TRANSACTION_ID, POSTED_AMOUNT, competing))
                 .isInstanceOf(OptimisticLockingFailureException.class);
 
         ObservedUnit afterRefusal = observeFromOutsideTheTransaction();
 
         assertThat(afterRefusal.categoryBalanceRows())
-                .as("write one had already succeeded inside the unit and was rolled back with it")
+                .as("write one had already reached the engine in the same flush and was rolled back")
                 .isZero();
         assertThat(afterRefusal.ledgerRows())
-                .as("write three was never reached, the unit having failed at write two")
+                .as("write three had been issued too, and it went back with the unit")
+                .isZero();
+        assertThat(afterRefusal.watermark().rows())
+                .as("and so did the checkpoint, which is the effect that decides whether a re-run"
+                        + " re-presents this record or loses it")
                 .isZero();
         assertThat(afterRefusal.balance())
                 .as("the account carries the competing session's value and no part of the failed unit")
@@ -1285,190 +1546,296 @@ class AccountRepositoryIT {
     }
 
     /**
-     * Issues the three writes of one posting unit, in the baseline order, inside the caller's boundary.
+     * Confirms the card fixture this class commits is unroutable and fails the Luhn check.
      *
-     * <p>Assumptions: this method is the SINGLE source of the write order for every case in this class,
-     * and it exists as one method for that reason. Two drivers holding two copies of the sequence could
-     * drift, and the ordering cases above would then be asserting the order of whichever copy they
-     * happened to call rather than the order the unit performs.</p>
+     * <p>Purpose: to hold the fixture to the two properties that make it safe to commit, MECHANICALLY,
+     * rather than to a sentence in a comment. Every case in this class writes {@code CARD_NUM} into a
+     * cross-reference row, a feed row and a posted row, so the value is committed to the repository; the
+     * only thing that keeps it from being a plausible payment instrument is that it belongs to no issuer
+     * range and would be refused by a check-digit test before an issuer ever saw it. Those are checkable
+     * facts, and this case checks them.</p>
      *
-     * <p>Assumptions: it must be called from inside an open transaction and opens none of its own,
-     * mirroring the production rule services, none of which declares a transaction -- the boundary
-     * belongs to the posting job. Each write is flushed before the next is issued so that a refusal
-     * arises at the position that provoked it, for the reason recorded on the class declaration.</p>
+     * <p>Refactoring Rationale: the value replaced here was {@code 4}-prefixed and its Luhn contribution
+     * sum was twenty, so it was checksum-VALID and issuer-shaped, while the comment above it attested
+     * that it failed the check. The attestation was the defect: a false safety claim is worse than none,
+     * because it stops the next reader looking. Prose alone would have gone stale the same way the moment
+     * anyone edited a digit, so the claim is now a test -- the digits and the assertions cannot disagree
+     * without a failure.</p>
      *
-     * @param transactionId the identifier the posted row carries; must not be {@code null}
-     * @param amount the transaction amount the unit accumulates and posts; must not be {@code null}
-     * @param description the description the posted row carries, which one caller deliberately makes
-     *     wider than the column admits; must not be {@code null}
-     * @param suppliedAccount the account instance the unit must write, used by the cases that supply a
-     *     detached copy carrying a superseded version, or {@code null} to have the unit read the current
-     *     row itself as an accepted posting does
-     * @return the accumulation outcome, naming which arm of the category-balance rule ran and the
-     *     balance that row now carries, never {@code null}
-     * @throws PersistenceException if the engine refuses the category-balance or the ledger write as it
-     *     flushes, which the failure-position cases provoke deliberately
-     * @throws OptimisticLockingFailureException if the supplied account carries a superseded version,
-     *     which the version-race cases provoke deliberately
+     * <p>Assumptions: the two properties are independent and both are required. The {@code 9900} prefix
+     * puts the value in major-industry identifier 9, which ISO/IEC 7812 leaves for national assignment
+     * and which no card network issues under, so the number is unroutable whatever its check digit. The
+     * failed Luhn check is the second, narrower guarantee: even a validator that ignored the prefix
+     * entirely would reject it. This is the same pair
+     * {@code services/reporting-service/src/test/java/com/carddemo/reporting/fixtures/ReportingFixtureContractTest.java}
+     * holds that module's fixture resources to, and the convention is deliberately shared -- one rule for
+     * fabricated card numbers across the repository is one rule a reviewer can check.</p>
+     *
+     * <p>Assumptions: no assertion here prints the value. The length, prefix and checksum are all
+     * asserted as booleans or integers rather than by passing the string to a matcher, because a matcher
+     * that fails prints its actual value and would put a sixteen-digit number in a build log -- which is
+     * the precaution the rest of the class takes by asserting on {@code CARD_LAST_FOUR}.</p>
+     *
+     * <p>Trade-offs: a control value is checked as well as the fixture, which costs one assertion and
+     * buys the only thing that makes the negative result meaningful -- evidence that
+     * {@link #satisfiesLuhn} can return {@code true} at all. Without it a checker that returned
+     * {@code false} unconditionally would pass this case, which is exactly how the claim it replaces went
+     * unexamined. The control differs from the fixture in its final digit alone and carries the same
+     * unassigned prefix, so it introduces no second issuer-shaped value.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
      */
-    private CategoryBalanceService.Outcome issueThreeWrites(String transactionId, BigDecimal amount,
-            String description, Account suppliedAccount) {
+    @Test
+    @DisplayName("the card fixture is unroutable and fails the Luhn check")
+    void theCardFixtureIsUnroutableAndFailsTheLuhnCheck() {
+        assertThat(CARD_NUM.length())
+                .as("the fixture is sixteen digits, the width the card copybook declares")
+                .isEqualTo(16);
+        assertThat(CARD_NUM.chars().allMatch(Character::isDigit))
+                .as("the fixture is digits only, so the checksum below is computed over the whole value")
+                .isTrue();
+        assertThat(CARD_NUM.startsWith(UNROUTABLE_PREFIX))
+                .as("the fixture carries the unassigned major-industry prefix, so it belongs to no"
+                        + " issuer range")
+                .isTrue();
+        assertThat(satisfiesLuhn(CARD_NUM))
+                .as("and it fails the Luhn check, so a validator that ignored the prefix would refuse"
+                        + " it too")
+                .isFalse();
 
-        CardXref resolved = this.crossReferences.findByCardNum(CARD_NUM).orElseThrow();
+        // WHY : Trade-offs: the control carries the same unassigned prefix and differs from the fixture
+        //       in its last digit alone, so it demonstrates the checker can report a VALID value without
+        //       committing a second value that looks like a real instrument. A checker stuck at false
+        //       would pass the assertion above and fail this one.
+        String luhnValidControl = "9900000000000077";
+        assertThat(satisfiesLuhn(luhnValidControl))
+                .as("the control satisfies the check, so the negative result above is a measurement"
+                        + " rather than a checker that never returns true")
+                .isTrue();
 
-        CategoryBalanceService.Outcome outcome = this.balances.accumulate(
-                new TransactionCategoryBalanceId(resolved.getAccountId(), TYPE_CD, CATEGORY_CD),
-                Money.of(amount));
-        this.entityManager.flush();
-
-        // Assumptions: the account key comes from the cross-reference resolution above and never from a
-        //     field of the feed record, matching app/cbl/CBTRN02C.cbl:393-394, where 1500-B-LOOKUP-ACCT
-        //     moves XREF-ACCT-ID into the file key before reading. The daily-transaction record carries
-        //     no account identifier at all, so there is no other value it could have come from.
-        Account posting = suppliedAccount != null
-                ? suppliedAccount
-                : this.accounts.findByAccountId(resolved.getAccountId()).orElseThrow();
-        applyAmountToAccount(posting, amount);
-        this.accounts.save(posting);
-        this.entityManager.flush();
-
-        this.ledger.save(postedRow(transactionId, amount, description));
-        this.entityManager.flush();
-        return outcome;
+        assertThat(CARD_NUM.endsWith(CARD_LAST_FOUR))
+                .as("the masked form every message in this class uses is the fixture's own last four"
+                        + " digits, so a diagnostic cannot name a different card")
+                .isTrue();
     }
 
     /**
-     * Performs one accepted posting unit of work and commits it.
+     * Commits one unposted feed record and returns the ingestion ordinal the engine assigned it.
      *
-     * @param transactionId the identifier the posted row carries; must not be {@code null}
-     * @param amount the transaction amount the unit accumulates and posts; must not be {@code null}
-     * @return the accumulation outcome the unit produced, never {@code null}
-     * @throws PersistenceException if the engine refuses any of the three writes, which the
-     *     write-position cases provoke by arranging a value the column cannot hold
+     * <p>Assumptions: the row is inserted by STATEMENT and not through a repository, because the feed's
+     * mapping is {@code @Immutable} and its interface declares no mutator at all -- this module only
+     * ever reads the feed, the rows being produced upstream by the extract-and-load package. Inserting
+     * through the same {@code DataSource} inside a committed template keeps the row visible to the unit
+     * of work that reads it back.</p>
+     *
+     * <p>Assumptions: the ordinal is RETURNED by the statement rather than assumed, because
+     * {@code ingest_seq} is {@code BIGINT GENERATED BY DEFAULT AS IDENTITY} and the identity sequence is
+     * not reset by the {@code DELETE} each case begins with -- so ordinals rise across the whole class
+     * run and no case may compare a watermark against a literal. Every assertion below compares against
+     * the value this method returned.</p>
+     *
+     * @param transactionId the identifier the feed row carries, or {@code null} for the case that
+     *     provokes the third write's refusal, the feed column admitting a null where the posted table's
+     *     primary key does not
+     * @param amount the transaction amount the row carries; must not be {@code null}
+     * @return the ingestion ordinal the engine assigned, which is also the position the unit checkpoints
+     * @throws IllegalStateException if the statement returns no ordinal, the arrangement then being
+     *     broken rather than the case having a result
      */
-    private CategoryBalanceService.Outcome postAccepted(String transactionId, BigDecimal amount) {
-        return this.transactionTemplate.execute(status ->
-                issueThreeWrites(transactionId, amount, DESCRIPTION, null));
+    private long seedFeedRecord(String transactionId, BigDecimal amount) {
+        Long ordinal = this.transactionTemplate.execute(status -> this.jdbc.queryForObject(
+                "INSERT INTO ledger.daily_transactions (transaction_id, type_cd, category_cd, source,"
+                        + " description, amount, merchant_id, merchant_name, merchant_city,"
+                        + " merchant_zip, card_num, orig_ts)"
+                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ingest_seq",
+                Long.class, transactionId, TYPE_CD, CATEGORY_CD, FEED_SOURCE, DESCRIPTION, amount,
+                MERCHANT_ID, MERCHANT_NAME, MERCHANT_CITY, MERCHANT_ZIP, CARD_NUM, ORIGINATED_AT));
+
+        if (ordinal == null) {
+            throw new IllegalStateException(
+                    "the seeded feed record returned no ingestion ordinal, so no unit of work can be"
+                            + " driven over it");
+        }
+        return ordinal;
     }
 
     /**
-     * Performs one posting unit whose THIRD write the description column refuses.
+     * Reads one seeded feed record back through the production interface, by its ordinal.
      *
-     * <p>Assumptions: only the description differs from an accepted unit, so the rollback a caller
-     * asserts is attributable to the ledger write and to nothing else about the unit.</p>
+     * <p>Assumptions: the read goes through the CONTINUATION FINDER the posting job itself walks with,
+     * called with the ordinal one below the wanted row and a limit of one, rather than through a finder
+     * of this test's own. The interface declares exactly one member and this is it, so a case cannot
+     * reach a row by a path the production step does not have.</p>
      *
-     * @param transactionId the identifier the posted row would have carried; must not be {@code null}
-     * @param amount the transaction amount the unit accumulates before the refused write;
-     *     must not be {@code null}
-     * @return never returns normally
-     * @throws PersistenceException always, wrapping the engine's refusal of the ledger write
+     * @param ingestSeq the ordinal the seeding statement returned; must be an ordinal it assigned
+     * @return the feed record at that ordinal, as the production step would read it, never {@code null}
+     * @throws IllegalStateException if the row is absent or another row answered, either of which is a
+     *     broken arrangement rather than a result
      */
-    private CategoryBalanceService.Outcome postRefusedAtLedgerWrite(String transactionId,
-            BigDecimal amount) {
+    private DailyTransaction feedRecord(long ingestSeq) {
+        List<DailyTransaction> read =
+                this.feed.findByIngestSeqGreaterThanOrderByIngestSeqAsc(ingestSeq - 1L, Limit.of(1));
 
-        return this.transactionTemplate.execute(status ->
-                issueThreeWrites(transactionId, amount, OVERLONG_DESCRIPTION, null));
+        if (read.isEmpty() || !Long.valueOf(ingestSeq).equals(read.getFirst().getIngestSeq())) {
+            throw new IllegalStateException("the seeded feed record at ordinal " + ingestSeq
+                    + " did not answer the continuation finder, so the arrangement is broken");
+        }
+        return read.getFirst();
     }
 
     /**
-     * Performs one posting unit whose account write carries a superseded version.
+     * Drives the PRODUCTION per-record unit over one seeded feed record, inside one committed boundary.
      *
-     * @param transactionId the identifier the posted row would have carried; must not be {@code null}
-     * @param amount the transaction amount the unit accumulates before the refused write;
-     *     must not be {@code null}
-     * @param stale the detached account copy whose version a competing session has already superseded;
-     *     must not be {@code null}
-     * @throws OptimisticLockingFailureException always, the account write losing the version race
-     * @throws PersistenceException if the category-balance write is refused first, which one ordering
-     *     case arranges deliberately
-     */
-    private void postWithStaleAccount(String transactionId, BigDecimal amount, Account stale) {
-        postWithStaleAccount(transactionId, amount, stale, DESCRIPTION);
-    }
-
-    /**
-     * Performs one posting unit whose account write carries a superseded version, with a chosen
-     * description.
+     * <p>Assumptions: this method is the single entry point every posting case reaches production
+     * through, and it exists as one method so that no case can drift into issuing writes of its own. The
+     * boundary is opened here and the unit opens none, which is exactly the production arrangement: the
+     * job brackets each record in a transaction and the component performs the record's decisions and
+     * writes inside it.</p>
      *
-     * <p>Assumptions: the description is a parameter here so that one ordering case can make the ledger
-     * write refusable at the same time as the account write, which is what lets the refusal that
-     * actually arises report which of the two positions the unit reached first.</p>
+     * <p>Assumptions: the returned reject record is handed back rather than discarded, because it is how
+     * the production unit reports which arm it took -- an empty result means the record posted. A case
+     * that arranged an accepted record and received a reject record would otherwise assert against
+     * tables the unit never wrote and report a durability failure that was really a rejected
+     * arrangement.</p>
      *
-     * @param transactionId the identifier the posted row would have carried; must not be {@code null}
-     * @param amount the transaction amount the unit accumulates before the refused write;
-     *     must not be {@code null}
-     * @param stale the detached account copy whose version a competing session has already superseded;
-     *     must not be {@code null}
-     * @param description the description the posted row would have carried, which one caller makes
-     *     wider than the column admits; must not be {@code null}
-     * @throws OptimisticLockingFailureException if the account write loses the version race, which is
-     *     what every caller arranges
-     * @throws PersistenceException if an earlier write is refused first
-     */
-    private void postWithStaleAccount(String transactionId, BigDecimal amount, Account stale,
-            String description) {
-
-        this.transactionTemplate.executeWithoutResult(status ->
-                issueThreeWrites(transactionId, amount, description, stale));
-    }
-
-    /**
-     * Performs the three writes, flushes them, and reads the tables from another session before commit.
-     *
-     * <p>Assumptions: the observation happens INSIDE the boundary, after all three writes have been
-     * flushed to the engine and before the commit, which is the only moment at which the property being
-     * asserted exists. Returning the snapshot rather than asserting inside the callback keeps the
-     * assertions with their case, where a failure names them.</p>
-     *
-     * @param transactionId the identifier the posted row carries; must not be {@code null}
-     * @param amount the transaction amount the unit accumulates and posts; must not be {@code null}
-     * @return what a session outside the still-open transaction can see of the three tables, never
+     * @param ingestSeq the ordinal of the seeded feed record to post; must be an assigned ordinal
+     * @return the 430-byte reject record when the unit rejected the record, empty when it posted, never
      *     {@code null}
-     * @throws PersistenceException if the engine refuses any of the three writes, which no caller of
-     *     this method arranges
+     * @throws ArithmeticException if the accumulated category balance or the account balance leaves the
+     *     domain its picture admits, which two failure-position cases provoke deliberately
+     * @throws DataAccessException if the provider or the engine refuses a write, which the third
+     *     failure-position case provokes deliberately
+     * @throws OptimisticLockingFailureException if the account carries a superseded version, which the
+     *     two version cases provoke deliberately
      */
-    private ObservedUnit postAndObserveBeforeCommit(String transactionId, BigDecimal amount) {
-        return this.transactionTemplate.execute(status -> {
-            issueThreeWrites(transactionId, amount, DESCRIPTION, null);
-            return observeFromOutsideTheTransaction();
+    private Optional<byte[]> postThroughTheProductionUnit(long ingestSeq) {
+        return this.transactionTemplate.execute(status ->
+                this.perRecord.applyOneRecord(feedRecord(ingestSeq), RUN_ID, BUSINESS_DATE));
+    }
+
+    /**
+     * Seeds one feed record and posts it through the production unit, expecting the accepted arm.
+     *
+     * @param transactionId the identifier the feed row and the posted row carry; must not be
+     *     {@code null}
+     * @param amount the transaction amount the unit accumulates and posts; must not be {@code null}
+     * @return the ingestion ordinal the record was assigned, which every watermark assertion compares
+     *     against
+     * @throws IllegalStateException if the unit REJECTED the record, the arrangement then being broken
+     * @throws ArithmeticException if a money domain refuses a write, which two cases provoke
+     * @throws OptimisticLockingFailureException if the account write loses a version race, which two
+     *     cases provoke
+     */
+    private long postAccepted(String transactionId, BigDecimal amount) {
+        long ordinal = seedFeedRecord(transactionId, amount);
+
+        if (postThroughTheProductionUnit(ordinal).isPresent()) {
+            throw new IllegalStateException(
+                    "the production unit rejected the seeded record, so the arrangement is broken"
+                            + " rather than the case having a result");
+        }
+        return ordinal;
+    }
+
+    /**
+     * Seeds a feed record the POSTED table cannot accept, and posts it, so the third write is refused.
+     *
+     * <p>Assumptions: the refusal comes from the one nullability asymmetry the two tables declare.
+     * {@code ledger.daily_transactions.transaction_id} is nullable -- the harness records why, the
+     * pre-posting feed having no usable natural key -- while {@code ledger.transactions.transaction_id}
+     * is that table's {@code NOT NULL} primary key. So a feed row carrying no identifier is a row the
+     * feed admits and the posted master must refuse, and the refusal arises where the production unit
+     * builds and saves the posted row, which is the third write.</p>
+     *
+     * <p>Alternatives Considered: a description one character wider than the posted column admits, which
+     * is what this class used before it drove production. Unavailable now rather than rejected: the
+     * description would have to reach the unit through the feed ROW, and both columns are
+     * {@code VARCHAR(100)}, so a value the posted column refuses cannot be stored in the feed in the
+     * first place. Alternatives Considered: posting the same identifier twice for a duplicate-key
+     * refusal. Rejected on a measured mechanism -- the posted entity carries no version column, so
+     * Spring Data's {@code save} treats a non-null assigned identifier as existing and issues a
+     * {@code merge}, which UPDATES the earlier row instead of refusing a second insert.</p>
+     *
+     * @param amount the transaction amount the unit accumulates before the refused write; must not be
+     *     {@code null}
+     * @return never returns normally
+     * @throws DataAccessException always, carrying the provider's refusal of a posted row that has no
+     *     identifier to be keyed by
+     */
+    private Optional<byte[]> postRefusedAtTheLedgerWrite(BigDecimal amount) {
+        return postThroughTheProductionUnit(seedFeedRecord(null, amount));
+    }
+
+    /**
+     * Posts one record through the production unit while a competing session supersedes the account.
+     *
+     * <p>Assumptions: the race is made real in the ONLY order that produces one. The account is read
+     * INSIDE the boundary first, which puts the row in the persistence context at the version current at
+     * that moment; a separate session then commits its own change to the same row, advancing the version
+     * column itself; and the production unit is driven afterwards. Its own read resolves to the instance
+     * already in the context -- the provider's identity guarantee, which does not overwrite managed state
+     * with a fresher row -- so the unit accumulates onto the superseded version and the version check
+     * fails when the transaction flushes.</p>
+     *
+     * <p>Assumptions: no explicit flush is issued, deliberately. The refusal then arises at the COMMIT,
+     * which is where the framework translates the provider's optimistic-lock failure into the Spring
+     * exception the cases assert on, and it is also what makes those cases the ones in which the earlier
+     * writes genuinely reached the engine before the unit failed.</p>
+     *
+     * <p>Assumptions: the arrangement is GUARDED rather than assumed. If the competing session had not
+     * advanced the version there would be no race, the unit would commit, and a case expecting a refusal
+     * would fail with a message about a missing exception instead of about a broken arrangement.</p>
+     *
+     * @param transactionId the identifier the feed row and the posted row carry; must not be
+     *     {@code null}
+     * @param amount the transaction amount the unit accumulates before the refused write; must not be
+     *     {@code null}
+     * @param competingBalance the balance the competing session commits; must not be {@code null}
+     * @throws OptimisticLockingFailureException always, the account write losing the version race
+     * @throws IllegalStateException if the competing session did not supersede the version
+     */
+    private void postWithASupersededAccountVersion(String transactionId, BigDecimal amount,
+            BigDecimal competingBalance) {
+
+        long ordinal = seedFeedRecord(transactionId, amount);
+        this.transactionTemplate.executeWithoutResult(status -> {
+            long versionInContext =
+                    this.accounts.findByAccountId(ACCOUNT_ID).orElseThrow().getVersion();
+            advanceTheAccountOnACompetingSession(competingBalance);
+
+            if (versionInContext == observeFromOutsideTheTransaction().version()) {
+                throw new IllegalStateException(
+                        "the competing session did not advance the version, so the arrangement is not"
+                                + " a race and the case would prove nothing");
+            }
+            this.perRecord.applyOneRecord(feedRecord(ordinal), RUN_ID, BUSINESS_DATE);
         });
     }
 
     /**
-     * Applies one posted amount to an account exactly as the posting paragraph directs.
+     * Posts one record through the production unit, flushes it, and reads the tables from outside.
      *
-     * <p>Assumptions: this mirrors the production transcription of
-     * {@code app/cbl/CBTRN02C.cbl:547-552} statement for statement -- the running balance advances
-     * unconditionally, the comparison against zero is INCLUSIVE, and the selected accumulator has the
-     * amount ADDED to it rather than assigned, so the debit arm accumulates an already-negative value as
-     * is. Every step goes through {@code Money}, which fixes scale two, because the amounts originate as
-     * zoned decimal with a sign overpunch and land in {@code NUMERIC} columns, and a binary
-     * floating-point intermediate would introduce a representation error that no later rounding could
-     * undo.</p>
+     * <p>Assumptions: the observation happens INSIDE the boundary, after the unit's writes have been
+     * flushed to the engine and before the commit, which is the only moment at which the property being
+     * asserted exists. The flush is issued here because the production unit issues none of its own --
+     * every write goes through a repository {@code save} and the provider queues them until commit -- and
+     * an unflushed row is not at the server at all, so its invisibility to another session would be
+     * vacuous. Returning the snapshot rather than asserting inside the callback keeps the assertions with
+     * their case, where a failure names them.</p>
      *
-     * <p>Trade-offs: the production method performing this is private to the posting job and its only
-     * public entry is the job definition itself, which a repository test cannot drive without becoming a
-     * job test. So the transition is applied here rather than called, and what this class asserts is
-     * therefore the DURABLE CONSEQUENCE of the paragraph at the engine -- which accumulator holds what,
-     * with which sign and at which scale, once committed -- while the branch as CODE is owned by tier
-     * one and by tier two's posting job test. The alternative was to assert nothing about these columns
-     * at the database, which would have left the sign convention the whole over-limit projection depends
-     * on unverified against a real {@code NUMERIC} column.</p>
-     *
-     * @param posting the account the amount is applied to, either a managed row or a detached copy;
-     *     must not be {@code null}
-     * @param amount the transaction amount being posted, of any sign; must not be {@code null}
+     * @param transactionId the identifier the feed row and the posted row carry; must not be
+     *     {@code null}
+     * @param amount the transaction amount the unit accumulates and posts; must not be {@code null}
+     * @return what a session outside the still-open transaction can see of the four written tables,
+     *     never {@code null}
      */
-    private static void applyAmountToAccount(Account posting, BigDecimal amount) {
-        posting.setCurrBal(Money.of(posting.getCurrBal()).plus(Money.of(amount)).amount());
-
-        if (amount.signum() >= 0) {
-            posting.setCurrCycCredit(
-                    Money.of(posting.getCurrCycCredit()).plus(Money.of(amount)).amount());
-        } else {
-            posting.setCurrCycDebit(
-                    Money.of(posting.getCurrCycDebit()).plus(Money.of(amount)).amount());
-        }
+    private ObservedUnit postAndObserveBeforeCommit(String transactionId, BigDecimal amount) {
+        long ordinal = seedFeedRecord(transactionId, amount);
+        return this.transactionTemplate.execute(status -> {
+            this.perRecord.applyOneRecord(feedRecord(ordinal), RUN_ID, BUSINESS_DATE);
+            this.entityManager.flush();
+            return observeFromOutsideTheTransaction();
+        });
     }
 
     /**
@@ -1488,39 +1855,6 @@ class AccountRepositoryIT {
         accruing.setCurrBal(Money.of(accruing.getCurrBal()).plus(Money.of(interest)).amount());
         accruing.setCurrCycCredit(Money.of(BigDecimal.ZERO).amount());
         accruing.setCurrCycDebit(Money.of(BigDecimal.ZERO).amount());
-    }
-
-    /**
-     * Builds the posted ledger row the third write inserts.
-     *
-     * <p>Assumptions: the row is assembled here rather than projected by the production mapper, which
-     * this class does not reach. The posted transaction is a PARTICIPANT in the unit of work under test
-     * and not its subject: its field carry-over, its stamp and its ordered reads belong to
-     * {@code TransactionRepositoryIT}, so what this row has to be is a valid row of the right table, at
-     * the declared widths, that the engine will accept or refuse for the reason a case intends.</p>
-     *
-     * @param transactionId the identifier the row carries, at the sixteen characters the column
-     *     declares; must not be {@code null}
-     * @param amount the posted amount; must not be {@code null}
-     * @param description the description, which one caller makes wider than the column admits; must not
-     *     be {@code null}
-     * @return a transient posted row, never {@code null}
-     */
-    private static Transaction postedRow(String transactionId, BigDecimal amount, String description) {
-        Transaction posted = new Transaction(transactionId);
-        posted.setTypeCd(TYPE_CD);
-        posted.setCategoryCd(CATEGORY_CD);
-        posted.setSource("POS       ");
-        posted.setDescription(description);
-        posted.setAmount(amount);
-        posted.setMerchantId(900000001L);
-        posted.setMerchantName("Fixture Merchant");
-        posted.setMerchantCity("Fixture City");
-        posted.setMerchantZip("12345     ");
-        posted.setCardNum(CARD_NUM);
-        posted.setOrigTs(ORIGINATED_AT);
-        posted.setProcTs(PROCESSED_AT);
-        return posted;
     }
 
     /**
@@ -1558,6 +1892,59 @@ class AccountRepositoryIT {
     }
 
     /**
+     * Re-seeds the account at the last balance the shared money domain admits, and commits it.
+     *
+     * <p>Assumptions: the row is replaced rather than updated, so its version column starts from the
+     * value a fresh insert carries and no case that reads the version has to account for a rewrite this
+     * arrangement made. The accumulators are seeded at zero deliberately: the validation rule projects
+     * its over-limit decision from them and not from the running balance, so an account at this ceiling
+     * with zero accumulators is one the rule ACCEPTS -- which is what puts the refusal at the account
+     * write rather than at validation.</p>
+     */
+    private void seedAccountAtItsBalanceCeiling() {
+        this.transactionTemplate.executeWithoutResult(status -> {
+            this.jdbc.update("DELETE FROM account.accounts");
+            this.accounts.save(
+                    seedAccount(ACCOUNT_BALANCE_CEILING, BigDecimal.ZERO, BigDecimal.ZERO));
+        });
+    }
+
+    /**
+     * Computes whether a candidate card number satisfies the Luhn check digit algorithm.
+     *
+     * <p>Assumptions: the algorithm is implemented here rather than taken from a dependency, because the
+     * only thing this class needs it for is to hold its own fixture to a stated property, and a
+     * dependency added for one assertion would be a dependency every consumer of this module inherits.
+     * It doubles every second digit counting from the RIGHT, casts out nine from any doubled value above
+     * nine, and reports whether the total is a multiple of ten, which is the definition ISO/IEC 7812
+     * annex B gives.</p>
+     *
+     * <p>Assumptions: the candidate is never echoed, by this method or by any assertion that calls it.
+     * It returns a boolean rather than the sum precisely so that a failing assertion prints
+     * {@code true}/{@code false} and cannot put a sixteen-digit value into a build log.</p>
+     *
+     * @param candidate the digits to check, which must contain digits only; must not be {@code null}
+     * @return {@code true} when the candidate's check digit is correct, {@code false} when it is not
+     * @throws IllegalArgumentException if the candidate carries a character that is not a digit, the
+     *     fixture then being malformed rather than merely invalid
+     */
+    private static boolean satisfiesLuhn(String candidate) {
+        int sum = 0;
+        boolean doubling = false;
+        for (int position = candidate.length() - 1; position >= 0; position--) {
+            int digit = Character.digit(candidate.charAt(position), 10);
+            if (digit < 0) {
+                throw new IllegalArgumentException(
+                        "the candidate carries a non-digit character at position " + position);
+            }
+            int contribution = doubling ? digit * 2 : digit;
+            sum += contribution > 9 ? contribution - 9 : contribution;
+            doubling = !doubling;
+        }
+        return sum % 10 == 0;
+    }
+
+    /**
      * Reads the one category-balance row this class writes, by its composite key.
      *
      * @return the stored row, or empty when no unit of work has created it; never {@code null}
@@ -1573,21 +1960,6 @@ class AccountRepositoryIT {
      * @return the stored account row; never {@code null}
      */
     private Account storedAccount() {
-        return this.transactionTemplate.execute(status ->
-                this.accounts.findByAccountId(ACCOUNT_ID).orElseThrow());
-    }
-
-    /**
-     * Reads the account and returns it detached, ready to carry a version a competitor will supersede.
-     *
-     * <p>Assumptions: the instance is detached because the persistence context closed with the
-     * transaction that read it, so no explicit detach is issued and none is needed. Holding it across
-     * the competing write is what makes the race below a real one rather than a simulated failure.</p>
-     *
-     * @return the account as read, detached, carrying the version current at the moment of the read;
-     *     never {@code null}
-     */
-    private Account detachedAccountSnapshot() {
         return this.transactionTemplate.execute(status ->
                 this.accounts.findByAccountId(ACCOUNT_ID).orElseThrow());
     }
@@ -1622,7 +1994,7 @@ class AccountRepositoryIT {
     }
 
     /**
-     * Reads the three tables from a session that is not the transaction under test.
+     * Reads the four written tables from a session that is not the transaction under test.
      *
      * <p>Assumptions: the connection is taken straight from the pool with
      * {@code DataSource#getConnection} rather than through a {@code JdbcTemplate}, and that is the
@@ -1641,9 +2013,9 @@ class AccountRepositoryIT {
      * card number, so returning whole rows would put them within reach of a failing assertion's output;
      * the migration plan's section 0.7.8 masks primary account numbers to their last four digits.</p>
      *
-     * @return what an outside session can see of the two ledger tables and the account's four mutable
-     *     columns, never {@code null}
-     * @throws IllegalStateException if the observing session cannot read the three tables, or if the
+     * @return what an outside session can see of the two ledger tables, the watermark and the account's
+     *     four mutable columns, never {@code null}
+     * @throws IllegalStateException if the observing session cannot read the four tables, or if the
      *     seeded account row is absent, either of which is a broken arrangement rather than a result
      */
     private ObservedUnit observeFromOutsideTheTransaction() {
@@ -1652,13 +2024,44 @@ class AccountRepositoryIT {
                 long categoryBalanceRows =
                         countOn(observer, "SELECT count(*) FROM ledger.transaction_category_balances");
                 long ledgerRows = countOn(observer, "SELECT count(*) FROM ledger.transactions");
-                return readAccountColumns(observer, categoryBalanceRows, ledgerRows);
+                return readAccountColumns(observer, categoryBalanceRows, ledgerRows,
+                        readWatermark(observer));
             } finally {
                 observer.rollback();
             }
         } catch (SQLException refusal) {
             throw new IllegalStateException(
-                    "the observing session could not read the three tables", refusal);
+                    "the observing session could not read the four tables", refusal);
+        }
+    }
+
+    /**
+     * Reads the daily feed's consumed position on the observing connection.
+     *
+     * <p>Assumptions: an ABSENT row is reported as {@code NOTHING_CONSUMED} together with a null run
+     * identifier, rather than as an error, because that is exactly what the production reader does with
+     * it -- a feed that has never been consumed has no row. It is unambiguous as evidence because the
+     * production advance is strictly monotonic from that same starting value, so no committed row can
+     * carry the zero an absent row reports.</p>
+     *
+     * @param observer the separate session the read is issued on; must not be {@code null}
+     * @return the consumed position, the run it is attributed to and whether a row exists at all, never
+     *     {@code null}
+     * @throws SQLException if the statement cannot be issued or read
+     */
+    private static ObservedWatermark readWatermark(Connection observer) throws SQLException {
+        try (PreparedStatement reading = observer.prepareStatement(
+                "SELECT last_ingest_seq, run_id, business_date FROM batch.daily_feed_watermark"
+                        + " WHERE feed_name = ?")) {
+            reading.setString(1, DailyFeedWatermarkService.DAILY_TRANSACTION_FEED);
+            try (ResultSet read = reading.executeQuery()) {
+                if (!read.next()) {
+                    return new ObservedWatermark(
+                            0L, DailyFeedWatermarkService.NOTHING_CONSUMED, null, null);
+                }
+                return new ObservedWatermark(
+                        1L, read.getLong(1), read.getString(2), read.getString(3));
+            }
         }
     }
 
@@ -1690,12 +2093,14 @@ class AccountRepositoryIT {
      *     into the returned snapshot so all three readings describe one moment
      * @param ledgerRows the posted-transaction count already taken on the same session, carried into the
      *     returned snapshot for the same reason
+     * @param watermark the feed's consumed position already read on the same session, carried into the
+     *     returned snapshot so all four readings describe one moment; must not be {@code null}
      * @return the snapshot of what the outside session can see, never {@code null}
      * @throws SQLException if the statement cannot be issued or read
      * @throws IllegalStateException if the seeded account row is absent
      */
     private static ObservedUnit readAccountColumns(Connection observer, long categoryBalanceRows,
-            long ledgerRows) throws SQLException {
+            long ledgerRows, ObservedWatermark watermark) throws SQLException {
 
         try (PreparedStatement reading = observer.prepareStatement(
                 "SELECT curr_bal, curr_cyc_credit, curr_cyc_debit, version"
@@ -1707,7 +2112,7 @@ class AccountRepositoryIT {
                             "the seeded account row is absent, so the arrangement did not commit it");
                 }
                 return new ObservedUnit(categoryBalanceRows, ledgerRows, read.getBigDecimal(1),
-                        read.getBigDecimal(2), read.getBigDecimal(3), read.getLong(4));
+                        read.getBigDecimal(2), read.getBigDecimal(3), read.getLong(4), watermark);
             }
         }
     }
@@ -1726,18 +2131,40 @@ class AccountRepositoryIT {
      *     negative
      * @param version the account's version column as visible, reporting whether a rewrite was made
      *     durable
+     * @param watermark the feed's consumed position as visible, being the unit's fourth durable effect
      */
     private record ObservedUnit(long categoryBalanceRows, long ledgerRows, BigDecimal balance,
-            BigDecimal cycleCredit, BigDecimal cycleDebit, long version) {
+            BigDecimal cycleCredit, BigDecimal cycleDebit, long version, ObservedWatermark watermark) {
+    }
+
+    /**
+     * What a session outside the transaction under test can see of the feed's consumed position.
+     *
+     * <p>Assumptions: the row count is carried BESIDE the ordinal rather than inferred from it, so that
+     * a case refusing a write can assert that no row exists at all -- which is a stronger statement than
+     * an ordinal of zero, and the one the checkpoint's own contract makes.</p>
+     *
+     * @param rows the number of watermark rows visible for the daily feed, being zero or one
+     * @param ordinal the consumed position as visible, or {@code NOTHING_CONSUMED} when no row exists
+     * @param runId the run the visible advance is attributed to, or {@code null} when no row exists
+     * @param businessDate the injected date the visible advance is attributed to, or {@code null} when no
+     *     row exists
+     */
+    private record ObservedWatermark(long rows, long ordinal, String runId, String businessDate) {
     }
 
     /**
      * The minimal Spring Boot configuration this class runs against.
      *
      * <p>Assumptions: no component scan is declared, so the job definitions, the queue client and the
-     * object-store client this module's own application class registers stay out of the context. The one
-     * production service these cases need is declared as a bean instead, which keeps the context to the
-     * persistence layer plus the accumulation rule the first write goes through.</p>
+     * object-store client this module's own application class registers stay out of the context. The
+     * production types these cases need are declared as beans instead, which keeps the context to the
+     * persistence layer plus the per-record unit of work and the three rules it composes.</p>
+     *
+     * <p>Assumptions: every bean below is the PRODUCTION type over the production repositories, and none
+     * is a stand-in. That is the whole point of the arrangement: a substitute at any of these positions
+     * would move the behaviour under test out of production code and back into this file, which is the
+     * defect the class-level rationale records.</p>
      *
      * <p>A configuration class accepts no parameter, yields no value and raises nothing, so this block
      * carries no parameter, return or exception at-clause.</p>
@@ -1759,6 +2186,78 @@ class AccountRepositoryIT {
         CategoryBalanceService categoryBalanceService(
                 TransactionCategoryBalanceRepository balances) {
             return new CategoryBalanceService(balances);
+        }
+
+        /**
+         * Registers the clock the posted row's processing stamp is minted from.
+         *
+         * <p>Assumptions: a FIXED clock at {@link #PROCESSED_AT} in UTC, never the system clock. The
+         * processing stamp is the one non-deterministic field a posted record carries -- the oracle
+         * suite masks it before comparing goldens for exactly that reason -- and the watermark's
+         * {@code updated_at} is minted from the same clock, so pinning it makes both values reproducible
+         * and lets a case assert them rather than merely assert they are present.</p>
+         *
+         * @return a clock fixed at the class's processing instant, never {@code null}
+         */
+        @Bean
+        Clock fixedPostingClock() {
+            return Clock.fixed(PROCESSED_AT.toInstant(ZoneOffset.UTC), ZoneOffset.UTC);
+        }
+
+        /**
+         * Registers the production validation rule, which resolves the card and the account it posts to.
+         *
+         * @param crossReferences the cross-reference the card number is resolved through; must not be
+         *     {@code null}
+         * @param accounts the account master the resolved key is read from; must not be {@code null}
+         * @return the production service, never {@code null}
+         */
+        @Bean
+        PostingValidationService postingValidationService(CardXrefRepository crossReferences,
+                AccountRepository accounts) {
+            return new PostingValidationService(crossReferences, accounts);
+        }
+
+        /**
+         * Registers the production watermark service, whose advance is the unit's fourth durable effect.
+         *
+         * @param watermarks the watermark table this module owns; must not be {@code null}
+         * @param clock the fixed clock the advance is stamped from; must not be {@code null}
+         * @return the production service, never {@code null}
+         */
+        @Bean
+        DailyFeedWatermarkService dailyFeedWatermarkService(DailyFeedWatermarkRepository watermarks,
+                Clock clock) {
+            return new DailyFeedWatermarkService(watermarks, clock);
+        }
+
+        /**
+         * Registers the production per-record unit of work every posting case below drives.
+         *
+         * <p>Assumptions: the argument order matches the production constructor exactly, and the
+         * production job's own bean method composes the same seven collaborators. A divergence here
+         * would make these cases assert a differently-composed unit from the one the nightly step runs,
+         * which is the failure mode a test-owned copy of the sequence had.</p>
+         *
+         * @param accounts the account master the second write reaches; must not be {@code null}
+         * @param ledger the posted-transaction master the third write reaches; must not be {@code null}
+         * @param rejects the reject rows the rejected arm writes; must not be {@code null}
+         * @param validation the rule deciding which conditions a record fails; must not be {@code null}
+         * @param categoryBalances the accumulation rule the first write goes through; must not be
+         *     {@code null}
+         * @param watermark the consumed position the fourth write advances; must not be {@code null}
+         * @param clock the fixed clock the posted row's processing stamp is minted from; must not be
+         *     {@code null}
+         * @return the production component, never {@code null}
+         */
+        @Bean
+        PostingRecordUnitOfWork postingRecordUnitOfWork(AccountRepository accounts,
+                TransactionRepository ledger, TransactionRejectRepository rejects,
+                PostingValidationService validation, CategoryBalanceService categoryBalances,
+                DailyFeedWatermarkService watermark, Clock clock) {
+
+            return new PostingRecordUnitOfWork(accounts, ledger, rejects, validation, categoryBalances,
+                    watermark, clock);
         }
     }
 }
