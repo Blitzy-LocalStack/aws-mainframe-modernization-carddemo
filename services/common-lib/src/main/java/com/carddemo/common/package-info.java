@@ -25,9 +25,13 @@
  *       {@code RecordConflictException}, {@code FieldOrdering}.</li>
  *   <li><b>{@code web}</b> -- correlation-id propagation, the keyset pagination
  *       envelope and the sealed token that carries a paging position between two
- *       requests, and the bound on how large a request body a service will read.
- *       Four production classes: {@code CorrelationIdFilter},
- *       {@code PageResponse}, {@code CursorToken}, {@code RequestBodySizeFilter}.</li>
+ *       requests, the bound on how large a request body a service will read, and
+ *       the container-level error reporter that renders a refusal the servlet
+ *       pipeline never sees in the same problem shape as every other failure.
+ *       Six production classes: {@code CorrelationIdFilter},
+ *       {@code PageResponse}, {@code CursorToken}, {@code RequestBodySizeFilter},
+ *       {@code RejectedRequestErrorReportValve},
+ *       {@code RejectedRequestErrorReportValveCustomizer}.</li>
  *   <li><b>{@code security}</b> -- conversion of the identity provider's group
  *       claim into Spring Security authorities, the access-token checks the
  *       issuer's decoder does not perform, the renderings that keep an identifier
@@ -99,8 +103,8 @@
  *
  * <h2>The closed inventory</h2>
  *
- * <p>The module holds <b>46 production classes</b> in a root and ten
- * subpackages, each carrying one charter file, for <b>57</b> compilation units. The
+ * <p>The module holds <b>48 production classes</b> in a root and ten
+ * subpackages, each carrying one charter file, for <b>59</b> compilation units. The
  * table is the closed set: a class belonging to this module belongs to exactly one
  * of these eleven rows, and a proposed addition that fits none of them does not belong
  * in the shared kernel at all. The set is deliberately FLAT: there is no nested
@@ -115,7 +119,7 @@
  * common.codec                           7         1                   8
  * common.error                           7         1                   8
  * common.messaging                       5         1                   6
- * common.web                             4         1                   5
+ * common.web                             6         1                   7
  * common.security                        9         1                  10
  * common.observability                   4         1                   5
  * common.time                            1         1                   2
@@ -124,20 +128,20 @@
  * </pre>
  *
  * <p>Read down the table. Cross-check by production class:
- * 1 + 2 + 7 + 7 + 5 + 4 + 9 + 4 + 1 + 2 + 4 = 46, the root contributing one. Cross-check by
- * compilation unit: 2 + 3 + 8 + 8 + 6 + 5 + 10 + 5 + 2 + 3 + 5 = 57. Both totals agree,
+ * 1 + 2 + 7 + 7 + 5 + 6 + 9 + 4 + 1 + 2 + 4 = 48, the root contributing one. Cross-check by
+ * compilation unit: 2 + 3 + 8 + 8 + 6 + 7 + 10 + 5 + 2 + 3 + 5 = 59. Both totals agree,
  * and this file is one of the eleven charters. Each sum is kept whole on one line
  * so that it can be checked by eye and matched by a search without a line break
  * splitting it.
  *
- * <p>Assumptions: the authoritative figures are <strong>46 production classes
- * across 10 subpackages and the root, in 57 compilation units, of which 11 are charters</strong>
+ * <p>Assumptions: the authoritative figures are <strong>48 production classes
+ * across 10 subpackages and the root, in 59 compilation units, of which 11 are charters</strong>
  * -- this file among them. They are counted subpackage by subpackage, and both
  * cross-checks above re-derive them independently, by class and by compilation
  * unit. The total and the breakdown are stated together for that reason: a bare
  * total invites a reader to trust it, whereas a breakdown lets a reader re-derive
  * it and reject any figure that does not add up. Any class count for this package
- * other than 45 fails both sums and is wrong.
+ * other than 47 fails both sums and is wrong.
  *
  * <p>Refactoring Rationale: this table has now been wrong twice in the same way, and
  * the second time is why it is no longer maintained by hand. The first revision said
@@ -173,8 +177,8 @@
  * <h2>Where this inventory exceeds the plan, and why each addition is here</h2>
  *
  * <p>Assumptions: the migration plan's section 0.4.1.2 names <b>17</b> shared-kernel
- * production classes by path, and the closed inventory above admits <b>46</b>. The
- * difference is 29 deliberate additions rather than drift, and it is enumerated here
+ * production classes by path, and the closed inventory above admits <b>48</b>. The
+ * difference is 31 deliberate additions rather than drift, and it is enumerated here
  * because a count that exceeds the plan's without saying so reads as either an
  * oversight or an unrecorded scope change. Each addition below is in the shared
  * kernel for the same reason the plan's own 17 are: it carries a contract that two or
@@ -202,6 +206,15 @@
  *   <li>{@code web.RequestBodySizeFilter} -- the one ceiling on request-body
  *       bytes, the container's own post-size setting bounding form data alone,
  *       which none of these services accepts.</li>
+ *   <li>{@code web.RejectedRequestErrorReportValve} -- renders the problem shape
+ *       for a refusal the container answers before selecting a web application, so
+ *       no filter and no advice can reach it. Every published contract declares a
+ *       JSON body and a correlation identifier for a 400, and a per-service copy of
+ *       this reporter could disagree with another service's copy about either.</li>
+ *   <li>{@code web.RejectedRequestErrorReportValveCustomizer} -- installs that
+ *       reporter deterministically in the one container slot it can occupy, the
+ *       registration being a contract about ordering rather than about rendering and
+ *       therefore not something each service should re-derive.</li>
  *   <li>{@code security.CardNumberMasker} -- the one implementation of the
  *       last-four rendering, two that disagreed on how many digits survive each
  *       looking correct in isolation.</li>
@@ -416,7 +429,7 @@
  *
  * <p>Assumptions: first, the count canon above admits exactly eleven charter
  * files, every one of them at this package or deeper. A twelfth would break the
- * 57-compilation-unit total, and authoring an artifact the migration plan does
+ * 59-compilation-unit total, and authoring an artifact the migration plan does
  * not call for falls outside the scope this tree is held to. Second, the
  * ruleset's charter-presence check is a file-set check: it fires only for a
  * directory that contains a compilation unit the audit actually processed.
@@ -639,7 +652,7 @@
  * layer, its single-program integration layer, its golden-master end-to-end
  * layer, and its fixtures, goldens, helpers and mocks. This module's own test
  * tree is {@code services/common-lib/src/test}, and it holds the unit tests and
- * the architecture rules for the 46 production classes this charter enumerates.
+ * the architecture rules for the 48 production classes this charter enumerates.
  * Neither substitutes for the other, and work on one does not modify the other.
  *
  * <p>Assumptions: the oracle suite covers batch flows. Three of the contracts

@@ -31,10 +31,23 @@ import java.util.Objects;
  * <p>The index artifact is written in ascending card-fingerprint order, one entry per record, at
  * {@value #ENCODED_WIDTH} characters each. Fixed width plus sorted order is what lets the read path
  * find one entry with a handful of ranged reads instead of downloading the whole index: entry
- * {@code i} begins at {@code i} times the width, so a binary search over the object's own size reaches
- * any card in logarithmic requests. A variable-width or self-describing encoding -- JSON, say -- would
- * be more familiar and would force every read to fetch and parse the entire index, whose size grows
- * with the portfolio.
+ * {@code i} begins at {@code i} times {@value #ON_OBJECT_STRIDE}, the stride declared below, so a
+ * binary search over the object's own size reaches any card in logarithmic requests. A variable-width
+ * or self-describing encoding -- JSON, say -- would be more familiar and would force every read to
+ * fetch and parse the entire index, whose size grows with the portfolio.
+ *
+ * <h2>⚠️ Refactoring Rationale: the encoded width and the on-object stride are TWO numbers</h2>
+ *
+ * <p>This type declared one width and the read path used it for both questions, and the two questions
+ * have different answers. {@link #ENCODED_WIDTH} is how many characters one entry's own content
+ * occupies; {@link #ON_OBJECT_STRIDE} is how far apart two consecutive entries begin inside the
+ * published object, and the writer that publishes the index terminates every record it appends. A
+ * reader that used the content width as the stride therefore read entry {@code i} from a position
+ * {@code i} bytes early: the object's byte length was never a whole multiple of the content width, so
+ * the alignment guard refused every read of a normally published index, and had the guard been removed
+ * instead the misaligned probe would have decoded a fingerprint spliced out of two cards and reported
+ * ANOTHER CARDHOLDER'S position. Both numbers are declared, both are named at the site that needs
+ * them, and neither stands in for the other.
  *
  * @param cardFingerprint the hexadecimal digest naming exactly one card, at
  *     {@value #FINGERPRINT_WIDTH} characters
@@ -67,8 +80,39 @@ public record StatementIndexEntry(String cardFingerprint, long firstRecord, long
     /**
      * Width of one encoded entry, being {@value #FINGERPRINT_WIDTH} plus twice
      * {@value #POSITION_WIDTH}.
+     *
+     * <p>Assumptions: this is the width of one entry's CONTENT and is what {@link #encode()} produces
+     * and {@link #decode(byte[])} accepts. It is not the distance between two consecutive entries in
+     * the published object; {@link #ON_OBJECT_STRIDE} is.</p>
      */
     public static final int ENCODED_WIDTH = FINGERPRINT_WIDTH + 2 * POSITION_WIDTH;
+
+    /**
+     * Bytes the record terminator occupies after every entry in the published object, being one.
+     *
+     * <p>Assumptions: one byte, because the artifact writer that publishes this index appends a single
+     * line feed after each record it accepts, exactly as it does for the 80-character and 100-character
+     * statement streams. That writer holds the terminator as a private constant, so the value is
+     * declared here rather than imported: the writer already depends on this package for the statement
+     * sink seam, and importing it back would close a package cycle. Alternatives Considered: giving the
+     * index its own writer that emits no terminator at all, which would make the stride equal to the
+     * content width; rejected because it would put a second, nearly identical multipart writer in the
+     * sink package solely to omit one byte, and because every artifact of a run would then be framed by
+     * one of two conventions with nothing in the object naming which.</p>
+     */
+    public static final int TERMINATOR_WIDTH = 1;
+
+    /**
+     * Distance between the starts of two consecutive entries in the published index object, being
+     * {@value #ENCODED_WIDTH} plus {@value #TERMINATOR_WIDTH}.
+     *
+     * <p>Assumptions: this is the number a reader divides an object's byte length by to learn how many
+     * entries it holds, and the number it multiplies an ordinal by to reach one. The terminator is
+     * SKIPPED rather than decoded: a ranged read for entry {@code i} spans
+     * {@value #ENCODED_WIDTH} bytes from {@code i} times this stride, so the byte the writer appended
+     * never reaches {@link #decode(byte[])} and that method can stay strict about its own width.</p>
+     */
+    public static final int ON_OBJECT_STRIDE = ENCODED_WIDTH + TERMINATOR_WIDTH;
 
     /**
      * Validates the fingerprint's width and refuses a negative position.
@@ -117,8 +161,19 @@ public record StatementIndexEntry(String cardFingerprint, long firstRecord, long
      * path and the artifact disagree about the width, and continuing from a truncated prefix would
      * return a position belonging to a different card.</p>
      *
-     * @param record the encoded entry, which may carry a trailing record terminator; must not be
-     *     {@code null}
+     * <p>⚠️ Assumptions: the argument carries the entry's CONTENT ALONE and never a trailing record
+     * terminator. This paragraph previously said a terminator "may" be present, which the width test
+     * below has always contradicted -- a record of {@value #ENCODED_WIDTH} plus one is refused, and a
+     * terminated record is exactly that length. The accurate statement is that the caller strips the
+     * terminator by construction of the byte range it asks for: a read for one entry spans
+     * {@value #ENCODED_WIDTH} bytes from a multiple of {@link #ON_OBJECT_STRIDE}, so the terminator
+     * falls outside the range and never arrives here. Refactoring Rationale: the contradiction is
+     * resolved in favour of the implementation rather than the prose, because a lenient reader that
+     * trimmed a trailing byte would also silently accept a genuinely misaligned probe -- the one
+     * failure whose consequence is another cardholder's position.</p>
+     *
+     * @param record the encoded entry's content, exactly {@value #ENCODED_WIDTH} bytes and carrying no
+     *     record terminator; must not be {@code null}
      * @return the decoded entry, never {@code null}
      * @throws NullPointerException if {@code record} is {@code null}
      * @throws IllegalArgumentException if the record is not of the declared width, or if either

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
 import com.carddemo.batch.service.BatchErrorPublisher;
+import com.carddemo.batch.service.BatchFailureReporter;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -66,6 +67,11 @@ class SqsConfigTest {
                 assertThat(context).hasNotFailed();
                 assertThat(context).hasSingleBean(BatchErrorPublisher.class);
                 assertThat(context).hasSingleBean(SqsConfig.ErrorSinkBinding.class);
+                // WHY : Assumptions: the step-level adapter is asserted to be a SINGLE bean beside the
+                //       producer, not merely present. It satisfies the port the durable step ledger
+                //       reports through and it delegates to that producer, so a second adapter bean
+                //       would be a second claim holder and one hard failure would publish twice again.
+                assertThat(context).hasSingleBean(BatchFailureReporter.class);
                 // WHY : Assumptions: the binding's four members are asserted here rather than in a
                 //       separate case, because this is the only place they are produced by the
                 //       CONTAINER from properties. Constructing the record directly would assert the
@@ -93,6 +99,7 @@ class SqsConfigTest {
                 assertThat(context).hasNotFailed();
                 assertThat(context).doesNotHaveBean(BatchErrorPublisher.class);
                 assertThat(context).doesNotHaveBean(SqsConfig.ErrorSinkBinding.class);
+                assertThat(context).doesNotHaveBean(BatchFailureReporter.class);
             });
         }
 

@@ -31,14 +31,22 @@ import software.amazon.awssdk.services.sqs.model.SendMessageResponse;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * Verifies the four properties of the terminal-sink producer that reading it cannot settle.
+ * Verifies the properties of the terminal-sink producer that reading it cannot settle.
  *
- * <p>Assumptions: the four are that a notification actually reaches the transport through the module's
- * own binding rather than through a request this class shapes; that a transport fault is reported and
- * NOT propagated, because the caller is already reporting a failure and its exit status is the only
- * channel the orchestrator reads; that no log record this class writes carries the failure's message or
- * the sink's address; and that a caller error is still raised, so a swallow of transport faults does not
- * become a swallow of programming faults.</p>
+ * <p>Assumptions: they are that a notification actually reaches the transport through the module's own
+ * binding rather than through a request this class shapes; that ONE failed run puts one message on the
+ * sink however many occasions publish for it; that an undelivered attempt does not silence the next
+ * occasion; that a transport fault is reported and NOT propagated, because the caller is already
+ * reporting a failure and its exit status is the only channel the orchestrator reads; that no log record
+ * this class writes carries the failure's message or the sink's address; and that a caller error is
+ * still raised, so a swallow of transport faults does not become a swallow of programming faults.</p>
+ *
+ * <p>Refactoring Rationale: the per-run cases are new, and they are the reason two cases here changed
+ * rather than being added to. This producer and the port's adapter were two senders addressing one
+ * queue, so a single hard failure published twice -- and the case that used to assert two sends for one
+ * run was asserting exactly the shape that made that possible. It now asserts two sends for two RUNS,
+ * which is the property it was reaching for, and the duplicate-suppression case asserts the one it
+ * accidentally contradicted.</p>
  *
  * <p>Assumptions: the transport is a mock and the mapper is real. A mock mapper would let the test pass
  * while the payload was unserialisable, which is one of the faults the swallow covers and therefore one
@@ -107,9 +115,20 @@ class BatchErrorPublisherTest {
      * @return the event, never {@code null}
      */
     private static BatchErrorEvent hardFailure(String stepName) {
-        return BatchErrorEvent.withoutAbendDetail("CD0123456789ABCDEF012345", stepName,
-                BatchJobName.POST_TRANSACTIONS, BatchReturnCode.HARD_FAILURE,
-                "CD0123456789ABCDEF012345");
+        return hardFailureOfRun("CD0123456789ABCDEF012345", stepName);
+    }
+
+    /**
+     * Builds a hard-failure event for a named run, so a case can vary the run and nothing else.
+     *
+     * @param runId the run to name on the event and to correlate it by; must not be {@code null} or
+     *     blank
+     * @param stepName the step to name on the event; must not be {@code null} or blank
+     * @return the event, never {@code null}
+     */
+    private static BatchErrorEvent hardFailureOfRun(String runId, String stepName) {
+        return BatchErrorEvent.withoutAbendDetail(runId, stepName,
+                BatchJobName.POST_TRANSACTIONS, BatchReturnCode.HARD_FAILURE, runId);
     }
 
     /**
@@ -152,8 +171,12 @@ class BatchErrorPublisherTest {
         when(this.sqs.sendMessage(any(SendMessageRequest.class)))
                 .thenReturn(SendMessageResponse.builder().messageId("transport-assigned").build());
 
-        this.publisher.publish(hardFailure("post-transactions-step"));
-        this.publisher.publish(hardFailure("post-transactions-step"));
+        // WHY : Assumptions: the two events name two different RUNS, and that is what makes this case
+        //       about message identity rather than about the per-run claim. Two publications of one run
+        //       are now one send by design, so driving this property through one run would assert the
+        //       identity of a send that never happens.
+        this.publisher.publish(hardFailureOfRun("CD0123456789ABCDEF012345", "post-transactions-step"));
+        this.publisher.publish(hardFailureOfRun("CD9876543210FEDCBA987654", "post-transactions-step"));
 
         ArgumentCaptor<SendMessageRequest> sent = ArgumentCaptor.forClass(SendMessageRequest.class);
         verify(this.sqs, org.mockito.Mockito.times(2)).sendMessage(sent.capture());
@@ -164,6 +187,68 @@ class BatchErrorPublisherTest {
                 .get(SqsConfig.ATTRIBUTE_MESSAGE_ID).stringValue();
         assertThat(first).isNotBlank().isNotEqualTo(second);
         assertThat(first).isNotEqualTo("transport-assigned");
+    }
+
+    /**
+     * Confirms one failed run puts one message on the sink however many occasions publish for it.
+     *
+     * <p>Assumptions: the two publications here stand for the module's two occasions -- the durable step
+     * ledger's report of a failed step, which carries diagnostics, and the entry point's run-level
+     * notification, which carries none -- in the order they occur at run time. The property being proved
+     * is that the SECOND is suppressed rather than sent, and that it still reports the run as notified,
+     * because a caller that read a suppression as a failure to notify would escalate a delivered
+     * message.</p>
+     */
+    @Test
+    @DisplayName("a second publication for one run is suppressed and still reports the run notified")
+    void secondPublicationForOneRunIsSuppressed() {
+        when(this.sqs.sendMessage(any(SendMessageRequest.class)))
+                .thenReturn(SendMessageResponse.builder().messageId("transport-assigned").build());
+
+        boolean first = this.publisher.publish(hardFailure("post-transactions-step"));
+        boolean second = this.publisher.publish(hardFailure("post-transactions-step"));
+
+        assertThat(first).isTrue();
+        assertThat(second)
+                .as("the run's notification is on the sink, so the second occasion reports success")
+                .isTrue();
+        verify(this.sqs, org.mockito.Mockito.times(1))
+                .sendMessage(any(SendMessageRequest.class));
+        // WHY : Assumptions: the suppression is asserted on the LOG as well as on the send count,
+        //       because the send count alone cannot distinguish a deduplicated occasion from a sender
+        //       that was never reached -- and those two have opposite repairs.
+        assertThat(this.captured.list).anySatisfy(event -> {
+            assertThat(event.getLevel()).isEqualTo(Level.INFO);
+            assertThat(event.getFormattedMessage())
+                    .contains("event=batch.error.publish-suppressed")
+                    .contains("reason=run-already-notified")
+                    .contains("post-transactions-step");
+        });
+    }
+
+    /**
+     * Confirms an undelivered attempt leaves the run publishable, so no failure goes unreported.
+     *
+     * <p>Assumptions: the first attempt stands for the step-level report and the second for the
+     * run-level notification. If the claim were taken by an attempt that never reached the sink, a
+     * transient rejection of the richer message would silence the leaner one and the failed run would
+     * reach the sink not at all -- which is a worse outcome than the duplicate the claim exists to
+     * remove.</p>
+     */
+    @Test
+    @DisplayName("a rejected first attempt does not silence the next occasion for the same run")
+    void rejectedAttemptDoesNotConsumeTheClaim() {
+        when(this.sqs.sendMessage(any(SendMessageRequest.class)))
+                .thenThrow(SdkClientException.create("first attempt rejected"))
+                .thenReturn(SendMessageResponse.builder().messageId("transport-assigned").build());
+
+        boolean firstAttempt = this.publisher.publish(hardFailure("post-transactions-step"));
+        boolean secondAttempt = this.publisher.publish(hardFailure("post-transactions-step"));
+
+        assertThat(firstAttempt).isFalse();
+        assertThat(secondAttempt).isTrue();
+        verify(this.sqs, org.mockito.Mockito.times(2))
+                .sendMessage(any(SendMessageRequest.class));
     }
 
     /**
@@ -200,25 +285,49 @@ class BatchErrorPublisherTest {
     }
 
     /**
-     * Confirms a refused correlation identity ends as a suppressed notification, not as a raised fault.
+     * Confirms a correlation identity the transport will not carry is substituted, not refused.
+     *
+     * <p>Refactoring Rationale: this case used to assert the opposite -- that such a notification was
+     * suppressed -- and the assertion was inverted deliberately when the module's two senders became
+     * one. The substitution already existed in the port's adapter, so the same unusable identity used to
+     * publish a step report and suppress a run notification; one sender cannot hold two policies, and
+     * the publishing one is the only one that keeps a failure with no step from reaching the sink not at
+     * all. What the report actually contains -- which run, which step, which job, which tier -- is in
+     * the body and is unaffected by the attribute.</p>
      */
     @Test
-    @DisplayName("a correlation identity the transport will not carry is suppressed, not raised")
-    void unusableCorrelationIdentityIsSuppressed() {
+    @DisplayName("a correlation identity the transport will not carry is substituted, not refused")
+    void unusableCorrelationIdentityIsSubstituted() {
         // WHY : Assumptions: a space is the character that makes this reachable in production rather
         //       than a contrived one. The entry point neutralises an operator-supplied run identifier
         //       by substituting a space for each control character, and the shared messaging rule
         //       admits printable US-ASCII OTHER than the space -- so a run identifier that arrived with
-        //       a line feed in it becomes a value the binding refuses.
+        //       a line feed in it becomes a value the binding would refuse as an attribute.
+        when(this.sqs.sendMessage(any(SendMessageRequest.class)))
+                .thenReturn(SendMessageResponse.builder().messageId("transport-assigned").build());
         BatchErrorEvent event = BatchErrorEvent.withoutAbendDetail("CD0123 456789", "export-step",
                 BatchJobName.EXPORT, BatchReturnCode.HARD_FAILURE, "CD0123 456789");
 
         boolean delivered = this.publisher.publish(event);
 
-        assertThat(delivered).isFalse();
-        verify(this.sqs, never()).sendMessage(any(SendMessageRequest.class));
-        assertThat(this.captured.list).anySatisfy(event2 ->
-                assertThat(event2.getFormattedMessage()).contains("event=batch.error.publish-failed"));
+        assertThat(delivered).isTrue();
+        ArgumentCaptor<SendMessageRequest> sent = ArgumentCaptor.forClass(SendMessageRequest.class);
+        verify(this.sqs).sendMessage(sent.capture());
+        String correlation = sent.getValue().messageAttributes()
+                .get(SqsConfig.ATTRIBUTE_CORRELATION_ID).stringValue();
+        // WHY : Assumptions: the substituted value is asserted to EQUAL the message identity rather
+        //       than merely to differ from the supplied one, because a rewritten or truncated identity
+        //       would also differ -- and would then look joinable to a run it no longer names.
+        assertThat(correlation)
+                .isNotEqualTo("CD0123 456789")
+                .isEqualTo(sent.getValue().messageAttributes()
+                        .get(SqsConfig.ATTRIBUTE_MESSAGE_ID).stringValue());
+        assertThat(sent.getValue().messageBody())
+                .as("the report's own content is in the body, which the substitution does not touch")
+                .contains("CD0123 456789").contains("export-step");
+        assertThat(this.captured.list).anySatisfy(record ->
+                assertThat(record.getFormattedMessage())
+                        .contains("event=batch.error.correlation-substituted"));
     }
 
     /**

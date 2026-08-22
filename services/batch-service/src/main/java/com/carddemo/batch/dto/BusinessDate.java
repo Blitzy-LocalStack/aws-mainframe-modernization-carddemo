@@ -156,12 +156,23 @@ public record BusinessDate(String token) {
         //       characters name no day that exists -- '2022999900' is ten characters and is accepted
         //       here. That is the price of holding the token opaquely, and it is paid rather than
         //       avoided because the alternative rejects the baseline's own production parameter. The
-        //       cost is met where a DERIVED calendar value is rendered instead: DatasetGeneration
+        //       cost is met TWICE over, and neither place is this constructor. BatchApplication now
+        //       refuses a --business-date= value that names no real day, in either accepted layout,
+        //       before an application context exists -- so no production path reaches this
+        //       constructor with an impossible token at all. Underneath that, DatasetGeneration
         //       .partitionDate() resolves the token's two layouts to a separated date and refuses one
-        //       that resolves to no real day, so an impossible date cannot reach an object-storage
-        //       prefix even though it can reach this constructor. A reader who needs the calendar
-        //       reading of a token asks that method or parseIsoDateForRangeComparison() below; neither
-        //       this constructor nor token() will ever answer that question.
+        //       that resolves to no real day, so an impossible token constructed directly in Java
+        //       still cannot reach an object-storage prefix by that route. A reader who needs the
+        //       calendar reading of a token asks one of those; neither this constructor nor token()
+        //       will ever answer that question.
+        // WHY : Refactoring Rationale: this paragraph formerly named the generation coordinate as the
+        //       ONLY place the cost was met, and that was measured to be insufficient rather than
+        //       merely incomplete. Two jobs address object storage from the token's own identifier
+        //       prefix instead of from a rendered partition date, so they were observed persisting
+        //       datasets under the prefix 'export/2023023000/' -- a durable artefact filed under a
+        //       February 30 that nothing downstream reports, because the prefix is well shaped. The
+        //       remedy is stated in the entry point rather than here, for the reason the paragraph
+        //       below gives about where this type's halves live.
         // WHY : Assumptions: the CHARACTER CLASS is gated upstream, not here, and the division is
         //       deliberate rather than an omission -- so a caller that constructs this record
         //       directly needs to know where the other half lives. BatchApplication refuses any

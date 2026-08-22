@@ -24,6 +24,7 @@ import com.carddemo.batch.domain.Account;
 import com.carddemo.batch.domain.CardXref;
 import com.carddemo.batch.domain.DailyFeedWatermark;
 import com.carddemo.batch.domain.DailyTransaction;
+import com.carddemo.batch.domain.PostingRejectOutbox;
 import com.carddemo.batch.domain.Transaction;
 import com.carddemo.batch.domain.TransactionCategoryBalance;
 import com.carddemo.batch.domain.TransactionCategoryBalance.TransactionCategoryBalanceId;
@@ -44,6 +45,7 @@ import com.carddemo.batch.repository.AccountRepository;
 import com.carddemo.batch.repository.CardXrefRepository;
 import com.carddemo.batch.repository.DailyFeedWatermarkRepository;
 import com.carddemo.batch.repository.DailyTransactionRepository;
+import com.carddemo.batch.repository.PostingRejectOutboxRepository;
 import com.carddemo.batch.repository.TransactionCategoryBalanceRepository;
 import com.carddemo.batch.repository.TransactionRejectRepository;
 import com.carddemo.batch.repository.TransactionRepository;
@@ -68,6 +70,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -95,6 +98,7 @@ import org.springframework.batch.core.job.parameters.JobParametersValidator;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.repository.support.ResourcelessJobRepository;
 import org.springframework.batch.infrastructure.support.transaction.ResourcelessTransactionManager;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.domain.Limit;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -237,8 +241,33 @@ class PostTransactionsJobTest {
      */
     private static final int WATERMARK_READ_BOUNDARY = 1;
 
+    /**
+     * The other unit of work the pass opens that is not a record's, on a pass that rejected something.
+     *
+     * <p>Assumptions: the reject images are marked as having reached a durable object once the upload
+     * returns, and a modifying statement cannot run outside a transaction while the tasklet body
+     * deliberately runs in none -- so the marking opens one of its own. It is a real transaction and is
+     * therefore indistinguishable from a record's by the matchers below, which is why it is added by
+     * name.</p>
+     *
+     * <p>Assumptions: it is opened only on a pass whose staged object holds records. A pass that
+     * rejected nothing has no row the statement could mark, so the job skips it and the boundary count
+     * of a clean pass is unchanged -- which is why no clean-pass case here names this constant.</p>
+     */
+    private static final int STAGING_MARKER_BOUNDARY = 1;
+
     /** The one-based feed position the rollback-isolation case makes the account write raise on. */
     private static final int FAILING_ORDINAL = 2;
+
+    /**
+     * The second feed ordinal, occupied by the rejected record of the redrive case.
+     *
+     * <p>Assumptions: a {@code long} rather than reusing {@link #FAILING_ORDINAL}, which is an
+     * {@code int} because the case reading it counts transaction boundaries. The feed's ordinal is a
+     * {@code long} and the watermark stores it as one, so a case asserting the stored position needs
+     * the value at that width.</p>
+     */
+    private static final long SECOND_ORDINAL = 2L;
 
     /** The job-instance identifier the cases run under, which no assertion depends on. */
     private static final long INSTANCE_ID = 1L;
@@ -388,6 +417,20 @@ class PostTransactionsJobTest {
     private BatchStepLedger ledgerOfSteps;
 
     /**
+     * The rows the durable reject outbox holds, in insert order, for one case.
+     *
+     * <p>Assumptions: held on the instance and handed to {@link #outboxOver(List)} rather than being
+     * private to the double, because a case that runs the job TWICE needs the second run to read what
+     * the first one committed. That is the whole subject of
+     * {@link #aRedriveAfterAFailedStageStillPublishesTheRunsRejects()}, and a list owned by the double
+     * would be unreachable from the case that has to assert against it.</p>
+     */
+    private List<PostingRejectOutbox> accounted;
+
+    /** The durable reject outbox, backed by {@link #accounted}. */
+    private PostingRejectOutboxRepository rejectOutbox;
+
+    /**
      * The watermark table, mocked so each case states what the feed had already consumed.
      *
      * <p>Assumptions: the SERVICE over it is real, not mocked. The service is where the
@@ -492,8 +535,17 @@ class PostTransactionsJobTest {
         this.perRecord = new PostingRecordUnitOfWork(this.accounts, this.ledger,
                 this.rejects, this.validation, this.categoryBalances, watermark, clock);
 
+        // WHY : Assumptions: the outbox double is a faithful in-memory table rather than a
+        //       default-returning mock. The job reads its two counts back to render the counter lines
+        //       and to grade the tier, and replays its rows to assemble the dataset -- so a mock
+        //       answering zero and an empty list would render two zero counters, stage an empty
+        //       stream and report the clean tier for every case in this class, which is exactly the
+        //       defect the outbox was added to remove.
+        this.accounted = new ArrayList<>();
+        this.rejectOutbox = outboxOver(this.accounted);
+
         this.configuration = new PostTransactionsJob(this.feed,
-                this.generations, this.ledgerOfSteps, watermark);
+                this.generations, this.ledgerOfSteps, watermark, this.rejectOutbox, clock);
 
         this.jobRepository = new ResourcelessJobRepository();
         this.job = buildJobOver(new ResourcelessTransactionManager());
@@ -737,6 +789,24 @@ class PostTransactionsJobTest {
      * @throws Exception if the framework's own execution path raises
      */
     private JobExecution run() throws Exception {
+        return runAs(EXECUTION_ID);
+    }
+
+    /**
+     * Runs the job once under one execution identifier and returns its execution.
+     *
+     * <p>Refactoring Rationale: the identifier became a parameter so that one case can run the SAME
+     * run twice, which is what a redrive is. Two executions of one run must be distinguishable to the
+     * framework -- a second execution reusing the first one's identifier is a second object claiming
+     * to be the same execution -- while the RUN identifier deliberately stays the same, because that
+     * is the key the durable outbox is read back under.</p>
+     *
+     * @param executionId the execution identifier this launch runs under, distinct per launch within
+     *     one case
+     * @return the completed job execution, never {@code null}
+     * @throws Exception if the framework's own execution path raises
+     */
+    private JobExecution runAs(long executionId) throws Exception {
         JobParameters parameters = new JobParametersBuilder()
                 .addString(BatchApplication.BUSINESS_DATE_PARAMETER, BUSINESS_DATE, true)
                 .addString(BatchConfig.RUN_ID_PARAMETER, RUN_ID, false)
@@ -747,7 +817,7 @@ class PostTransactionsJobTest {
         //       takes an instance, so a test that asked it for one by name would depend on an overload
         //       that the framework does not declare on the interface this job is built against.
         JobInstance instance = new JobInstance(INSTANCE_ID, PostTransactionsJob.JOB_NAME);
-        JobExecution execution = new JobExecution(EXECUTION_ID, instance, parameters);
+        JobExecution execution = new JobExecution(executionId, instance, parameters);
         this.jobRepository.update(execution);
         this.job.execute(execution);
         return execution;
@@ -1255,15 +1325,24 @@ class PostTransactionsJobTest {
 
         run();
 
-        // WHY : Assumptions: the expected count is the records PLUS ONE, and the one is named rather
-        //       than folded into the number. The pass opens a unit of work of its own before the walk,
-        //       for the feed watermark's locking read -- a row lock needs a transaction and the tasklet
-        //       body runs in none -- and that transaction is a real one, so the matcher below cannot
-        //       tell it from a record's. Asserting records-plus-one is what keeps this case sensitive
-        //       to a fourth record's boundary going missing.
-        verify(transactions, times(THREE_RECORDS + WATERMARK_READ_BOUNDARY))
+        // WHY : Assumptions: the expected count is the records PLUS TWO, and both extras are named
+        //       rather than folded into the number. The pass opens a unit of work of its own before the
+        //       walk, for the feed watermark's locking read -- a row lock needs a transaction and the
+        //       tasklet body runs in none -- and one after the walk, to mark this pass's reject image
+        //       as having reached a durable object. Both are real transactions, so the matcher below
+        //       cannot tell either from a record's. Naming them is what keeps this case sensitive to a
+        //       fourth record's boundary going missing.
+        // WHY : Refactoring Rationale: the second extra is new, and it arrived with the durable reject
+        //       outbox. The reject images are no longer accumulated in a temporary file the pass throws
+        //       away -- they are committed inside each record's own transaction and marked as staged
+        //       once the upload returns -- so the marking is transactional work that the pass performs
+        //       and this count has to admit. It is opened only on a pass that rejected something, which
+        //       is why the clean-pass cases in this class still see records-plus-one.
+        verify(transactions,
+                times(THREE_RECORDS + WATERMARK_READ_BOUNDARY + STAGING_MARKER_BOUNDARY))
                 .getTransaction(argThat(PostTransactionsJobTest::isRealUnitOfWork));
-        verify(transactions, times(THREE_RECORDS + WATERMARK_READ_BOUNDARY))
+        verify(transactions,
+                times(THREE_RECORDS + WATERMARK_READ_BOUNDARY + STAGING_MARKER_BOUNDARY))
                 .commit(argThat(TransactionStatus::isNewTransaction));
         verify(transactions, never()).rollback(any());
 
@@ -2222,6 +2301,101 @@ class PostTransactionsJobTest {
     }
 
     /**
+     * Builds the durable reject outbox as an in-memory table over one caller-held list.
+     *
+     * <p>Assumptions: the double ANSWERS from the rows it has been given rather than returning fixed
+     * values, because three separate behaviours of the job read it back: the processed counter is a
+     * count of its rows, the rejected counter is a count of the rows carrying an image, and the staged
+     * dataset is assembled by replaying those images in ascending feed ordinal. A double that answered
+     * zero and an empty list would leave all three unexercised while every case still passed.</p>
+     *
+     * <p>Assumptions: a second row for a record one run has already accounted for is REFUSED, the way
+     * the owning migration's unique constraint refuses it. Nothing in a correct pass provokes that --
+     * a redrive begins strictly above the watermark its predecessor advanced -- so the refusal is here
+     * precisely to make the incorrect case loud: an implementation that deferred the watermark advance
+     * out of the record's own transaction would re-present committed records to a redrive, and posting
+     * mints a new transaction identifier per record, so the double posting would otherwise be silent.</p>
+     *
+     * <p>Trade-offs: the marking statement is answered by COUNTING the rows it would have marked
+     * rather than by mutating them, so a second marking within one case reports the same figure again.
+     * That is accepted here because no case in this class marks twice, and because the statement's real
+     * effect -- the instant and the key landing on the row, and a repeat then reporting zero -- can only
+     * be observed against a database that executes it, which
+     * {@code services/batch-service/src/test/java/com/carddemo/batch/repository/PostingUnitOfWorkIT.java}
+     * does. Mutating the rows here would need reflection into a member the entity deliberately leaves
+     * unwritable, and would still not exercise the statement.</p>
+     *
+     * @param accounted the list the double stores its rows in, which the caller keeps a reference to so
+     *     a case can assert against it and a second run can read the first run's rows; must not be
+     *     {@code null}
+     * @return the outbox double, never {@code null}
+     */
+    private static PostingRejectOutboxRepository outboxOver(List<PostingRejectOutbox> accounted) {
+        PostingRejectOutboxRepository outbox = mock(PostingRejectOutboxRepository.class);
+
+        when(outbox.save(any(PostingRejectOutbox.class))).thenAnswer(call -> {
+            PostingRejectOutbox row = call.getArgument(0);
+            boolean alreadyAccounted = accounted.stream()
+                    .anyMatch(stored -> stored.getRunId().equals(row.getRunId())
+                            && stored.getFeedName().equals(row.getFeedName())
+                            && stored.getIngestSeq() == row.getIngestSeq());
+            if (alreadyAccounted) {
+                throw new DataIntegrityViolationException("run " + row.getRunId()
+                        + " has already accounted for ordinal " + row.getIngestSeq()
+                        + " of feed " + row.getFeedName());
+            }
+            accounted.add(row);
+            return row;
+        });
+
+        when(outbox.countByRunIdAndFeedName(anyString(), anyString())).thenAnswer(call ->
+                rowsOf(accounted, call.getArgument(0), call.getArgument(1)).count());
+        when(outbox.countByRunIdAndFeedNameAndRejectRecordIsNotNull(anyString(), anyString()))
+                .thenAnswer(call -> rowsOf(accounted, call.getArgument(0), call.getArgument(1))
+                        .filter(PostingRejectOutbox::isRejected)
+                        .count());
+
+        when(outbox
+                .findByRunIdAndFeedNameAndRejectRecordIsNotNullAndIngestSeqGreaterThanOrderByIngestSeqAsc(
+                        anyString(), anyString(), anyLong(), any(Limit.class)))
+                .thenAnswer(call -> {
+                    long above = call.getArgument(2);
+                    Limit slice = call.getArgument(3);
+                    return rowsOf(accounted, call.getArgument(0), call.getArgument(1))
+                            .filter(PostingRejectOutbox::isRejected)
+                            .filter(stored -> stored.getIngestSeq() > above)
+                            .sorted(Comparator.comparingLong(PostingRejectOutbox::getIngestSeq))
+                            .limit(slice.max())
+                            .toList();
+                });
+
+        when(outbox.markRejectsStaged(anyString(), anyString(), any(LocalDateTime.class),
+                anyString()))
+                .thenAnswer(call -> (int) rowsOf(accounted, call.getArgument(0), call.getArgument(1))
+                        .filter(PostingRejectOutbox::isRejected)
+                        .filter(stored -> stored.getStagedAt() == null)
+                        .count());
+
+        return outbox;
+    }
+
+    /**
+     * Selects the outbox rows one run holds on one feed, which every answer above qualifies on.
+     *
+     * @param accounted the rows the double holds; must not be {@code null}
+     * @param runId the run identifier the caller asked for; must not be {@code null}
+     * @param feedName the feed name the caller asked for; must not be {@code null}
+     * @return the matching rows, in insert order, never {@code null}
+     */
+    private static Stream<PostingRejectOutbox> rowsOf(List<PostingRejectOutbox> accounted,
+            Object runId, Object feedName) {
+
+        return accounted.stream()
+                .filter(stored -> stored.getRunId().equals(runId))
+                .filter(stored -> stored.getFeedName().equals(feedName));
+    }
+
+    /**
      * Stages the feed to return one record on the first read and nothing afterwards.
      *
      * @param feedRecord the record the feed holds; must not be {@code null}
@@ -2720,8 +2894,12 @@ class PostTransactionsJobTest {
                 ledgerRepository, rejectRepository,
                 new PostingValidationService(crossReferenceRepository, accountRepository),
                 new CategoryBalanceService(balanceRepository), watermark, clock);
+        // WHY : Assumptions: the outbox is the same faithful in-memory table the shared setup uses, and
+        //       it is what the staged bytes this harness captures are assembled FROM. A double
+        //       returning an empty replay would stage an empty stream for every scenario, and the four
+        //       reject expectations under tests/golden/posting would then be compared against nothing.
         PostTransactionsJob realConfiguration = new PostTransactionsJob(feedRepository,
-                allocator, stepLedger, watermark);
+                allocator, stepLedger, watermark, outboxOver(new ArrayList<>()), clock);
 
         JobRepository repository = new ResourcelessJobRepository();
         Job realJob = realConfiguration.postTransactions(
@@ -3010,6 +3188,106 @@ class PostTransactionsJobTest {
     }
 
     /**
+     * A redrive of a run whose stage failed still publishes that run's rejects, counters and tier.
+     *
+     * <p>Refactoring Rationale: this is the acceptance case for the defect the durable outbox closes,
+     * and the defect was a mismatch of EXTENTS rather than a missing write. Each record's decisions,
+     * its writes and its watermark advance commit in that record's own transaction; the reject stream
+     * was accumulated in a temporary file on the task's own disk and staged only after the walk. A
+     * failure at the stage therefore left the database work committed and the watermark past the
+     * records, and threw the only copy of the reject images away with the file. The redrive then read
+     * above the watermark, found nothing, staged an EMPTY generation, printed nine zeros in both
+     * counters and reported the clean tier -- for a night that had rejected a record. Every one of
+     * those four is asserted below, in the state the second pass leaves.</p>
+     *
+     * <p>Assumptions: the watermark is a REAL stored row that the two passes share, and the feed answer
+     * honours the ordinal it is given. Both are what make the second pass a redrive rather than a
+     * repeat: without the stored row the second pass would walk from the beginning, and without an
+     * ordinal-honouring feed it would receive the same two records again. A repeat would publish the
+     * rejects too, and would publish them by re-posting records that had already committed, so a case
+     * that could not tell the two apart would accept the cure that is worse than the defect.</p>
+     *
+     * <p>Assumptions: the double posting the deferred-watermark alternative would cause is asserted
+     * NEGATIVELY and twice over -- one ledger write and one reject write across BOTH passes. Posting
+     * mints a new transaction identifier per record, so a re-posted record produces a second, valid,
+     * indistinguishable row; nothing about the second pass's own output would reveal it, which is why
+     * the assertion is on the cumulative write count.</p>
+     *
+     * <p>Assumptions: the first pass fails at the STAGE and not earlier, so the assertions after it
+     * describe a database that committed everything and an object store that received nothing. That is
+     * the state the reported defect was reproduced in, with an unreachable dataset bucket standing in
+     * for the store; a stub that raised from the allocator instead would fail before any record was
+     * walked and would leave nothing to redrive.</p>
+     *
+     * @throws Exception if the framework's own execution path raises, which neither pass here provokes
+     */
+    @Test
+    @DisplayName("publish the run's rejects, counters and tier on a redrive after a failed stage")
+    void aRedriveAfterAFailedStageStillPublishesTheRunsRejects() throws Exception {
+        // WHY : Alternatives Considered: the framework's own resourceless manager, which every
+        //       single-pass case in this class uses. It cannot serve a two-pass case: it does not
+        //       implement suspension, so the second pass's PROPAGATION_NOT_SUPPORTED bracket fails with
+        //       TransactionSuspensionNotSupportedException the moment it is opened while its
+        //       predecessor's bracket is still on the thread -- which is the state a pass that ABENDED
+        //       inside the bracket leaves. The recording manager implements both suspension and
+        //       cleanup-after-completion, so the failed pass leaves the thread clean and the redrive
+        //       observes the job rather than the double.
+        this.job = buildJobOver(new DistinctBoundaryTransactionManager());
+
+        DailyFeedWatermark stored = new DailyFeedWatermark(
+                DailyFeedWatermarkService.DAILY_TRANSACTION_FEED, 0L, "batch-run-0000",
+                BUSINESS_DATE, POSTED_AT);
+        when(this.watermarks.findByFeedName(DailyFeedWatermarkService.DAILY_TRANSACTION_FEED))
+                .thenReturn(Optional.of(stored));
+
+        List<DailyTransaction> extract = List.of(
+                resolvableRecord(new BigDecimal("100.00"), FIRST_ORDINAL),
+                record(UNRESOLVABLE_CARD, new BigDecimal("100.00"), SECOND_ORDINAL));
+        when(this.feed.findByIngestSeqGreaterThanOrderByIngestSeqAsc(anyLong(), any(Limit.class)))
+                .thenAnswer(call -> {
+                    long above = call.getArgument(0);
+                    return extract.stream()
+                            .filter(candidate -> candidate.getIngestSeq() > above)
+                            .toList();
+                });
+        stageDecisionRoutedByCard(RejectReason.CARD_NUMBER_NOT_IN_CROSS_REFERENCE);
+        when(this.generations.stageDataset(
+                any(DatasetGeneration.class), anyString(), any(Path.class)))
+                .thenThrow(new IllegalStateException("the dataset bucket does not exist"));
+
+        JobExecution failed = runAs(EXECUTION_ID);
+
+        assertThat(failed.getStatus()).isEqualTo(BatchStatus.FAILED);
+        assertThat(stored.getLastIngestSeq()).isEqualTo(SECOND_ORDINAL);
+        assertThat(this.accounted).hasSize(2);
+        assertThat(this.accounted).filteredOn(PostingRejectOutbox::isRejected).hasSize(1);
+
+        byte[][] republished = new byte[1][];
+        when(this.generations.stageDataset(
+                any(DatasetGeneration.class), anyString(), any(Path.class)))
+                .thenAnswer(call -> {
+                    republished[0] = Files.readAllBytes(call.<Path>getArgument(2));
+                    return "ledger/dalyrejs/dt=2022-07-18/gen=0001/dalyrejs";
+                });
+
+        JobExecution redriven = runAs(EXECUTION_ID + 1);
+
+        assertThat(redriven.getStatus()).isEqualTo(BatchStatus.COMPLETED);
+        assertThat(redriven.getExitStatus().getExitCode())
+                .isEqualTo(BatchApplication.EXIT_CODE_COMPLETED_WITH_WARNINGS);
+        assertThat(republished[0]).hasSize(REJECT_RECORD_BYTES);
+        assertThat(new String(republished[0], StandardCharsets.ISO_8859_1)
+                .substring(REJECT_PAYLOAD_BYTES))
+                .isEqualTo(RejectReason.CARD_NUMBER_NOT_IN_CROSS_REFERENCE.trailerField());
+        assertThat(loggedLines())
+                .contains(PostTransactionsJob.PROCESSED_LABEL + "000000002")
+                .contains(PostTransactionsJob.REJECTED_LABEL + "000000001");
+        assertThat(this.accounted).hasSize(2);
+        verify(this.ledger, times(1)).save(any(Transaction.class));
+        verify(this.rejects, times(1)).save(any(TransactionReject.class));
+    }
+
+    /**
      * Assigns the feed ordinal, which the entity deliberately exposes no setter for.
      *
      * <p>Assumptions: the ordinal is the row's database-assigned identifier and the entity declares it
@@ -3186,7 +3464,8 @@ class PostTransactionsJobTest {
         DailyFeedWatermarkService fixtureWatermark = new DailyFeedWatermarkService(
                 mock(DailyFeedWatermarkRepository.class), fixtureClock);
         PostTransactionsJob fixtureConfiguration = new PostTransactionsJob(feedRepository,
-                stagedGenerations, steps, fixtureWatermark);
+                stagedGenerations, steps, fixtureWatermark, outboxOver(new ArrayList<>()),
+                fixtureClock);
 
         this.configuration = fixtureConfiguration;
         this.perRecord = new PostingRecordUnitOfWork(accountRepository, ledgerRepository,

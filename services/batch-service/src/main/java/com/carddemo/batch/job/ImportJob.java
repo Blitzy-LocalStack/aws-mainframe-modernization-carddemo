@@ -371,14 +371,26 @@ public class ImportJob {
     public static final String JOB_NAME = BatchJobName.IMPORT.token();
 
     /**
-     * Ledger step name, held separately from {@link #JOB_NAME} even though the two values agree.
+     * Ledger step name, the job token followed by the vocabulary's step suffix.
      *
      * <p>Assumptions: the durable ledger keys on the run identifier paired with the <b>step</b> name,
-     * so the step name is a persisted contract of its own rather than a display label. The five landed
-     * nightly jobs each declare the pair as two constants for that reason, and this job follows them so
-     * that a future second step in this job cannot silently inherit the job's own key.</p>
+     * so the step name is a persisted contract of its own rather than a display label.</p>
+     *
+     * <p>Refactoring Rationale: the value used to EQUAL {@link #JOB_NAME}, which made this job and its
+     * sibling {@link ExportJob} the only two of seven whose ledger rows carried a bare token. The
+     * constant was already held separately so a future second step could not inherit the job's key; what
+     * was missing is that the row is also read across jobs, and a selection over the chain's step rows
+     * -- {@code WHERE step_name LIKE '%-step'}, the spelling the other five invite -- returned five of
+     * seven with nothing reporting the omission.</p>
+     *
+     * <p>Assumptions: it is derived from {@link BatchJobName#STEP_NAME_SUFFIX} rather than written out,
+     * so the persisted name and the derivation {@code BatchJobName.forStepName} inverts cannot
+     * disagree.</p>
+     *
+     * <p>Assumptions: the JOB token is unchanged and stays bare, because that is the value the
+     * orchestration passes as {@code --job=} and the Spring Batch registry resolves a job by.</p>
      */
-    public static final String STEP_NAME = JOB_NAME;
+    public static final String STEP_NAME = JOB_NAME + BatchJobName.STEP_NAME_SUFFIX;
 
     /** Key prefix the export artefact is read from; the sibling export job's write location. */
     private static final String EXPORT_KEY_PREFIX = "export/";

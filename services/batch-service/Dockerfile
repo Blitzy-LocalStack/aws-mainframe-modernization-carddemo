@@ -317,9 +317,78 @@ USER carddemo:carddemo
 #       task because a correctly finished process has no steady healthy state.
 #       It is retained because the service-image contract mandates one and the
 #       datasource-aware actuator response can detect a hung dependency while the
-#       job is running. ECS and Step Functions still decide success from the
-#       process exit status, never from this probe.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+#       job is running. ECS and Step Functions decide success from the process
+#       EXIT STATUS and never from this probe: the state machine reads
+#       $.Tasks[0].Containers[0].ExitCode, and ECS reads a container health check
+#       from the task definition rather than from this image directive. Nothing in
+#       the pipeline is gated on the value docker inspect reports here.
+# WHY : Refactoring Rationale: the four timings below were --interval=30s
+#       --timeout=5s --start-period=30s --retries=3, and that combination could
+#       not probe this image at all. A successful run of the shortest job in the
+#       chain is about fifteen to twenty seconds end to end, so the container was
+#       gone before the thirty-second start period elapsed and no probe was ever
+#       scheduled -- a finished run was recorded `health=unhealthy` with
+#       `failing_streak=0`, the streak of zero being the proof that nothing had
+#       run rather than that something had failed, while the endpoint itself
+#       answered HTTP 200 throughout. The fix is --start-interval, which sets the
+#       probe cadence DURING the start period: probes now begin two seconds in, so
+#       the first one to find the listener up marks the container healthy well
+#       inside the shortest plausible job.
+# WHY : Assumptions: the start period is ten seconds and not shorter. Within it a
+#       failing probe leaves the container `starting` rather than counting toward
+#       the retry budget, which is what a probe issued while the context is still
+#       building must do -- Flyway runs before the listener binds, so an early
+#       probe is expected to fail and must not be held against the run. Ten
+#       seconds is longer than the measured time to a bound listener and shorter
+#       than the measured job, which is the window this directive has to fit
+#       inside.
+# WHY : Assumptions: --start-interval is honoured by Docker Engine 25.0 and later
+#       (API 1.44), and the flag has two separate version requirements that are
+#       easy to conflate. At BUILD time it must be parsed by a Dockerfile frontend
+#       that knows it: an older frontend does NOT ignore it but fails the build
+#       outright, measured as `dockerfile parse error: unknown flag:
+#       start-interval` against a `# syntax=docker/dockerfile:1.4` pin. At RUN
+#       time an engine predating the field ignores it and falls back to probing at
+#       --interval, which is now five seconds rather than thirty, so even there a
+#       probe runs inside the job. That second case is why --interval was lowered
+#       alongside the new flag instead of being left where it was, and the first is
+#       why this file carries no `# syntax=` pin to an older frontend.
+# WHY : Trade-offs: --retries=3 at a five-second interval means three consecutive
+#       failures after the start period, so an unhealthy verdict cannot be reached
+#       before about twenty-five seconds in -- ten for the start period and three
+#       intervals of five after it, the exact instant depending on where the
+#       engine's probe schedule falls. Alternatives Considered: a single
+#       retry, which would report a hung dependency sooner. Rejected because it
+#       would put the unhealthy verdict at fifteen seconds -- inside the range a
+#       perfectly healthy short job occupies -- and would turn a single dropped
+#       probe on a busy host into a false alarm on a run that then exits zero.
+#       That last case is not hypothetical: a clean run measured here ends with one
+#       failing probe, because the entry point closes the listener as it winds down
+#       and a probe already in flight then finds nothing listening. With three
+#       retries that single failure cannot reach a verdict; with one it would
+#       mislabel every successful run.
+# WHY : Assumptions: a FINISHED container still reports `health=unhealthy`, and no
+#       value of these four flags changes that. The engine sets that status
+#       unconditionally when a container stops -- measured on Docker 29.7.0 with a
+#       control container whose probe was /bin/true: it reported `healthy` with
+#       four successful probes and a failing streak of zero while running, and
+#       flipped to `unhealthy` the instant it exited zero, streak still zero. What
+#       these timings fix is the state DURING the run and the evidence that a probe
+#       ran at all: a completed job now shows five entries in the health log and
+#       reaches `healthy` about twelve seconds in, where the previous timings left
+#       the log EMPTY and the streak at zero -- a streak of zero beside an
+#       unhealthy verdict being the signature of a probe that never ran rather than
+#       one that failed. An operator reading a stopped task should read the exit
+#       status and the final `event=batch.job.outcome` record; the terminal health
+#       value carries no information about the run and none is claimed for it here.
+#       Alternatives Considered: dropping the directive entirely, which is the only
+#       way to stop a finished container reporting unhealthy. Rejected because the
+#       service-image contract requires a health check and the running state it
+#       reports is genuinely useful for a long accrual or posting pass, where a
+#       hung datasource shows up as a failing probe minutes before the step times
+#       out.
+HEALTHCHECK --interval=5s --timeout=4s --start-period=10s --start-interval=2s \
+    --retries=3 \
     CMD ["/usr/bin/curl", "--fail", "--silent", "--show-error", \
          "--max-time", "4", "--output", "/dev/null", \
          "http://127.0.0.1:8080/actuator/health"]

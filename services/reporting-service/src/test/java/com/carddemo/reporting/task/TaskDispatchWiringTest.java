@@ -33,6 +33,7 @@ import org.springframework.context.annotation.Configuration;
 import software.amazon.awssdk.core.exception.SdkClientException;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
@@ -527,7 +528,7 @@ class TaskDispatchWiringTest {
         when(statements.generateStatements(any())).thenAnswer(invocation -> {
             StatementService.StatementSink sink = invocation.getArgument(0);
             sink.replaceArtifacts();
-            return new StatementRunOutcome(0, List.of());
+            return new StatementRunOutcome(0, 0, List.of());
         });
         S3Client s3 = storageAnsweringVersion(null);
 
@@ -554,15 +555,26 @@ class TaskDispatchWiringTest {
     // WHY : Refactoring Rationale: this is the case the retired shape could not pass at all. Its three
     //       writes went to fixed keys, so a run failing after the first one had already replaced part of
     //       the previous run and left a reader pairing objects from two of them. Nothing a failed run
-    //       writes is addressable now, and the assertion is that the pointer never moved: the previous
-    //       run stays whole and current, which is what makes a redrive of the state safe to attempt.
+    //       writes is addressable now, and the assertions are that the pointer never moved and that
+    //       nothing was written for it to move to: the previous run stays whole and current, which is
+    //       what makes a redrive of the state safe to attempt.
+    // WHY : ⚠️ Refactoring Rationale: the case now asserts that NOTHING was published, where it
+    //       asserted only that the MANIFEST was not. Manifest-absence alone was satisfied by a failed
+    //       run that had nonetheless stored both artifacts in full: the sink published on close and
+    //       every caller holds it in a try-with-resources, so the unwind completed both uploads. A
+    //       failed run therefore left two complete objects under its own run prefix with no index and
+    //       no manifest -- unaddressable, so this assertion passed, and un-reclaimable, because a
+    //       COMPLETED upload is not an incomplete one that a lifecycle rule expires and a distinct run
+    //       prefix is a separate key rather than a noncurrent version. Asserting the absence of the
+    //       pointer measures who can reach the residue; asserting the absence of every put measures
+    //       whether there is any, which is the property the disposition claim actually makes.
     /**
-     * Asserts that a run failing before its objects are complete publishes no manifest.
+     * Asserts that a run failing before its objects are complete publishes nothing at all.
      *
      * <p>This case takes no parameter and yields no value.</p>
      */
     @Test
-    @DisplayName("a failed statement run publishes no manifest, leaving the previous run current")
+    @DisplayName("a failed statement run publishes no object at all, leaving the previous run current")
     void aFailedStatementRunPublishesNoManifest() {
         StatementService statements = mock(StatementService.class);
         when(statements.generateStatements(any()))
@@ -575,9 +587,24 @@ class TaskDispatchWiringTest {
 
         ArgumentCaptor<PutObjectRequest> put = ArgumentCaptor.forClass(PutObjectRequest.class);
         verify(s3, org.mockito.Mockito.atLeast(0)).putObject(put.capture(), any(RequestBody.class));
-        assertThat(put.getAllValues().stream().map(PutObjectRequest::key).toList())
+        List<String> keys = put.getAllValues().stream().map(PutObjectRequest::key).toList();
+        assertThat(keys)
                 .as("a run that did not finish must not be published to a single reader")
                 .doesNotContain(StatementService.manifestKey(STATEMENT_PREFIX));
+        assertThat(keys)
+                .as("and it must leave no residue either -- no plain-text artifact, no markup artifact"
+                        + " and no index, because an object nothing addresses is still an object nothing"
+                        + " reclaims")
+                .isEmpty();
+
+        // WHY : Assumptions: the multipart completion is asserted absent as well as the put, because a
+        //       run publishes by one path or the other and the empty put list closes only one of them.
+        //       An artifact under one part is published by a whole-object put, which the assertion above
+        //       covers; one past a part is published by a multipart completion, which nothing above
+        //       would see. This run is the small case, so the assertion is vacuous for it by itself --
+        //       it is here to hold the OTHER path to the same claim, so that a close which resumed
+        //       publishing large artifacts could not pass by leaving the put list empty.
+        verify(s3, never()).completeMultipartUpload(any(CompleteMultipartUploadRequest.class));
     }
 
     // WHY : Refactoring Rationale: the case above fails the run in its GENERATOR, before any of the four
@@ -601,7 +628,7 @@ class TaskDispatchWiringTest {
             StatementService.StatementSink sink = invocation.getArgument(0);
             sink.replaceArtifacts();
             return new StatementRunOutcome(
-                    1, List.of(new StatementIndexEntry("a".repeat(64), 0L, 24L)));
+                    1, 0, List.of(new StatementIndexEntry("a".repeat(64), 0L, 24L)));
         });
         S3Client s3 = storageRefusingKeysEndingIn(StatementService.INDEX_OBJECT);
 
@@ -634,7 +661,7 @@ class TaskDispatchWiringTest {
     @DisplayName("the statement task runs without a business date, because the reference takes none")
     void theStatementTaskRunsWithoutABusinessDate() throws Exception {
         StatementService statements = mock(StatementService.class);
-        when(statements.generateStatements(any())).thenReturn(new StatementRunOutcome(0, List.of()));
+        when(statements.generateStatements(any())).thenReturn(new StatementRunOutcome(0, 0, List.of()));
         S3Client s3 = storageAnsweringVersion(null);
 
         new GenerateStatementsTask(statements, s3, BUCKET, STATEMENT_PREFIX).run(Map.of());

@@ -886,6 +886,26 @@ and that is why it is recorded rather than quietly fixed:
   form is kept because the guess would have justified a blank-filling encoder, and the
   first golden-master comparison over either record would then have failed on twenty-two
   bytes that no reader would think to suspect.
+- Assumptions: **where no source image exists, the span cannot be recovered at all, and
+  that is a consequence of the drop rather than a defect of the encoder.** The category
+  balance is the record where this is observable, because
+  [`app/cbl/CBTRN02C.cbl`](../../app/cbl/CBTRN02C.cbl) writes it from two paragraphs
+  whose spans **disagree**: the create arm at L503–L510 performs
+  `INITIALIZE TRAN-CAT-BAL-RECORD` at L504, which carries no `REPLACING` phrase and so
+  never reaches a `FILLER` item, leaving the twenty-two bytes at the low value the record
+  area held — measured as `00` × 22 in
+  `tests/golden/posting/zero_balance/tcatbal.expected` — while the update arm at
+  L526–L528 `REWRITE`s the image the read supplied, so the seed's own `30` × 22
+  goes straight back out, as the eight remaining posting golden trees measure. A row read
+  back from `ledger.transaction_category_balances` carries neither history, because the
+  column does not exist, so the backup state renders the low value on both arms:
+  byte-identical on the create arm and one twenty-two-byte span short on the rewrite arm.
+  That consequence is registered as divergence **D-TCATBAL-FILLER-DB-RENDER** in §7.4 of
+  [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md), and it is the
+  reason the posting parity comparison normalises that span rather than comparing it.
+  Alternatives Considered: a twenty-two-byte column carrying the image, rejected because it
+  would store the writing program's record-area state as though it were a fact about the
+  balance, and a row the target originates has no such state to store.
 
 The drop is recorded per record so that a reader comparing a copybook against a
 migration can account for every byte. Each row below is the identity
@@ -2150,7 +2170,7 @@ model:
 | Layer | Representation |
 |---|---|
 | PostgreSQL | `NUMERIC(p,2)` |
-| Java | `BigDecimal`, scale 2, `RoundingMode.HALF_UP` at one reduction point — see [Arithmetic order is preserved](#arithmetic-order-is-preserved) for where that point sits |
+| Java | `BigDecimal`, scale 2, one reduction point per computation: `RoundingMode.HALF_UP` everywhere except the monthly accrual, which discards with `RoundingMode.DOWN` because the reference statement does — see [Arithmetic order is preserved](#arithmetic-order-is-preserved) for where that point sits and why the accrual differs |
 | Python (the extract-transform-load path) | `Decimal` |
 | JSON on the wire | a **string** |
 
@@ -2201,10 +2221,9 @@ model:
 > parity failure rather than as a rounding note. The target therefore multiplies at
 > full precision, divides once, and applies scale 2 at that single point.
 
-> Assumptions: **the mode at that single point is `HALF_UP`, the same mode as every
-> other hop, and the baseline diverges from it in a way that is recorded rather than
-> matched.** The reference program truncates, and two observations establish that.
-> First, the receiving field is declared at
+> Assumptions: **the mode at that single point is the mode the reference applies, and
+> for the accrual that is truncation rather than half up.** Two observations establish
+> what the reference does. First, the receiving field is declared at
 > [`app/cbl/CBACT04C.cbl`](../../app/cbl/CBACT04C.cbl) L168 as
 > `05 WS-MONTHLY-INT PIC S9(09)V99`, so the result is stored at exactly two decimal
 > places and the surplus precision of the quotient has to go somewhere. Second, the
@@ -2213,36 +2232,44 @@ model:
 > A store into a fixed-scale field without `ROUNDED` **discards** the surplus digits
 > rather than rounding them, so the baseline behaviour is truncation toward zero.
 >
-> The target does **not** apply that truncation. `Money.GENERAL_ROUNDING` —
-> `RoundingMode.HALF_UP` — is the ONE mode the money type declares and it governs the
-> accrual quotient like every other reduction, because transformation rule T3 states
-> that mode for the money path and states no exception for the accrual. It is not
-> reachable from any signature, so no call site selects anything. The resulting
-> difference from the baseline is registered as divergence **C-ROUNDING** in §7.4 of
-> `docs/architecture/cobol-to-service-traceability.md`.
+> The target applies that same reduction. The money type declares **two** modes and
+> neither is reachable from a signature: `Money.GENERAL_ROUNDING`, `RoundingMode.HALF_UP`,
+> reduces a supplied amount, a general product and a general quotient — the three
+> operations that have no reference statement behind them at all — while
+> `Money.BASELINE_INTEREST_ROUNDING`, `RoundingMode.DOWN`, reduces the accrual quotient
+> and nothing else in the migration. `DOWN` and not `FLOOR`, because the reference's store
+> discards toward **zero** and the balance and rate pictures are both signed, so the
+> negative quotient is reachable and the two modes differ on it.
 >
-> Refactoring Rationale: the accrual was moved to `RoundingMode.DOWN` for a time, to
-> match the baseline cent for cent, and C-ROUNDING was recorded as withdrawn. That is
-> reversed. The argument for matching was that the accrual is one of the business rules
-> the reference suite asserts verbatim and that the cent compounds — line 467 adds each
-> reduced term into the account total and line 352 adds that total to the account
-> balance, which the next **inclusive** over-limit comparison is made against. Both
-> observations are true and neither licenses the departure: the plan is frozen, it admits
-> a behavioural difference from the reference when the difference is registered, and it
-> admits a departure from a transformation rule only where it states an exception. So the
-> difference is registered, with those consequences stated in the register entry, and the
-> rule is followed.
+> Refactoring Rationale: this paragraph twice asserted the opposite — that one half-up
+> mode governed the accrual too, and that the resulting cent was registered as divergence
+> `C-ROUNDING`. That reading is reversed and the identifier is **withdrawn**, in §7.5 of
+> [`cobol-to-service-traceability.md`](cobol-to-service-traceability.md), because the
+> difference no longer exists. The argument for half up was that transformation rule T3
+> states that mode for the money path, states no exception, and is frozen. It fails on
+> precedence: rule T3 is the money path's **general** default, while §0.7.3 of the plan
+> names this accrual formula as the one that must be **bit-exact**, §0.1.1.2 requires its
+> observable behaviour to be unchanged, §0.9.1 makes functional parity non-negotiable and
+> §0.7.7 makes the committed interest goldens the oracle every accrual output is compared
+> against. Rule T9's documented-divergence allowance records a difference that cannot be
+> avoided; it does not authorise creating one where bit-exactness is demanded. Assumptions:
+> a reader arriving from a comment that describes `C-ROUNDING` as live is reading a
+> citation from that intervening period.
 >
-> Trade-offs: **one mode for the whole money path, at the cost of a cent against the
-> baseline on an exact half.** On the vectors the reference fixtures actually carry the
-> two modes agree, which is why the difference has to be written down and asserted rather
-> than left for a fixture to catch: a balance of `1000.00` at a rate of `15.00` yields
-> `12.5000` exactly and both modes return `12.50`; at a rate of `2.50` against the same
-> balance the quotient is `2.08333…` and both return `2.08`. They part company at
-> `1000.80` and `2.50`, where the quotient is `2.0850` exactly — half up returns `2.09`
-> and the baseline stores `2.08` — and on a negative vector, where rounding on magnitude
-> and truncation toward zero differ in direction. The authoritative statement of the
-> contract lives beside the implementation, in
+> Trade-offs: **two modes, at the cost of a reader having to know which operation takes
+> which, and the boundary is one method wide.** On the vectors the reference fixtures
+> actually carry the two modes agree, which is why the boundary has to be written down and
+> asserted rather than left for a fixture to catch: a balance of `1000.00` at a rate of
+> `15.00` yields `12.5000` exactly and both modes return `12.50`; at a rate of `2.50`
+> against the same balance the quotient is `2.08333…` and both return `2.08`. They part
+> company only on an exact half cent — at `1000.80` and `2.50` the quotient is `2.0850`
+> exactly and the shipped mode returns `2.08` where half up would return `2.09`, and at
+> `2419.60` and `15.00` it is `30.245` exactly for `30.24` against `30.25` — and on a
+> negative vector, where truncation toward zero and rounding on magnitude differ in
+> direction. Had the accrual rounded, the cent would not have stayed local: line 467 adds
+> each reduced term into the account total and line 352 adds that total to the account
+> balance, which the next **inclusive** over-limit comparison is made against. The
+> authoritative statement of the contract lives beside the implementation, in
 > [`../../services/common-lib/src/main/java/com/carddemo/common/money/package-info.java`](../../services/common-lib/src/main/java/com/carddemo/common/money/package-info.java),
 > which carries the same baseline observations and the same vectors.
 

@@ -121,25 +121,28 @@ import org.hibernate.type.SqlTypes;
  * rounding at all.</p>
  *
  * <p>Assumptions: the rounding contract is likewise cited and not restated. {@code Money} declares
- * ONE mode, fixed at the type and selectable by no caller, because a selectable mode would be a second
- * money contract in disguise: {@code Money.GENERAL_ROUNDING} is {@code RoundingMode.HALF_UP} and
- * governs every reduction that type performs, the accrual quotient included.
- * {@code Money.MONTHLY_RATE_DIVISOR} preserves the reference literal 1200 of L465 as one combined
- * divisor, and {@code Money.monthlyInterest(BigDecimal)} reproduces L464 to L465 by forming the
- * product first and reducing exactly once at the division. The token {@code ROUNDED} appears nowhere
- * in the 652 lines of {@code app/cbl/CBACT04C.cbl}, so the reference program discards its surplus
- * digits where the target rounds them; that difference is registered as divergence {@code C-ROUNDING}
- * and belongs to the accrual, not to this type, which holds a rate and reduces nothing.</p>
+ * TWO modes, both fixed at the type and neither selectable by a caller, because a caller-selectable
+ * mode would be a second money contract in disguise: {@code Money.GENERAL_ROUNDING} is
+ * {@code RoundingMode.HALF_UP} and governs every reduction the type performs EXCEPT one, and
+ * {@code Money.BASELINE_INTEREST_ROUNDING} is {@code RoundingMode.DOWN} and governs the accrual
+ * quotient alone. {@code Money.MONTHLY_RATE_DIVISOR} preserves the reference literal 1200 of L465 as
+ * one combined divisor, and {@code Money.monthlyInterest(BigDecimal)} reproduces L464 to L465 by
+ * forming the product first and reducing exactly once at the division. The token {@code ROUNDED}
+ * appears nowhere in the 652 lines of {@code app/cbl/CBACT04C.cbl}, so the reference program discards
+ * its surplus digits -- and the target now discards them the same way, so no cent differs and nothing
+ * is registered. That reduction belongs to the accrual in any case, not to this type, which holds a
+ * rate and reduces nothing.</p>
  *
- * <p>Refactoring Rationale: this paragraph twice described the opposite disposition -- first a single
- * half-up mode with the resulting cent registered, then a second truncating mode with the divergence
- * withdrawn. The half-up reading is restored and {@code C-ROUNDING} is a LIVE entry in section 7.4 of
- * {@code docs/architecture/cobol-to-service-traceability.md} rather than a withdrawal record in 7.5,
- * because transformation rule T3 names one mode for the money path and states no exception for the
- * accrual, and the plan admits a registered behavioural difference from the reference where it does not
- * admit an unstated departure from a frozen rule. This entity is worth keeping accurate even though it
- * performs no arithmetic, because the rate it carries is one of the two operands of that formula and a
- * reader arrives here looking for the contract the rate feeds.</p>
+ * <p>Refactoring Rationale: this paragraph has described both dispositions and now settles on the
+ * truncating one, with {@code C-ROUNDING} WITHDRAWN in section 7.5 of
+ * {@code docs/architecture/cobol-to-service-traceability.md} rather than live in 7.4. Transformation
+ * rule T3 names half up as the money path's general default and is the LESS specific rule here: the
+ * plan pins this one formula to the reference at its sections 0.7.3, 0.1.1.2 and 0.7.7, where it
+ * requires the interest formula to be bit-exact and makes the golden masters the oracle. A registered
+ * divergence is the right instrument for a difference the plan permits, and it is the wrong instrument
+ * for one the plan forbids. This entity is worth keeping accurate even though it performs no
+ * arithmetic, because the rate it carries is one of the two operands of that formula and a reader
+ * arrives here looking for the contract the rate feeds.</p>
  *
  * <p>Alternatives Considered: this member is a {@code BigDecimal} rather than a
  * {@code com.carddemo.common.money.Money}. {@code Money} was weighed and deliberately not used on

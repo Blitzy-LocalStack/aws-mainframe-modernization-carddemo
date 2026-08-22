@@ -502,14 +502,26 @@ class InterestRateLookupTest {
      * contract is the reason this type is preferred to a bare decimal. The rounding mode, the
      * multiply-before-divide order and the sum-of-reduced-values property are each invisible in the
      * reference source -- the ABSENCE of a {@code ROUNDED} phrase is what establishes the first --
-     * so a reader who cannot find them here has no other place to find them.</p>
+     * so a reader who cannot find them documented somewhere has no way to recover them.</p>
      *
-     * <p>Refactoring Rationale: this expectation has required three different wordings as the accrual's
-     * disposition moved -- "rounded half up" with "C-ROUNDING", then "truncated toward zero" with two
-     * mode constants, and now "reduced half up" with the single constant the kernel declares and the
-     * divergence identifier restored. It requires the identifier as well as the mode because the mode
-     * alone would not tell a reader that the reference reduces differently, and that difference is the
-     * fact a parity reviewer needs from this type's documentation.</p>
+     * <p>Refactoring Rationale: this expectation has required several wordings as the accrual's
+     * disposition moved, and it briefly accepted EITHER of two of them. That alternation existed only
+     * because the record's own file sat outside the set of files one pass could edit, so requiring the
+     * settled wording would have failed on a file nobody in that pass could correct. The file now
+     * carries the settled wording, so the check is single-valued again: an alternation kept past its
+     * cause is a check that has stopped deciding anything.</p>
+     *
+     * <p>Assumptions: the settled contract is that the accrual quotient reduces with
+     * {@code Money.BASELINE_INTEREST_ROUNDING}, truncation toward zero, reproducing a reference
+     * statement that carries no {@code ROUNDED} phrase. The authoritative statements of that live where
+     * the arithmetic does -- on {@code Money#monthlyInterest(java.math.BigDecimal)} and on
+     * {@code InterestCalculationService.ACCRUAL_ROUNDING}, each with the reference lines that establish
+     * it -- and this case asserts only that the record NAMES the mode, because a reader who arrives at
+     * the rate looking for the contract it feeds has to be able to find it from here. Trade-offs: the
+     * divergence identifier {@code C-ROUNDING} is deliberately NOT required any more, because it is
+     * withdrawn in subsection 7.5 of
+     * {@code docs/architecture/cobol-to-service-traceability.md} -- requiring a withdrawn identifier
+     * would pin the prose to a claim the register no longer makes.</p>
      *
      * <p>This zero-argument test returns no value; failed expectations surface as assertion
      * errors.</p>
@@ -523,10 +535,8 @@ class InterestRateLookupTest {
         String source = Files.readString(lookupRecordSourcePath());
 
         assertThat(source)
-                .as("the accrual's rounding contract, and the divergence from the reference it implies")
-                .contains("reduced half up")
-                .contains("GENERAL_ROUNDING")
-                .contains("C-ROUNDING");
+                .as("the accrual's reduction contract, named by the constant that carries it")
+                .contains("BASELINE_INTEREST_ROUNDING");
         assertThat(source)
                 .as("the order of the two operations, and the scale-4 intermediate it protects")
                 .contains("the product is formed before the quotient")

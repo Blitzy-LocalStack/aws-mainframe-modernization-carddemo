@@ -82,6 +82,17 @@ import software.amazon.awssdk.services.s3.model.UploadPartRequest;
  * reason, and the dataset bucket's lifecycle configuration expires incomplete uploads as the backstop that
  * covers a process killed outright.</p>
  *
+ * <p>⚠️ Refactoring Rationale: every stored object carries an explicitly DECLARED media type, taken from
+ * ONE field on this writer and set on BOTH storage paths, where neither path declared one at all. The
+ * value was therefore whatever each path's store inferred, and the two inferred differently: within one
+ * statement run the plain-text artifact, published by a single whole-object put, reported
+ * {@code application/octet-stream} while the markup artifact, large enough to have gone through a
+ * multipart upload, reported {@code binary/octet-stream}. Two artifacts of one run disagreed about their
+ * own type on no better ground than which upload path each had taken, and neither declaration came from
+ * this application. One field read by both request builders is what makes the two paths incapable of
+ * disagreeing again -- a second literal at the second builder would have closed the symptom and left the
+ * divergence one edit away.</p>
+ *
  * <p>Assumptions: this writer is NOT thread-safe and does not need to be. One artifact is produced by one
  * task on one thread, which is the same discipline the reference's single sequential pass has.</p>
  *
@@ -117,6 +128,28 @@ public final class S3ArtifactWriter implements AutoCloseable {
      */
     private static final byte RECORD_TERMINATOR = (byte) '\n';
 
+    /**
+     * The media type every artifact is declared as unless a caller names another.
+     *
+     * <p>Trade-offs: {@code application/octet-stream} rather than {@code text/plain} for the
+     * eighty-column plain-text artifact or {@code text/html} for the hundred-column markup one. These are
+     * fixed-width parity artifacts whose exact bytes are the contract -- a record's declared width is the
+     * interface, and a golden-master comparison reads them byte for byte -- so a type that invites
+     * charset negotiation, transcoding or content sniffing declares something about them that is not
+     * true. It is also the type the two endpoints that serve these artifacts already declare, at the
+     * artifact mappings on {@code ReportController} and {@code StatementController}, so the stored object
+     * and the response that hands it over now agree rather than disagreeing by one hop.</p>
+     *
+     * <p>Alternatives Considered: a per-artifact text type, {@code text/plain} for the plain-text
+     * artifact and {@code text/html} for the markup one, which is what a reader browsing the bucket would
+     * find friendliest. Rejected on the two grounds above and on a third: {@code text/html} would let the
+     * markup artifact render straight from the store, and it carries cardholder statements, so the
+     * friendlier declaration is also the one that turns a bucket listing into a viewer. The accepted cost
+     * of this choice is exactly that -- a browser fetching either artifact downloads it rather than
+     * displaying it, which is the outcome a byte-exact artifact wants.</p>
+     */
+    public static final String DEFAULT_CONTENT_TYPE = "application/octet-stream";
+
     // WHY : Assumptions: this class logs on ONE path only -- an abort that itself failed -- because that
     //       is the only outcome it knows about that no caller can be told. Every other outcome is
     //       reported to the caller as a return or as a thrown failure, and the task above it journals
@@ -132,6 +165,14 @@ public final class S3ArtifactWriter implements AutoCloseable {
 
     /** The object key the completed artifact appears under. */
     private final String key;
+
+    // WHY : Assumptions: the media type is held as a FIELD rather than passed to each storage call,
+    //       because the two calls that carry it sit in two different methods on two different paths --
+    //       the whole-object put and the multipart creation -- and a run takes exactly one of them. A
+    //       parameter would be supplied twice and could be supplied differently, which is the state this
+    //       field exists to make unreachable.
+    /** The media type declared on the stored object, on whichever path publishes it. */
+    private final String contentType;
 
     /** The part buffer, flushed and reused each time it reaches {@link #PART_SIZE_BYTES}. */
     private final ByteArrayOutputStream buffer = new ByteArrayOutputStream(PART_SIZE_BYTES);
@@ -164,7 +205,13 @@ public final class S3ArtifactWriter implements AutoCloseable {
     private String publishedVersionId;
 
     /**
-     * Creates a writer for one artifact.
+     * Creates a writer for one artifact, declared as {@value #DEFAULT_CONTENT_TYPE}.
+     *
+     * <p>Assumptions: this is the form every call site in the module uses, and it exists so that a media
+     * type cannot be forgotten at one of them. The overload below admits another value for a future
+     * artifact whose type genuinely differs; defaulting here rather than requiring the argument
+     * everywhere is what makes the declared type a property of this class instead of a convention each
+     * call site has to remember, and every artifact this module stores today wants the default.</p>
      *
      * @param s3 the object-store client; must not be {@code null}
      * @param bucket the destination bucket; must not be {@code null} or blank
@@ -175,9 +222,35 @@ public final class S3ArtifactWriter implements AutoCloseable {
      *     for it
      */
     public S3ArtifactWriter(S3Client s3, String bucket, String key) {
+        this(s3, bucket, key, DEFAULT_CONTENT_TYPE);
+    }
+
+    /**
+     * Creates a writer for one artifact carrying a caller-named media type.
+     *
+     * <p>Assumptions: the type is a CONSTRUCTOR argument rather than something a caller sets later, so it
+     * cannot change during a writer's life. The two publication paths read it at two different moments --
+     * the multipart path fixes the eventual object's metadata when it creates the upload, the
+     * whole-object path when it puts the bytes -- and a value that could move between those moments would
+     * be observable as two different declarations for artifacts of one run, which is the divergence
+     * recorded on this class.</p>
+     *
+     * @param s3 the object-store client; must not be {@code null}
+     * @param bucket the destination bucket; must not be {@code null} or blank
+     * @param key the destination object key; must not be {@code null} or blank
+     * @param contentType the media type to declare on the stored object; must not be {@code null} or
+     *     blank
+     * @throws NullPointerException if any argument is {@code null}
+     * @throws IllegalArgumentException if {@code bucket}, {@code key} or {@code contentType} is blank. A
+     *     blank key is unreachable, and a blank media type is refused rather than sent because a store
+     *     answering an empty declaration falls back to guessing -- which is the behaviour this argument
+     *     exists to replace, so admitting a blank value would reinstate it silently
+     */
+    public S3ArtifactWriter(S3Client s3, String bucket, String key, String contentType) {
         this.s3 = Objects.requireNonNull(s3, "s3 must not be null");
         this.bucket = requireText(bucket, "bucket");
         this.key = requireText(key, "key");
+        this.contentType = requireText(contentType, "contentType");
     }
 
     /**
@@ -337,12 +410,20 @@ public final class S3ArtifactWriter implements AutoCloseable {
     /**
      * Publishes an artifact small enough to have needed no multipart upload.
      *
+     * <p>Assumptions: the media type is declared on the put itself, which is the only opportunity this
+     * path has -- a whole-object put carries the object's metadata with its bytes, so an undeclared type
+     * here is a stored object whose type the store decided.</p>
+     *
      * @throws IOException if the put is refused
      */
     private void putWholeObject() throws IOException {
         try {
             publishedVersionId = s3.putObject(
-                    PutObjectRequest.builder().bucket(bucket).key(key).build(),
+                    PutObjectRequest.builder()
+                            .bucket(bucket)
+                            .key(key)
+                            .contentType(contentType)
+                            .build(),
                     RequestBody.fromBytes(buffer.toByteArray()))
                     .versionId();
         } catch (SdkException failure) {
@@ -359,6 +440,12 @@ public final class S3ArtifactWriter implements AutoCloseable {
      * a run that produces an artifact smaller than one part never creates a multipart upload at all and
      * therefore never leaves one to abort.</p>
      *
+     * <p>Assumptions: the media type is declared on the CREATION call and not on a part or on the
+     * completion, because that is where a multipart upload fixes the eventual object's metadata -- a part
+     * carries bytes only, and the completion carries the part list. It is read from the same field the
+     * whole-object put reads, so the type a run declares does not depend on how large the artifact turned
+     * out to be.</p>
+     *
      * @throws IOException if the part cannot be uploaded
      */
     private void uploadPart() throws IOException {
@@ -368,6 +455,7 @@ public final class S3ArtifactWriter implements AutoCloseable {
                         s3.createMultipartUpload(CreateMultipartUploadRequest.builder()
                                 .bucket(bucket)
                                 .key(key)
+                                .contentType(contentType)
                                 .build());
                 uploadId = created.uploadId();
             }

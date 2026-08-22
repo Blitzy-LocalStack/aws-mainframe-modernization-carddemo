@@ -41,16 +41,19 @@ import org.springframework.stereotype.Service;
  * function of its arguments: the run-scoped identifier suffix arrives as a parameter rather than as
  * a field, so two concurrent runs cannot interleave one counter.</p>
  *
- * <p>Trade-offs: the accrual rounds HALF UP where the reference discards its surplus digits, and the
- * difference is recorded here rather than left to be re-derived because the evidence on the reference
- * side is an ABSENCE. The reference statement at {@code app/cbl/CBACT04C.cbl:464-465} reads
+ * <p>Assumptions: the accrual DISCARDS its surplus digits rather than rounding them, and the evidence
+ * on the reference side is an ABSENCE, which is why it is recorded here rather than left to be
+ * re-derived. The reference statement at {@code app/cbl/CBACT04C.cbl:464-465} reads
  * {@code COMPUTE WS-MONTHLY-INT = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200} and carries no
  * {@code ROUNDED} phrase; no statement anywhere in that program's 652 lines carries one, so a COBOL
  * arithmetic statement storing into {@code WS-MONTHLY-INT PIC S9(09)V99} at line 168 discards its
- * surplus digits toward zero. This module reduces through the shared half-up contract instead, because
- * transformation rule T3 states that mode for the money path and states no exception for the accrual,
- * and the resulting cent is registered as divergence {@code C-ROUNDING}. It is reachable only where the
- * quotient lands exactly on a half cent, which no shipped interest fixture does.</p>
+ * surplus digits toward zero. This module reduces the same way, through
+ * {@code Money.BASELINE_INTEREST_ROUNDING}, so the accrual is comparable against the committed
+ * interest goldens cent for cent -- which section 0.7.7 of the migration plan makes the oracle for
+ * this output, and section 0.7.3 names this formula as the one that must be bit-exact. Rule T3's half
+ * up governs the general money path and is the less specific instruction where the two meet; the
+ * difference the earlier half-up reading produced was registered as {@code C-ROUNDING} and that
+ * identifier is now withdrawn in section 7.5 of the register.</p>
  *
  * <p>Assumptions: a rate of zero and an absent disclosure group are different outcomes and stay
  * different. A group carrying a genuine zero rate accrues nothing and emits nothing, because
@@ -102,22 +105,31 @@ public class InterestCalculationService {
      *
      * <p>Assumptions: this constant is DOCUMENTATION and not a parameter. The accrual reduces
      * through {@link Money#monthlyInterest(java.math.BigDecimal)}, which binds the mode to
-     * {@link Money#GENERAL_ROUNDING} and exposes no way to select another, so naming it beside the
-     * service records the mode where a reader of this service looks for it without giving any call
-     * site the ability to apply a different one. It is DERIVED from the shared constant rather than
-     * restated as a literal, so the two cannot drift; this service's own tests assert the identity as
-     * well, which turns a future divergence between the name and the behaviour into a build failure.</p>
+     * {@link Money#BASELINE_INTEREST_ROUNDING} and exposes no way to select another, so naming it
+     * beside the service records the mode where a reader of this service looks for it without giving
+     * any call site the ability to apply a different one. It is DERIVED from the shared constant
+     * rather than restated as a literal, so the two cannot drift; this service's own tests assert the
+     * identity as well, which turns a future divergence between the name and the behaviour into a
+     * build failure.</p>
      *
-     * <p>Trade-offs: the mode is half up, which is what transformation rule T3 states for the money
-     * path, and it is NOT what the reference does. The reference statement at
+     * <p>Assumptions: the mode is truncation toward zero, which is what the reference does, and it is
+     * deliberately NOT {@link Money#GENERAL_ROUNDING}. The reference statement at
      * {@code app/cbl/CBACT04C.cbl:464-465} carries no {@code ROUNDED} phrase, and neither does any
-     * other statement in that program, so it discards the surplus digits of its result -- a cent less
-     * than this service produces on a quotient landing exactly on a half cent. Rule T3 states no
-     * exception for the accrual, so the rule governs and the difference is registered as divergence
-     * {@code C-ROUNDING} in {@code docs/architecture/cobol-to-service-traceability.md}, which carries
-     * the parity evidence with it.</p>
+     * other statement in that program, so it discards the surplus digits of its result -- and this
+     * service reproduces that, because section 0.7.3 of the migration plan names this formula as the
+     * one that must be bit-exact and section 0.7.7 makes the committed goldens its oracle. Rule T3's
+     * half up remains the general money-path default and is displaced here by that specific
+     * requirement.</p>
+     *
+     * <p>Refactoring Rationale: this constant was derived from {@link Money#GENERAL_ROUNDING} for a
+     * period, on the reading that rule T3 admits no exception, and the cent of difference was
+     * registered as divergence {@code C-ROUNDING}. That reading is reversed and the identifier is
+     * withdrawn in section 7.5 of {@code docs/architecture/cobol-to-service-traceability.md}: a
+     * general default does not displace the specific bit-exactness the plan demands for this
+     * statement, and the measured cost of the half-up period was 2.09 per row against 2.08 at a
+     * balance of 1000.80 and a rate of 2.50, and 30.25 against 30.24 at 2419.60 and 15.00.</p>
      */
-    public static final RoundingMode ACCRUAL_ROUNDING = Money.GENERAL_ROUNDING;
+    public static final RoundingMode ACCRUAL_ROUNDING = Money.BASELINE_INTEREST_ROUNDING;
 
     /**
      * The transaction type code every generated interest transaction carries, {@code 01}.
@@ -553,9 +565,9 @@ public class InterestCalculationService {
      * arithmetic, or performing the arithmetic locally. Both are rejected in favour of the one
      * dedicated helper. The general multiplication reduces its product to cents before returning,
      * so a caller that multiplied by the rate and then divided would have discarded the two decimal
-     * places the division still needs -- and the general contract rounds half up, which is not the
-     * mode this statement applies. Re-implementing the two operations here would put the reference's
-     * only monetary formula in a second place, where the mode and the divisor could drift from the
+     * places the division still needs -- and it reduces half up, which is not the mode this
+     * statement applies. Re-implementing the two operations here would put the reference's only
+     * monetary formula in a second place, where the mode and the divisor could drift from the
      * shared constants that name them.</p>
      *
      * <p>Assumptions: the delegated helper multiplies at FULL precision before dividing, which is
@@ -565,12 +577,14 @@ public class InterestCalculationService {
      * discards two digits the division would have consumed, which on a balance of 1000.80 at a rate
      * of 2.50 is a two-cent difference.</p>
      *
-     * <p>Assumptions: the helper reduces the quotient half up, on MAGNITUDE, and the sign matters
-     * because the receiving field is declared SIGNED and a negative balance is therefore reachable.
-     * Half up and flooring part company on a negative quotient -- flooring moves it away from zero
-     * where half up rounds to the nearer cent -- so the mode is not interchangeable with either
-     * flooring or the reference's truncation. {@link #ACCRUAL_ROUNDING} names it beside this service
-     * and the shared helper is what applies it.</p>
+     * <p>Assumptions: the helper reduces the quotient by DISCARDING its surplus digits, toward zero,
+     * and the sign matters because the receiving field is declared SIGNED and a negative balance is
+     * therefore reachable. Truncation and flooring part company on a negative quotient -- flooring
+     * moves it away from zero where truncation moves it toward zero -- so the mode is not
+     * interchangeable with flooring, and it is not interchangeable with half up either, which on an
+     * exact half cent credits one cent more than the reference field receives.
+     * {@link #ACCRUAL_ROUNDING} names it beside this service and the shared helper is what applies
+     * it.</p>
      *
      * @param categoryBalance the balance to accrue on, standing for
      *     {@code TRAN-CAT-BAL PIC S9(09)V99} at {@code app/cpy/CVTRA01Y.cpy:9}; must not be
@@ -578,8 +592,9 @@ public class InterestCalculationService {
      * @param lookup the resolved rate and the key that answered it, standing for
      *     {@code DIS-INT-RATE PIC S9(04)V99} at {@code app/cpy/CVTRA02Y.cpy:9}; must not be
      *     {@code null}
-     * @return one month's interest on that balance at that rate, exact at two decimal places and
-     *     reduced half up; never {@code null}
+     * @return one month's interest on that balance at that rate, exact at two decimal places, with
+     *     the surplus fraction digits discarded exactly as the reference statement discards them;
+     *     never {@code null}
      * @throws NullPointerException if either argument is {@code null}
      */
     public Money monthlyInterest(Money categoryBalance, InterestRateLookup lookup) {

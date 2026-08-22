@@ -50,24 +50,25 @@ import com.carddemo.common.money.Money;
  * <b>scale 4</b> before the division reduces it. Dividing first reduces at the wrong step and loses
  * those digits, which is why transformation rule T4 requires the order be preserved.
  *
- * <p>Assumptions: <b>the quotient is reduced half up</b>, under {@link Money#GENERAL_ROUNDING}, the
- * one mode the money path declares and the mode transformation rule T3 states for it without
- * exception.
+ * <p>Assumptions: <b>the quotient is reduced by discarding its surplus digits</b>, under
+ * {@link Money#BASELINE_INTEREST_ROUNDING}, which is the one reduction on the money path that departs
+ * from transformation rule T3's half up, and it departs from it to reproduce the reference exactly.
  *
- * <p>Trade-offs: the reference program would reduce this quotient differently -- no {@code ROUNDED}
+ * <p>Assumptions: the reference program reduces this quotient the same way -- no {@code ROUNDED}
  * phrase appears on the statement nor anywhere else in that program, and an unrounded {@code COMPUTE}
  * storing into the fixed-scale {@code PIC S9(09)V99} fields at lines 168 and 169 discards the surplus
- * digits. The two modes part company by one cent on a quotient landing exactly on a half cent: a
- * balance of {@code 1000.80} at a rate of {@code 2.50} forms the scale-4 product {@code 2502.0000},
- * whose quotient rounds half up to {@code 2.09} where the reference stores {@code 2.08}. The accrual
- * produces {@code 2.09}, and the difference is registered as divergence {@code C-ROUNDING} in
- * {@code docs/architecture/cobol-to-service-traceability.md} rather than removed by reducing with a
- * second mode. The cent does not stay local either, which is why the register carries the accrual's
- * parity evidence with it: line 467 adds each reduced term into the account total and line 352 adds
- * that total to the balance, which the next inclusive over-limit comparison is made against. A
- * predecessor of this paragraph described a truncating constant adopted to avoid the cent; it is
- * withdrawn, because a frozen transformation rule outranks a parity argument the plan itself provides
- * a divergence register for.
+ * digits. Reducing half up would part company with that by one cent on a quotient landing exactly on
+ * a half cent: a balance of {@code 1000.80} at a rate of {@code 2.50} forms the scale-4 product
+ * {@code 2502.0000}, whose quotient rounds half up to {@code 2.09} where the reference stores
+ * {@code 2.08}. The accrual produces {@code 2.08}, because it reduces with
+ * {@code Money.BASELINE_INTEREST_ROUNDING}, and no divergence is registered for the reduction.
+ * Assumptions: the cent would not have stayed local, which is why this is settled toward the reference
+ * rather than registered: line 467 adds each reduced term into the account total and line 352 adds that
+ * total to the balance, which the next inclusive over-limit comparison is made against, so a cent here
+ * can move a posting decision there. A predecessor of this paragraph described the half-up reading with
+ * the cent registered as {@code C-ROUNDING}; that identifier is withdrawn in section 7.5 of the
+ * register, because transformation rule T3 is the money path's general default while the plan pins this
+ * formula to the reference at its section 0.7.3 and makes the goldens its oracle at 0.7.7.
  *
  * <p>Assumptions: the account increment is <b>the sum of per-category reduced values</b> and never
  * the reduction of a sum. Line 467 adds each transaction's own already-reduced interest into

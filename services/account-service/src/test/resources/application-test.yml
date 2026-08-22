@@ -12,21 +12,22 @@
 #
 #   Every other production mechanism is inherited on purpose, so that a passing
 #   test exercises the deployed shape rather than a test-only substitute. The
-#   migrations applied here are the two this module owns,
-#   db/migration/V1__account.sql and
-#   db/migration/V2__account_inquiry_reply_ledger.sql, and the mappings they are
+#   migrations applied here are the THREE this module owns,
+#   db/migration/V1__account.sql,
+#   db/migration/V2__account_inquiry_reply_ledger.sql and
+#   db/migration/V3__batch_account_write_grant.sql, and the mappings they are
 #   checked against are the entities under com.carddemo.account.domain.
 #
-#   SEVEN classes activate this profile, every one of them a repository
+#   EIGHT classes activate this profile, every one of them a repository
 #   integration test, and they are the whole of the module's repository/
 #   directory: AccountRepositoryIT, AccountScreenProjectionIT,
-#   AccountUpdateAtomicityIT, CardXrefRepositoryIT, CustomerMasterRepositoryIT,
-#   CustomerRepositoryIT and InquiryReplyLedgerIT. Each starts a PostgreSQL
+#   AccountUpdateAtomicityIT, BatchAccountWriteGrantIT, CardXrefRepositoryIT,
+#   CustomerMasterRepositoryIT, CustomerRepositoryIT and InquiryReplyLedgerIT. Each starts a PostgreSQL
 #   container, creates the account schema and its owning role before the context
 #   is built, publishes the generated connection coordinates and the matching
 #   migration locations through @DynamicPropertySource, and loads a narrow
 #   @SpringBootConfiguration that reaches only this context's entities and
-#   repositories. The module's eighth integration test, config/AwsStarterRuntimeIT,
+#   repositories. The module's ninth integration test, config/AwsStarterRuntimeIT,
 #   deliberately does NOT activate this profile -- it asserts start-up behaviour
 #   rather than storage -- and no other test class in this module reads this
 #   file, nor does any build plugin activate the profile on their behalf. That
@@ -36,7 +37,11 @@
 #   Refactoring Rationale: this paragraph named exactly TWO consuming classes,
 #   AccountScreenProjectionIT and CustomerMasterRepositoryIT, and the count is
 #   re-measured rather than incremented: `grep -rl '@ActiveProfiles("test")'
-#   src/test/java` reports the seven above. An exhaustive list is kept in
+#   src/test/java` reports NINE paths, of which the eight above are classes --
+#   the ninth is repository/package-info.java, which names the annotation in its
+#   prose and activates nothing. Assumptions: the census counts consuming
+#   CLASSES, so a path that only mentions the annotation is excluded rather than
+#   silently inflating the figure a reader would otherwise re-derive and doubt. An exhaustive list is kept in
 #   preference to non-exhaustive wording because the point of the list is to say
 #   which contexts this overlay has to be correct FOR, and a reader cannot
 #   derive that from "several".
@@ -50,7 +55,7 @@
 #   This file consumes no environment variable and declares no value that names
 #   a network location, an account, a role credential, or key material of any
 #   kind. That is a property of the file rather than an accident of it: the
-#   values a deployment injects arrive here from the container each of the seven
+#   values a deployment injects arrive here from the container each of the eight
 #   tests starts, and the values a deployment keeps in a managed store are read
 #   by none of those contexts.
 #
@@ -63,7 +68,11 @@
 #   ownership the base profile's own statement selects, followed by
 #   V2__account_inquiry_reply_ledger.sql, which the duplicate-reply claim ledger
 #   needs and which InquiryReplyLedgerIT asserts arrived through Flyway's own
-#   history rather than through a hand-built table; a Hibernate mapping
+#   history rather than through a hand-built table, followed by
+#   V3__batch_account_write_grant.sql, which issues the one cross-schema table
+#   privilege the nightly posting job cannot rewrite an account master without
+#   and which BatchAccountWriteGrantIT asserts by probing the live grant rather
+#   than by reading the file; a Hibernate mapping
 #   validation against the tables those migrations produced; no remote
 #   configuration lookup; and no running queue listener.
 #
@@ -230,10 +239,18 @@ spring:
     #   is why the base profile forbids Flyway from creating a schema and why
     #   neither db/migration/V1__account.sql nor
     #   db/migration/V2__account_inquiry_reply_ledger.sql carries a CREATE
-    #   SCHEMA, a CREATE ROLE or a GRANT of its own. A PostgreSQL container has never run that
+    #   SCHEMA, a CREATE ROLE or a GRANT of its own. Assumptions:
+    #   db/migration/V3__batch_account_write_grant.sql is deliberately NOT folded
+    #   into that sentence, because it DOES carry a GRANT -- one table privilege
+    #   is its entire purpose. What still holds of all three is the part this
+    #   paragraph turns on: none of them creates a schema or a role, and V3's
+    #   GRANT names a grantee data-migration/sql/V0__schemas_and_roles.sql
+    #   created rather than creating one, so the bootstrap remains the exclusive
+    #   authority on existence and these migrations only ever add privileges to
+    #   what it made. A PostgreSQL container has never run that
     #   bootstrap, so the schema and its owning role have to exist before Flyway
     #   opens its first connection -- and the integration-test setup in the java
-    #   tree is what creates them, in a documented step on each of the seven
+    #   tree is what creates them, in a documented step on each of the eight
     #   consuming classes, ahead of context refresh. This file inherits
     #   create-schemas unchanged and leaves the base profile's own ownership
     #   statement in force, so the deployed mechanism that makes migrated
@@ -255,15 +272,15 @@ spring:
     #   setup step that a reader has to find in java rather than here -- the
     #   three statements that create the owning role, grant it CREATE on the
     #   container's database and create the account schema under it -- so the
-    #   prerequisite is expressed seven times over. What is bought is that this
+    #   prerequisite is expressed eight times over. What is bought is that this
     #   file names no role, grants no right and creates no schema, so it cannot
     #   disagree with the document that does all three.
     # Refactoring Rationale: this paragraph said TWO classes and justified the
     #   duplication on the ground that "a shared base class would be a new type
-    #   for two callers". Both halves went stale as the package grew to seven:
-    #   the count was wrong, and an argument that turns on there being two
-    #   callers cannot be read as covering seven. The duplication is retained
-    #   for a reason that does hold at seven -- each class starts its OWN
+    #   for two callers". Both halves went stale as the package grew, first to
+    #   seven and now to eight: the count was wrong, and an argument that turns
+    #   on there being two callers cannot be read as covering eight. The
+    #   duplication is retained for a reason that does hold at eight -- each class starts its OWN
     #   container and publishes that container's coordinates through its own
     #   @DynamicPropertySource, so the statements have to run against the
     #   instance that class started, which a shared base class would have to be
@@ -302,12 +319,14 @@ logging:
 # -----------------------------------------------------------------------------
 # Register of deliberate omissions. Each entry below is a value a reasonable
 # reader would expect this overlay to set. Each is absent for a reason that was
-# established by reading all seven consuming test classes -- the whole of
+# established by reading all eight consuming test classes -- the whole of
 # src/test/java/com/carddemo/account/repository, listed in the header -- and the
 # base profile, rather than assumed. Refactoring Rationale: this sentence said
 # "the two consuming test classes", a count that stopped being true as that
-# package grew; the register's entries were re-read against all seven and each
-# still holds, so only the census changed.
+# package grew; the register's entries were re-read against all eight -- most
+# recently against BatchAccountWriteGrantIT, which probes a grant rather than
+# storing a row and so exercises none of the omitted values -- and each still
+# holds, so only the census changed.
 # -----------------------------------------------------------------------------
 #
 #   1. No datasource URL, user name or credential, and no migration pair.
@@ -388,7 +407,7 @@ logging:
 #
 #   8. No profile-selection key.
 #      Assumptions: the profile is chosen by the @ActiveProfiles annotation each
-#      of the seven consuming classes carries -- and by nothing else, no build
+#      of the eight consuming classes carries -- and by nothing else, no build
 #      plugin activating it on their behalf. A document that named its own
 #      profile would either agree redundantly or contradict the annotation that
 #      loaded it.

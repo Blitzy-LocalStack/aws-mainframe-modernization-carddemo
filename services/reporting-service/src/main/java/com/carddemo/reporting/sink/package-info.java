@@ -10,7 +10,8 @@
  *
  * <ul>
  *   <li>{@code S3ArtifactWriter} -- the one place a record stream becomes an object. It buffers a fixed
- *       part, uploads a part at a time, and publishes nothing until the stream closes.</li>
+ *       part, uploads a part at a time, and publishes nothing until it is told to complete -- a
+ *       close without that instruction abandons the upload instead.</li>
  *   <li>{@code S3StatementSink} -- the statement seam's adapter, routing the two bands to the two
  *       datasets the reference declares for a whole run.</li>
  *   <li>{@code S3ReportSink} -- the report seam's adapter, a single writer behind a single method.</li>
@@ -65,9 +66,15 @@
  * <p>Assumptions: these classes raise {@code IOException} and never a service-level abend type. The
  * conversion from a storage failure into the reference's abend vocabulary belongs to the generator that
  * owns the abend code and culprit, and doing it here would put two different classes in the business of
- * naming the same failure. Where a sink closes more than one writer, a failure closing the second is
- * suppressed onto the first rather than replacing it, so the diagnostic names the failure that happened
- * first.</p>
+ * naming the same failure. Assumptions: where a sink holds more than one writer, closing them in
+ * sequence aborts every one of them, because {@code close} on a writer is specified not to throw --
+ * an abort failure is logged and swallowed there, since it leaves only uploaded parts for the
+ * bucket's incomplete-upload lifecycle rule to expire and there is nothing a caller can do about it.
+ * COMPLETION is the opposite and deliberately so: a sink completes its writers in sequence and a
+ * refused completion propagates immediately, so the second artifact is never published beside a first
+ * that failed. Trade-offs: that leaves a window one refused call wide in which the first artifact is
+ * stored and the second is not, and it stays unaddressable because the manifest write sits after both
+ * -- which is a strictly smaller exposure than publishing a matched pair of partial artifacts.</p>
  *
  * <p>Assumptions: no exception message composed here carries an object key, a bucket name, an account
  * identifier or a card number. An object key is derived from an opaque token precisely so that a storage

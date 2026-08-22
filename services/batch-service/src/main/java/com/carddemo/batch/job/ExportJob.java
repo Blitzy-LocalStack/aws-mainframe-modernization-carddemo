@@ -266,13 +266,26 @@ public class ExportJob {
     public static final String JOB_NAME = BatchJobName.EXPORT.token();
 
     /**
-     * The ledger step name, identical to the job name because this job has exactly one step.
+     * The ledger step name, the job token followed by the vocabulary's step suffix.
      *
-     * <p>Assumptions: the two are one value rather than two, because a single-step job has nothing to
-     * distinguish. The durable ledger keys on the run identifier paired with the STEP name, so a second
-     * spelling would be a second key for one unit of work.</p>
+     * <p>Refactoring Rationale: this used to be the bare job token, on the ground that a single-step job
+     * has nothing to distinguish. The ground was true and the conclusion was not: the ledger rows every
+     * job writes are read together, and an operator or a report that selects the step rows of a chain --
+     * {@code WHERE step_name LIKE '%-step'} is the obvious spelling, because five of the seven jobs were
+     * suffixed -- silently returned five of seven. A ledger key is a queried contract shared across the
+     * whole chain, so the shape that makes one job's row locally tidy is worth less than the shape that
+     * makes seven jobs' rows selectable in one predicate.</p>
+     *
+     * <p>Assumptions: it is derived from {@link BatchJobName#STEP_NAME_SUFFIX} rather than written out,
+     * for the same reason {@link #JOB_NAME} is read from the enumeration: the suffix is declared once
+     * beside the derivation {@code BatchJobName.forStepName} inverts, so a spelling written here could
+     * disagree with the rule without failing anything.</p>
+     *
+     * <p>Assumptions: the JOB token is unchanged and stays bare. It is what the orchestration passes as
+     * {@code --job=} and what the Spring Batch registry resolves, so suffixing it would break every
+     * caller; only the persisted step name gains the suffix.</p>
      */
-    public static final String STEP_NAME = JOB_NAME;
+    public static final String STEP_NAME = JOB_NAME + BatchJobName.STEP_NAME_SUFFIX;
 
     /**
      * Branch identifier stamped on every record when no override is configured, from

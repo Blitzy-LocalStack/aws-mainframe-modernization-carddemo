@@ -189,13 +189,14 @@ public class TransactionReportService {
     /**
      * Greatest number of report lines the value-composing surface will assemble in one call.
      *
-     * <p>Trade-offs: {@link #composeDetailLines} holds every line it returns in memory at once, so it
-     * is bounded and a range holding more transactions than this is refused rather than shortened. A
-     * shortened report whose grand figure covered only part of its range would reconcile against
-     * nothing, which is worse than a refusal the caller can act on. The bound belongs to that surface
-     * alone: {@link #generateReport} hands each record to a sink as it goes, exactly as the reference
-     * writes each record to a data set as it goes at L345 of {@code app/cbl/CBTRN03C.cbl}, so it holds
-     * no report in memory and needs no bound.</p>
+     * <p>Trade-offs: {@link #composeTotals} walks the whole range on a request thread, so it is bounded
+     * and a range holding more transactions than this is refused rather than shortened. A shortened
+     * report whose grand figure covered only part of its range would reconcile against nothing, which is
+     * worse than a refusal the caller can act on. The bound belongs to that surface alone:
+     * {@link #generateReport} hands each record to a sink as it goes, exactly as the reference writes
+     * each record to a data set as it goes at L345 of {@code app/cbl/CBTRN03C.cbl}, so it holds no report
+     * in memory and needs no bound, and {@link #readDetailLinePage} reads one keyset page whose cost is
+     * that page's own rows.</p>
      */
     public static final int MAX_REPORT_LINES = 10_000;
 
@@ -697,8 +698,6 @@ public class TransactionReportService {
      * @return {@code true} when the key differs from the group in progress and a new group has just
      *     been opened, {@code false} when the row continues the group in progress
      * @throws IllegalStateException if the sink cannot accept the closing band
-     * @throws ArithmeticException if the closing figure needs more than the nine integer positions its
-     *     mask provides
      */
     private boolean breakOnGroupChange(
             ReportAccumulators acc, String groupKey, ReportRecordSink sink) {
@@ -986,9 +985,13 @@ public class TransactionReportService {
      * @param acc the accumulators of this run, a {@link ReportAccumulators}; mutated in place
      * @param sink the destination each band is handed to, a {@link ReportRecordSink}, or {@code null} to
      *     accumulate and advance without emitting anything
+     * <p>Assumptions: the figure carried into the grand accumulator is the NARROWED one and not the raw
+     * page accumulator, so a page that went past nine integer positions contributes the digits its own
+     * band printed. Accumulating the raw figure and narrowing only at the band would make the grand
+     * figure disagree with the sum of the bands above it, which is the identity the shipped oracle
+     * proves.</p>
+     *
      * @throws IllegalStateException if the sink cannot accept either band
-     * @throws ArithmeticException if the page figure needs more than the nine integer positions the
-     *     total mask at L54 of {@code app/cpy/CVTRA07Y.cpy} provides
      */
     private void writePageTotals(ReportAccumulators acc, ReportRecordSink sink) {
         Money closing = requireBandMagnitude(acc.pageTotal, "page");
@@ -1034,8 +1037,6 @@ public class TransactionReportService {
      * @param sink the destination each band is handed to, a {@link ReportRecordSink}, or {@code null} to
      *     accumulate and advance without emitting anything
      * @throws IllegalStateException if the sink cannot accept either band
-     * @throws ArithmeticException if the card-break figure needs more than the nine integer positions
-     *     the total mask at L60 of {@code app/cpy/CVTRA07Y.cpy} provides
      */
     private void writeAccountTotals(ReportAccumulators acc, ReportRecordSink sink) {
         Money closing = requireBandMagnitude(acc.accountTotal, "card-break");
@@ -1070,13 +1071,12 @@ public class TransactionReportService {
      * alone here for that reason, and a step that advanced it would put this class's page arithmetic one
      * out of step with the reference's for any caller reading the counter afterwards.</p>
      *
-     * @param acc the accumulators of this run, a {@link ReportAccumulators}; read for its grand figure
-     *     and, when a band is emitted, mutated only in its record count
+     * @param acc the accumulators of this run, a {@link ReportAccumulators}; read for its grand figure,
+     *     mutated in its record count when a band is emitted, and left holding the figure this band
+     *     closed with so the value-composing surface publishes what a printed report would show
      * @param sink the destination the band is handed to, a {@link ReportRecordSink}, or {@code null} to
      *     emit nothing
      * @throws IllegalStateException if the sink cannot accept the band
-     * @throws ArithmeticException if the grand figure needs more than the nine integer positions the
-     *     total mask at L66 of {@code app/cpy/CVTRA07Y.cpy} provides
      */
     private void writeGrandTotals(ReportAccumulators acc, ReportRecordSink sink) {
         Money closing = requireBandMagnitude(acc.grandTotal, "grand");
@@ -1084,50 +1084,80 @@ public class TransactionReportService {
         if (sink != null) {
             writeReportRecord(TransactionReportMapper.encodeGrandTotal(closing), sink, acc);
         }
+
+        // WHY : Assumptions: the narrowed figure is kept on the accumulator, which is what the
+        //       value-composing surface reads for this band -- the two sibling writers keep theirs the
+        //       same way, in their own held fields, and this band has none because it closes the report
+        //       and nothing accumulates past it. Keeping it is what makes the composed band agree with
+        //       the band a report of the same range prints: the page figures folded into it are already
+        //       narrowed, so a report spanning several pages can still reach a closing figure wider than
+        //       the nine positions the published amount domain admits, and returning the unnarrowed one
+        //       would answer the caller with a figure that surface cannot serialise.
+        // WHY : Assumptions: this assignment is safe to make unconditionally because this is the LAST
+        //       band of a run -- its caller emits it after both other bands and nothing reads the
+        //       accumulator afterwards -- so it cannot feed a narrowed figure back into an arithmetic
+        //       path that would narrow it a second time.
+        acc.grandTotal = closing;
     }
 
     /**
-     * Refuses a band figure whose magnitude the reference's own total mask cannot print.
+     * Narrows a band figure to the integer positions the reference's own total mask prints.
      *
-     * <p>⚠️ Refactoring Rationale: this exists because the nine-digit bound was enforced only by the
-     * ENCODER, and the encoder runs only when a sink is present. The value-composing surface --
-     * {@link #composeTotals(LocalDate, LocalDate)} -- deliberately passes no sink, so on that path all
-     * three band figures were accumulated, captured and returned with no magnitude check at all: a range
-     * whose totals need ten integer digits produced a body that no report of the same range could be
-     * written from, and the published amount schema then had to be widened to admit it. Checking here, on
-     * the value rather than on its encoding, makes the two paths refuse exactly the same figure.
+     * <p>Purpose: the total masks at L54, L60 and L66 of {@code app/cpy/CVTRA07Y.cpy} provide nine
+     * integer positions, and a figure wider than that has to be reduced to something those nine
+     * positions can carry before either the encoder or the value-composing surface sees it. This is the
+     * one place that decision is made, so the sink path and the sinkless path publish the same figure
+     * for the same range.
      *
-     * <p>Assumptions: nine is read from {@link #REPORT_TOTAL_INTEGER_DIGITS} rather than written here, and
-     * the refusal is {@link Money#ofPicture(java.math.BigDecimal, int)} rather than a comparison against a
-     * limit. That factory is the shared kernel's own statement of what a declared picture admits, so a
-     * change to how a picture bound is enforced reaches this path with it; a local comparison would be a
-     * second, drifting statement of the same rule.
+     * <p>⚠️ Refactoring Rationale: this narrows where it used to raise, and the change of disposition
+     * is the whole point of the method now. Raising here discarded the ENTIRE report: a range whose page
+     * figure needed a tenth integer digit ended the run with no object written at all and answered the
+     * value-composing surface with an internal error, so a fortnight of transactions became
+     * unreportable because one page of it summed high. The reference does not do that. It declares its
+     * three accumulators {@code PIC S9(09)V99} at L134 to L136 of {@code app/cbl/CBTRN03C.cbl} and adds
+     * into them at L200, L201, L287 and L288 with no {@code ON SIZE ERROR} clause, so a sum too wide for
+     * nine positions loses its high-order digits and the report is written complete. The migration's own
+     * divergence register records the same disposition under {@code D-EDIT-MASK-OVERFLOW} and states
+     * that the narrowing decision belongs to the caller assembling the band, which is this method.
      *
-     * <p>Trade-offs: the sink path is now checked twice -- here and again inside the encoder that has its
-     * own mask width to honour. That duplication is deliberate rather than redundant: the encoder must
-     * refuse a figure its mask cannot hold whoever hands it one, and this method must refuse a figure this
-     * service will RETURN whether or not anything encodes it. Removing either leaves one path unchecked.
+     * <p>Assumptions: nine is read from {@link #REPORT_TOTAL_INTEGER_DIGITS} rather than written here,
+     * and the narrowing is {@link Money#narrowedToIntegerDigits(int)} rather than local arithmetic. That
+     * operation is the shared kernel's own statement of what discarding high-order digits from a signed
+     * field means -- including that the sign survives, so an over-wide credit stays a credit -- and a
+     * local remainder here would be a second, drifting statement of the same rule.
+     *
+     * <p>Trade-offs: the encoder downstream still REFUSES a figure its mask cannot hold, and that is
+     * kept rather than relaxed. The two are not the same question: a caller assembling a band is
+     * entitled to decide what an over-wide figure should show, and an encoder handed a figure it cannot
+     * print has no such decision available to it and must not silently emit a mask-width lie. Because
+     * this method narrows first, the encoder's refusal is now unreachable from these three call sites,
+     * which is the correct relationship between a policy and a guard.
+     *
+     * <p>Assumptions: the journal event names the BAND and the digit count and never the amount. The
+     * figure is a sum of cardholder transaction amounts, so an event quoting it would disclose one; what
+     * an operator needs is which of the three arithmetic paths went over, which cannot be worked out
+     * afterwards from the artifact.
      *
      * @param figure the band figure just closed; must not be {@code null}
-     * @param band the band's name, used only in the refusal message so a reader learns which of the three
-     *     overflowed
-     * @return {@code figure} unchanged, so the call reads as a pass-through at its use sites
-     * @throws ArithmeticException if the magnitude needs more than {@link #REPORT_TOTAL_INTEGER_DIGITS}
-     *     integer positions, which the total masks at L54, L60 and L66 of
-     *     {@code app/cpy/CVTRA07Y.cpy} cannot print
+     * @param band the band's name, used only in the journal event so a reader learns which of the three
+     *     narrowed
+     * @return {@code figure} unchanged when its magnitude already fits
+     *     {@link #REPORT_TOTAL_INTEGER_DIGITS} integer positions, otherwise the same figure with its
+     *     high-order digits discarded and its sign and cents intact
      */
     private static Money requireBandMagnitude(Money figure, String band) {
-        try {
-            return Money.ofPicture(figure.amount(), REPORT_TOTAL_INTEGER_DIGITS);
-        } catch (ArithmeticException overflow) {
-            // WHY : Assumptions: the message names the BAND and not the amount. The figure is a sum of
-            //       cardholder transaction amounts, so quoting it in a message that reaches a log would
-            //       disclose one; the band tells a reader which of the three arithmetic paths overflowed,
-            //       which is the part that cannot be worked out afterwards.
-            throw new ArithmeticException("the " + band + " total needs more than "
-                    + REPORT_TOTAL_INTEGER_DIGITS + " integer digits, which the report total mask of"
-                    + " app/cpy/CVTRA07Y.cpy cannot print");
+        Money narrowed = figure.narrowedToIntegerDigits(REPORT_TOTAL_INTEGER_DIGITS);
+        // WHY : Assumptions: identity is what distinguishes a narrowing that happened from one that did
+        //       not, because the narrowing operation returns the receiver unchanged when the figure
+        //       already fits. Comparing values instead would report no event for the one figure that
+        //       narrows to exactly itself, and comparing nothing at all would journal a warning for
+        //       every band of every report.
+        if (narrowed != figure) {
+            LOG.warn("event=report.total.narrowed band={} integerDigits={} outcome=high-order-digits-"
+                            + "discarded",
+                    band, REPORT_TOTAL_INTEGER_DIGITS);
         }
+        return narrowed;
     }
 
     /**
@@ -1213,9 +1243,19 @@ public class TransactionReportService {
      * dimension between two pages go unreported, and the reference has no notion of a first page to
      * privilege.</p>
      *
-     * <p>Assumptions: the range bound is still enforced, because a caller may page through a range and
-     * the bound is a statement about how much of a range this class is willing to serve at all rather
-     * than about one page.</p>
+     * <p>⚠️ Refactoring Rationale: this reconciles the dimensions DIRECTLY and no longer goes through
+     * {@link #requireAssemblableRange}, because that helper carries a second obligation this path must
+     * not inherit. It reconciles and then caps the range at {@value #MAX_REPORT_LINES} rows, and the cap
+     * is a statement about how much of a range can be ASSEMBLED IN MEMORY on a request thread -- which
+     * is what {@link #composeTotals(LocalDate, LocalDate)} does and what this method exists in order not
+     * to do. Applying it here refused a range on the ground that it was too wide to read a bounded page
+     * of: a range holding twelve thousand transactions could be streamed to an object in full by the
+     * generating path, yet could not be read twenty rows at a time by the paging path, and the caller
+     * was told its end date was invalid. A page's cost is its own row count and its anchor's index seek,
+     * neither of which grows with the range, so there is nothing here for a whole-range cap to bound.
+     * The reconciliation is kept in full: it is the migrated form of three reference lookup paragraphs
+     * that abend on a miss, so it is a parity obligation rather than a size limit, and it runs on every
+     * page for the reason stated above.
      *
      * @param rangeStart the first business date to cover, inclusive, a {@link LocalDate}; must not be
      *     {@code null}
@@ -1230,8 +1270,8 @@ public class TransactionReportService {
      *     {@code null}
      * @return one bounded page of detail lines with its two sealed boundaries; never {@code null}
      * @throws NullPointerException if either bound or {@code sealer} is {@code null}
-     * @throws ClientInputException if either bound is absent, if the range is inverted, or if the range
-     *     holds more transactions than this class is willing to serve
+     * @throws ClientInputException if either bound is absent or if the range is inverted; the range's
+     *     width is not a ground for refusal on this path, however wide it is
      * @throws IllegalArgumentException if a backward page is requested with no cursor key
      * @throws IllegalStateException if a transaction in the range does not resolve to exactly one of each
      *     dimension, which is the target's equivalent of the reference abending on an unresolved lookup
@@ -1253,7 +1293,11 @@ public class TransactionReportService {
                     "a backward page is taken from the first row of the window the caller holds, so it"
                             + " cannot be requested without a cursor");
         }
-        requireAssemblableRange(rangeStart, rangeEnd);
+        // WHY : Assumptions: the reconciliation's returned driving count is deliberately discarded here.
+        //       It is the number the whole-range cap is compared against, and this path has no cap; what
+        //       this call is wanted for is its refusal, which fires when a transaction in the range does
+        //       not resolve to exactly one of each dimension.
+        reconcileDimensionIntegrity(rangeStart, rangeEnd);
 
         PageResponse<TransactionReportRepository.ReportLine> page = backward
                 ? reports.readPreviousReportLines(
@@ -1315,6 +1359,14 @@ public class TransactionReportService {
      * concurrent load. The reconciliation is also the migrated form of the three lookup paragraphs of
      * {@code app/cbl/CBTRN03C.cbl}, each of which abends on a miss, so a range that fails it must not be
      * served at all.</p>
+     *
+     * <p>⚠️ Assumptions: this guard belongs to the ASSEMBLING path alone -- to
+     * {@link #composeTotals(LocalDate, LocalDate)}, which runs the accumulation engine over the whole
+     * range on a request thread. The cap is what bounds that walk, so it stays here and must not be
+     * relaxed. It is deliberately NOT applied by {@link #readDetailLinePage}, whose cost is the page it
+     * was asked for and whose reconciliation is therefore called directly; the rationale for that split
+     * is recorded at that method. A caller wanting both obligations on a new path should call this one,
+     * and a caller wanting only the parity obligation should call the reconciliation directly.</p>
      *
      * @param rangeStart the first business date, inclusive; must not be {@code null}
      * @param rangeEnd the last business date, inclusive; must not be {@code null}
@@ -1387,8 +1439,6 @@ public class TransactionReportService {
      *     willing to assemble
      * @throws IllegalStateException if a transaction in the range does not resolve to exactly one of each
      *     dimension, which is the target's equivalent of the reference abending on an unresolved lookup
-     * @throws ArithmeticException if one of the three figures needs more than the nine integer positions
-     *     the total masks at L54, L60 and L66 of {@code app/cpy/CVTRA07Y.cpy} provide
      */
     @Transactional(readOnly = true)
     public List<ReportTotalsResponse> composeTotals(LocalDate rangeStart, LocalDate rangeEnd) {

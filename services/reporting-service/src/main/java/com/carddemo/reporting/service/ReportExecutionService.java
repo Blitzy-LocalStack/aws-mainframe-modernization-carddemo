@@ -7,6 +7,7 @@ import com.carddemo.common.time.TimestampFormatter;
 import com.carddemo.common.validation.DateEditValidator;
 import com.carddemo.common.validation.DateEditValidator.LanguageEnvironmentResult;
 import com.carddemo.common.validation.FieldValidationFlag;
+import com.carddemo.common.web.CorrelationIdFilter;
 import com.carddemo.reporting.dto.ReportRequest;
 import com.carddemo.reporting.dto.ReportSubmissionResponse;
 import com.carddemo.reporting.mapper.ReportBandLayouts;
@@ -27,6 +28,7 @@ import java.util.UUID;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import software.amazon.awssdk.core.exception.SdkException;
@@ -315,6 +317,74 @@ public class ReportExecutionService {
             "End Date - Month can NOT be empty...";
 
     /**
+     * Verbatim sentence the reference emits when the start bound's month component is out of range.
+     *
+     * <p>Assumptions: reproduced character for character from L331 of {@code app/cbl/CORPT00C.cbl}.
+     * The six sentences declared here are the reference's COMPONENT-RANGE tier, which sits between
+     * the blank tier above and the assembled tier below: the reference tests them at L328 to L379,
+     * one arm per component, and each arm sends the screen and returns, so exactly one of the
+     * fourteen date sentences reaches an operator per turn.</p>
+     *
+     * <p>Assumptions: the range test the reference writes for a month is
+     * {@code NOT NUMERIC OR > '12'} at L329 and L330, an alphanumeric comparison against a
+     * two-character literal. On a two-digit numeric component that comparison and an integer
+     * comparison agree, which is why {@link #HIGHEST_MONTH_ORDINAL} below is compared numerically.
+     * What it does NOT test is a low value: a month of {@code 00} is numeric and is not greater than
+     * twelve, so it passes this tier and is refused by the assembled tier instead. That asymmetry is
+     * the reference's own and is carried rather than tidied.</p>
+     */
+    public static final String MESSAGE_START_DATE_MONTH_INVALID =
+            "Start Date - Not a valid Month...";
+
+    /**
+     * Verbatim sentence the reference emits when the start bound's day component is out of range.
+     *
+     * <p>Assumptions: reproduced character for character from L340 of {@code app/cbl/CORPT00C.cbl}.
+     * The reference's test is {@code NOT NUMERIC OR > '31'} at L338 and L339, so a day of
+     * {@code 00}, and a day of {@code 31} in a thirty-day month, both pass this tier and are refused
+     * by the assembled tier.</p>
+     */
+    public static final String MESSAGE_START_DATE_DAY_INVALID =
+            "Start Date - Not a valid Day...";
+
+    /**
+     * Verbatim sentence the reference emits when the start bound's year component is not numeric.
+     *
+     * <p>Assumptions: reproduced character for character from L348 of {@code app/cbl/CORPT00C.cbl}.
+     * The reference's test is {@code NOT NUMERIC} alone at L347, with no upper or lower bound, so a
+     * year of {@code 0000} passes this tier and is refused by the assembled tier.</p>
+     */
+    public static final String MESSAGE_START_DATE_YEAR_INVALID =
+            "Start Date - Not a valid Year...";
+
+    /**
+     * Verbatim sentence the reference emits when the end bound's month component is out of range.
+     *
+     * <p>Assumptions: reproduced character for character from L357 of {@code app/cbl/CORPT00C.cbl},
+     * being the fourth arm of the component tier and the first one that concerns the end bound.</p>
+     */
+    public static final String MESSAGE_END_DATE_MONTH_INVALID =
+            "End Date - Not a valid Month...";
+
+    /**
+     * Verbatim sentence the reference emits when the end bound's day component is out of range.
+     *
+     * <p>Assumptions: reproduced character for character from L366 of
+     * {@code app/cbl/CORPT00C.cbl}.</p>
+     */
+    public static final String MESSAGE_END_DATE_DAY_INVALID =
+            "End Date - Not a valid Day...";
+
+    /**
+     * Verbatim sentence the reference emits when the end bound's year component is not numeric.
+     *
+     * <p>Assumptions: reproduced character for character from L374 of
+     * {@code app/cbl/CORPT00C.cbl}.</p>
+     */
+    public static final String MESSAGE_END_DATE_YEAR_INVALID =
+            "End Date - Not a valid Year...";
+
+    /**
      * Verbatim sentence the reference emits when the assembled start bound fails the date edit.
      *
      * <p>Assumptions: reproduced character for character from L400 of {@code app/cbl/CORPT00C.cbl}.
@@ -363,15 +433,98 @@ public class ReportExecutionService {
      */
     private static final int MONTHS_IN_YEAR = 12;
 
+    // Assumptions: the six offsets below are the reference's OWN group layout and not a reading of
+    //     the ISO form. app/cbl/CORPT00C.cbl declares WS-START-DATE at L60 to L65 as a four-
+    //     character year, a hyphen filler, a two-character month, a second hyphen filler and a
+    //     two-character day, and declares WS-END-DATE identically at L66 to L71 -- which puts the
+    //     year at positions 0 through 3, the month at 5 and 6 and the day at 8 and 9 of the ten
+    //     positions WS-DATE-FORMAT names at L72. The two hyphen fillers occupy positions 4 and 7 and
+    //     are dropped from the component reading, as transformation rule T1 requires of a dropped
+    //     filler item. Their positions are not TESTED here, and the reason is that no test is needed
+    //     for the sentence to stay in the reference's catalogue: a bound whose separators sit
+    //     elsewhere makes one of the three slices read characters that are not its own, so it is
+    //     refused either by the component tier -- when that slice is non-numeric or out of range --
+    //     or by the assembled edit, which reads the same ten-position mask. Both answers are
+    //     reference sentences. The reference itself cannot reach the condition at all, because its
+    //     two hyphens are literal filler values in the group.
+    /**
+     * Index of the first character of the four-character year component.
+     */
+    private static final int YEAR_COMPONENT_BEGIN = 0;
+
+    /**
+     * Index one past the last character of the year component.
+     */
+    private static final int YEAR_COMPONENT_END = 4;
+
+    /**
+     * Index of the first character of the two-character month component.
+     */
+    private static final int MONTH_COMPONENT_BEGIN = 5;
+
+    /**
+     * Index one past the last character of the month component.
+     */
+    private static final int MONTH_COMPONENT_END = 7;
+
+    /**
+     * Index of the first character of the two-character day component.
+     */
+    private static final int DAY_COMPONENT_BEGIN = 8;
+
+    /**
+     * Index one past the last character of the day component.
+     */
+    private static final int DAY_COMPONENT_END = 10;
+
+    /**
+     * Highest month ordinal the reference's component tier admits.
+     *
+     * <p>Assumptions: the value is the literal {@code '12'} the reference compares against at L330
+     * and L356 of {@code app/cbl/CORPT00C.cbl}, and it is an inclusive ceiling because the
+     * comparison there is a strict {@code >}.</p>
+     */
+    private static final int HIGHEST_MONTH_ORDINAL = 12;
+
+    /**
+     * Highest day ordinal the reference's component tier admits.
+     *
+     * <p>Assumptions: the value is the literal {@code '31'} the reference compares against at L339
+     * and L365, applied without regard to the month, which is why a thirty-first of April clears
+     * this tier and is refused by the assembled tier.</p>
+     */
+    private static final int HIGHEST_DAY_ORDINAL = 31;
+
+    /**
+     * Highest value four decimal digits can express, used as the year component's unreachable
+     * ceiling.
+     *
+     * <p>Assumptions: this is the whole four-digit domain and not a chosen limit. The reference's
+     * year arm at L347 and L373 of {@code app/cbl/CORPT00C.cbl} tests numerity alone with no
+     * comparison beside it, so the component test needs a ceiling no four-character numeric value can
+     * exceed in order to reduce to that same test.</p>
+     */
+    private static final int HIGHEST_FOUR_DIGIT_VALUE = 9999;
+
     /**
      * Request field naming the lower bound of a custom range.
+     *
+     * <p>Assumptions: this constant is the identity a refusal names, and it is deliberately the
+     * same string as {@code ReportArtifactLocator.START_DATE_PARAMETER} and as the query parameter
+     * the two read operations publish. One spelling for the bound across every surface is what lets
+     * {@link #editStatedBound(String, String)} select the reference's start-bound sentence for a
+     * bound that arrived on any of them; a surface that named the bound differently would be
+     * answered with the END-bound sentence, silently.</p>
      */
-    private static final String START_DATE_FIELD = "startDate";
+    public static final String START_DATE_FIELD = "startDate";
 
     /**
      * Request field naming the upper bound of a custom range.
+     *
+     * <p>Assumptions: paired with {@link #START_DATE_FIELD} above, and public for the same
+     * reason.</p>
      */
-    private static final String END_DATE_FIELD = "endDate";
+    public static final String END_DATE_FIELD = "endDate";
 
     /**
      * Request field naming the report-type selection as a whole.
@@ -405,6 +558,32 @@ public class ReportExecutionService {
      * Execution-input member naming the upper bound of the range a run covers.
      */
     private static final String INPUT_END_DATE_MEMBER = "endDate";
+
+    /**
+     * Execution-input member carrying the correlation identity of the request that started a run.
+     *
+     * <p>Refactoring Rationale: this member is ADDED to an input that carried the report type and the
+     * two bounds and nothing else, so the correlation identity did not cross the asynchronous
+     * boundary at all. It was present on the request, in every log line the request emitted and on
+     * the response header, and then stopped: a submitted execution's stored input named the report
+     * and the range but not the request that ordered it, so an operator holding a correlation
+     * identity from a caller's incident could not reach the run, and an operator holding a run could
+     * not reach the request. Both directions are recoverable from one member.</p>
+     *
+     * <p>Assumptions: adding a member is compatible with the deployed orchestration and needs no
+     * infrastructure change, which is why it can be a member rather than a redesign. The ad-hoc state
+     * machine in {@code infra/modules/step-functions-batch} branches on the report type alone and
+     * formats its container command from the three members above, so an input member it does not name
+     * is carried with the execution and read by nothing.</p>
+     *
+     * <p>Alternatives Considered: the execution's own trace header, which is the field a tracing
+     * value looks like it belongs in. Rejected because that field is constrained to the distributed
+     * tracing form -- a root identifier with its own prefix and layout -- and a correlation identity
+     * from {@link CorrelationIdFilter} is not one, so a well-formed identity would be refused by the
+     * orchestrator and the submission it accompanied would fail. The member carries the same value
+     * with no shape it does not satisfy.</p>
+     */
+    private static final String INPUT_CORRELATION_ID_MEMBER = "correlationId";
 
     /**
      * The sentence the reference displays when no report type was marked.
@@ -832,9 +1011,12 @@ public class ReportExecutionService {
      * <p>Alternatives Considered: taking the six components as six parameters so that a refusal could
      * name the individual component at fault, as the baseline does when it positions the cursor on
      * the month component at L403 and L423. Rejected because the bounds cross the service boundary as
-     * assembled values and re-splitting them here would invent a component identity the request never
-     * carried; the refusal names the bound instead, which is the field a client can actually
-     * correct.</p>
+     * assembled values and widening the request to six members would invent a request shape the
+     * published contract does not have. The component identity is recovered a different way instead:
+     * an assembled ISO bound always carries all three components, so
+     * {@link #editStatedBound(String, String)} reads the three slices back out of the ten characters
+     * and reports the reference's component sentence, while the refusal's FIELD stays the bound --
+     * the one identity a client can correct and the only one the contract publishes.</p>
      *
      * @param request the report request carrying the two assembled bounds; must not be {@code null}
      * @return the inclusive pair the request stated; never {@code null}
@@ -842,8 +1024,15 @@ public class ReportExecutionService {
      *     if the upper bound falls below the lower bound
      */
     private DateRange resolveCustomRange(ReportRequest request) {
-        LocalDate start = requireEditedBound(request.startDate(), START_DATE_FIELD);
-        LocalDate end = requireEditedBound(request.endDate(), END_DATE_FIELD);
+        // WHY : Refactoring Rationale: the pair is edited TIER BY TIER rather than bound by bound, and
+        //       the paired method carries the reason. Editing the lower bound to completion first
+        //       refused a request stating 2022-02-30 and 2022-13-15 on the LOWER bound under the
+        //       assembled sentence, where app/cbl/CORPT00C.cbl refuses it on the UPPER bound at L355:
+        //       its component arms for both bounds run before either assembled edit at L399 and L419.
+        DateRange editedBounds = editStatedBounds(request.startDate(), request.endDate(),
+                START_DATE_FIELD, END_DATE_FIELD);
+        LocalDate start = editedBounds.start();
+        LocalDate end = editedBounds.end();
 
         // WHY : Alternatives Considered: leaving the ordering of the two bounds to
         //       TransactionReportService, which already refuses an inverted range on entry to its
@@ -862,7 +1051,23 @@ public class ReportExecutionService {
     }
 
     /**
-     * Puts one bound through the shared date edit, honouring the tolerance this caller applies.
+     * Puts one stated bound through the reference's whole date edit, honouring this caller's
+     * tolerance.
+     *
+     * <p>Refactoring Rationale: this method is PUBLIC and is the single edit every report surface
+     * applies to a date bound, where it was private and served the submission alone. The two read
+     * operations and the artifact collection each parsed their two bounds with a bare calendar parse,
+     * so the three surfaces disagreed about the same value: a bound of {@code 0000-01-01} was refused
+     * on submission -- the shared edit reports an era-zero year -- and accepted by both reads, which
+     * answered rows for a range the same service had just declared unusable. One entry point removes
+     * the disagreement by construction rather than by keeping three implementations in step.</p>
+     *
+     * <p>Assumptions: the acceptance this method applies is UNCHANGED by that widening, and
+     * deliberately so. It still forgives the unsupported-range outcome, which is what the reference
+     * does at L399 and L419 of {@code app/cbl/CORPT00C.cbl}, so a well-formed calendar date below the
+     * supported calendar floor is accepted on every surface exactly as the reference accepts it.
+     * Introducing a floor here would refuse a bound the reference processes and would change
+     * behaviour where transformation rule T9 admits only a change of structure.</p>
      *
      * <p>Refactoring Rationale: the edit itself is DELEGATED and not transcribed here.
      * {@code app/cbl/CORPT00C.cbl} does not implement its own date rules either: it calls the
@@ -892,15 +1097,78 @@ public class ReportExecutionService {
      * down into the shared validator would therefore relax every other caller, and dropping it here
      * would refuse a bound the baseline accepts.</p>
      *
-     * @param bound the bound as the request stated it, which may be {@code null} or unsupplied
-     * @param field the request field the bound came from, used to name a refusal against the field a
-     *     client can correct
+     * @param bound the bound as the caller stated it, which may be {@code null} or unsupplied
+     * @param field the field or query parameter the bound came from, used to name a refusal against
+     *     the identity a client can correct; pass {@link #START_DATE_FIELD} for a lower bound and
+     *     {@link #END_DATE_FIELD} for an upper one, because the sentence selected depends on which
+     *     end of the range is being reported
      * @return the bound as a calendar date; never {@code null}
      * @throws ClientInputException if the bound is unsupplied, is not the ten-character width the
-     *     mask declares, or is rejected by the shared edit with a severity this caller does not
-     *     forgive
+     *     mask declares, carries a month, day or year component outside the reference's component
+     *     range, or is rejected by the shared edit with a severity this caller does not forgive
      */
-    private static LocalDate requireEditedBound(String bound, String field) {
+    public static LocalDate editStatedBound(String bound, String field) {
+        requireStatableBound(bound, field);
+        requireComponentsInRange(bound, field);
+        return requireAssembledBound(bound, field);
+    }
+
+    /**
+     * Applies the reference's three date-edit tiers to BOTH bounds of a range, tier by tier.
+     *
+     * <p>Purpose: {@link #editStatedBound(String, String)} edits one bound completely, which is the
+     * wrong order for a pair. The reference evaluates each TIER across both bounds before opening the
+     * next: {@code app/cbl/CORPT00C.cbl} runs its six emptiness arms at L258 to L299, then its six
+     * component arms at L331 to L374, and only then the assembled edit -- for the lower bound at L399
+     * and for the upper bound at L419. Editing the lower bound to completion first inverts that for one
+     * reachable class of input. A request stating {@code 2022-02-30} as its lower bound and
+     * {@code 2022-13-15} as its upper is refused by the reference on the UPPER bound, because that
+     * bound's month fails a component arm before either assembled edit is reached, whereas editing the
+     * lower bound to completion refuses it on the LOWER bound under the assembled sentence. Both name a
+     * real fault and only one sentence ever reaches a caller either way, so the divergence is in WHICH of
+     * two simultaneous faults is named -- which is exactly the kind of observable difference
+     * transformation rule T9 does not admit.</p>
+     *
+     * <p>Assumptions: within each tier the lower bound is evaluated before the upper, which is the
+     * reference's order inside both of its own tiers -- start month, start day, start year, then end
+     * month, end day, end year, in the emptiness arms and again in the component arms.</p>
+     *
+     * <p>Assumptions: the range's own ordering is NOT checked here. Whether an upper bound may precede a
+     * lower one is a property of the operation asking rather than of the bounds, so imposing it here
+     * would decide it for every caller of this method at once.</p>
+     *
+     * @param startBound the lower bound as the caller stated it, which may be {@code null} or unsupplied
+     * @param endBound the upper bound as the caller stated it, which may be {@code null} or unsupplied
+     * @param startField the field or query parameter the lower bound came from, used to name a refusal
+     *     against an identity a client can correct
+     * @param endField the field or query parameter the upper bound came from
+     * @return both bounds as calendar dates, in the order stated; never {@code null}
+     * @throws ClientInputException if either bound is unsupplied, is not the ten-character width the mask
+     *     declares, carries a month, day or year component outside the reference's component range, or is
+     *     rejected by the shared edit with a severity this caller does not forgive
+     */
+    public static DateRange editStatedBounds(String startBound, String endBound,
+            String startField, String endField) {
+        requireStatableBound(startBound, startField);
+        requireStatableBound(endBound, endField);
+        requireComponentsInRange(startBound, startField);
+        requireComponentsInRange(endBound, endField);
+        return new DateRange(requireAssembledBound(startBound, startField),
+                requireAssembledBound(endBound, endField));
+    }
+
+    /**
+     * Refuses a bound that was never supplied or cannot be ten characters wide.
+     *
+     * <p>Assumptions: this is the first of the reference's tiers and it is separated from the other two
+     * so {@link #editStatedBounds(String, String, String, String)} can run it across both bounds before
+     * opening the next. Neither test changed in being named.</p>
+     *
+     * @param bound the bound as the caller stated it, which may be {@code null} or unsupplied
+     * @param field the field or query parameter the bound came from
+     * @throws ClientInputException if the bound is unsupplied or is not the width the mask declares
+     */
+    private static void requireStatableBound(String bound, String field) {
         if (FieldValidationFlag.isNeverSupplied(bound)) {
             // WHY : Refactoring Rationale: the sentence is the reference's MONTH-component blank
             //       message, and an earlier revision emitted a target-authored one naming the request
@@ -949,6 +1217,73 @@ public class ReportExecutionService {
                     invalidDateMessage(field));
         }
 
+        // WHY : Refactoring Rationale: the reference's COMPONENT tier is applied here, where an
+        //       earlier revision went straight from the width test to the assembled edit. Ten of the
+        //       reference's fourteen date sentences were unreachable in consequence: every one of the
+        //       eight distinct faults a caller can state -- a month of 13 or 00, a day of 32 or 00, a
+        //       year of 0000, and the three impossible calendar days 02-30, 04-31 and a non-leap
+        //       02-29 -- was answered with the single assembled sentence, while the contract
+        //       published all fourteen as the catalogue this operation may carry. Six of the ten are
+        //       recoverable and are recovered here; the four that are not are recorded as
+        //       D-REPORT-DATE-MESSAGE-REACH in docs/architecture/cobol-to-service-traceability.md
+        //       rather than left for a reader to discover from the catalogue.
+        // WHY : Assumptions: the tier is applied in the reference's own order -- month, then day,
+        //       then year, at L328, L338 and L346 for the start bound and L355, L364 and L372 for the
+        //       end -- and the FIRST arm that matches raises. That is the reference's control flow
+        //       too: each of its arms performs SEND-TRNRPT-SCREEN, whose last statement is
+        //       GO TO RETURN-TO-CICS, so exactly one sentence reaches an operator per turn and it is
+        //       the first fault in tier order rather than the last.
+        // WHY : Trade-offs: the tier is deliberately NOT strengthened past what the reference tests.
+        //       A month of 00, a day of 00 and a year of 0000 all clear it, because the reference's
+        //       arms test a strict upper bound and numerity and nothing else; each of those three is
+        //       then refused by the assembled edit under the assembled sentence. Adding a lower bound
+        //       here would read better and would move three inputs onto a different one of the
+        //       reference's own sentences, which transformation rule T9 does not admit.
+    }
+
+    /**
+     * Refuses a bound whose month, day or year component falls outside the reference's component range.
+     *
+     * <p>Assumptions: this is the second of the reference's tiers, separated from the first and third so
+     * a caller holding both bounds can run it across both before either assembled edit. The arms, their
+     * order and the sentence each selects are unchanged.</p>
+     *
+     * @param bound the bound as the caller stated it, already known to be the declared width
+     * @param field the field or query parameter the bound came from
+     * @throws ClientInputException if the month, day or year component is outside the reference's range
+     */
+    private static void requireComponentsInRange(String bound, String field) {
+        requireComponentInRange(bound, field, MONTH_COMPONENT_BEGIN, MONTH_COMPONENT_END,
+                HIGHEST_MONTH_ORDINAL, invalidMonthMessage(field));
+        requireComponentInRange(bound, field, DAY_COMPONENT_BEGIN, DAY_COMPONENT_END,
+                HIGHEST_DAY_ORDINAL, invalidDayMessage(field));
+        // WHY : Assumptions: the year arm passes the highest four-digit value as its ceiling, which
+        //       makes the ceiling unreachable and leaves numerity as the whole of the test. That is
+        //       what the reference writes: its year arm at L347 is IS NOT NUMERIC with no comparison
+        //       beside it, unlike the two arms above. Passing an unreachable ceiling rather than
+        //       adding a second, ceiling-free helper keeps one component test for all three
+        //       components, and the ceiling is stated as a constant so a reader can see it is the
+        //       whole four-digit domain rather than a chosen limit.
+        requireComponentInRange(bound, field, YEAR_COMPONENT_BEGIN, YEAR_COMPONENT_END,
+                HIGHEST_FOUR_DIGIT_VALUE, invalidYearMessage(field));
+
+    }
+
+    /**
+     * Puts a bound through the shared date edit and converts it, forgiving only what the reference does.
+     *
+     * <p>Assumptions: this is the third and last of the reference's tiers, separated from the first two
+     * so a caller holding both bounds reaches it for neither bound until the component tier has passed
+     * for both. The acceptance disjunction, the tolerance it carries and the conversion are unchanged.</p>
+     *
+     * @param bound the bound as the caller stated it, already known to be the declared width and to
+     *     carry components inside the reference's range
+     * @param field the field or query parameter the bound came from
+     * @return the bound as a calendar date; never {@code null}
+     * @throws ClientInputException if the shared edit rejects the bound with a severity this caller does
+     *     not forgive
+     */
+    private static LocalDate requireAssembledBound(String bound, String field) {
         LanguageEnvironmentResult edited = DateEditValidator.evaluateWithLanguageEnvironment(
                 bound, DateEditValidator.DATE_FORMAT_MASK);
 
@@ -998,6 +1333,103 @@ public class ReportExecutionService {
         return START_DATE_FIELD.equals(field)
                 ? MESSAGE_START_DATE_MONTH_EMPTY
                 : MESSAGE_END_DATE_MONTH_EMPTY;
+    }
+
+    /**
+     * Applies one arm of the reference's component-range tier to one slice of an assembled bound.
+     *
+     * <p>Assumptions: the two conditions this method tests are exactly the two the reference's arms
+     * write, in the reference's order: {@code NOT NUMERIC} first and a strict comparison against an
+     * inclusive ceiling second. Numerity is decided by inspecting each character rather than by
+     * catching a conversion failure, because a conversion would also accept a leading sign or a
+     * surrounding blank -- forms the reference's own {@code IS NOT NUMERIC} class test rejects on a
+     * display item -- and would therefore admit values the reference's arm refuses.</p>
+     *
+     * <p>Alternatives Considered: writing the three arms out inline at the call site, which is what
+     * the reference does across L328 to L379. Rejected because the three differ only in the slice
+     * they read, the ceiling they compare against and the sentence they carry, so inline arms would
+     * repeat one condition three times and let a later reader change one copy; the reference repeats
+     * them because it has no other option on a screen field, not because the repetition carries
+     * meaning.</p>
+     *
+     * @param bound the whole ten-character bound, already established at that width
+     * @param field the field or query parameter the bound arrived on, used to name the refusal
+     * @param begin index of the component's first character within the bound
+     * @param end index one past the component's last character
+     * @param highestAdmitted the greatest value the component may hold, inclusive
+     * @param message the reference's verbatim sentence for this component of this bound
+     * @throws ClientInputException if the component is not wholly numeric or exceeds the ceiling
+     */
+    private static void requireComponentInRange(String bound, String field, int begin, int end,
+            int highestAdmitted, String message) {
+
+        // WHY : Assumptions: numerity is tested against the ASCII digits explicitly and NOT with the
+        //       character class the platform offers, which would also admit a decimal digit from
+        //       another script. The reference's IS NOT NUMERIC on a display item admits the ten
+        //       characters zero through nine and nothing else, so admitting more here would accept a
+        //       bound the reference refuses; and the conversion below would compound it, because the
+        //       platform's integer parse reads those other scripts' digits as values, so a bound
+        //       spelled in one would clear both tests and reach the assembled edit.
+        String component = bound.substring(begin, end);
+        for (int index = 0; index < component.length(); index++) {
+            char digit = component.charAt(index);
+            if (digit < '0' || digit > '9') {
+                throw new ClientInputException(ApiError.CODE_VALIDATION, field, message);
+            }
+        }
+
+        // WHY : Assumptions: the comparison is numeric where the reference's is alphanumeric, and the
+        //       two agree on every value that reaches it. The reference compares a two-character
+        //       display item against a two-character literal, which for two digit characters orders
+        //       the same way the integers do; the loop above has already established that every
+        //       character is a digit, so no non-digit can reach a comparison whose orderings would
+        //       differ. Converting is preferred to comparing strings because the year arm's ceiling
+        //       is four digits wide and a string comparison against it would silently depend on the
+        //       slice and the literal being the same width.
+        if (Integer.parseInt(component) > highestAdmitted) {
+            throw new ClientInputException(ApiError.CODE_VALIDATION, field, message);
+        }
+    }
+
+    /**
+     * Selects the reference's invalid-month sentence for whichever bound carries the fault.
+     *
+     * <p>Assumptions: the three selectors below follow {@link #blankMonthMessage(String)} in holding
+     * whole strings rather than composing a shared tail from a leading word, for the same reason: the
+     * reference writes six separate MOVE literals at L331, L340, L348, L357, L366 and L374 of
+     * {@code app/cbl/CORPT00C.cbl}, and a composed sentence would let one of the six drift.</p>
+     *
+     * @param field the field or query parameter the bound arrived on, one of the two range bounds
+     * @return the reference's sentence for an out-of-range month of that end; never {@code null}
+     */
+    private static String invalidMonthMessage(String field) {
+        return START_DATE_FIELD.equals(field)
+                ? MESSAGE_START_DATE_MONTH_INVALID
+                : MESSAGE_END_DATE_MONTH_INVALID;
+    }
+
+    /**
+     * Selects the reference's invalid-day sentence for whichever bound carries the fault.
+     *
+     * @param field the field or query parameter the bound arrived on, one of the two range bounds
+     * @return the reference's sentence for an out-of-range day of that end; never {@code null}
+     */
+    private static String invalidDayMessage(String field) {
+        return START_DATE_FIELD.equals(field)
+                ? MESSAGE_START_DATE_DAY_INVALID
+                : MESSAGE_END_DATE_DAY_INVALID;
+    }
+
+    /**
+     * Selects the reference's invalid-year sentence for whichever bound carries the fault.
+     *
+     * @param field the field or query parameter the bound arrived on, one of the two range bounds
+     * @return the reference's sentence for a non-numeric year of that end; never {@code null}
+     */
+    private static String invalidYearMessage(String field) {
+        return START_DATE_FIELD.equals(field)
+                ? MESSAGE_START_DATE_YEAR_INVALID
+                : MESSAGE_END_DATE_YEAR_INVALID;
     }
 
     /**
@@ -1075,6 +1507,23 @@ public class ReportExecutionService {
      * nothing; those three documents together are the whole of this method's deduplication
      * behaviour.</p>
      *
+     * <p>Assumptions: every outcome of this method is journalled, and the three records together are
+     * the whole operational account of a submission: {@code report.submission.accepted} at
+     * information level for a run that was started, {@code report.submission.deduplicated} at the
+     * same level for a retry folded onto the run it was retrying, and a refusal at error level
+     * carrying the failure digest for a start the orchestrator declined. The two information records
+     * carry the same five fields in the same order -- the report name, both bounds, the submission
+     * key and the execution name -- so one query returns both and a retry can be read against the run
+     * it joined; the refusal carries the report name, both bounds and the digest, because no
+     * execution exists to name. The correlation identity is not a field of any of them because the
+     * logging context already carries it on every line.</p>
+     *
+     * <p>Assumptions: the correlation identity of the request additionally travels INTO the execution
+     * as the fourth input member, which is what makes the run reachable from a caller's identity after
+     * the request that ordered it has ended. See {@link #INPUT_CORRELATION_ID_MEMBER} for why a
+     * member rather than a trace header, and {@link #correlationIdForExecutionInput()} for what
+     * happens when there is no request context.</p>
+     *
      * @param request the confirmed report request; must not be {@code null}
      * @param reportName the resolved report name, as {@link #resolveReportName(ReportRequest)}
      *     returns it; must not be {@code null}
@@ -1133,17 +1582,30 @@ public class ReportExecutionService {
         String endDate = rangeEnd.toString();
 
         // WHY : Alternatives Considered: assembling this input through a serialisation mapper rather
-        //       than by concatenation. Rejected because all 3 values are scalars this method has
-        //       already established -- a report name drawn from the 3 constants above and 2 bounds
-        //       each rendered from a calendar date into 10 characters -- so none of them can carry a
-        //       character a mapper would shape differently, while routing them through one would put
-        //       the shape of the execution input under a module-wide serialisation configuration
-        //       this class does not own. The state machine reads these 3 names, so the shape is a
-        //       contract between this method and the infrastructure code that declares the machine.
+        //       than by concatenation. Rejected because all 4 values are scalars this method has
+        //       already established -- a report name drawn from the 3 constants above, 2 bounds each
+        //       rendered from a calendar date into 10 characters, and a correlation identity the
+        //       shared conformance rule has confined to letters, digits and 3 separators -- so none
+        //       of them can carry a character a mapper would shape differently, while routing them
+        //       through one would put the shape of the execution input under a module-wide
+        //       serialisation configuration this class does not own. The state machine reads the
+        //       first 3 names, so the shape is a contract between this method and the infrastructure
+        //       code that declares the machine.
+        // WHY : Assumptions: the correlation member is APPENDED and is omitted rather than emitted
+        //       empty when there is none. Two callers reach this method with no correlation context
+        //       at all -- a unit test and a batch task invoked outside a request -- and for them an
+        //       empty member would put a value into the stored input that means "absent" while
+        //       looking like a value, which is the one reading an operator cannot distinguish from a
+        //       tracing failure. An omitted member is unambiguous.
+        String correlationId = correlationIdForExecutionInput();
         String executionInput = "{\"" + INPUT_REPORT_TYPE_MEMBER + "\":\""
                 + reportName.toLowerCase(Locale.ROOT)
                 + "\",\"" + INPUT_START_DATE_MEMBER + "\":\"" + startDate
-                + "\",\"" + INPUT_END_DATE_MEMBER + "\":\"" + endDate + "\"}";
+                + "\",\"" + INPUT_END_DATE_MEMBER + "\":\"" + endDate + "\""
+                + (correlationId == null
+                        ? ""
+                        : ",\"" + INPUT_CORRELATION_ID_MEMBER + "\":\"" + correlationId + "\"")
+                + "}";
 
         // WHY : Assumptions: the key is resolved ONCE, before the call, and the same value is used
         //       for the name and for the log line that reports a duplicate, so that an operator
@@ -1294,6 +1756,30 @@ public class ReportExecutionService {
         //       calls it -- is addressed by NAME and composes the ARN itself from the configured
         //       machine, so the one value a caller held was the one value that operation does not
         //       accept. The name was already in scope here and was discarded instead.
+        // WHY : Refactoring Rationale: the ACCEPTED submission is journalled here, and it was not
+        //       journalled at all. The only submission event this method raised was the duplicate one
+        //       in the arm above, so a resubmitted request was traceable and a first-time one was
+        //       not -- the inverse of what an operator needs, because the first-time submission is
+        //       the one that starts work. The two events are written at the same level, in the same
+        //       shape and with the same field names so that a single query returns both and the
+        //       relationship between a retry and the run it was folded onto is readable.
+        // WHY : Assumptions: INFO is the level, matching the duplicate event beside it, because
+        //       nothing failed -- a run was accepted. The refusal path below it stays at error level,
+        //       so the three outcomes of a submission occupy the two levels their severities warrant.
+        // WHY : Assumptions: every field written here is either a value this service resolved or a
+        //       caller-supplied token the guards above have already confined. The report name is one
+        //       of the 3 constants, the 2 bounds are rendered calendar dates, the submission key has
+        //       been held to letters, digits, the hyphen and the underscore, and the execution name is
+        //       composed from those. No customer, account or card value is in scope at this point and
+        //       none is written, which is the withholding docs/architecture/observability.md states.
+        // WHY : Assumptions: the correlation identity is NOT a field of this line. The logging
+        //       context already carries it under the key CorrelationIdFilter publishes, so the
+        //       structured record shows it beside every field here; naming it again would put one
+        //       value in a line twice and would disagree with every other event in this class.
+        LOG.info("event=report.submission.accepted reportName={} startDate={} endDate={}"
+                + " submission={} execution={}",
+                reportName, startDate, endDate, submissionKey, executionName);
+
         // WHY : Alternatives Considered: returning both. Rejected because the ARN had no consumer
         //       anywhere in the repository outside this module's own tests, and it carries the account
         //       identifier and the region of the deployment that ran the report -- infrastructure
@@ -1307,6 +1793,40 @@ public class ReportExecutionService {
                 startDate,
                 endDate,
                 TimestampFormatter.formatNow(clock));
+    }
+
+    /**
+     * Reads the correlation identity of the request in progress, for carrying into an execution
+     * input.
+     *
+     * <p>Assumptions: the identity is taken from the logging context rather than from a method
+     * parameter, and the two facts that make that sound are worth stating together.
+     * {@link CorrelationIdFilter} establishes the value on the request thread under the key it
+     * publishes, before any controller runs and for every request; and this method is called on that
+     * same thread, synchronously, from a request-scoped operation. Threading it through the call chain
+     * instead would add a parameter to every caller of {@link #start} in order to move a value the
+     * shared filter has already put where every log line in the service reads it from.</p>
+     *
+     * <p>Assumptions: the value is re-tested against the shared conformance rule rather than trusted
+     * because it is in the context. That is not redundancy -- it is what makes the concatenated input
+     * above safe without escaping. The rule admits ASCII letters, digits and three separators within a
+     * bounded length, so a conforming value cannot carry the quotation mark or the reverse solidus
+     * that would end the member early or open an escape; and re-testing means a value put into the
+     * context by anything other than the servlet filter is held to the same alphabet.</p>
+     *
+     * <p>Alternatives Considered: minting an identity when the context holds none, so that every
+     * execution input carries the member. Rejected because a minted value correlates nothing: it
+     * appears on the run and on nothing else, so an operator following it finds one record and cannot
+     * tell that from a genuine identity whose other records are missing. Absence is the honest
+     * report, and the callers with no context -- a batch task and this module's own tests -- are
+     * precisely the ones with no request to correlate to.</p>
+     *
+     * @return the conforming correlation identity of the request in progress, or {@code null} when
+     *     there is no request context or the context holds a value that may not be carried
+     */
+    private static String correlationIdForExecutionInput() {
+        String fromContext = MDC.get(CorrelationIdFilter.CORRELATION_ID_MDC_KEY);
+        return CorrelationIdFilter.isConformingCorrelationId(fromContext) ? fromContext : null;
     }
 
     /**

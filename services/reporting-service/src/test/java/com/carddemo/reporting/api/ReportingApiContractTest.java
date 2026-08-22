@@ -7,6 +7,7 @@ import com.carddemo.reporting.api.ReportController;
 import com.carddemo.reporting.config.OpenApiConfig;
 import com.carddemo.reporting.dto.StatementRequest;
 import com.carddemo.reporting.dto.StatementTransactionCollection;
+import com.carddemo.reporting.service.ReportArtifactLocator;
 import com.carddemo.reporting.service.ReportExecutionService;
 import com.carddemo.reporting.service.StatementService;
 import io.swagger.v3.oas.models.OpenAPI;
@@ -570,6 +571,107 @@ class ReportingApiContractTest {
         assertThat(contractText())
                 .as("a refused submission must carry a message the published catalogue lists")
                 .contains("'" + ReportExecutionService.MESSAGE_NO_REPORT_TYPE_SELECTED + "'");
+    }
+
+    // WHY : Assumptions: this case runs in the direction the catalogue case above does not. That one
+    //       asks whether the document lists a sentence; this one asks whether every sentence the
+    //       SERVICE can emit is listed, which is the direction a new constant escapes through. A
+    //       message answered off the catalogue is one a client cannot map, and the browser client
+    //       copies this catalogue into its own message file, so an unlisted sentence reaches an
+    //       operator as unrecognised text.
+    // WHY : Assumptions: each sentence is sought as an enumerated example -- the two-character
+    //       sequence that opens a document list item, then the quoted value -- rather than anywhere in
+    //       the document. Every one of these sentences is also quoted in the surrounding prose, so a
+    //       plain containment test would pass on the prose alone and would not notice a catalogue
+    //       entry that had been dropped.
+    /**
+     * Asserts every date sentence this service can emit is an enumerated catalogue entry.
+     *
+     * <p>Assumptions: ten sentences are asserted and four are deliberately absent from this register.
+     * The four are the Day and Year emptiness sentences of each bound, which no input selects because
+     * a consolidated bound is present whole or absent whole -- they stay in the document's enumeration
+     * for completeness against {@code app/cbl/CORPT00C.cbl} and have no Java constant to compare. The
+     * residual is registered as {@code D-REPORT-DATE-MESSAGE-REACH}, and this case asserts the
+     * document names that identifier so a reader of the catalogue is told where the boundary is
+     * recorded rather than having to infer it from the count.</p>
+     *
+     * @throws Exception if the document is absent from the classpath or unreadable
+     */
+    @Test
+    @DisplayName("every date sentence the service emits is an enumerated catalogue entry")
+    void everyEmittedDateSentenceIsPublished() throws Exception {
+        String document = contractText();
+
+        for (String emitted : List.of(
+                ReportExecutionService.MESSAGE_START_DATE_MONTH_EMPTY,
+                ReportExecutionService.MESSAGE_END_DATE_MONTH_EMPTY,
+                ReportExecutionService.MESSAGE_START_DATE_MONTH_INVALID,
+                ReportExecutionService.MESSAGE_START_DATE_DAY_INVALID,
+                ReportExecutionService.MESSAGE_START_DATE_YEAR_INVALID,
+                ReportExecutionService.MESSAGE_END_DATE_MONTH_INVALID,
+                ReportExecutionService.MESSAGE_END_DATE_DAY_INVALID,
+                ReportExecutionService.MESSAGE_END_DATE_YEAR_INVALID,
+                ReportExecutionService.MESSAGE_START_DATE_INVALID,
+                ReportExecutionService.MESSAGE_END_DATE_INVALID)) {
+
+            assertThat(document)
+                    .as("the service emits \"%s\", so the catalogue must enumerate it", emitted)
+                    .contains("- '" + emitted + "'");
+        }
+
+        assertThat(document)
+                .as("the catalogue must name where its unreachable entries are accounted for")
+                .contains("D-REPORT-DATE-MESSAGE-REACH");
+    }
+
+    // WHY : Assumptions: the field identity is asserted through the PARSED document rather than as
+    //       text, because what this case is about is one description's content and a text search would
+    //       match the same words anywhere. The description was wrong in a way a client acts on: it said
+    //       a consolidated date bound "reports the specific component at fault" in this field, which
+    //       would have a client looking for a per-component property name that the request schema does
+    //       not declare and that the browser's field-to-control map does not recognise.
+    /**
+     * Asserts the field identity is published as the bound and never as one of its components.
+     *
+     * <p>Assumptions: the two request bound names are asserted to be PRESENT in the description and a
+     * component-qualified spelling to be absent, which is the pair that pins the split. Naming the
+     * bounds alone would pass against a description that also offered a component spelling as an
+     * alternative, and asserting the absence alone would pass against a description that named no
+     * identity at all.</p>
+     *
+     * @throws Exception if the document is absent from the classpath or unreadable
+     */
+    @Test
+    @DisplayName("the field identity is published as the bound, with the component in the message")
+    void theFieldIdentityIsPublishedAsTheBound() throws Exception {
+        Map<String, Object> fieldError = mapping(
+                mapping(mapping(contractRoot(), "components"), "schemas"), "FieldError");
+        String published = String.valueOf(
+                mapping(mapping(fieldError, "properties"), "field").get("description"));
+
+        assertThat(published)
+                .as("a client marks the control the request declares, which is the bound")
+                .contains(ReportExecutionService.START_DATE_FIELD)
+                .contains(ReportExecutionService.END_DATE_FIELD);
+        assertThat(published)
+                .as("a component-qualified identity names no control a client could mark")
+                .doesNotContain(ReportExecutionService.START_DATE_FIELD + "Month")
+                .doesNotContain(ReportExecutionService.END_DATE_FIELD + "Month");
+
+        // WHY : Assumptions: the artifact collection publishes its bounds under its own two
+        //       constants and reaches the shared date edit with those, while the edit selects
+        //       between the lower bound's sentence and the upper bound's by comparing the value it
+        //       was given against START_DATE_FIELD. The two spellings are therefore load-bearing
+        //       against each other: renaming either constant alone would leave the artifact
+        //       operation answering a lower-bound fault with the UPPER bound's sentence, which is a
+        //       wrong sentence rather than an absent one and would pass every case that only reads
+        //       a status. Asserting the equality is what makes that rename fail here instead.
+        assertThat(ReportArtifactLocator.START_DATE_PARAMETER)
+                .as("the artifact operation's lower bound must select the lower bound's sentence")
+                .isEqualTo(ReportExecutionService.START_DATE_FIELD);
+        assertThat(ReportArtifactLocator.END_DATE_PARAMETER)
+                .as("the artifact operation's upper bound must select the upper bound's sentence")
+                .isEqualTo(ReportExecutionService.END_DATE_FIELD);
     }
 
     // WHY : Assumptions: the document is asserted NOT to promise exclusivity, by searching for the phrase

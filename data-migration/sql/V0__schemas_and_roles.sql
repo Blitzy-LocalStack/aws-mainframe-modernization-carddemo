@@ -15,6 +15,18 @@
 --   and shows up as a permission error in a running service rather than as a
 --   build failure.
 --
+--   ONE grant is the sanctioned exception to that sentence, and section 4
+--   argues it at length: UPDATE on the single table account.accounts, held by
+--   carddemo_batch for the posting unit of work's third write. A privilege that
+--   NAMES a table cannot be issued by a script that runs before any table
+--   exists, so it is issued by
+--   services/account-service/src/main/resources/db/migration/
+--   V3__batch_account_write_grant.sql, in the owning context's own Flyway chain
+--   and under the role that owns the table. Section 4's guarded block still
+--   issues the same statement when this script is re-run against an
+--   already-migrated database, so the two sites agree by construction rather
+--   than by coordination.
+--
 --   The eight bounded contexts, and the objects each one owns:
 --     auth           auth.users
 --     account        account.accounts, account.customers, account.card_xref
@@ -83,12 +95,16 @@
 --   - CREATE on schema public is revoked from PUBLIC.
 --   - carddemo_batch holds USAGE on ledger, account, card and reference, and
 --     default privileges that grant it SELECT/INSERT/UPDATE on ledger tables,
---     USAGE/SELECT on ledger sequences, SELECT on account tables with UPDATE on
---     account.accounts by name, SELECT on reference tables, and SELECT and
---     nothing else on card tables. It holds NO WRITE PRIVILEGE on card, account
---     beyond account.accounts, or reference -- see the rationale in section 4,
---     which records that the card grant was withdrawn on one reading of the
---     reference and reinstated on another.
+--     USAGE/SELECT on ledger sequences, SELECT on account tables, SELECT on
+--     reference tables, and SELECT and nothing else on card tables. It holds NO
+--     WRITE PRIVILEGE on card, account beyond account.accounts, or reference --
+--     see the rationale in section 4, which records that the card grant was
+--     withdrawn on one reading of the reference and reinstated on another.
+--     UPDATE on account.accounts is part of that role's contract and is NOT
+--     established by this script on a first run: it names a table, so on a fresh
+--     database section 4's guarded block reports it outstanding and
+--     account-service's V3__batch_account_write_grant.sql issues it. A re-run of
+--     this script against an already-migrated database issues it here too.
 --   - carddemo_ledger holds USAGE on account and, by name, SELECT and UPDATE on
 --     account.accounts and no other table in it. That one grant is what lets bill
 --     payment settle a balance and record its ledger row in a single transaction,
@@ -1099,13 +1115,28 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 -- table exists anywhere, so a bare GRANT ... ON ALL TABLES would grant on the
 -- zero tables present at that instant and have no effect whatsoever on the
 -- tables the per-service migrations create afterwards -- a statement that
--- executes cleanly, reads as correct, and does nothing. Table-level grants
--- issued from a per-service migration were the obvious alternative, and they
--- were rejected twice over: every per-service V1__*.sql is contractually
--- forbidden from issuing GRANT, and a grant living inside one service's
--- migration could not cover a table that a different service adds to its own
--- schema. The accepted cost of default privileges is that they are keyed on the
--- creating role, which is what makes the FOR ROLE clause below load-bearing.
+-- executes cleanly, reads as correct, and does nothing. The accepted cost of
+-- default privileges is that they are keyed on the creating role, which is what
+-- makes the FOR ROLE clause below load-bearing.
+--
+-- WHY : Refactoring Rationale: table-level grants issued from a per-service
+-- migration were rejected here on two grounds, and ONE of the two has been
+-- reversed by measurement rather than by preference. The ground that stands is
+-- that a grant living inside one service's migration cannot cover a table a
+-- DIFFERENT service adds to its own schema, so the schema-wide forms below
+-- remain the right shape for every privilege that does not need to name a
+-- table. The ground that fell is the contractual prohibition on a per-service
+-- migration issuing GRANT: held absolutely, it left the one privilege that MUST
+-- name a table -- UPDATE on account.accounts -- with no site that both runs
+-- after the table exists and runs as its owner, and the consequence was
+-- measured rather than theoretical, as posting failed its third write with
+-- "permission denied for table accounts" on every freshly provisioned
+-- environment. The prohibition is therefore narrowed to a single sanctioned
+-- exception, recorded in this file's header, in
+-- services/account-service/src/main/resources/db/migration/
+-- V3__batch_account_write_grant.sql and in docs/runbooks/deploy.md Step 4c, and
+-- asserted by CrossSchemaPrivilegeContractTest in the shared kernel so a further
+-- exception cannot be added quietly.
 --
 -- WHY : Assumptions: ALTER DEFAULT PRIVILEGES FOR ROLE <owner> applies only to
 -- objects created after it runs and only to objects created BY that role. Each
@@ -1224,13 +1255,48 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA ledger TO carddemo_batch;
 --
 -- WHY : Trade-offs: the named grant has to be issued AFTER the table exists,
 -- which is what the guarded block below handles and what the schema-wide form
--- was avoiding. The cost is that this script must be re-run once the
--- per-service migrations have created their tables -- it is idempotent by
--- construction, so re-running it is the documented bootstrap sequence rather
--- than a workaround -- and that on a first run the block reports the grant as
+-- was avoiding. On a first run the block therefore reports the grant as
 -- outstanding instead of applying it. That is the right direction to fail in:
 -- an outstanding grant is named in the output, whereas an over-broad one is
 -- invisible.
+--
+-- WHY : Refactoring Rationale: the AUTHORITATIVE site for that one named grant
+-- is no longer this file, and the block below is now a safety net rather than
+-- the only route. It is issued by
+-- services/account-service/src/main/resources/db/migration/
+-- V3__batch_account_write_grant.sql, inside the account context's own migration
+-- chain, which runs after V1__account.sql has created the table and under the
+-- role that owns it. What was wrong with resting on this file alone is not the
+-- SQL but the sequence: this script runs once per apply, before any table
+-- exists, and the earlier arrangement asked an operator to re-run it after the
+-- per-service Flyway chains. Nothing in the deployed path does that --
+-- infra/lambda/database_admin.py exposes a bootstrap action and an analyze
+-- action, its invocation triggers do not change when a service migrates, and no
+-- Terraform resource can order itself after a container's own start-up chain --
+-- so every freshly provisioned environment ran the nightly posting job with the
+-- privilege still outstanding and failed its third write with "permission
+-- denied for table accounts". Expressing the grant beside the table makes the
+-- ordering structural instead of documented: the table and the privilege on it
+-- can never be more than one migration apart.
+--
+-- WHY : Trade-offs: this block is KEPT rather than deleted, and its two costs
+-- are worth stating. It duplicates a statement that now has another owner, and
+-- a reader could take the duplication for indecision. It is retained because
+-- the two cases it covers are real: a database provisioned by an earlier
+-- revision, whose account tables already exist when this script is re-run, gets
+-- the grant from here without waiting for a service to redeploy; and a re-run
+-- against a fully migrated database is what turns "the privilege graph is
+-- complete" from a claim into an observation, because the block is silent once
+-- the grant is in place. GRANT is idempotent, so the two sites cannot disagree
+-- -- they can only both be right.
+--
+-- WHY : Assumptions: this block is also the documented REPAIR for the one state
+-- the authoritative site cannot reach on its own. That migration is guarded on
+-- its grantee, so a chain that ran before this script committed records itself
+-- as applied, warns that the grant was skipped and is never re-run by Flyway.
+-- Re-running this script is what closes that gap, and docs/runbooks/deploy.md
+-- Step 4c and docs/runbooks/data-migration.md both send an operator here for it
+-- by name.
 ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_account_owner IN SCHEMA account
     GRANT SELECT ON TABLES TO carddemo_batch;
 
@@ -1263,17 +1329,26 @@ BEGIN
         -- WHY : Trade-offs: a NOTICE rather than an EXCEPTION. On the first
         -- bootstrap run no per-service migration has run yet, so the table is
         -- legitimately absent and raising here would make the documented
-        -- sequence fail. Saying nothing was the other option and is worse: the
-        -- posting job's account rewrite would then fail at run time, inside the
-        -- nightly window, with a permission error naming a table rather than a
-        -- provisioning step. The notice names the statement to re-run and is
-        -- silent once the grant is in place, so a clean re-run confirms the
-        -- privilege graph is complete.
+        -- sequence fail. Saying nothing was the other option and is worse: a
+        -- reader of this run's output would have no record that the privilege
+        -- was left to another artifact.
+        --
+        -- WHY : Refactoring Rationale: the notice named THIS script as the
+        -- statement to re-run, and it no longer does. That instruction was the
+        -- defect's carrier: it read as a remedy while nothing in the deployed
+        -- path performed it, so an operator following the output was told the
+        -- grant was outstanding and given a step the automation never took. It
+        -- now names the migration that actually issues the grant, so the
+        -- outstanding state is attributed to a step that will happen on its own
+        -- rather than to one somebody must remember.
         RAISE NOTICE
             'account.accounts does not exist yet, so UPDATE was not granted to '
-            'carddemo_batch. Re-run this script after the per-service Flyway '
-            'migrations have created it; the nightly posting and interest jobs '
-            'cannot rewrite an account master until that grant is present.';
+            'carddemo_batch here. It is granted by account-service migration '
+            'V3__batch_account_write_grant.sql, which runs in that context''s '
+            'own Flyway chain after V1__account.sql creates the table. Confirm '
+            'it afterwards with has_table_privilege(''carddemo_batch'', '
+            '''account.accounts'', ''UPDATE''); the nightly posting and interest '
+            'jobs cannot rewrite an account master until it reports true.';
     END IF;
 END
 $$;

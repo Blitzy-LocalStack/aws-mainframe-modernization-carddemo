@@ -3,6 +3,7 @@ package com.carddemo.batch.job;
 import com.carddemo.batch.BatchApplication;
 import com.carddemo.batch.config.BatchConfig;
 import com.carddemo.batch.domain.DailyTransaction;
+import com.carddemo.batch.domain.PostingRejectOutbox;
 import com.carddemo.batch.dto.BatchJobName;
 import com.carddemo.batch.dto.BatchReturnCode;
 import com.carddemo.batch.dto.BusinessDate;
@@ -10,6 +11,7 @@ import com.carddemo.batch.dto.DatasetGeneration;
 import com.carddemo.batch.dto.DatasetGeneration.DatasetFamily;
 import com.carddemo.batch.repository.AccountRepository;
 import com.carddemo.batch.repository.DailyTransactionRepository;
+import com.carddemo.batch.repository.PostingRejectOutboxRepository;
 import com.carddemo.batch.repository.TransactionRejectRepository;
 import com.carddemo.batch.repository.TransactionRepository;
 import com.carddemo.batch.service.BatchStepLedger;
@@ -18,11 +20,13 @@ import com.carddemo.batch.service.DailyFeedWatermarkService;
 import com.carddemo.batch.service.DatasetGenerationService;
 import com.carddemo.batch.service.PostingRecordUnitOfWork;
 import com.carddemo.batch.service.PostingValidationService;
+import com.carddemo.common.time.TimestampFormatter;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -151,8 +155,39 @@ import org.springframework.transaction.support.TransactionTemplate;
  * replaces is not "fewer commits" but "all-or-nothing for the night", and because a partially
  * completed pass is exactly what the durable step ledger and the orchestrator's redrive are built to
  * resume. Assumptions: a rejected record needs no writes to the ledger or the account master at all,
- * so its transaction covers only the decomposed reject row -- the 430-byte stream record is appended
- * AFTER that commit, so a rolled-back reject cannot leave a stream record with no row behind it.</p>
+ * so its transaction covers the decomposed reject row together with the durable outbox row carrying
+ * that record's 430-byte image -- both of them, so a rolled-back reject leaves neither behind.</p>
+ *
+ * <h2>The reject stream is durable before it is staged</h2>
+ *
+ * <p>Refactoring Rationale: the 430-byte image used to be appended to a temporary file on the task's
+ * own disk as the walk ran, and that file was uploaded only once the walk had finished. Everything
+ * between the two sat outside every transaction the pass opened, so a failure there -- an unreachable
+ * bucket, a denied upload, a task killed mid-stage -- lost the whole stream while every row it
+ * described stayed committed and the watermark stayed advanced past those records. The redrive then
+ * read strictly above that watermark, found nothing left to read, staged a ZERO-BYTE dataset and
+ * reported both counters as zero: a run that had rejected records published an empty stream and the
+ * clean tier. The image is now written INSIDE the record's own transaction, into
+ * {@code batch.posting_reject_outbox}, and the dataset is assembled from those durable rows at
+ * staging time -- so a redrive rebuilds the same bytes and recounts the same run, however many
+ * attempts it took.</p>
+ *
+ * <p>Alternatives Considered: deferring the watermark advance out of the record's transaction, so
+ * that a failed stage re-presented the whole window and the next attempt rebuilt the stream by
+ * re-reading the feed. Rejected because posting is not idempotent per record: each accepted record
+ * mints a new transaction identifier and accumulates its amount into the account master, so a
+ * re-presented record that already committed is posted a second time -- and both postings are
+ * individually valid, so no reject is written and no return code changes. Also rejected: re-deriving
+ * the stream from {@code ledger.transaction_rejects}, which carries no run identifier, no business
+ * date and no generation, and whose shape belongs to the transaction context rather than to this
+ * module.</p>
+ *
+ * <p>Assumptions: the two counters and the graded tier are read from those durable rows as well, and
+ * not from the counters this attempt accumulated. That is the half of the same defect a rebuilt
+ * dataset alone would leave standing: a redrive walking no new rows would stage the right bytes and
+ * still print zero processed and zero rejected, and {@code app/cbl/CBTRN02C.cbl:229-230} grades the
+ * tier from the rejected count -- so a recovered stream would still be published under a clean
+ * tier.</p>
  *
  * <h2>Divergence D-POSTING-ATOMIC-NO-REJECT-109: the reference can post partially, and this
  * cannot</h2>
@@ -280,6 +315,19 @@ public class PostTransactionsJob {
     private final DailyFeedWatermarkService watermark;
 
     /**
+     * The durable record of what this run accounted for, and of the reject bytes it produced.
+     *
+     * <p>Assumptions: it is held by this class rather than by the per-record unit of work because the
+     * DATASET is this class's obligation -- the unit of work applies one record's decisions, and the
+     * stream those decisions feed is assembled, staged and counted here. Passing it down would also
+     * have meant widening the unit of work's constructor, which repository tests construct directly.</p>
+     */
+    private final PostingRejectOutboxRepository rejectOutbox;
+
+    /** The clock the outbox row's accounting instant and the staging marker are read from. */
+    private final Clock clock;
+
+    /**
      * Builds the job over the rules, repositories and dataset allocator it composes.
      *
      * @param feed the daily transaction feed; must not be {@code null}
@@ -288,6 +336,11 @@ public class PostTransactionsJob {
      * @param ledgerOfSteps the durable step ledger; must not be {@code null}
      * @param watermark the feed's consumed position, read under its lock before the walk; must not
      *     be {@code null}
+     * @param rejectOutbox the durable record of the records this run accounted for and the reject
+     *     images it produced, written inside each record's own transaction and read back to assemble
+     *     the dataset and the counters; must not be {@code null}
+     * @param clock the clock the accounting instant and the staging marker are read from, injected so
+     *     a test can pin it; must not be {@code null}
      * @throws NullPointerException if any argument is {@code null}
      */
     // WHY : Refactoring Rationale: an EntityManager parameter stood after the clock, and it is
@@ -337,14 +390,24 @@ public class PostTransactionsJob {
     //       shape the boundary already has: the TransactionTemplate cannot be a field either,
     //       because it is built from a registration-time argument, and the two travel together
     //       precisely because neither is meaningful without the other.
+    // WHY : Refactoring Rationale: two parameters were ADDED, and both belong to the pass rather than
+    //       to a record's decisions -- which is the test this constructor's contents are held to. The
+    //       outbox is what makes the reject dataset and the two counters survive a failed stage, and
+    //       it is read back here because the dataset is assembled here. The clock stamps the
+    //       accounting instant of each row and the staging marker; it is injected rather than read
+    //       from the system so a test can pin both, which is the same discipline the per-record unit
+    //       of work already applies to the posted records' processing stamp.
     public PostTransactionsJob(DailyTransactionRepository feed,
             DatasetGenerationService generations, BatchStepLedger ledgerOfSteps,
-            DailyFeedWatermarkService watermark) {
+            DailyFeedWatermarkService watermark, PostingRejectOutboxRepository rejectOutbox,
+            Clock clock) {
 
         this.feed = Objects.requireNonNull(feed, "feed must not be null");
         this.generations = Objects.requireNonNull(generations, "generations must not be null");
         this.ledgerOfSteps = Objects.requireNonNull(ledgerOfSteps, "ledgerOfSteps must not be null");
         this.watermark = Objects.requireNonNull(watermark, "watermark must not be null");
+        this.rejectOutbox = Objects.requireNonNull(rejectOutbox, "rejectOutbox must not be null");
+        this.clock = Objects.requireNonNull(clock, "clock must not be null");
     }
 
     /**
@@ -540,7 +603,8 @@ public class PostTransactionsJob {
      * written and no return code changed: the chain would have reported a clean night.</p>
      *
      * <p>Assumptions: the advance is written inside each RECORD'S OWN transaction, together with
-     * the three writes or the reject row it accounts for, rather than once for the whole pass. The
+     * the three writes or the reject row it accounts for and the outbox row that records the record as
+     * accounted, rather than once for the whole pass. The
      * position and the postings it accounts for therefore still commit together -- which is the
      * property that matters -- at the granularity the boundary now has. A single advance at the end
      * would be the wrong pairing under a per-record boundary: an interrupted pass would leave a
@@ -583,63 +647,48 @@ public class PostTransactionsJob {
                         DailyFeedWatermarkService.DAILY_TRANSACTION_FEED)),
                 "a unit of work must report the consumed position");
         long lastOrdinal = startedAbove;
-        long processed = 0L;
-        long rejected = 0L;
+        long readThisAttempt = 0L;
 
-        // WHY : Trade-offs: an object store has no append, so a per-record write would either rewrite
-        //       the whole object each time -- quadratic in the reject count -- or leave one object per
-        //       reject, which is not the single fixed-length dataset app/jcl/POSTTRAN.jcl:34-38
-        //       allocates. Buffering on the task's ephemeral disk costs one file and bounds memory by
-        //       a single record, and it is the same route BackupTransactionsJob takes for the same
-        //       reason.
-        Path rejectStream = createRejectStreamFile();
-        try {
-            try (OutputStream sink = Files.newOutputStream(rejectStream)) {
-                while (true) {
-                    List<DailyTransaction> batch =
-                            this.feed.findByIngestSeqGreaterThanOrderByIngestSeqAsc(
-                                    lastOrdinal, Limit.of(BatchConfig.CHUNK_SIZE));
-                    if (batch.isEmpty()) {
-                        break;
-                    }
-
-                    for (DailyTransaction feedRecord : batch) {
-                        processed++;
-                        if (postOneRecord(feedRecord, sink, unitOfWork, perRecord, runId,
-                                generationDate)) {
-                            rejected++;
-                        }
-                        lastOrdinal = feedRecord.getIngestSeq();
-                    }
-                }
-            } catch (IOException unwritable) {
-                throw new IllegalStateException(
-                        "could not write the reject stream to " + rejectStream, unwritable);
+        while (true) {
+            List<DailyTransaction> batch = this.feed.findByIngestSeqGreaterThanOrderByIngestSeqAsc(
+                    lastOrdinal, Limit.of(BatchConfig.CHUNK_SIZE));
+            if (batch.isEmpty()) {
+                break;
             }
 
-            stageRejectStream(rejectStream, runId, generationDate, rejected);
-
-            // WHY : Refactoring Rationale: no watermark write stands here, and one did. It advanced
-            //       the position once, after staging, on the argument that a staging failure should
-            //       re-present the whole window. That argument belonged to a pass-wide transaction: the
-            //       boundary is now the RECORD, so a single advance at the end would sit behind a
-            //       committed prefix of postings, and the re-presented window would post them a second
-            //       time -- silently, since each one is individually valid. The advance therefore moved
-            //       INTO each record's own transaction, and the reasoning is recorded there.
-            // WHY : Trade-offs: what that costs is the re-presentation itself. A staging failure now
-            //       leaves the records checkpointed and their reject DATASET unstaged, where before the
-            //       window came back whole. It is acceptable because the reject ROWS are committed per
-            //       record and carry the same three fields the 430-byte record is composed of -- the
-            //       verbatim image, the reason code and its description -- so the dataset for a window
-            //       is reconstructible from ledger.transaction_rejects, which was not true when the
-            //       stream was the only record of what had been rejected.
-        } finally {
-            // WHY : Assumptions: the temporary file is removed on every path, including a failed
-            //       stage, because a batch task's ephemeral disk is finite and a failed step is
-            //       retried. Leaving it would let a sequence of retries fill the volume and turn a
-            //       transient upload failure into a task that can no longer start.
-            deleteQuietly(rejectStream);
+            for (DailyTransaction feedRecord : batch) {
+                readThisAttempt++;
+                postOneRecord(feedRecord, unitOfWork, perRecord, runId, generationDate);
+                lastOrdinal = feedRecord.getIngestSeq();
+            }
         }
+
+        // WHY : Refactoring Rationale: no watermark write stands here, and one did. It advanced
+        //       the position once, after staging, on the argument that a staging failure should
+        //       re-present the whole window. That argument belonged to a pass-wide transaction: the
+        //       boundary is now the RECORD, so a single advance at the end would sit behind a
+        //       committed prefix of postings, and the re-presented window would post them a second
+        //       time -- silently, since each one is individually valid. The advance therefore moved
+        //       INTO each record's own transaction, and the reasoning is recorded there.
+        // WHY : Refactoring Rationale: the staging call no longer takes an assembled file or a
+        //       reject count, because neither exists at this point any more. The walk above appends
+        //       nothing to a local file: each record's image is committed to the outbox inside that
+        //       record's own transaction, so the dataset is assembled from durable rows below and a
+        //       failed stage leaves the images where a redrive can find them.
+        stageRejectStream(runId, generationDate, unitOfWork);
+
+        // WHY : Assumptions: the two counters are read from the outbox AFTER staging, so they report
+        //       the whole RUN -- every record this run has accounted for across all of its attempts
+        //       -- rather than the rows this attempt happened to walk. That is what makes a redrive
+        //       of a run whose stage failed report the night's real figures instead of zeroes.
+        // WHY : Trade-offs: two extra round trips per pass, both single-row aggregates over the
+        //       run's own slice of one index. Accepted because the alternative is the attempt's
+        //       in-memory tally, which is exactly the value that reported a clean night for a run
+        //       that had rejected records.
+        long processed = this.rejectOutbox.countByRunIdAndFeedName(
+                runId, DailyFeedWatermarkService.DAILY_TRANSACTION_FEED);
+        long rejected = this.rejectOutbox.countByRunIdAndFeedNameAndRejectRecordIsNotNull(
+                runId, DailyFeedWatermarkService.DAILY_TRANSACTION_FEED);
 
         reportCounters(processed, rejected);
 
@@ -648,9 +697,14 @@ public class PostTransactionsJob {
         //       It is what an operator needs when a pass posts fewer rows than the extract holds: the
         //       counters alone cannot distinguish "the feed was short" from "most of it had already
         //       been posted".
-        LOG.info("event=batch.posting.window feed={} above={} through={} processed={}",
+        // WHY : Assumptions: the window reports what THIS attempt read, which is deliberately not the
+        //       processed counter above. On a redrive the two differ -- the attempt reads nothing and
+        //       the run's total stands -- and that difference is precisely the diagnosis an operator
+        //       needs, so the two figures are reported side by side rather than reconciled into one.
+        LOG.info("event=batch.posting.window feed={} above={} through={} readThisAttempt={}"
+                + " runProcessed={} runRejected={}",
                 DailyFeedWatermarkService.DAILY_TRANSACTION_FEED, startedAbove, lastOrdinal,
-                processed);
+                readThisAttempt, processed, rejected);
 
         // WHY : Assumptions: the tier is decided by whether ANY record was rejected, not by how many,
         //       matching app/cbl/CBTRN02C.cbl:229 which tests the count against zero rather than
@@ -685,33 +739,29 @@ public class PostTransactionsJob {
     }
 
     /**
-     * Brackets one record's decisions and writes in a transaction, then appends its reject bytes.
+     * Brackets one record's decisions, its writes and its outbox row in a single transaction.
      *
      * <p>Assumptions: the decisions themselves are NOT made here. {@code PostingRecordUnitOfWork}
      * owns them -- the validation, the three writes in reference order, the reject row and the
-     * checkpoint -- and this method owns the boundary they are made inside and the append that has to
-     * happen outside it. That split is what makes the unit drivable against a real database by a
-     * repository test while leaving the boundary declared in exactly one file.</p>
+     * checkpoint -- and this method owns the boundary they are made inside, together with the one
+     * write that boundary gained: the outbox row recording this record as accounted for and carrying
+     * its reject image when there is one. That split is what makes the unit drivable against a real
+     * database by a repository test while leaving the boundary declared in exactly one file.</p>
      *
      * @param feedRecord the feed record to post or reject; must not be {@code null}
-     * @param rejectStream the sink the 430-byte reject record is appended to; must not be
-     *     {@code null}
-     * @param unitOfWork the transaction boundary this record's decisions and writes are made inside;
-     *     must not be {@code null}
+     * @param unitOfWork the transaction boundary this record's decisions, writes and outbox row are
+     *     made inside; must not be {@code null}
      * @param perRecord the per-record unit of work that makes those decisions and issues those
      *     writes; must not be {@code null}
-     * @param runId the orchestrator execution recorded against the advanced watermark; must not be
-     *     {@code null}
-     * @param generationDate the injected date recorded against the advanced watermark; must not be
-     *     {@code null}
-     * @return {@code true} when the record was rejected, {@code false} when it was posted
-     * @throws IOException if the reject record cannot be appended to the stream
+     * @param runId the orchestrator execution recorded against the advanced watermark and against the
+     *     outbox row; must not be {@code null}
+     * @param generationDate the injected date recorded against the advanced watermark and against the
+     *     outbox row; must not be {@code null}
      * @throws IllegalStateException if the validation rule accepted a record without resolving both
-     *     the cross-reference and the account
+     *     the cross-reference and the account, or if the unit of work reports no outcome
      */
-    private boolean postOneRecord(DailyTransaction feedRecord, OutputStream rejectStream,
-            TransactionTemplate unitOfWork, PostingRecordUnitOfWork perRecord, String runId,
-            BusinessDate generationDate) throws IOException {
+    private void postOneRecord(DailyTransaction feedRecord, TransactionTemplate unitOfWork,
+            PostingRecordUnitOfWork perRecord, String runId, BusinessDate generationDate) {
 
         // WHY : Assumptions: the transaction brackets the decisions AND the writes, not the writes
         //       alone, because the account the amount is accumulated into is read by the validation
@@ -719,20 +769,57 @@ public class PostTransactionsJob {
         //       read-modify-write window that the account's @Version column exists to close, and would
         //       do it invisibly -- the optimistic-lock check would still pass, having been performed
         //       against a row nobody held.
-        // WHY : Assumptions: the 430-byte stream record is appended AFTER the commit rather than
-        //       inside it, so a reject whose row failed to persist cannot appear in the dataset the
-        //       golden masters compare. The file append is not transactional and cannot be made so;
-        //       ordering it after the commit is what keeps the two in agreement in the direction that
-        //       matters, since a committed row whose append then failed fails the whole step.
-        Optional<byte[]> rejectRecord = unitOfWork.execute(
-                status -> perRecord.applyOneRecord(feedRecord, runId, generationDate));
+        // WHY : Refactoring Rationale: the 430-byte image is now written INSIDE this transaction, as
+        //       an outbox row, where it used to be appended to a temporary file after the commit. The
+        //       old ordering was chosen so that a reject whose row failed to persist could not appear
+        //       in the dataset, and it achieved that -- while leaving the opposite failure wide open:
+        //       a committed reject whose file never reached the object store vanished, and the
+        //       watermark had already moved past it. A row written in the same transaction cannot
+        //       diverge in either direction, and it needs no file to survive the pass.
+        // WHY : Assumptions: the outbox write is issued INSIDE the callback rather than after it, so
+        //       it shares the record's commit. Issuing it outside would open a second transaction and
+        //       reintroduce exactly the split this change closes, in a form that is harder to see.
+        unitOfWork.executeWithoutResult(status -> {
+            Optional<byte[]> rejectRecord = Objects.requireNonNull(
+                    perRecord.applyOneRecord(feedRecord, runId, generationDate),
+                    "a unit of work must report its outcome");
 
-        if (Objects.requireNonNull(rejectRecord, "a unit of work must report its outcome").isEmpty()) {
-            return false;
-        }
+            this.rejectOutbox.save(accountedRow(feedRecord, runId, generationDate, rejectRecord));
+        });
+    }
 
-        rejectStream.write(rejectRecord.get());
-        return true;
+    /**
+     * Builds the outbox row for one accounted record, on whichever of the two arms it took.
+     *
+     * @param feedRecord the record that was accounted for, read for its feed ordinal; must not be
+     *     {@code null}
+     * @param runId the orchestrator execution accounting for it; must not be {@code null}
+     * @param generationDate the injected date the run received; must not be {@code null}
+     * @param rejectRecord the record's 430-byte reject image when it was rejected, or empty when it
+     *     was posted; must not be {@code null}
+     * @return the row to insert inside this record's transaction, never {@code null}
+     */
+    // WHY : Assumptions: the two arms are named at the factory rather than expressed as a nullable
+    //       argument, so a reader of this method sees which of the two a record took without tracing
+    //       a null. The posted arm exists at all because the PROCESSED counter is a count of rows:
+    //       without a row for a posted record, a redriven pass could rebuild its rejects and would
+    //       still report zero processed.
+    private PostingRejectOutbox accountedRow(DailyTransaction feedRecord, String runId,
+            BusinessDate generationDate, Optional<byte[]> rejectRecord) {
+
+        // WHY : Assumptions: the instant is truncated to whole microseconds through the shared
+        //       formatter rather than taken as a raw clock reading, because the column is
+        //       TIMESTAMP(6) and a nanosecond-precision value would be rounded on the way in. Reading
+        //       it back would then differ from the value handed to the insert, which is the kind of
+        //       mismatch a stored-versus-expected comparison surfaces long after the fact.
+        LocalDateTime accountedAt = TimestampFormatter.normalizeNow(this.clock);
+        String feedName = DailyFeedWatermarkService.DAILY_TRANSACTION_FEED;
+
+        return rejectRecord
+                .map(image -> PostingRejectOutbox.rejectedRecord(runId, feedName,
+                        feedRecord.getIngestSeq(), generationDate.token(), image, accountedAt))
+                .orElseGet(() -> PostingRejectOutbox.postedRecord(runId, feedName,
+                        feedRecord.getIngestSeq(), generationDate.token(), accountedAt));
     }
 
     /**
@@ -777,19 +864,63 @@ public class PostTransactionsJob {
      * {@code SCRATCH}, so an aged-out generation is deleted rather than merely uncatalogued; the
      * allocator's scratch pair reproduces exactly that pairing.</p>
      *
-     * @param rejectStream the assembled reject records; must not be {@code null}
-     * @param runId the orchestrator execution the allocation belongs to; must not be {@code null}
+     * <p>Refactoring Rationale: the assembled file is no longer a parameter, and the temporary file is
+     * created HERE rather than before the walk. The stream is built from the run's committed outbox
+     * rows at the moment it is staged, so the file exists only for the length of the upload and a
+     * failure anywhere in this method leaves the images where the next attempt can read them. The
+     * reject count is likewise no longer a parameter: it is what the assembly counted, so the logged
+     * figure is the number of records the object actually holds rather than a tally kept beside it.</p>
+     *
+     * <p>Assumptions: the rows are marked staged only AFTER the upload returns, and the assembly
+     * replays every reject of the run rather than only the unmarked ones. The two together make the
+     * method idempotent per run: an attempt that uploaded and then failed before marking rewrites the
+     * same generation -- the allocator memoises the coordinate per run -- with the same bytes, and the
+     * marking that follows then finds the rows still unmarked. Marking first would leave a run
+     * recorded as published against an object that may not exist.</p>
+     *
+     * @param runId the orchestrator execution the allocation belongs to, and whose committed reject
+     *     images the dataset is assembled from; must not be {@code null}
      * @param generationDate the date the generation is partitioned under; must not be
      *     {@code null}
-     * @param rejected the number of records the stream holds, reported for operator traceability
+     * @param unitOfWork the transaction boundary the staging marker is written inside; must not be
+     *     {@code null}
+     * @throws IllegalStateException if the reject stream cannot be assembled
      */
     private void stageRejectStream(
-            Path rejectStream, String runId, BusinessDate generationDate, long rejected) {
+            String runId, BusinessDate generationDate, TransactionTemplate unitOfWork) {
 
         DatasetGeneration target =
                 this.generations.allocateNewGeneration(
                         DatasetFamily.DALYREJS, generationDate, runId);
-        this.generations.stageDataset(target, REJECT_DATASET_OBJECT_NAME, rejectStream);
+
+        // WHY : Trade-offs: an object store has no append, so the records are buffered into one
+        //       temporary file and uploaded once. A per-record upload would either rewrite the whole
+        //       object each time -- quadratic in the reject count -- or leave one object per reject,
+        //       which is not the single fixed-length dataset app/jcl/POSTTRAN.jcl:34-38 allocates.
+        //       Buffering on the task's ephemeral disk costs one file and bounds memory by a single
+        //       slice, and it is the same route BackupTransactionsJob takes for the same reason.
+        Path rejectStream = createRejectStreamFile();
+        long records;
+        String objectKey;
+        try {
+            records = assembleRejectStream(rejectStream, runId);
+            objectKey = this.generations.stageDataset(
+                    target, REJECT_DATASET_OBJECT_NAME, rejectStream);
+        } finally {
+            // WHY : Assumptions: the temporary file is removed on every path, including a failed
+            //       stage, because a batch task's ephemeral disk is finite and a failed step is
+            //       retried. Leaving it would let a sequence of retries fill the volume and turn a
+            //       transient upload failure into a task that can no longer start.
+            deleteQuietly(rejectStream);
+        }
+
+        // WHY : Assumptions: the marking statement is issued only when the object HOLDS records, and
+        //       skipping it otherwise is exactly equivalent rather than an approximation. The assembly
+        //       above replays EVERY reject row of the run, so a count of zero means the run has no
+        //       reject row at all and the statement's predicate would match nothing. What the guard
+        //       buys is that a clean night -- five of the nine committed scenarios -- opens no write
+        //       transaction and makes no round trip for a statement that could only update nothing.
+        int marked = records > 0 ? markRejectsStaged(unitOfWork, runId, objectKey) : 0;
 
         int scratched = 0;
         for (DatasetGeneration agedOut : this.generations.generationsToScratch(
@@ -797,9 +928,81 @@ public class PostTransactionsJob {
             scratched += this.generations.scratchGeneration(agedOut);
         }
 
-        LOG.info("event=batch.posting.rejects-staged generation={} records={} scratchedObjects={}"
-                + " location={}", target.generationNumber(), rejected, scratched,
-                this.generations.datasetUri(target));
+        LOG.info("event=batch.posting.rejects-staged generation={} records={} markedStaged={}"
+                + " scratchedObjects={} location={}", target.generationNumber(), records, marked,
+                scratched, this.generations.datasetUri(target));
+    }
+
+    /**
+     * Writes one run's committed reject images into the file the dataset is staged from.
+     *
+     * <p>Assumptions: the rows are read in ascending feed ordinal, which reproduces the order the walk
+     * appended in -- and reproduces it across attempts too, since a later attempt begins strictly
+     * above the position an earlier one advanced and so contributes only higher ordinals. The bytes
+     * are therefore the bytes a single uninterrupted pass would have written, which is what the
+     * committed expectations under {@code tests/golden/posting} compare.</p>
+     *
+     * @param rejectStream the temporary file to fill; must not be {@code null}
+     * @param runId the orchestrator execution whose images are written; must not be {@code null}
+     * @return how many records the file holds, which is zero on a run that rejected nothing
+     * @throws IllegalStateException if the file cannot be written, or if a stored image is not
+     *     exactly the fixed record width
+     */
+    private long assembleRejectStream(Path rejectStream, String runId) {
+        long written = 0L;
+
+        try (OutputStream sink = Files.newOutputStream(rejectStream)) {
+            // WHY : Assumptions: the continuation starts BELOW zero rather than at zero, because the
+            //       column admits zero as an ordinal and a bound of zero would skip a row carrying it.
+            //       The read is strictly greater than the bound, matching the feed walk's own
+            //       continuation, so the first slice has to be bounded by a value no ordinal can hold.
+            long continueAbove = -1L;
+            while (true) {
+                List<PostingRejectOutbox> slice = this.rejectOutbox
+                        .findByRunIdAndFeedNameAndRejectRecordIsNotNullAndIngestSeqGreaterThanOrderByIngestSeqAsc(
+                                runId, DailyFeedWatermarkService.DAILY_TRANSACTION_FEED,
+                                continueAbove, Limit.of(BatchConfig.CHUNK_SIZE));
+                if (slice.isEmpty()) {
+                    break;
+                }
+
+                for (PostingRejectOutbox rejectedRecord : slice) {
+                    sink.write(rejectedRecord.rejectImageBytes());
+                    written++;
+                    continueAbove = rejectedRecord.getIngestSeq();
+                }
+            }
+        } catch (IOException unwritable) {
+            throw new IllegalStateException(
+                    "could not write the reject stream to " + rejectStream, unwritable);
+        }
+
+        return written;
+    }
+
+    /**
+     * Records that this run's reject images have reached a durable object.
+     *
+     * @param unitOfWork the transaction boundary the statement is executed inside; must not be
+     *     {@code null}
+     * @param runId the orchestrator execution whose images were staged; must not be {@code null}
+     * @param objectKey the key of the object they reached; must not be {@code null}
+     * @return how many rows were marked, zero on a run with no reject and on a repeat of a marking
+     *     that already succeeded
+     * @throws IllegalStateException if the unit of work reports no result
+     */
+    // WHY : Assumptions: the statement runs in a transaction this class opens, and the repository
+    //       method carries no transaction annotation of its own -- so the boundary stays declared in
+    //       this one file, exactly as it is for a record's writes. A modifying statement cannot run
+    //       outside a transaction, and the tasklet body deliberately runs in none.
+    private int markRejectsStaged(TransactionTemplate unitOfWork, String runId, String objectKey) {
+        LocalDateTime stagedAt = TimestampFormatter.normalizeNow(this.clock);
+
+        return Objects.requireNonNull(
+                unitOfWork.execute(status -> this.rejectOutbox.markRejectsStaged(
+                        runId, DailyFeedWatermarkService.DAILY_TRANSACTION_FEED, stagedAt,
+                        objectKey)),
+                "a unit of work must report the number of rows it marked");
     }
 
     /**

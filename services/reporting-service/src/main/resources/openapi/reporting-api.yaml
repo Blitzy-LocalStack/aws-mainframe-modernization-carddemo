@@ -1086,6 +1086,23 @@ components:
         shared filter in common-lib mints one in the same shape. At most
         twenty-four characters, enforced before any handler runs. It must never
         carry a credential, because it is written to logs by design.
+
+
+        On the submission operation it is carried further than the request: an
+        accepted submission places it in the orchestration input alongside the
+        report type and the two bounds, so the stored input of a run names the
+        request that ordered it and the identity can be walked in either
+        direction. It reaches the input only when it satisfies the shared
+        alphabet and width above, and is omitted rather than shortened when it
+        does not.
+      # Assumptions: the identity crosses the asynchronous boundary as an ordinary
+      # member of the orchestration input rather than as a trace header, because a
+      # trace header field admits only one tracing form -- a Root= identifier --
+      # and a caller-supplied request identity is not one, so anything placed
+      # there would be refused by the orchestrator or silently dropped. An input
+      # member is read by whatever consumes the input and ignored by whatever does
+      # not, which is why adding it needed no change to the state machine that
+      # reads the other three members.
       # Assumptions: the shared CorrelationId schema admits the EMPTY string, because
       # ApiError normalises an absent identity to "" at L619 and every problem
       # document carries the member, so the schema a BODY member names has to admit
@@ -1537,6 +1554,24 @@ components:
         accepts one in a target, and no card verification value appears anywhere
         in this contract at all.
 
+    # Assumptions: this scalar admits every four-digit year the mask can spell,
+    # and the date edit behind it declines fewer values than a strict Gregorian
+    # reading of a calendar would. app/cbl/CORPT00C.cbl accepts a bound whose
+    # date edit answered 'unsupported range' -- it tests the verdict's message
+    # number rather than its severity, IF CSUTLDTC-RESULT-MSG-NUM NOT = '2513',
+    # at L399 for the lower bound and at L419 for the upper -- so a year below
+    # the supported calendar floor is processed rather than refused. Every
+    # surface here that states a bound carries that same tolerance, which is why
+    # the domain is described below in terms of what is refused rather than in
+    # terms of a floor.
+    # Alternatives Considered: declining a bound below the Gregorian floor, on
+    # the reading that a pre-Gregorian date cannot be a real processing date and
+    # that a caller sending one has made a mistake worth reporting. Rejected
+    # because the reference states the opposite in code at both bounds, so
+    # declining those values would refuse work the reference performs -- and a
+    # target that refuses accepted input is the one class of difference
+    # functional parity does not admit, whatever its merits as a validation
+    # rule.
     IsoDate:
       type: string
       pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
@@ -1548,6 +1583,15 @@ components:
         the one the baseline stores, so a lexical comparison and a date
         comparison agree, which is what lets the range predicate compare the
         leading ten characters of a timestamp directly.
+
+
+        No floor is imposed on the year. A bound below the supported calendar
+        floor is processed rather than refused, matching app/cbl/CORPT00C.cbl
+        L399 and L419, so 1582-10-14 and 0001-01-01 are both accepted; a year of
+        0000 is refused, because an era-zero year is a different verdict and not
+        a tolerated one. Every operation that states a bound -- the submission,
+        both date-range reads and the artifact collection -- applies that one
+        edit, so the three agree on every value.
 
     # Assumptions: no date-time format is declared on it.
     # services/common-lib/src/main/java/com/carddemo/common/time/TimestampFormatter.java
@@ -3199,15 +3243,36 @@ components:
         help text. The component list of the shared FieldError record name for
         name.
       properties:
+        # WHY : Refactoring Rationale: the sentence below read "A consolidated date bound
+        #       reports the specific component at fault, so the twelve per-component reference
+        #       messages stay individually addressable even though the wire carries one value
+        #       per bound." Two things were wrong with it and both are load-bearing for a
+        #       client. It said the FIELD names the component, which it never did and must not:
+        #       this value is the property name of the request schema, and the request carries
+        #       startDate and endDate, so a synthetic name such as startDateMonth would identify
+        #       no control a client could mark. And it claimed all twelve per-component messages
+        #       were addressable, which was false in both directions -- ten of the fourteen were
+        #       unreachable when it was written, and four remain unreachable now for reasons the
+        #       message description below states.
+        # WHY : Assumptions: the component identity travels in the MESSAGE and the bound identity
+        #       in this field, which is the only split the wire supports. It is also what the
+        #       reference does: app/cbl/CORPT00C.cbl names the component in the sentence it moves
+        #       to WS-MESSAGE and separately points the cursor at that component's own screen
+        #       field, so the two identities are distinct there too -- what changes is that a
+        #       consolidated bound has one control to point at where the screen had three.
         field:
           type: string
           minLength: 1
           description: >-
             The response-field identity a client attaches the help text to,
-            spelled as the property name of the request schema. A consolidated
-            date bound reports the specific component at fault, so the twelve
-            per-component reference messages stay individually addressable even
-            though the wire carries one value per bound.
+            spelled as the property name of the request schema or of the query
+            parameter the operation publishes. A date bound is therefore named as
+            the bound -- startDate or endDate -- and never as one of its three
+            components, because a consolidated ISO value has one control a client
+            can mark. Which component is at fault is carried by the message
+            instead: the reference's six per-component sentences are selected from
+            the components of the assembled bound and are individually
+            addressable through the message text, at the same field identity.
         state:
           allOf:
             - $ref: '#/components/schemas/FieldValidationState'
@@ -3235,6 +3300,25 @@ components:
             user-visible behavioural change. Each is three ASCII full stops and
             never a single ellipsis character, and the capitalised NOT is the
             reference's own.
+
+
+            Ten of the fourteen date sentences are emitted by this context and
+            four can never be, and the boundary is structural rather than chosen.
+            The four are the Day and Year empty-field sentences of each bound, at
+            L268, L275, L289 and L296: a bound arrives as ONE consolidated value,
+            so it is present whole or absent whole and cannot be partially empty,
+            which leaves each bound's Month empty-field sentence as the one an
+            absent bound carries. Of the ten that are emitted, eight are reachable
+            by a caller that obeys the schemas published here -- both
+            empty-field Month sentences, the four Month and Day range sentences
+            and the two assembled-date sentences -- while the two 'Not a valid
+            Year' sentences answer a year that is not four digits, which IsoDate
+            does not admit on any bound carrier this document declares. They are
+            listed and selected all the same, because a caller that sends a
+            non-conforming year is answered with the reference's own sentence for
+            it rather than with an off-catalog one. The residual is registered as
+            D-REPORT-DATE-MESSAGE-REACH in
+            docs/architecture/cobol-to-service-traceability.md.
           examples:
             - 'Start Date - Month can NOT be empty...'
             - 'Start Date - Day can NOT be empty...'

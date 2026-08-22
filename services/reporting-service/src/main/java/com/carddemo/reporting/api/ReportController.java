@@ -19,7 +19,6 @@ import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import java.security.Principal;
 import java.time.LocalDate;
-import java.time.format.DateTimeParseException;
 import java.util.Objects;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.http.HttpHeaders;
@@ -486,10 +485,10 @@ public class ReportController {
      * @param principal the authenticated caller, supplied by the framework; the page's boundary
      *     tokens are bound to its name, so a cursor issued to another operator is refused
      * @return one bounded page of detail lines with its two sealed boundaries; never {@code null}
-     * @throws ClientInputException if either bound is not a calendar date, if the range is inverted,
-     *     if the direction is neither of the two values the contract publishes, if a direction is sent
-     *     without the cursor it moves from, or if the range selects more rows than the service is
-     *     willing to assemble
+     * @throws ClientInputException if either bound is refused by the same date edit a submitted
+     *     bound is held to, if the range is inverted, if the direction is neither of the two values
+     *     the contract publishes, if a direction is sent without the cursor it moves from, or if the
+     *     range selects more rows than the service is willing to assemble
      * @throws IllegalStateException if a detail line cannot be resolved to its reference dimensions,
      *     which is the target's equivalent of the reference abending on an unresolved lookup
      */
@@ -507,8 +506,10 @@ public class ReportController {
             @RequestParam(name = DIRECTION_PARAMETER, required = false) String direction,
             Principal principal) {
 
-        LocalDate start = parseBound(startDate, "startDate");
-        LocalDate end = parseBound(endDate, "endDate");
+        ReportExecutionService.DateRange edited = editStatedBounds(startDate, endDate,
+                ReportExecutionService.START_DATE_FIELD, ReportExecutionService.END_DATE_FIELD);
+        LocalDate start = edited.start();
+        LocalDate end = edited.end();
 
         // WHY : Refactoring Rationale: the page is read by KEYSET and no longer sliced ordinally out of
         //       a materialised range. The previous shape assembled every line the range held -- up to
@@ -649,15 +650,18 @@ public class ReportController {
      * @param startDate the first business date to cover, in {@code YYYY-MM-DD} order
      * @param endDate the last business date to cover, in {@code YYYY-MM-DD} order
      * @return the subtotal bands in the order the report emits them; never {@code null}
-     * @throws ClientInputException if either bound is not a calendar date, if the range is inverted,
-     *     or if the range selects more rows than the service is willing to assemble
+     * @throws ClientInputException if either bound is refused by the same date edit a submitted
+     *     bound is held to, if the range is inverted, or if the range selects more rows than the
+     *     service is willing to assemble
      */
     @GetMapping(path = TOTALS_PATH)
     public TransactionReportTotals readTransactionReportTotals(
             @RequestParam("startDate") String startDate,
             @RequestParam("endDate") String endDate) {
-        LocalDate start = parseBound(startDate, "startDate");
-        LocalDate end = parseBound(endDate, "endDate");
+        ReportExecutionService.DateRange edited = editStatedBounds(startDate, endDate,
+                ReportExecutionService.START_DATE_FIELD, ReportExecutionService.END_DATE_FIELD);
+        LocalDate start = edited.start();
+        LocalDate end = edited.end();
 
         // WHY : Refactoring Rationale: the totals are computed by the service over the RANGE rather than
         //       over a list of composed lines this method assembled first. The old shape forced the
@@ -792,7 +796,8 @@ public class ReportController {
      * @param startDate the inclusive lower bound of the reported range, in {@code YYYY-MM-DD} order
      * @param endDate the inclusive upper bound
      * @return the artifact bytes as an attachment
-     * @throws ClientInputException if a bound is absent or is not a calendar date
+     * @throws ClientInputException if a bound is absent or is refused by the same date edit a
+     *     submitted bound is held to
      * @throws NoSuchElementException if no artifact is stored for those coordinates
      */
     @GetMapping(path = ARTIFACT_PATH, produces = MediaType.APPLICATION_OCTET_STREAM_VALUE)
@@ -800,9 +805,9 @@ public class ReportController {
             @RequestParam(ReportArtifactLocator.TYPE_PARAMETER) String reportType,
             @RequestParam(ReportArtifactLocator.START_DATE_PARAMETER) String startDate,
             @RequestParam(ReportArtifactLocator.END_DATE_PARAMETER) String endDate) {
-        LocalDate start = parseBound(startDate, ReportArtifactLocator.START_DATE_PARAMETER);
-        LocalDate end = parseBound(endDate, ReportArtifactLocator.END_DATE_PARAMETER);
-        String key = reportArtifactKey(reportType, start, end);
+        ReportExecutionService.DateRange edited = editStatedBounds(startDate, endDate,
+                ReportArtifactLocator.START_DATE_PARAMETER, ReportArtifactLocator.END_DATE_PARAMETER);
+        String key = reportArtifactKey(reportType, edited.start(), edited.end());
         ArtifactStore.OpenArtifact artifact = artifacts.open(key);
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION, ATTACHMENT_DISPOSITION)
@@ -835,32 +840,66 @@ public class ReportController {
     }
 
     /**
-     * Parses one query bound, refusing an unparseable value against its own parameter name.
+     * Edits a range's two query bounds with the same rules a submitted range is held to.
      *
-     * <p>Assumptions: this parses and does not validate a business rule. The ordering of the two
+     * <p>Refactoring Rationale: the edit is applied to the PAIR rather than to one bound at a time,
+     * because a bound is not the unit the reference edits in. {@code app/cbl/CORPT00C.cbl} runs each of
+     * its tiers across both bounds before opening the next -- six emptiness arms at L258 to L299, six
+     * component arms at L331 to L374, then the assembled edit for the lower bound at L399 and for the
+     * upper at L419 -- so a range stating {@code 2022-02-30} below and {@code 2022-13-15} above is
+     * refused there on the UPPER bound, whose month fails a component arm before either assembled edit
+     * is reached. Editing each bound to completion in turn refused the same range on the LOWER bound
+     * instead. Only one sentence ever reaches a caller, so the difference is in WHICH of two
+     * simultaneous faults is named, and naming a different one is an observable difference.
+     *
+     * <p>Refactoring Rationale: this method also DELEGATES the edit, where it parsed the value with a bare
+     * calendar parse of its own. Two surfaces then disagreed about the same value: the submission
+     * operation puts each bound through {@link ReportExecutionService#editStatedBound(String, String)}
+     * and refused {@code 0000-01-01} because the shared date edit reports an era-zero year, while the
+     * two read operations and the artifact collection accepted it and answered rows for a range the
+     * same service had just declared unusable. The bare parse was the whole cause: it admits any value
+     * the calendar type can construct, which is a wider domain than the reference's edit. Delegating
+     * rather than transcribing the rules here is what keeps the three surfaces from drifting apart
+     * again, and it carries the reference's own sentences onto the read surfaces at the same time --
+     * including the component sentences, which the previous target-authored message could not express.
+     *
+     * <p>Assumptions: this edits and does not validate a business rule. The ordering of the two
      * bounds and the size of the range they span are checked by
      * {@link TransactionReportService#composeDetailLines(LocalDate, LocalDate)}, which owns those
      * rules; duplicating either here would give one rule two homes.
      *
-     * @param value the bound as the caller stated it
-     * @param field the query-parameter name, used to name the refusal
-     * @return the parsed bound
-     * @throws ClientInputException if the value is blank or is not a calendar date
+     * <p>Assumptions: each value is trimmed before the edit, which is the transport normalisation this
+     * method already performed and is kept unchanged. The submission path reaches the same edit with
+     * its TRAILING padding already removed, because {@code ReportRequest} strips a declared-width
+     * field's trailing blanks in its constructor, so on that side the two surfaces agree exactly.
+     * They differ on LEADING padding and knowingly so: a body bound carrying a leading blank is
+     * eleven characters after that strip and is refused by the request schema's own pattern, while a
+     * query bound carrying one is trimmed and accepted. The difference is a property of transport
+     * normalisation rather than of the date edit -- the edit itself is now one implementation for
+     * every surface -- and narrowing the read surfaces over a percent-encoded blank would change an
+     * accepted request into a refused one for no finding's sake.
+     *
+     * @param startValue the lower bound as the caller stated it
+     * @param endValue the upper bound as the caller stated it
+     * @param startField the lower bound's query-parameter name, used to name a refusal against it
+     * @param endField the upper bound's query-parameter name; the sentence the shared edit selects
+     *     depends on which end of the range is being reported, so the two surfaces that read a range
+     *     pass {@link ReportExecutionService#START_DATE_FIELD} and
+     *     {@link ReportExecutionService#END_DATE_FIELD} while the artifact collection reaches those
+     *     same two values through {@link ReportArtifactLocator#START_DATE_PARAMETER} and
+     *     {@link ReportArtifactLocator#END_DATE_PARAMETER}, which are the parameter names that
+     *     operation publishes and are spelled identically -- a rename on either side would send the
+     *     upper bound's sentence for a lower bound, which is why the two are asserted equal by the
+     *     contract cases rather than assumed to stay in step
+     * @return both edited bounds, in the order stated; never {@code null}
+     * @throws ClientInputException if either value is blank, carries a month, day or year component
+     *     the reference's component tier refuses, or is rejected by the shared date edit
      */
-    private static LocalDate parseBound(String value, String field) {
-        if (value == null || value.isBlank()) {
-            throw new ClientInputException(ApiError.CODE_VALIDATION, field,
-                    field + " must be supplied");
-        }
-        try {
-            return LocalDate.parse(value.trim());
-        } catch (DateTimeParseException notADate) {
-            // WHY : Assumptions: the refusal names the parameter and never repeats the value it
-            //       refused. The message is written into an operational record, and a constant
-            //       message is what lets an alert rule match this refusal without matching on caller
-            //       input -- the same discipline every refusal in this context follows.
-            throw new ClientInputException(ApiError.CODE_VALIDATION, field,
-                    field + " must be a calendar date in YYYY-MM-DD order");
-        }
+    private static ReportExecutionService.DateRange editStatedBounds(String startValue, String endValue,
+            String startField, String endField) {
+        return ReportExecutionService.editStatedBounds(
+                startValue == null ? null : startValue.trim(),
+                endValue == null ? null : endValue.trim(),
+                startField, endField);
     }
 }

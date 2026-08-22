@@ -6,17 +6,23 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.carddemo.batch.domain.Account;
 import com.carddemo.batch.domain.CardXref;
 import com.carddemo.batch.domain.DailyTransaction;
+import com.carddemo.batch.domain.PostingRejectOutbox;
 import com.carddemo.batch.domain.Transaction;
 import com.carddemo.batch.domain.TransactionCategoryBalance;
 import com.carddemo.batch.domain.TransactionCategoryBalance.TransactionCategoryBalanceId;
+import com.carddemo.batch.domain.TransactionReject;
 import com.carddemo.batch.mapper.DailyTransactionMapper;
+import com.carddemo.batch.mapper.TransactionRejectRecordMapper;
 import com.carddemo.batch.service.CategoryBalanceService;
+import com.carddemo.batch.service.DailyFeedWatermarkService;
 import com.carddemo.common.money.Money;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceException;
 import java.math.BigDecimal;
+import java.time.Clock;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import javax.sql.DataSource;
@@ -29,6 +35,8 @@ import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.persistence.autoconfigure.EntityScan;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Bean;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
@@ -87,6 +95,31 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * a cleared persistence context. Reading through the context that attempted them would return the
  * in-memory instances and would report the rollback as successful whether or not the database had
  * performed one.</p>
+ *
+ * <h2>What the unit of work covers besides the three writes</h2>
+ *
+ * <p>Purpose: the record's transaction carries two further writes that are as much part of it as the
+ * three above, and the last three cases in this class are about them. {@code batch.daily_feed_watermark}
+ * records the feed ordinal the pass has consumed through, so a redriven pass starts after it; and
+ * {@code batch.posting_reject_outbox} records that the record was accounted for, holding the verbatim
+ * 430-byte reject image when it was rejected. Both are written inside the record's own transaction, so
+ * a refusal at any write leaves the ordinal unconsumed and the record unaccounted for -- and a pass
+ * that reached the end of the feed can publish the run's reject stream and state the run's totals from
+ * the outbox alone, whatever became of the attempt that produced them.</p>
+ *
+ * <p>Refactoring Rationale: the checkpoint used to be the only durable trace a pass left behind, and
+ * the reject images were accumulated in a temporary file on the task's own disk and staged after the
+ * walk. A failure at the stage therefore committed every record and advanced the checkpoint past them
+ * while destroying the only copy of the images, so the redrive read above the checkpoint, found
+ * nothing, staged an empty generation and reported a clean night for one that had rejected a record.
+ * The outbox closes that by giving the images the same extent as the checkpoint, which is what these
+ * cases assert against a real engine.</p>
+ *
+ * <p>Alternatives Considered: moving the checkpoint advance OUT of the record's transaction so a
+ * redrive re-reads the window. It was rejected and is asserted against here, because posting mints a
+ * new transaction identifier per record, so a re-read record posts a second time and the duplicate is
+ * individually valid and therefore invisible. Keeping the advance inside the transaction and making
+ * the artefact durable is the direction that has no such failure mode.</p>
  *
  * <p>A test class accepts no parameter, yields no value and raises nothing, so this block carries no
  * parameter, return or exception at-clause. Every member below carries its own.</p>
@@ -217,6 +250,80 @@ class PostingUnitOfWorkIT {
     private static final LocalDateTime ORIGINATED_AT = LocalDateTime.of(2022, 6, 10, 19, 27, 53);
 
     /**
+     * The orchestrator execution identifier every accounted row and checkpoint below carries.
+     *
+     * <p>Assumptions: one value for the whole class, because the outbox is read back BY run and a case
+     * that accounted under one identifier and read back under another would report an empty run and
+     * pass for the wrong reason.</p>
+     */
+    private static final String RUN_ID = "batch-run-0042";
+
+    /**
+     * The injected business-date token every accounted row and checkpoint below carries.
+     *
+     * <p>Assumptions: exactly ten characters in the ISO order, which is the width both the checkpoint
+     * and the outbox declare and validate. It is the date {@code app/jcl/INTCALC.jcl} L22 passes as a
+     * parameter, so the value is the reference's own and is never a clock read.</p>
+     */
+    private static final String BUSINESS_DATE = "2022-07-18";
+
+    /** The feed the checkpoint and the outbox are keyed by, named by the production constant. */
+    private static final String FEED_NAME = DailyFeedWatermarkService.DAILY_TRANSACTION_FEED;
+
+    /** The feed ordinal the accepted record of these cases occupies. */
+    private static final long ACCEPTED_ORDINAL = 7L;
+
+    /** The feed ordinal the rejected record of these cases occupies, after the accepted one. */
+    private static final long REJECTED_ORDINAL = 8L;
+
+    /**
+     * The instant the staging marker records against a published reject image.
+     *
+     * <p>Assumptions: a literal later than {@link #PROCESSED_AT}, because the marking happens after
+     * the record's own transaction committed and a reader comparing the two should see that order.</p>
+     */
+    private static final LocalDateTime STAGED_AT = LocalDateTime.of(2022, 7, 18, 2, 6, 15);
+
+    /**
+     * The object key the staging marker records, in the generation convention the module writes to.
+     *
+     * <p>Assumptions: the shape is the dataset generation convention -- family, business date, then
+     * generation -- which is the GDG analogue {@code app/jcl/DALYREJS.jcl} L24-L26 defines at
+     * {@code LIMIT(5)}. Where the key is FORMED is asserted by {@code DatasetGenerationServiceTest};
+     * here it is only a value the column has to carry back unchanged.</p>
+     */
+    private static final String STAGED_OBJECT_KEY =
+            "ledger/dalyrejs/dt=2022-07-18/gen=0001/dalyrejs";
+
+    /** The declared length of one reject record, being the 350-byte prefix plus the 80-byte trailer. */
+    private static final int REJECT_RECORD_LENGTH = PostingRejectOutbox.REJECT_RECORD_LENGTH;
+
+    /**
+     * The declared width of the reject trailer.
+     *
+     * <p>Assumptions: eighty, being {@code WS-VALIDATION-FAIL-REASON PIC 9(04)} at
+     * {@code app/cbl/CBTRN02C.cbl} L181 followed by {@code WS-VALIDATION-FAIL-REASON-DESC PIC X(76)}
+     * at L182. It is named so the prefix width below is derived from the contract.</p>
+     */
+    private static final int REJECT_TRAILER_WIDTH = 80;
+
+    /**
+     * The 350-character record image the rejected record of these cases carries.
+     *
+     * <p>Assumptions: the image is filled with a REPEATED marker rather than assembled field by field,
+     * because these cases assert that the bytes survive the row unchanged and never decode them. What
+     * the fields say is the subject of {@code TransactionRejectRecordMapperTest}; that the column
+     * returns the same 430 bytes it was given is the subject here.</p>
+     *
+     * <p>Assumptions: the width is taken from the reject record's own declared length minus its trailer
+     * rather than written as 350, so the value moves with the contract. {@code DALYTRAN-RECORD} is 350
+     * bytes in {@code app/cpy/CVTRA06Y.cpy} and the trailer is the 80 bytes
+     * {@code app/cbl/CBTRN02C.cbl} L181 and L182 declare.</p>
+     */
+    private static final String REJECTED_IMAGE_PREFIX =
+            "R".repeat(REJECT_RECORD_LENGTH - REJECT_TRAILER_WIDTH);
+
+    /**
      * The container every assertion in this class runs against, started once for the class.
      *
      * <p>Assumptions: the type comes from {@code org.testcontainers.postgresql} rather than the
@@ -253,6 +360,32 @@ class PostingUnitOfWorkIT {
     @Autowired
     private CategoryBalanceService balances;
 
+    /** The reject stream, injected as the production repository interface. */
+    @Autowired
+    private TransactionRejectRepository rejects;
+
+    /**
+     * The durable reject outbox, injected as the production repository interface.
+     *
+     * <p>Assumptions: the interface is used rather than a plain JDBC write, because what the last three
+     * cases assert is what the PRODUCTION write path leaves in the table -- including the fixed-width
+     * character column returning the image padded and the identity column assigning an ordinal. A JDBC
+     * insert would state the schema's behaviour while leaving the mapping the job depends on
+     * unexercised.</p>
+     */
+    @Autowired
+    private PostingRejectOutboxRepository rejectOutbox;
+
+    /**
+     * The production feed checkpoint rule, exercised rather than substituted.
+     *
+     * <p>Assumptions: the real service over the real repository, because its advance-only guard and its
+     * insert-or-mutate arms are part of what the record's transaction writes. A substitute would leave
+     * the one write whose rollback these cases are about unexercised against the real table.</p>
+     */
+    @Autowired
+    private DailyFeedWatermarkService feedWatermarks;
+
     /** The persistence context, used to flush inside a boundary and to detach after it. */
     @Autowired
     private EntityManager entityManager;
@@ -285,12 +418,18 @@ class PostingUnitOfWorkIT {
     }
 
     /**
-     * Empties the three written tables and seeds the account and its cross-reference.
+     * Empties the written tables and seeds the account and its cross-reference.
      *
      * <p>Assumptions: the seed is committed before each case rather than shared across the class, so a
      * case that rolls back a posting still starts from a known balance. The delete order is
      * child-before-parent only in the sense of what each case writes; the harness declares no foreign
      * key between these tables, deliberately, because the owning migrations declare none either.</p>
+     *
+     * <p>Assumptions: the checkpoint row and the outbox rows are emptied too, and they matter more than
+     * the others. Both are keyed by values this class holds constant, so a row surviving from a
+     * previous case would make the checkpoint's advance-only guard refuse the next case's advance and
+     * would make the outbox's uniqueness rule refuse the next case's row -- each turning a real
+     * assertion into a failure about ordering between cases.</p>
      *
      * @param dataSource the pool the context built from the container's coordinates; must not be
      *     {@code null}
@@ -301,8 +440,11 @@ class PostingUnitOfWorkIT {
         this.transactionTemplate.executeWithoutResult(status -> {
             this.jdbc.update("DELETE FROM ledger.transactions");
             this.jdbc.update("DELETE FROM ledger.transaction_category_balances");
+            this.jdbc.update("DELETE FROM ledger.transaction_rejects");
             this.jdbc.update("DELETE FROM account.accounts");
             this.jdbc.update("DELETE FROM account.card_xref");
+            this.jdbc.update("DELETE FROM batch.posting_reject_outbox");
+            this.jdbc.update("DELETE FROM batch.daily_feed_watermark");
         });
         this.transactionTemplate.executeWithoutResult(status -> {
             this.accounts.save(seedAccount());
@@ -563,6 +705,190 @@ class PostingUnitOfWorkIT {
     }
 
     /**
+     * Confirms an accepted record's outbox row and feed checkpoint commit with its three writes.
+     *
+     * <p>Purpose: this is the accounting half of the unit of work read from the committed side. The
+     * outbox row is what a later pass counts to state how many records the RUN processed, and the
+     * checkpoint is what a later pass walks from, so both have to be present and consistent with the
+     * three rows once the transaction commits.</p>
+     *
+     * <p>Assumptions: the outbox row is asserted through the two COUNTS the production job reads rather
+     * than by selecting the row, because those counts are the values the counter lines are rendered
+     * from. A row that existed but that the run-scoped count did not see would satisfy a select and
+     * still report a night of zero.</p>
+     *
+     * <p>Assumptions: the accepted record's row carries NO image, and that is asserted positively
+     * through the rejected count being zero. A posted record accounted for as a rejected one would
+     * publish a reject the night never produced and would grade a clean night as warned.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an accepted record's outbox row and feed checkpoint commit with its three writes")
+    void anAcceptedRecordsAccountingCommitsWithItsWrites() {
+        postAndAccount(TRANSACTION_ID, DESCRIPTION, ACCEPTED_ORDINAL);
+        this.entityManager.clear();
+
+        assertThat(this.ledger.findById(TRANSACTION_ID))
+                .as("the posted transaction committed alongside its accounting")
+                .isPresent();
+        assertThat(this.accounts.findByAccountId(ACCOUNT_ID).orElseThrow().getCurrBal())
+                .isEqualByComparingTo(OPENING_BALANCE.add(AMOUNT));
+        assertThat(categoryBalanceOf()).isPresent();
+
+        assertThat(this.rejectOutbox.countByRunIdAndFeedName(RUN_ID, FEED_NAME))
+                .as("the run accounted for exactly one record, which is what a later pass reports"
+                        + " as processed")
+                .isEqualTo(1L);
+        assertThat(this.rejectOutbox
+                .countByRunIdAndFeedNameAndRejectRecordIsNotNull(RUN_ID, FEED_NAME))
+                .as("an accepted record carries no reject image, so the run's rejected total is zero"
+                        + " and the pass grades clean")
+                .isZero();
+        assertThat(consumedThrough())
+                .as("the checkpoint advanced to the accounted ordinal in the same transaction")
+                .isEqualTo(ACCEPTED_ORDINAL);
+    }
+
+    /**
+     * Confirms a refusal at the ledger write rolls back the outbox row and the checkpoint too.
+     *
+     * <p>Purpose: this is the property the durable outbox rests on. The reported defect was reproduced
+     * with a forced failure at the third write, and the observation that the checkpoint reverted with it
+     * is what proved the checkpoint sits INSIDE the record's transaction while the reject artefact sat
+     * outside it. This case states both halves as a requirement: the checkpoint reverts, and now the
+     * accounting row reverts with it, so a refused record is neither counted nor skipped.</p>
+     *
+     * <p>Assumptions: the accounting writes are issued BEFORE the refused ledger write inside the same
+     * boundary, so their rollback is what the assertions read. Issuing them afterwards would never
+     * execute them and the case would pass without asserting anything about their extent.</p>
+     *
+     * <p>Assumptions: the checkpoint is asserted to be entirely absent rather than merely behind,
+     * because nothing precedes this record. An implementation that committed the checkpoint separately
+     * would leave a position advanced past a record that was never accounted for -- which is exactly the
+     * state a redrive cannot recover from, since the record is neither re-presented nor recorded.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a refusal at the ledger write rolls back the outbox row and the checkpoint")
+    void aRefusalRollsBackTheAccountingAndTheCheckpoint() {
+        // WHY : Assumptions: the refusal arrives TRANSLATED here, while the neighbouring cases above
+        //       see the raw JPA one, and the difference is a real property of this unit rather than a
+        //       looser assertion. The accounting row's identifier is database-assigned, so persisting it
+        //       executes an insert immediately -- which forces the pending ledger insert out to the
+        //       engine at that moment, inside a Spring Data repository call whose proxy translates what
+        //       comes back. The cases above have no such write after the ledger one, so their refusal
+        //       surfaces from the explicit flush instead, untranslated.
+        // WHY : Trade-offs: the exact translated type is asserted rather than the DataAccessException
+        //       family, and the compromise accepted is that a future engine reporting a width
+        //       violation under a different classification would fail here. That is the right way
+        //       round: an integrity violation is what a width refusal IS, and accepting the whole
+        //       family would let a connectivity failure satisfy a case about rollback.
+        assertThatThrownBy(() -> postAndAccount(
+                TRANSACTION_ID, OVERLONG_DESCRIPTION, ACCEPTED_ORDINAL))
+                .as("the description column refuses a value wider than it admits")
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .rootCause()
+                .hasMessageContaining("value too long");
+
+        this.entityManager.clear();
+
+        assertThat(this.ledger.count()).as("no posted transaction survived").isZero();
+        assertThat(this.accounts.findByAccountId(ACCOUNT_ID).orElseThrow().getCurrBal())
+                .as("the account is exactly as seeded")
+                .isEqualByComparingTo(OPENING_BALANCE);
+        assertThat(categoryBalanceOf()).isEmpty();
+
+        assertThat(this.rejectOutbox.countByRunIdAndFeedName(RUN_ID, FEED_NAME))
+                .as("the refused record was NOT accounted for, so the run's processed total does not"
+                        + " count a record it did not write")
+                .isZero();
+        assertThat(consumedThrough())
+                .as("the checkpoint did not advance, so a redrive re-presents the refused record"
+                        + " rather than skipping it")
+                .isEqualTo(DailyFeedWatermarkService.NOTHING_CONSUMED);
+    }
+
+    /**
+     * Confirms a rejected record's image survives the record's commit and is marked staged once.
+     *
+     * <p>Purpose: this is the durability the whole outbox exists for, read against a real engine. The
+     * image has to come back from the column byte for byte, because the staged dataset is assembled
+     * from these rows and the reference suite compares that dataset byte for byte against
+     * {@code tests/golden/posting/reject_102_overlimit/dalyrejs.expected}. A column that padded, trimmed
+     * or transcoded the image would produce a dataset that was the right length and the wrong bytes.</p>
+     *
+     * <p>Assumptions: the image is read back through the ORDERED replay finder the staging path uses,
+     * not through a select of the row, so the ordering the dataset depends on is exercised as well as
+     * the storage. Ordering by the feed ordinal is what makes the assembled bytes reproducible across
+     * attempts.</p>
+     *
+     * <p>Assumptions: the marking statement is issued twice and the second call is asserted to report
+     * nothing marked. That is what makes a second staging attempt within one pass harmless: the instant
+     * a publication really happened at is not overwritten by a later attempt that found the work
+     * already done.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("a rejected record's image survives its commit and is marked staged exactly once")
+    void aRejectedRecordsImageSurvivesAndIsMarkedStagedOnce() {
+        byte[] image = rejectImage();
+        rejectAndAccount(image, REJECTED_ORDINAL);
+        this.entityManager.clear();
+
+        // WHY : Assumptions: the reject row is counted through JDBC rather than through its repository,
+        //       because that interface deliberately declares nothing but save -- appending is the only
+        //       operation this module performs against the stream. Counting through it would mean
+        //       widening a production interface for a test's benefit.
+        assertThat(this.jdbc.queryForObject(
+                "SELECT count(*) FROM ledger.transaction_rejects", Long.class))
+                .as("the reject row committed with its accounting")
+                .isEqualTo(1L);
+        assertThat(this.rejectOutbox.countByRunIdAndFeedName(RUN_ID, FEED_NAME)).isEqualTo(1L);
+        assertThat(this.rejectOutbox
+                .countByRunIdAndFeedNameAndRejectRecordIsNotNull(RUN_ID, FEED_NAME))
+                .as("the run's rejected total is one, which is what drives the warned tier")
+                .isEqualTo(1L);
+        assertThat(consumedThrough()).isEqualTo(REJECTED_ORDINAL);
+
+        List<PostingRejectOutbox> replayed = replayFrom(DailyFeedWatermarkService.NOTHING_CONSUMED);
+        assertThat(replayed).hasSize(1);
+        assertThat(replayed.get(0).isRejected()).isTrue();
+        assertThat(replayed.get(0).getIngestSeq()).isEqualTo(REJECTED_ORDINAL);
+        assertThat(replayed.get(0).rejectImageBytes())
+                .as("the column returns the 430 bytes it was given, byte for byte")
+                .isEqualTo(image);
+        assertThat(replayFrom(REJECTED_ORDINAL))
+                .as("the exclusive bound skips the row it names, which is how the assembly advances")
+                .isEmpty();
+
+        int marked = this.transactionTemplate.execute(status -> this.rejectOutbox.markRejectsStaged(
+                RUN_ID, FEED_NAME, STAGED_AT, STAGED_OBJECT_KEY));
+        assertThat(marked).as("the one unstaged image was marked").isEqualTo(1);
+
+        this.entityManager.clear();
+        PostingRejectOutbox stamped = replayFrom(DailyFeedWatermarkService.NOTHING_CONSUMED).get(0);
+        assertThat(stamped.getStagedAt()).isEqualTo(STAGED_AT);
+        assertThat(stamped.getStagedObjectKey()).isEqualTo(STAGED_OBJECT_KEY);
+        assertThat(stamped.rejectImageBytes())
+                .as("marking a row published does not disturb the image it published")
+                .isEqualTo(image);
+
+        int remarked = this.transactionTemplate.execute(status -> this.rejectOutbox.markRejectsStaged(
+                RUN_ID, FEED_NAME, STAGED_AT.plusMinutes(1L), "ledger/dalyrejs/second-attempt"));
+        assertThat(remarked)
+                .as("a repeat of a marking that already succeeded reports nothing to do")
+                .isZero();
+
+        this.entityManager.clear();
+        assertThat(replayFrom(DailyFeedWatermarkService.NOTHING_CONSUMED).get(0).getStagedAt())
+                .as("and leaves the instant of the real publication where it was")
+                .isEqualTo(STAGED_AT);
+    }
+
+    /**
      * Persists one posted transaction with an explicit card number and processing instant.
      *
      * <p>Assumptions: the row is built through the production mapper and then its two varying members
@@ -630,28 +956,175 @@ class PostingUnitOfWorkIT {
      */
     private CategoryBalanceService.Outcome post(String transactionId, String description) {
         return this.transactionTemplate.execute(status -> {
-            CardXref resolved = this.crossReferences.findByCardNum(CARD_NUM).orElseThrow();
+            CategoryBalanceService.Outcome outcome = applyThreeWrites(transactionId, description);
+            this.entityManager.flush();
+            return outcome;
+        });
+    }
 
-            CategoryBalanceService.Outcome outcome = this.balances.accumulate(
-                    new TransactionCategoryBalanceId(resolved.getAccountId(), TYPE_CD, CATEGORY_CD),
-                    Money.of(AMOUNT));
+    /**
+     * Issues the three writes of one posting, without opening a boundary and without flushing.
+     *
+     * <p>Refactoring Rationale: this was the body of {@link #post(String, String)}'s boundary and was
+     * extracted so the accounting overload below can perform the SAME three writes before adding the
+     * two accounting writes to them. Restating the three would let one copy drift from the other, and
+     * the accounting cases would then be asserting rollback of a unit that differs from the one the
+     * atomicity cases assert.</p>
+     *
+     * @param transactionId the identifier the posted row carries; must not be {@code null}
+     * @param description the description the feed record carries; must not be {@code null}
+     * @return the accumulation outcome, naming which arm ran and the resulting balance, never
+     *     {@code null}
+     * @throws jakarta.persistence.EntityNotFoundException never; the seeded cross-reference and account
+     *     are both present in every case, and the {@code orElseThrow} calls below state that
+     *     expectation rather than handling an absence
+     */
+    private CategoryBalanceService.Outcome applyThreeWrites(String transactionId,
+            String description) {
 
-            Account posting = this.accounts.findByAccountId(resolved.getAccountId()).orElseThrow();
-            posting.setCurrBal(Money.of(posting.getCurrBal()).plus(Money.of(AMOUNT)).amount());
-            posting.setCurrCycCredit(
-                    Money.of(posting.getCurrCycCredit()).plus(Money.of(AMOUNT)).amount());
-            this.accounts.save(posting);
+        CardXref resolved = this.crossReferences.findByCardNum(CARD_NUM).orElseThrow();
 
-            // WHY : Assumptions: the posted row is projected by the PRODUCTION mapper rather than
-            //   assembled here, so the stamp, the field carry-over and the FILLER drop are the ones
-            //   the job performs. Hand-building it would leave the projection unexercised and would
-            //   let this class agree with itself about a shape production does not produce.
-            this.ledger.save(DailyTransactionMapper.toPostedTransaction(
-                    feedRecord(transactionId, description), PROCESSED_AT));
+        CategoryBalanceService.Outcome outcome = this.balances.accumulate(
+                new TransactionCategoryBalanceId(resolved.getAccountId(), TYPE_CD, CATEGORY_CD),
+                Money.of(AMOUNT));
+
+        Account posting = this.accounts.findByAccountId(resolved.getAccountId()).orElseThrow();
+        posting.setCurrBal(Money.of(posting.getCurrBal()).plus(Money.of(AMOUNT)).amount());
+        posting.setCurrCycCredit(
+                Money.of(posting.getCurrCycCredit()).plus(Money.of(AMOUNT)).amount());
+        this.accounts.save(posting);
+
+        // WHY : Assumptions: the posted row is projected by the PRODUCTION mapper rather than
+        //   assembled here, so the stamp, the field carry-over and the FILLER drop are the ones
+        //   the job performs. Hand-building it would leave the projection unexercised and would
+        //   let this class agree with itself about a shape production does not produce.
+        this.ledger.save(DailyTransactionMapper.toPostedTransaction(
+                feedRecord(transactionId, description), PROCESSED_AT));
+
+        return outcome;
+    }
+
+    /**
+     * Performs one accepted record's WHOLE unit of work: its three writes plus its accounting.
+     *
+     * <p>Assumptions: the write order is the production job's own -- the three posted writes, then the
+     * feed checkpoint, then the outbox row -- because that is the order
+     * {@code PostTransactionsJob.postOneRecord} issues them in, with the checkpoint advanced at the end
+     * of the per-record unit and the accounting row saved immediately after it inside the same
+     * template's callback. A case that reordered them would assert the rollback of a unit shaped
+     * differently from the one production commits.</p>
+     *
+     * <p>Assumptions: the flush is inside the boundary, so a refusal arises at the offending write
+     * rather than at commit and the assertions can attribute it. That is the same reason the accepted
+     * overload flushes.</p>
+     *
+     * @param transactionId the identifier the posted row carries; must not be {@code null}
+     * @param description the description the feed record carries, which one case deliberately makes
+     *     wider than the column admits; must not be {@code null}
+     * @param ingestSeq the feed ordinal this record occupies, which the checkpoint advances to and the
+     *     outbox row is keyed by
+     * @return the accumulation outcome, naming which arm ran and the resulting balance, never
+     *     {@code null}
+     * @throws DataIntegrityViolationException if the database refuses any write of the unit, which one
+     *     case provokes deliberately; the refusal arrives translated rather than as the raw JPA
+     *     exception because the accounting write that follows the ledger one is a repository call, and
+     *     that case records the measurement
+     */
+    private CategoryBalanceService.Outcome postAndAccount(String transactionId, String description,
+            long ingestSeq) {
+
+        return this.transactionTemplate.execute(status -> {
+            CategoryBalanceService.Outcome outcome = applyThreeWrites(transactionId, description);
+
+            this.feedWatermarks.recordConsumedThrough(
+                    FEED_NAME, ingestSeq, RUN_ID, BUSINESS_DATE);
+            this.rejectOutbox.save(PostingRejectOutbox.postedRecord(
+                    RUN_ID, FEED_NAME, ingestSeq, BUSINESS_DATE, PROCESSED_AT));
 
             this.entityManager.flush();
             return outcome;
         });
+    }
+
+    /**
+     * Performs one rejected record's whole unit of work: its reject row plus its accounting.
+     *
+     * <p>Assumptions: a rejected record writes NO posted row, no account and no category balance, which
+     * is the short-circuit {@code app/cbl/CBTRN02C.cbl} takes at L370 to L420 -- the reject is written
+     * and the posting paragraph is never reached. So this unit is deliberately three writes shorter
+     * than the accepted one rather than being the same unit with a flag.</p>
+     *
+     * @param rejectImage the verbatim reject record, exactly {@value #REJECT_RECORD_LENGTH} bytes; must
+     *     not be {@code null}
+     * @param ingestSeq the feed ordinal this record occupies, which the checkpoint advances to and the
+     *     outbox row is keyed by
+     * @throws DataIntegrityViolationException if the database refuses any write of the unit, which no
+     *     case here provokes
+     */
+    private void rejectAndAccount(byte[] rejectImage, long ingestSeq) {
+        this.transactionTemplate.executeWithoutResult(status -> {
+            // WHY : Assumptions: the row is derived from the IMAGE by the production mapper rather than
+            //   constructed beside it, so the row and the outbox's copy of the image are two views of
+            //   one artefact. Building them independently would let the case pass while the two
+            //   disagreed, which is precisely the disagreement the reported defect consisted of.
+            this.rejects.save(TransactionRejectRecordMapper.toEntity(rejectImage));
+
+            this.feedWatermarks.recordConsumedThrough(
+                    FEED_NAME, ingestSeq, RUN_ID, BUSINESS_DATE);
+            this.rejectOutbox.save(PostingRejectOutbox.rejectedRecord(
+                    RUN_ID, FEED_NAME, ingestSeq, BUSINESS_DATE, rejectImage, PROCESSED_AT));
+
+            this.entityManager.flush();
+        });
+    }
+
+    /**
+     * Builds the 430-byte reject record the rejected cases store and read back.
+     *
+     * <p>Assumptions: the record is RENDERED by the production mapper from a row rather than written
+     * out as a literal, so the trailer is the one the reference moves at
+     * {@code app/cbl/CBTRN02C.cbl} L386 and L387 -- the four-digit code followed by its verbatim
+     * description, blank filled. A literal would be a second statement of the trailer's layout, free to
+     * disagree with the mapper about padding that a byte comparison would then blame on the column.</p>
+     *
+     * @return a newly built reject record of exactly {@value #REJECT_RECORD_LENGTH} bytes, never
+     *     {@code null}
+     */
+    private static byte[] rejectImage() {
+        return TransactionRejectRecordMapper.toRecord(new TransactionReject(
+                REJECTED_IMAGE_PREFIX,
+                TransactionReject.REASON_CODE_INVALID_CARD_NUMBER,
+                TransactionReject.REASON_DESC_INVALID_CARD_NUMBER));
+    }
+
+    /**
+     * Reads the feed position the checkpoint holds, outside any transaction.
+     *
+     * <p>Assumptions: the READER'S accessor is used rather than the consumer's, because the consumer's
+     * takes a row lock and so refuses to run outside a transaction. What these cases need is the
+     * committed position, which the unlocked read returns.</p>
+     *
+     * @return the ordinal the feed has been consumed through, or the service's own nothing-consumed
+     *     value when no checkpoint row survives
+     */
+    private long consumedThrough() {
+        return this.feedWatermarks.consumedThroughForReader(FEED_NAME);
+    }
+
+    /**
+     * Replays this run's reject images above one ordinal, the way the staging path assembles them.
+     *
+     * @param above the exclusive lower bound to continue from, being the ordinal of the last row
+     *     already written
+     * @return the matching rows in ascending ordinal order, never {@code null}
+     */
+    // Assumptions: the limit is generous rather than tight, because these cases assert ORDER and
+    //     CONTENT and not slicing. How the production path advances its bound across slices is
+    //     asserted by PostTransactionsJobTest, which drives the assembly loop directly.
+    private List<PostingRejectOutbox> replayFrom(long above) {
+        return this.rejectOutbox
+                .findByRunIdAndFeedNameAndRejectRecordIsNotNullAndIngestSeqGreaterThanOrderByIngestSeqAsc(
+                        RUN_ID, FEED_NAME, above, Limit.of(100));
     }
 
     /**
@@ -738,6 +1211,25 @@ class PostingUnitOfWorkIT {
         CategoryBalanceService categoryBalanceService(
                 TransactionCategoryBalanceRepository balances) {
             return new CategoryBalanceService(balances);
+        }
+
+        /**
+         * Registers the production feed checkpoint rule over the real repository.
+         *
+         * <p>Assumptions: the clock is fixed and is built here rather than contributed as a bean of its
+         * own, because this context has exactly one consumer of one and a bean would invite a second
+         * unqualified {@code Clock} to appear later and fail the context. The instant is the processing
+         * stamp every other assertion in this class is written against, so the checkpoint's recorded
+         * moment is deterministic.</p>
+         *
+         * @param watermarks the repository holding the position row; must not be {@code null}
+         * @return the production service, never {@code null}
+         */
+        @Bean
+        DailyFeedWatermarkService dailyFeedWatermarkService(
+                DailyFeedWatermarkRepository watermarks) {
+            return new DailyFeedWatermarkService(
+                    watermarks, Clock.fixed(PROCESSED_AT.toInstant(ZoneOffset.UTC), ZoneOffset.UTC));
         }
     }
 }

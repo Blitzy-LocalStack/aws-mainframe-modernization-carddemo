@@ -74,9 +74,15 @@ import tools.jackson.databind.ObjectMapper;
  *
  * <ul>
  *   <li><b>The sender.</b> {@code com.carddemo.batch.service.BatchErrorPublisher} is the one
- *       production sender, and {@code BatchStepLedger}'s failure path is its one caller. The ledger
- *       holds it as an {@link java.util.Optional}, which is empty exactly when this configuration is
- *       skipped, so the gate is honoured in one place.</li>
+ *       production sender, and it has two callers: {@code BatchStepLedger}'s failure path, which
+ *       reaches it through the {@link #batchFailureReporter} adapter declared below, and
+ *       {@code com.carddemo.batch.BatchApplication}, which publishes the run's graded outcome once the
+ *       job has returned. Both occasions address this one queue and the sender admits at most ONE
+ *       delivered notification per failed run, so two occasions do not become two messages. The ledger
+ *       holds the adapter as an {@link java.util.Optional}, which is empty exactly when this
+ *       configuration is skipped, and the entry point resolves the sender through a bean provider that
+ *       is empty on the same condition -- so the gate is honoured on both paths without either of them
+ *       testing a property.</li>
  *   <li><b>The grant.</b> {@code sqs:SendMessage} on the error queue alone, from the
  *       {@code batch_task_runtime} policy document in each environment root. That document wraps the
  *       batch dataset document rather than extending it, because the data-migration task inherits the
@@ -591,8 +597,8 @@ public class SqsConfig {
      * @param binding the binding declared by {@link #batchErrorSinkBinding}; must not be {@code null}
      * @param objectMapper the context's own mapper, carrying the shared kernel's modules; must not be
      *     {@code null}
-     * @return the producer the entry point publishes one notification per failed run through, never
-     *     {@code null}
+     * @return the producer both publication occasions send through, which delivers one notification per
+     *     failed run, never {@code null}
      * @throws NullPointerException if any argument is {@code null}
      */
     @Bean
@@ -602,15 +608,22 @@ public class SqsConfig {
     }
 
     /**
-     * Declares the step-level failure reporter the durable ledger publishes its diagnoses through.
+     * Declares the step-level adapter the durable ledger reports its diagnoses through.
      *
-     * <p>Purpose. The module publishes to the terminal error sink on two distinct occasions, and this
-     * declares the wiring for the second of them. {@link #batchErrorPublisher} serves the entry point,
-     * which announces ONE graded notification per failed run as the process exits. This serves
-     * {@code com.carddemo.batch.service.BatchStepLedger}, which reports EACH failed step with the
-     * diagnostics that step produced. The two carry different payloads -- the run notification carries
-     * no {@code AbendDetail} and the step report carries a redacted one -- so neither is the other's
-     * duplicate, and a failed run may legitimately place more than one message on an error queue.</p>
+     * <p>Purpose. The module reaches the terminal error sink on two distinct occasions, and this declares
+     * the wiring for the second of them. {@link #batchErrorPublisher} serves the entry point, which
+     * announces the run's graded outcome as the process exits. This serves
+     * {@code com.carddemo.batch.service.BatchStepLedger}, which reports a failed step with the
+     * diagnostics that step produced. The two carry different payloads -- the run notification carries no
+     * {@code AbendDetail} and the step report carries a redacted one -- and they are two occasions rather
+     * than two messages: the adapter delegates to the same producer, which admits the first attempt that
+     * reaches the sink and suppresses any later attempt for the same run.</p>
+     *
+     * <p>Refactoring Rationale: this adapter used to hold a client, a mapper and the binding and issue
+     * its own send, so one hard failure put TWO messages on the queue -- the step report and the run
+     * notification -- against the producer's documented contract of one per failed run. Delegating is
+     * what makes that contract enforceable at all: a claim held by one of two senders cannot see what the
+     * other sent, and the sink has no key to deduplicate on.</p>
      *
      * <p>Refactoring Rationale: the ledger takes {@code Optional<BatchFailureReporter>} and Spring
      * resolves an absent candidate to empty, so a missing declaration here does not fail a context, does
@@ -620,28 +633,26 @@ public class SqsConfig {
      * and it is declared behind the same gate as the rest of the sink so an unconfigured deployment
      * contributes nothing at all.</p>
      *
-     * <p>Assumptions: the implementation is the one class in this package that issues the step-level
-     * send, and it is constructed here rather than annotated as a component so that its wiring is
-     * gated by this class alone. A component-scanned bean would be contributed whether or not the
-     * sink's address was supplied, which is the property {@code SqsConfigTest} asserts against by
+     * <p>Assumptions: the adapter is constructed here rather than annotated as a component so that its
+     * wiring is gated by this class alone. A component-scanned bean would be contributed whether or not
+     * the sink's address was supplied, which is the property {@code SqsConfigTest} asserts against by
      * requiring that an unconfigured deployment gets no sink wiring of any kind.</p>
      *
-     * <p>Alternatives Considered: pointing the ledger at {@link BatchErrorPublisher} directly, which
-     * needs no declaration here because that bean already exists. Rejected because the ledger sits in
-     * the service package and that would put an AWS client type in its constructor, where the port it
-     * takes today keeps the transport on the far side of an interface -- the same reason the ledger's
-     * own unit test can exercise the report path with a recording stub and no client at all.</p>
+     * <p>Alternatives Considered: deleting the adapter and pointing the ledger at
+     * {@link BatchErrorPublisher} directly, which needs no declaration here because that bean already
+     * exists. Rejected because the ledger sits in the service package and that would put the producer's
+     * transport collaborators on the far side of no interface at all, where the port it takes today lets
+     * its own unit test exercise the report path with a recording stub and no client -- and the adapter
+     * additionally absorbs an {@link Error}, which the producer deliberately does not.</p>
      *
-     * @param sqs the client declared by {@link #sqsClient}, or a caller-supplied replacement; must not
-     *     be {@code null}
-     * @param binding the binding declared by {@link #batchErrorSinkBinding}; must not be {@code null}
-     * @return the reporter the durable step ledger publishes each step failure through, never
+     * @param publisher the producer declared by {@link #batchErrorPublisher}; must not be {@code null}
+     * @return the reporter the durable step ledger reports each step failure through, never
      *     {@code null}
-     * @throws NullPointerException if either argument is {@code null}
+     * @throws NullPointerException if {@code publisher} is {@code null}
      */
     @Bean
-    public BatchFailureReporter batchFailureReporter(SqsClient sqs, ErrorSinkBinding binding) {
-        return new SqsBatchFailureReporter(sqs, binding);
+    public BatchFailureReporter batchFailureReporter(BatchErrorPublisher publisher) {
+        return new SqsBatchFailureReporter(publisher);
     }
 
     /**

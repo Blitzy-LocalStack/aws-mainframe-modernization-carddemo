@@ -174,16 +174,22 @@
  *       it would make context refresh depend on a reachable queue and would pass silently in every
  *       test and local run, which is the same objection the sibling contexts record against reading
  *       a queue's own settings at startup.</li>
- *   <li>{@code SqsBatchFailureReporter} owns the STEP-LEVEL send, and is the only class in this
- *       package that issues one. It satisfies {@code com.carddemo.batch.service.BatchFailureReporter},
- *       the port the durable step ledger reports a failed step through, by serialising the
- *       {@code BatchErrorEvent} the sibling {@code dto} package defines, shaping the request through
- *       the binding {@code SqsConfig} validated, and absorbing every failure of its own so that a
- *       reporting problem can never replace the step failure it was reporting. Assumptions: it is not
- *       the module's only sender and does not claim to be. The service package's
- *       {@code BatchErrorPublisher} issues the RUN-level notification the entry point announces as the
- *       process exits, which carries the graded return code and no {@code AbendDetail}; this one
- *       reports each failed step and carries a redacted one. Two occasions, two payloads, one queue.
+ *   <li>{@code SqsBatchFailureReporter} owns the STEP-LEVEL occasion, and issues no send of its own.
+ *       It satisfies {@code com.carddemo.batch.service.BatchFailureReporter}, the port the durable step
+ *       ledger reports a failed step through, by handing the {@code BatchErrorEvent} the sibling
+ *       {@code dto} package defines to the service package's {@code BatchErrorPublisher} -- the
+ *       module's one sender -- and absorbing anything that escapes it, including an {@code Error}, so
+ *       that a reporting problem can never replace the step failure it was reporting. Assumptions:
+ *       there are two occasions and one sender. {@code BatchErrorPublisher} also carries the RUN-level
+ *       notification the entry point announces as the process exits, which names the graded return code
+ *       and no {@code AbendDetail}, while this occasion reports a failed step and carries a redacted
+ *       one; the sender admits the first attempt that reaches the sink and suppresses any later attempt
+ *       for the same run, so one failed run puts one message on the queue whichever occasion got there
+ *       first. Refactoring Rationale: this class used to hold a client, a mapper and the binding and
+ *       send for itself, which is what made a single hard failure publish TWICE -- once here with
+ *       diagnostics and once from the entry point without them -- against the sender's documented
+ *       contract of one notification per failed run. Two senders cannot enforce that contract between
+ *       them, because neither can see what the other put on a queue that has no key to deduplicate on.
  *       Refactoring Rationale: this adapter had no bean declaration at all. The ledger takes the port
  *       as an {@code Optional} and the container resolves an absent candidate to empty, so the gap
  *       failed no context, no test and no build -- it silently disabled the step-level report, leaving

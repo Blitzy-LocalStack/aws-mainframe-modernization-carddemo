@@ -12,7 +12,7 @@ import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
  * Verifies that {@link BatchJobParameters} refuses every argument combination it documents as
  * impossible, and that {@link BatchApplication#parseArguments(String[])} -- the one parser this
  * module ships -- decodes the container command line the orchestration state actually sends into
- * that record while staying permissive about every argument it does not own.
+ * that record while refusing, by name, every token that is not one of the two options it owns.
  *
  * <p>Refactoring Rationale: the record CARRIES parameters and no longer decodes them, so the
  * decoding cases below call the production entry point rather than a factory on the record. This
@@ -40,12 +40,22 @@ import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
  * and that layer is asserted by constructing the record directly -- otherwise the stricter parse
  * above would shadow it, and the invariant would stop being checked while still being documented.</p>
  *
- * <p>Alternatives Considered: asserting the parser rejects arguments it does not recognise, which is
- * what a test of a strict command-line parser would do. Rejected because it would pin exactly the
- * defect the entry point's parser is built to avoid: the argument vector is shared with the
- * framework, so a strict parser fails the container the first time anyone passes a profile selection
- * or a property override. The permissive behaviour is therefore asserted positively, by a test named
- * so that its purpose survives a future author's tidying.</p>
+ * <p>Refactoring Rationale: this block previously argued the opposite of what it now asserts. It held
+ * that a strict parser "would fail the container the first time anyone passes a profile selection or a
+ * property override", and it pinned the permissive behaviour positively so that the purpose would
+ * survive a future author's tidying. That reasoning is withdrawn, and it is withdrawn on evidence
+ * rather than on taste: the state definition that dispatches this container passes exactly the two
+ * options and nothing else, every deployment setting -- the profile included -- reaches the process
+ * through the environment, and the tolerance the block defended was observed admitting
+ * {@code --business-dat=2022-07-18} in silence and then failing the run for the unrelated-looking
+ * reason that no business date had been supplied. The strictness is therefore asserted positively
+ * here, in the same place and for the same reason the tolerance was: so that its purpose survives.</p>
+ *
+ * <p>Alternatives Considered: keeping the tolerance and adding a separate warning for a token that
+ * looks like a near-miss of a known option. Rejected because it needs a similarity rule to decide what
+ * "looks like" means, and a rule loose enough to catch {@code --business-dat=} would also warn about
+ * arguments that are not mistakes, while one tight enough to avoid that would miss the next typo.
+ * Refusing everything unrecognised needs no such rule.</p>
  */
 class BatchJobParametersTest {
 
@@ -99,20 +109,43 @@ class BatchJobParametersTest {
     }
 
     /**
-     * Guards against a strict parser: an ordinary framework option must be ignored rather than
-     * failing the step, because the argument vector is shared with the framework that consumes it.
+     * Confirms a framework option on the command line is refused by name rather than absorbed, so a
+     * command line that is not the one the caller wrote is reported instead of run.
+     *
+     * <p>Assumptions: the two options beside it are well formed, so the refusal is attributable to the
+     * framework option and not to a fault in the pair. The refused token is asserted to appear in the
+     * message, because a refusal that does not name the offending token sends an operator to the usage
+     * text with no indication of which of their arguments to change.</p>
      *
      * <p>This zero-argument test returns no value; failed expectations surface as assertion
      * errors.</p>
      */
     @Test
-    @DisplayName("unrecognised framework options are ignored rather than rejected")
-    void unrecognisedFrameworkOptionsAreIgnoredRatherThanRejected() {
+    @DisplayName("a framework option on the command line is rejected by name")
+    void frameworkOptionsAreRejectedRatherThanIgnored() {
+        assertThatExceptionOfType(IllegalArgumentException.class)
+                .isThrownBy(() -> BatchApplication.parseArguments(new String[] {
+                    "--spring.profiles.active=prod",
+                    "--job=post-transactions",
+                    "--business-date=" + SEPARATED_TOKEN,
+                    "--logging.level.root=INFO"}))
+                .withMessageContaining("--spring.profiles.active=prod")
+                .withMessageContaining("is not an option this module accepts");
+    }
+
+    /**
+     * Confirms the two options this module does own are still accepted when they arrive alone, so the
+     * refusal above is attributable to the extra token rather than to the pair beside it.
+     *
+     * <p>This zero-argument test returns no value; failed expectations surface as assertion
+     * errors.</p>
+     */
+    @Test
+    @DisplayName("the two owned options alone decode without complaint")
+    void theTwoOwnedOptionsAloneAreAccepted() {
         BatchJobParameters parameters = BatchApplication.parseArguments(new String[] {
-            "--spring.profiles.active=prod",
             "--job=post-transactions",
-            "--business-date=" + SEPARATED_TOKEN,
-            "--logging.level.root=INFO"});
+            "--business-date=" + SEPARATED_TOKEN});
 
         assertThat(parameters.jobName()).isSameAs(BatchJobName.POST_TRANSACTIONS);
         assertThat(parameters.businessDate()).map(BusinessDate::token).contains(SEPARATED_TOKEN);
@@ -317,17 +350,44 @@ class BatchJobParametersTest {
     }
 
     /**
-     * Confirms a bare word carrying no option prefix is skipped, because a container command may
-     * append positional arguments this type does not own.
+     * Confirms a bare word carrying no option prefix is refused by name rather than skipped.
+     *
+     * <p>Assumptions: the bare word used is {@code export}, a real job token, because that is the
+     * shape of the mistake this refusal exists to catch -- an operator writing
+     * {@code --job export} with a space where the equals sign belongs. Skipping it left the run to
+     * fail for the unrelated reason that no job had been named.</p>
      *
      * <p>This zero-argument test returns no value; failed expectations surface as assertion
      * errors.</p>
      */
     @Test
-    @DisplayName("a bare token carrying no option prefix is ignored")
-    void bareTokenCarryingNoOptionPrefixIsIgnored() {
+    @DisplayName("a bare token carrying no option prefix is rejected by name")
+    void bareTokenCarryingNoOptionPrefixIsRejected() {
+        assertThatExceptionOfType(IllegalArgumentException.class)
+                .isThrownBy(() -> BatchApplication.parseArguments(new String[] {
+                    "export", "--job=export", "--business-date=" + SEPARATED_TOKEN}))
+                .withMessageContaining("export")
+                .withMessageContaining("is not an option this module accepts");
+    }
+
+    /**
+     * Confirms a null ELEMENT is still skipped, which is a different case from a bare word and stays
+     * permissive on purpose.
+     *
+     * <p>Assumptions: a process argument vector cannot carry a null -- the platform passes every
+     * argument as text -- so a null can only arrive from Java code calling the parser directly, and a
+     * refusal naming it would have no token to name. Skipping leaves the two option gates to report
+     * whatever is genuinely missing, which is why this case did not change when the bare-word case
+     * did.</p>
+     *
+     * <p>This zero-argument test returns no value; failed expectations surface as assertion
+     * errors.</p>
+     */
+    @Test
+    @DisplayName("a null argument element is skipped rather than refused")
+    void nullArgumentElementIsSkipped() {
         BatchJobParameters parameters = BatchApplication.parseArguments(new String[] {
-            "export", "--job=export", null, "--business-date=" + SEPARATED_TOKEN});
+            "--job=export", null, "--business-date=" + SEPARATED_TOKEN});
 
         assertThat(parameters.jobName()).isSameAs(BatchJobName.EXPORT);
     }
@@ -511,6 +571,13 @@ class BatchJobParametersTest {
      * Confirms the factory never manufactures a generation coordinate, because no option supplies one
      * and the family a job writes is the job's own knowledge rather than the operator's.
      *
+     * <p>Refactoring Rationale: this case formerly appended {@code --generation=0001} to prove the
+     * parser did not honour an option nobody defined. That token is now refused as unrecognised, so
+     * appending it would assert the refusal a second time instead of asserting the property this case
+     * exists for. The command line is reduced to the two owned options, which is where the property is
+     * actually observable: a coordinate the parser never manufactures is empty for a command line that
+     * mentions no generation at all.</p>
+     *
      * <p>This zero-argument test returns no value; failed expectations surface as assertion
      * errors.</p>
      */
@@ -520,10 +587,33 @@ class BatchJobParametersTest {
         for (BatchJobName job : BatchJobName.values()) {
             BatchJobParameters parameters = BatchApplication.parseArguments(new String[] {
                 BatchJobParameters.JOB_OPTION + job.token(),
-                BatchJobParameters.BUSINESS_DATE_OPTION + SEPARATED_TOKEN,
-                "--generation=0001"});
+                BatchJobParameters.BUSINESS_DATE_OPTION + SEPARATED_TOKEN});
 
             assertThat(parameters.targetGeneration()).isEmpty();
         }
+    }
+
+    /**
+     * Confirms an option nobody defined is refused rather than quietly discarded, using the coordinate
+     * option a reader of this class might reasonably expect to exist.
+     *
+     * <p>Assumptions: {@code --generation=} is the right token to test with. No option supplies a
+     * generation coordinate, so an operator who believes one does is making exactly the mistake this
+     * refusal is for, and discarding it would let them believe a coordinate they supplied had been
+     * honoured.</p>
+     *
+     * <p>This zero-argument test returns no value; failed expectations surface as assertion
+     * errors.</p>
+     */
+    @Test
+    @DisplayName("an undefined generation option is refused, not discarded")
+    void undefinedGenerationOptionIsRefused() {
+        assertThatExceptionOfType(IllegalArgumentException.class)
+                .isThrownBy(() -> BatchApplication.parseArguments(new String[] {
+                    BatchJobParameters.JOB_OPTION + BatchJobName.EXPORT.token(),
+                    BatchJobParameters.BUSINESS_DATE_OPTION + SEPARATED_TOKEN,
+                    "--generation=0001"}))
+                .withMessageContaining("--generation=0001")
+                .withMessageContaining("is not an option this module accepts");
     }
 }

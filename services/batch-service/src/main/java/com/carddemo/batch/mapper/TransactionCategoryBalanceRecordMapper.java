@@ -189,17 +189,27 @@ import java.util.Objects;
  * the migration reproduces as versioned object-storage prefixes retaining five noncurrent versions,
  * and {@code app/jcl/PRTCATBL.jcl} lines 35 to 39 write that generation from the cluster with
  * {@code LRECL=50}. A backup generation is only useful if it is byte-identical to the record it
- * copies, so neither encode overload is dead code and neither must be removed as such -- and it is
- * {@link #toRecord(TransactionCategoryBalance, byte[])} rather than
- * {@link #toRecord(TransactionCategoryBalance)} that a generation must be written through, for the
- * reason the next section gives.</p>
+ * copies, so neither encode overload is dead code and neither must be removed as such.</p>
+ *
+ * <p>Assumptions: <b>the generation is written through {@link #toRecord(TransactionCategoryBalance)}
+ * and NOT through {@link #toRecord(TransactionCategoryBalance, byte[])}</b>, and the reason is
+ * structural rather than a preference. {@code com.carddemo.batch.job.BackupTransactionsJob} streams
+ * ROWS out of {@code ledger.transaction_category_balances} and holds no image to pass, because the
+ * package charter dropped the pad at {@code app/cpy/CVTRA01Y.cpy} line 10 rather than mapping it to a
+ * column, so the bytes the reference's update arm re-emits do not exist to be restored. That
+ * consequence is a registered divergence, {@code D-TCATBAL-FILLER-DB-RENDER} in section 7.4 of
+ * {@code docs/architecture/cobol-to-service-traceability.md}: the staged generation is byte-identical
+ * on the create arm, where the low value this class writes IS what the reference left, and one
+ * twenty-two byte span short on the rewrite arm, where no column carries the answer. The source-image
+ * overload serves the caller that still HOLDS the image it decoded, which is the round-trip contract
+ * the next section states and the posting parity harness.</p>
  *
  * <h2>The parity obligation, stated where the bytes are produced</h2>
  *
  * <p>Assumptions: the encoded image is compared BYTE FOR BYTE against the committed expectation
  * files {@code tests/golden/posting/*}{@code /tcatbal.expected} after timestamp normalisation, and
  * this record carries no timestamp for that normalisation to touch. The significance is that there is
- * no near miss available: one blank too many in the twenty-two byte {@code FILLER} span, or one
+ * no near miss available: one byte wrong in the twenty-two byte {@code FILLER} span, or one
  * digit of scale in the balance, is a failed comparison rather than an approximate match. The nine
  * committed posting scenarios and the two interest scenarios are the parity oracle for this record.
  * <b>Everything under {@code tests/**} is reference-only under the migration plan's section 0.2.2:
@@ -233,7 +243,12 @@ import java.util.Objects;
  * carries the positive-zero form" and that an unused overload would be a second encode path to keep in
  * step. Both halves of that were wrong. The claim was about the SIGN and silently left the PAD
  * unaddressed, and two committed expectations carry a non-blank pad; and the overload is not unused,
- * because the backup generation described above is exactly the caller that needs it. The two overloads
+ * because every caller that still HOLDS the image it is re-emitting needs it -- the round-trip contract
+ * asserted in {@code TransactionCategoryBalanceRecordMapperTest} and the posting parity harness in
+ * {@code PostTransactionsJobTest}, which re-encodes a rewritten row through the seed image it read.
+ * Assumptions: the backup generation is NOT that caller, and describing it as one is the error this
+ * sentence previously carried -- that job renders from rows, has no image, and therefore goes through
+ * the plain overload, which is what {@code D-TCATBAL-FILLER-DB-RENDER} registers. The two overloads
  * are kept in step by sharing one field map, so the only difference between them is what the second one
  * restores afterwards. The single-argument overload remains correct, and remains the right entry point,
  * for a row this module ORIGINATED and which therefore has no source image at all.</p>
@@ -544,13 +559,24 @@ public final class TransactionCategoryBalanceRecordMapper {
      * record right in its first 28 bytes and 22 bytes short still writes, still reads back, and shifts
      * every field of every record after it.</p>
      *
-     * <p>Assumptions: the {@code FILLER} span is supplied to the codec by OMISSION and is written back
-     * as blanks. Leaving the freshly allocated array's zero bytes in place instead would preserve the
-     * record's length but not its content, and a reader of the record distinguishes low values from
-     * spaces even though both look empty once decoded into text. Naming the pad explicitly with a run
-     * of twenty-two spaces would produce the same bytes today and would stop doing so the moment the
-     * descriptor's pad width changed, because the literal would then be measured against a span it no
-     * longer fits.</p>
+     * <p>Assumptions: the {@code FILLER} span is supplied to the codec by OMISSION, so the codec
+     * rebuilds it with the charset's blank, and <b>this method then overwrites all twenty-two of those
+     * bytes with {@link #FRESH_RECORD_PAD}, the low value.</b> The overwrite is the span's whole
+     * contract rather than an incidental step: {@code tests/golden/posting/zero_balance/tcatbal.expected}
+     * measures twenty-two low-value bytes there, because {@code INITIALIZE} at
+     * {@code app/cbl/CBTRN02C.cbl} line 504 carries no {@code REPLACING} phrase and so never reaches a
+     * {@code FILLER} item, and a row rendered through this overload is an originated row exactly like
+     * that one. Naming the pad explicitly in the field map instead would tie the value to a literal
+     * measured against a span whose width the descriptor owns, which is why the byte is written after
+     * the encode rather than through it.</p>
+     *
+     * <p>Assumptions: a row the reference's UPDATE arm would have rewritten cannot be reproduced through
+     * this overload, and no entity-only overload could reproduce it. Rule T1 dropped the pad rather than
+     * mapping it to a column, so the seed bytes that arm re-emits -- twenty-two ASCII zeros in the eight
+     * rewritten posting trees -- are not recoverable from {@code ledger.transaction_category_balances}
+     * at all. That consequence is registered as {@code D-TCATBAL-FILLER-DB-RENDER} in section 7.4 of
+     * {@code docs/architecture/cobol-to-service-traceability.md}, and it is why
+     * {@code PostTransactionsJobParityIT} normalises this span on both sides rather than comparing it.</p>
      *
      * <p>Assumptions: the four values are inserted in the copybook's declaration order, which is the
      * key order the interest job's control break depends on. The shared codec keys by field name and
@@ -613,21 +639,23 @@ public final class TransactionCategoryBalanceRecordMapper {
      * Encodes one running-balance row into its 50-byte image, restoring from a source image what the
      * entity cannot carry.
      *
-     * <p>Refactoring Rationale: this overload exists because the plain one CANNOT satisfy the
-     * byte-identical obligation this class states for a backup generation, and an earlier revision of
-     * this file argued the opposite -- that no overload was warranted because "every committed
-     * expectation file for this record carries the positive-zero form". That reasoning was wrong on the
-     * pad and incomplete on the sign. Two of the committed expectations carry a NON-BLANK pad in the
-     * twenty-two byte span at {@code app/cpy/CVTRA01Y.cpy} line 10:
+     * <p>Refactoring Rationale: this overload exists because the plain one CANNOT reproduce an image a
+     * caller already holds, and an earlier revision of this file argued the opposite -- that no overload
+     * was warranted because "every committed expectation file for this record carries the positive-zero
+     * form". That reasoning was wrong on the pad and incomplete on the sign. Two of the committed
+     * expectations carry a NON-BLANK pad in the twenty-two byte span at
+     * {@code app/cpy/CVTRA01Y.cpy} line 10:
      * {@code tests/golden/posting/happy_path/tcatbal.expected} carries twenty-two ASCII zeros,
      * inherited from the seed row the update arm rewrote, and
      * {@code tests/golden/posting/zero_balance/tcatbal.expected} carries twenty-two low-value bytes,
      * because {@code INITIALIZE} does not reach a {@code FILLER} item so the create arm wrote whatever
      * the record area held. The authoritative seed agrees: bytes 28 to 49 of the first record of
-     * {@code app/data/ASCII/tcatbal.txt} are ASCII zeros, not spaces. Re-encoding either row through
-     * the plain overload therefore substitutes blanks across that span and produces a generation that
-     * differs from the dataset it copies, which is precisely the failure the parity comparison would
-     * report and precisely what a backup generation must not do.</p>
+     * {@code app/data/ASCII/tcatbal.txt} are ASCII zeros, not spaces. The plain overload writes the
+     * create arm's low value across that span, so it reproduces a CREATED row's image exactly and cannot
+     * reproduce a REWRITTEN row's at all: a caller that read the record it is re-emitting must therefore
+     * pass it, and a caller that read nothing -- the backup generation, which renders from rows -- has
+     * nothing to pass, which is the divergence {@code D-TCATBAL-FILLER-DB-RENDER} records rather than a
+     * defect either overload can remove.</p>
      *
      * <p>Assumptions: the two regions restored here are the two a decode cannot carry, and each has a
      * named cause. The {@code FILLER} span has no entity member at all, because the package charter
@@ -639,7 +667,10 @@ public final class TransactionCategoryBalanceRecordMapper {
      * <p>Assumptions: the plain overload REMAINS and is not deprecated. It is the correct entry point
      * for a row this module ORIGINATED -- one the posting or interest service just computed, which has
      * no source image because no image was ever read -- and for that row the create arm's low-value pad
-     * is the right pad, which is the byte that overload now writes.
+     * is the right pad, which is the byte that overload now writes. It is also the ONLY entry point
+     * available to a caller that renders from the table rather than from an image, which
+     * {@code com.carddemo.batch.job.BackupTransactionsJob} does, because rule T1 left the pad no column
+     * to be read back out of.
      * The two overloads therefore answer two different questions, "render this row" and "reproduce the
      * record this row came from", and collapsing them would force a caller with no image to invent one.</p>
      *

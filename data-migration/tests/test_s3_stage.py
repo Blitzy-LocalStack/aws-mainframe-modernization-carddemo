@@ -7,7 +7,7 @@ import hashlib
 import io
 import os
 import re
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Final
 
@@ -331,6 +331,165 @@ def test_prune_generations_permanently_deletes_old_versions_and_markers() -> Non
         {"Key": f"{old}records.dat", "VersionId": "m1"},
         {"Key": f"{second}records.dat", "VersionId": "v2"},
     ]
+
+
+#: Instant the allocation-order cases date their claim markers from.
+#:
+#: WHY : Assumptions: a fixed literal is used rather than a value read from the clock, for the
+#: reason every other fixture in this suite states -- a clock read makes the ordering under test
+#: depend on when the suite runs, and the property being asserted is a RELATIVE order that a
+#: fixed base expresses exactly.
+_ALLOCATION_BASE: Final[datetime] = datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _claim_marker(client: _FakeS3, generation_prefix: str, minutes_after_base: int) -> None:
+    """Give one generation a claim marker with a chosen allocation instant.
+
+    Purpose
+    -------
+    Let a test state when a generation was ALLOCATED independently of the business date in its
+    key, which is the whole distinction generation retention has to make.
+
+    Parameters
+    ----------
+    client : _FakeS3
+        The double whose registries the marker is written into.
+    generation_prefix : str
+        Prefix of the generation being marked, ending in ``/``.
+    minutes_after_base : int
+        Offset from :data:`_ALLOCATION_BASE`; a larger value is a more recent allocation.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    None
+    """
+    # WHY : Assumptions: the marker is written into BOTH registries the double answers from --
+    #   `objects` so `head_object` finds it rather than reporting 404, and `get_overrides` so the
+    #   response carries a `LastModified`. Writing only the override would leave the head raising
+    #   404 and the generation ordering at the sentinel, which is the state these tests exist to
+    #   distinguish from a real instant.
+    key = f"{generation_prefix}_generation.claim"
+    client.objects[key] = b"run-token"
+    client.get_overrides[key] = {
+        "LastModified": _ALLOCATION_BASE + timedelta(minutes=minutes_after_base)
+    }
+
+
+def test_prune_generations_retires_the_oldest_allocation_not_the_oldest_key_date() -> None:
+    """Order the retention window by allocation instant rather than by the date in the key."""
+    client = _FakeS3()
+    _generation_pages(client)
+    family = "ledger/transact-bkup/"
+    # WHY : Assumptions: the allocation order is deliberately the REVERSE of the key-date order,
+    #   because that is the only arrangement in which the two orderings disagree and therefore the
+    #   only one that can tell them apart. Under the previous ordering the victim would have been
+    #   dt=2026-08-01/gen=0001 -- the earliest date -- while it is in fact the most recently
+    #   allocated generation of the four.
+    _claim_marker(client, f"{family}dt=2026-08-02/gen=0002/", 0)
+    _claim_marker(client, f"{family}dt=2026-08-02/gen=0001/", 10)
+    _claim_marker(client, f"{family}dt=2026-08-01/gen=0002/", 20)
+    _claim_marker(client, f"{family}dt=2026-08-01/gen=0001/", 30)
+    settings = DatasetStagingSettings(bucket="datasets", environment="dev")
+
+    deleted = prune_generations(client, settings, "ledger", "transact-bkup", 3)
+
+    assert deleted == (f"{family}dt=2026-08-02/gen=0002/",)
+
+
+def test_prune_generations_never_scratches_the_generation_this_call_staged() -> None:
+    """Withhold the caller's own generation, so a back-dated run cannot delete its own output."""
+    client = _FakeS3()
+    _generation_pages(client)
+    family = "ledger/transact-bkup/"
+    # WHY : Assumptions: this reproduces the reported defect exactly. A run whose business date
+    #   precedes every existing partition allocates a generation that sorts FIRST by key date, so
+    #   the staging call that created it selected it as the oldest and scratched it while logging a
+    #   successful stage. Here the fresh generation is additionally given no marker, so it orders
+    #   at the sentinel and the ordering alone would still choose it -- which is what makes the
+    #   protection, rather than the ordering, the thing this case decides.
+    backdated = f"{family}dt=2026-07-01/gen=0001/"
+    client.pages[("list_objects_v2", family)] = [
+        {
+            "CommonPrefixes": [
+                {"Prefix": f"{family}dt=2026-07-01/"},
+                {"Prefix": f"{family}dt=2026-08-01/"},
+                {"Prefix": f"{family}dt=2026-08-02/"},
+            ]
+        }
+    ]
+    client.pages[("list_objects_v2", f"{family}dt=2026-07-01/")] = [
+        {"CommonPrefixes": [{"Prefix": backdated}]}
+    ]
+    _claim_marker(client, f"{family}dt=2026-08-01/gen=0001/", 0)
+    _claim_marker(client, f"{family}dt=2026-08-01/gen=0002/", 10)
+    _claim_marker(client, f"{family}dt=2026-08-02/gen=0001/", 20)
+    _claim_marker(client, f"{family}dt=2026-08-02/gen=0002/", 30)
+    settings = DatasetStagingSettings(bucket="datasets", environment="dev")
+
+    protected = prune_generations(
+        client, settings, "ledger", "transact-bkup", 4, protected_prefix=backdated
+    )
+
+    assert protected == ()
+    assert client.deletes == []
+    # WHY : Assumptions: the same call WITHOUT the protection is asserted immediately afterwards,
+    #   because "nothing was deleted" is also what a broken discovery would report. Showing that
+    #   the unprotected form does select this prefix establishes that the ordering really did
+    #   choose it and the guard is what spared it.
+    unprotected = prune_generations(client, settings, "ledger", "transact-bkup", 4)
+
+    assert unprotected == (backdated,)
+
+
+def test_prune_generations_refuses_when_a_generation_age_probe_fails() -> None:
+    """Raise rather than order a generation at the sentinel when its marker cannot be read."""
+
+    class _RefusingHead(_FakeS3):
+        """A double whose claim-marker probe fails with a non-absent service code."""
+
+        def head_object(self, **kwargs: Any) -> dict[str, Any]:
+            """Refuse every claim-marker probe with an access failure.
+
+            Purpose
+            -------
+            Produce the one condition that must NOT be read as "this generation has no marker".
+
+            Parameters
+            ----------
+            **kwargs : Any
+                The head arguments; ``Key`` is read.
+
+            Returns
+            -------
+            dict[str, Any]
+                Never returns for a claim marker; delegates for any other key.
+
+            Raises
+            ------
+            _ConditionalConflict
+                Carrying ``AccessDenied``, which is not an absent-object code.
+            """
+            if str(kwargs["Key"]).endswith("_generation.claim"):
+                raise _ConditionalConflict("AccessDenied")
+            return super().head_object(**kwargs)
+
+    client = _RefusingHead()
+    _generation_pages(client)
+    settings = DatasetStagingSettings(bucket="datasets", environment="dev")
+
+    # WHY : Assumptions: the failure must surface rather than default, because ordering an
+    #   unreadable generation at the sentinel puts it FIRST in line for permanent deletion -- so a
+    #   transient permission fault would be indistinguishable from an aged-out generation and
+    #   would scratch live data. Nothing may be deleted on the way to the refusal either, which is
+    #   why the delete log is asserted empty as well as the exception being raised.
+    with pytest.raises(StagingServiceError):
+        prune_generations(client, settings, "ledger", "transact-bkup", 2)
+
+    assert client.deletes == []
 
 
 #: Date partition every reservation test in this module allocates under.

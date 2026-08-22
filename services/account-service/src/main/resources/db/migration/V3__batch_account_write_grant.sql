@@ -1,0 +1,190 @@
+-- =============================================================================
+-- services/account-service/src/main/resources/db/migration/
+--     V3__batch_account_write_grant.sql
+-- -----------------------------------------------------------------------------
+-- Purpose:
+--   Grants UPDATE on account.accounts -- one table, one privilege -- to the
+--   nightly batch role carddemo_batch, at the only point in the deployment
+--   sequence at which the statement can succeed: inside the account context's
+--   own migration chain, which runs after V1__account.sql has created the table
+--   and under the role that owns it.
+--
+--   This is the third write the posting unit of work performs. In
+--   app/cbl/CBTRN02C.cbl the paragraph 2000-POST-TRANSACTION. at L424 performs
+--   2700-UPDATE-TCATBAL at L440 (the category balance, ledger schema),
+--   2800-UPDATE-ACCOUNT-REC at L441 (the account master, rewritten at L554,
+--   THIS schema) and 2900-WRITE-TRANSACTION-FILE at L442 (the posted
+--   transaction, ledger schema), all inside one CICS syncpoint. The interest
+--   job rewrites the same master on each account control break
+--   (app/cbl/CBACT04C.cbl L356). The target keeps that one ACID commit rather
+--   than fragmenting it into a saga, which is the exception AAP section 0.4.1.3
+--   sanctions, and this grant is the half of that exception that lands in the
+--   account schema.
+--
+-- Parameters:
+--   A migration takes no arguments, so its inputs are the Flyway state and
+--   configuration it is applied under, all declared in sibling resources:
+--
+--   - Target schema: account, pinned by spring.flyway.schemas and
+--     spring.flyway.default-schema in application.yml. This script names
+--     account.accounts and carddemo_batch explicitly and so does not depend on
+--     the search path, but the history row it produces lands in that schema.
+--   - Discovery location: classpath:db/migration, set by
+--     spring.flyway.locations. The V3 prefix is what orders this script after
+--     V1__account.sql, which creates the table, and after
+--     V2__account_inquiry_reply_ledger.sql.
+--   - Applied-version state: the schema history table in schema account.
+--     Version 3 decides whether this script runs; a history row recording it
+--     means the grant is already in place and the file is skipped.
+--   - The executing role: Flyway authenticates as carddemo_account_migrator and
+--     issues SET ROLE carddemo_account_owner first (spring.flyway.init-sqls),
+--     so the session that reaches the statement below IS the table's owner.
+--     That is what makes the GRANT legal without any superuser involvement.
+--   - A pre-existing role named carddemo_batch, created as a LOGIN runtime role
+--     by data-migration/sql/V0__schemas_and_roles.sql, which also grants that
+--     role USAGE on this schema. USAGE is what makes the table nameable at all;
+--     without it this table privilege would be unreachable and the run-time
+--     error would name the schema rather than the table.
+--
+-- Return values:
+--   One access-control entry on account.accounts, and nothing besides. No
+--   table, column, constraint, index or row is created, altered or dropped.
+--
+-- Fails when:
+--   - account.accounts does not exist, which cannot happen through Flyway
+--     because V1 creates it and V1 is applied first; a hand-applied V3 against
+--     an empty schema fails with an unknown-relation error and applies nothing.
+--   - Not when the role carddemo_batch is absent. That state means
+--     data-migration/sql/V0__schemas_and_roles.sql has not been applied to this
+--     database, so there is no grantee to name; the block below reports the
+--     omission as a warning and applies nothing, and the two gates recorded
+--     under WHY are what establish the end state in an environment that IS
+--     bootstrapped.
+--   - The session is not the table's owner and holds no grant option on it --
+--     for example a migration run as the runtime role rather than under the
+--     SET ROLE above. The statement reports insufficient privilege rather than
+--     silently granting nothing.
+--
+-- WHY (non-obvious design decisions):
+--   - Refactoring Rationale: this grant EXISTS in
+--     data-migration/sql/V0__schemas_and_roles.sql and never reached a
+--     provisioned database, which is the defect this file answers. That script
+--     runs before any table exists, so it can only issue the grant from inside
+--     an IF to_regclass('account.accounts') IS NOT NULL guard; on a fresh
+--     database the guard is false, the block emits its NOTICE and the privilege
+--     is left outstanding. Nothing then re-applied it: the bootstrap runs once
+--     per apply through infra/lambda/database_admin.py, whose invocation
+--     triggers do not change when a service's Flyway chain runs, and that module
+--     exposes only the bootstrap and analyze actions. The nightly posting job
+--     therefore failed its third write on every freshly provisioned
+--     environment with "permission denied for table accounts" -- correctly
+--     rolling the other two writes back, so the ledger stayed consistent and
+--     the failure was a stop rather than a corruption.
+--   - Alternatives Considered: widening the bootstrap's account defaults to
+--     ALTER DEFAULT PRIVILEGES ... GRANT SELECT, UPDATE ON TABLES, which is the
+--     one form that reaches a table created later and needs no second pass.
+--     Rejected: a default privilege cannot name a table, so it would also grant
+--     UPDATE on account.customers -- the row carrying the encrypted national
+--     identifier, the encrypted government-issued identifier and the address --
+--     and on account.card_xref and on every table this schema gains in future.
+--     Two write sites exist in the whole nightly chain against this schema
+--     (app/cbl/CBTRN02C.cbl L554, app/cbl/CBACT04C.cbl L356) and both rewrite
+--     an account master that already exists, so one named table is the exact
+--     privilege and the wider form is authority nothing exercises.
+--   - Alternatives Considered: re-running the bootstrap by hand after the
+--     Flyway chains, which is what its NOTICE used to ask for and what
+--     docs/runbooks/data-migration.md used to document. Rejected as the
+--     AUTHORITATIVE site while retained as a safety net: it makes the privilege
+--     graph depend on an operator performing a second, undocumented-in-Terraform
+--     step in the right order, and the deployed path has no step that can run
+--     after a service's own start-up migration -- no Terraform resource can
+--     order itself after a container's Flyway chain. Expressing the grant here
+--     makes the ordering STRUCTURAL: Flyway applies V1 then V3 in one chain, so
+--     the table and the privilege on it can never be more than one migration
+--     apart, on a fresh database and on an already-provisioned one alike.
+--   - Alternatives Considered: a post-Flyway grants action added to
+--     infra/lambda/database_admin.py and invoked as a separate Terraform step.
+--     Rejected for the same ordering reason: services migrate at their own
+--     start-up, so a Terraform-invoked step cannot be sequenced after them
+--     without a wait loop over a state Terraform does not observe.
+--   - Assumptions: this file breaks the standing contract that a per-service
+--     migration issues no GRANT, and it is the ONE exception -- recorded here,
+--     in that contract's own words at data-migration/sql/V0__schemas_and_roles.sql
+--     section 4, and in docs/runbooks/deploy.md Step 4c. The contract's reason for
+--     existing is that a grant hidden inside one service's migration cannot
+--     cover a table another service adds to ITS schema, and that reason does
+--     not reach this case: the object granted is a table THIS schema owns, and
+--     the only session that may grant on it is this schema's owner. The
+--     grantee being another context's role does not change who must issue the
+--     statement.
+--   - Trade-offs: the statement is guarded on the GRANTEE's existence and the
+--     skip raises a warning rather than passing in silence. A bare GRANT is what
+--     this file carried first, and it aborted the whole account chain with
+--     'role "carddemo_batch" does not exist' (SQLSTATE 42704) in every harness
+--     that creates the owning role and the schema and never applies the
+--     bootstrap -- seven of the eight classes under
+--     services/account-service/src/test/java/com/carddemo/account/repository, so
+--     80 assertions about this schema's own contract stopped being made. A
+--     migration that only runs inside a fully bootstrapped database makes the
+--     owning context untestable without it, and the error it raises says nothing
+--     about the privilege being wrong.
+--   - Assumptions: that guard cannot reintroduce the defect this file answers,
+--     because the two conditions differ in kind. The bootstrap's guard tests for
+--     a TABLE that only a later document creates, so it is false on every first
+--     deployment by construction. This one tests for a ROLE that the bootstrap
+--     itself creates before any service starts -- deploy Step 3 precedes Step 4 --
+--     so in a deployed environment it is always true, and the branch that skips
+--     is reachable only in a database that was never bootstrapped at all.
+--   - Assumptions: the end state is asserted twice in the engine rather than
+--     trusted to this text.
+--     services/account-service/src/test/java/com/carddemo/account/repository/
+--     BatchAccountWriteGrantIT.java applies the bootstrap, then this chain, then
+--     reads has_table_privilege and executes a real UPDATE as the batch role; and
+--     docs/runbooks/deploy.md Step 4c fails the deployment closed on the same
+--     probe. A skipped grant therefore cannot pass unnoticed in either place.
+--   - Assumptions: SELECT is not granted here and is not missing either. The
+--     nightly chain's read of this schema is legitimately schema-wide
+--     (app/cbl/CBTRN01C.cbl L29-L58 opens the customer, cross-reference and
+--     account records while validating the daily feed), so the bootstrap grants
+--     it through ALTER DEFAULT PRIVILEGES ... GRANT SELECT ON TABLES, which
+--     does reach a table created afterwards. Only the ONE privilege that has to
+--     name a table is expressed here.
+--   - Assumptions: INSERT, DELETE and TRUNCATE are withheld, and that is
+--     measured rather than cautious. No batch program inserts an account,
+--     customer or cross-reference row -- all three originate in
+--     account-service -- and grepping the DELETE verb across app/cbl/CB*.cbl
+--     returns nothing at all, so the withheld privileges are ones no migrated
+--     job exercises.
+--   - Assumptions: the privilege is verifiable without running a job.
+--     has_table_privilege('carddemo_batch','account.accounts','UPDATE') answers
+--     true once this migration has been applied; docs/runbooks/deploy.md Step 4c
+--     asserts exactly that, and
+--     services/account-service/src/test/java/com/carddemo/account/repository/
+--     BatchAccountWriteGrantIT.java asserts it plus the negative probes against
+--     a real engine.
+-- =============================================================================
+
+-- WHY : Assumptions: the grantee is spelled as a bare identifier and the table
+-- is schema-qualified. carddemo_batch is the name V0's service_roles array
+-- declares and the name each service resolves as its datasource user, so it
+-- matches character for character; and account.accounts is qualified because
+-- this statement must resolve the same way whatever search path the migrating
+-- session happens to carry.
+-- WHY : Assumptions: the GRANT runs inside a plain block rather than as a bare
+-- statement so that the grantee's absence is a reported skip instead of a failed
+-- migration. The block inherits the session's role, which the account chain has
+-- already set to carddemo_account_owner, so the statement is issued by the
+-- table's owner exactly as it would be on its own.
+-- WHY : Trade-offs: pg_catalog.pg_roles is read rather than pg_authid, which
+-- holds the same rows. pg_authid is superuser-only, and the migrating role is
+-- deliberately not a superuser, so reading it would make this block fail on the
+-- lookup rather than on the grant.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'carddemo_batch') THEN
+        GRANT UPDATE ON account.accounts TO carddemo_batch;
+    ELSE
+        RAISE WARNING 'account.accounts UPDATE was NOT granted: role carddemo_batch does not exist, so data-migration/sql/V0__schemas_and_roles.sql has not been applied to this database. Apply it and restart this service; the nightly posting job cannot rewrite an account master until has_table_privilege(''carddemo_batch'', ''account.accounts'', ''UPDATE'') answers true.';
+    END IF;
+END
+$$;

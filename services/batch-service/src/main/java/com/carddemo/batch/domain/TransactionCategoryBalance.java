@@ -273,14 +273,16 @@ public class TransactionCategoryBalance {
     //       that product at full precision and only then divide with an explicit scale and rounding
     //       mode, because dividing first and multiplying second changes the intermediate precision
     //       and yields a different final cent on many balances.
-    // WHY : Trade-offs: that division rounds HALF UP in the target where the reference discards its
-    //       surplus digits -- the program carries no ROUNDED phrase on any statement at all, which was
-    //       measured rather than inferred. com.carddemo.common.money.Money declares one mode,
-    //       GENERAL_ROUNDING, because transformation rule T3 states half up for the money path without
-    //       exception, and the cent this can differ by is registered as divergence C-ROUNDING. Line 467
-    //       then adds each row's already-reduced result into the account total, so an account's accrual
-    //       is the sum of per-row reduced values and never the reduction of a summed product -- which is
-    //       why Money deliberately offers no sum-then-round helper for a caller to reach for here.
+    // WHY : Assumptions: that division discards its surplus digits in the target exactly as the
+    //       reference does -- the program carries no ROUNDED phrase on any statement at all, which was
+    //       measured rather than inferred. com.carddemo.common.money.Money declares two modes:
+    //       GENERAL_ROUNDING is half up under transformation rule T3 and governs every other
+    //       reduction, and BASELINE_INTEREST_ROUNDING truncates and governs the accrual quotient
+    //       alone, because the plan pins this formula to the reference at its section 0.7.3. No cent
+    //       differs, so no divergence is registered. Line 467 then adds each row's already-reduced
+    //       result into the account total, so an account's accrual is the sum of per-row reduced values
+    //       and never the reduction of a summed product -- which is why Money deliberately offers no
+    //       sum-then-round helper for a caller to reach for here.
     // WHY : Alternatives Considered: a domain method on this type that added an amount to the
     //       balance, mirroring the ADD statements at app/cbl/CBTRN02C.cbl lines 508 and 527.
     //       Rejected so that every monetary operation in this module passes through Money, which

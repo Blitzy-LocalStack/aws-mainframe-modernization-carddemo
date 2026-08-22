@@ -199,10 +199,20 @@
  *   <li>{@code RuntimeDeletePrivilegeContractTest} across 2 cases -- asserts that every row-deleting
  *       call site is one the database permits, and that no table carries a delete grant nothing
  *       uses.</li>
- *   <li>{@code CrossSchemaPrivilegeContractTest} across 3 cases -- asserts that the batch role's
- *       cross-schema grants are exactly the schemas its code can reach: no schema is granted that the
- *       service's own {@code search_path} omits, no schema on that path is left ungranted, and every
- *       schema an entity explicitly maps to is granted.</li>
+ *   <li>{@code CrossSchemaPrivilegeContractTest} across 5 cases -- asserts that the batch role's
+ *       cross-schema grants are exactly the schemas AND TABLES its code can reach. THREE govern the
+ *       schema tier: no schema is granted that the service's own {@code search_path} omits, no schema
+ *       on that path is left ungranted, and every schema an entity explicitly maps to is granted. TWO
+ *       govern the table tier, which the schema tier cannot see: exactly one account-owned migration
+ *       grants {@code UPDATE} on {@code account.accounts} to the batch role, and no other account
+ *       table -- and no schema-wide or default privilege -- carries an account write.
+ *       <p>Refactoring Rationale: the table tier was added because the schema tier passed while
+ *       posting could not write the account master at all. The bootstrap document granted that
+ *       privilege behind a guard testing for a table the service migrations had not yet created, so
+ *       the guard was false on every first deployment; a text-level assertion over schema USAGE
+ *       cannot detect that, which is why the definitive check is the live-engine
+ *       {@code BatchAccountWriteGrantIT} in {@code account-service} and this pair is the cheap
+ *       text-level companion to it.</p></li>
  *   <li>{@code ServiceReadmeInventoryTest} across 6 cases -- holds every inventory a service README
  *       publishes to that module's own trees, so a class added or removed cannot leave a stale count
  *       standing in prose. THREE govern the test census: the two published tiers, the total stated beside

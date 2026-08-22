@@ -114,6 +114,11 @@ class StatementRunIndexTest {
         //       artifact and this reader disagree about the width, and decoding the prefix anyway would
         //       return a position belonging to a different card -- which is the one failure mode a
         //       caller could not detect.
+        // WHY : Assumptions: the length used is deliberately the content width plus ONE, which is also
+        //       the length of a TERMINATED record -- so this case additionally pins that the decoder
+        //       accepts content alone and never a framed record. The caller strips the terminator by
+        //       construction of the byte range it asks for, and a decoder that trimmed a trailing byte
+        //       instead would also accept a genuinely misaligned probe.
         /**
          * Asserts that a record of the wrong length is refused rather than decoded from its prefix.
          */
@@ -125,6 +130,30 @@ class StatementRunIndexTest {
             assertThatExceptionOfType(IllegalArgumentException.class)
                     .isThrownBy(() -> StatementIndexEntry.decode(tooLong))
                     .withMessageContaining("disagree about the width");
+        }
+
+        // WHY : Assumptions: the stride is asserted as arithmetic against the two numbers it is composed
+        //       from rather than as a literal, so the case states the RELATIONSHIP -- one terminator per
+        //       entry -- rather than restating a number that would then have to be maintained in two
+        //       places. The reader divides an object's byte length by the stride and multiplies an
+        //       ordinal by it, so a stride that drifted from the writer's framing refuses every normally
+        //       published index or, worse, splices two entries into one probe.
+        /**
+         * Asserts that the on-object stride is one terminator wider than an entry's content.
+         */
+        @Test
+        @DisplayName("strides one terminator past each entry's content")
+        void stridesOneTerminatorPastEachEntry() {
+            assertThat(StatementIndexEntry.TERMINATOR_WIDTH)
+                    .as("the writer appends exactly one line feed after every record")
+                    .isEqualTo(1);
+            assertThat(StatementIndexEntry.ON_OBJECT_STRIDE)
+                    .isEqualTo(StatementIndexEntry.ENCODED_WIDTH
+                            + StatementIndexEntry.TERMINATOR_WIDTH);
+            assertThat(new StatementIndexEntry(FINGERPRINT, 0L, 1L).encode())
+                    .as("an entry's own content is narrower than the stride by the terminator")
+                    .hasSize(StatementIndexEntry.ON_OBJECT_STRIDE
+                            - StatementIndexEntry.TERMINATOR_WIDTH);
         }
 
         /**
@@ -175,10 +204,11 @@ class StatementRunIndexTest {
         @Test
         @DisplayName("accepts a count that agrees with the index")
         void acceptsAnAgreeingCount() {
-            StatementRunOutcome outcome = new StatementRunOutcome(1,
+            StatementRunOutcome outcome = new StatementRunOutcome(1, 0,
                     List.of(new StatementIndexEntry(FINGERPRINT, 0L, 9L)));
 
             assertThat(outcome.statementsProduced()).isEqualTo(1);
+            assertThat(outcome.statementsOmitted()).isZero();
             assertThat(outcome.index()).hasSize(1);
         }
 
@@ -194,7 +224,7 @@ class StatementRunIndexTest {
         @DisplayName("refuses a count that disagrees with the index")
         void refusesADisagreeingCount() {
             assertThatExceptionOfType(IllegalArgumentException.class)
-                    .isThrownBy(() -> new StatementRunOutcome(2,
+                    .isThrownBy(() -> new StatementRunOutcome(2, 0,
                             List.of(new StatementIndexEntry(FINGERPRINT, 0L, 9L))))
                     .withMessageContaining("unreachable");
         }
@@ -205,7 +235,37 @@ class StatementRunIndexTest {
         @Test
         @DisplayName("accepts an empty run")
         void acceptsAnEmptyRun() {
-            assertThat(new StatementRunOutcome(0, List.of()).index()).isEmpty();
+            assertThat(new StatementRunOutcome(0, 0, List.of()).index()).isEmpty();
+        }
+
+        // WHY : Assumptions: an omitted statement contributes NO index entry, which is the property
+        //       that keeps every later record position answerable -- the positions describe the bytes
+        //       that were actually written. So the produced count still has to agree with the index
+        //       size while the omission count sits beside it, unchecked against anything.
+        /**
+         * Asserts that an omitted statement is counted without contributing an index entry.
+         */
+        @Test
+        @DisplayName("counts an omitted statement without indexing it")
+        void countsAnOmittedStatementWithoutIndexingIt() {
+            StatementRunOutcome outcome = new StatementRunOutcome(1, 2,
+                    List.of(new StatementIndexEntry(FINGERPRINT, 0L, 9L)));
+
+            assertThat(outcome.statementsProduced()).isEqualTo(1);
+            assertThat(outcome.statementsOmitted()).isEqualTo(2);
+            assertThat(outcome.index()).hasSize(1);
+            assertThat(outcome.toString()).contains("statementsOmitted=2");
+        }
+
+        /**
+         * Asserts that a negative omission count is refused.
+         */
+        @Test
+        @DisplayName("refuses a negative omission count")
+        void refusesANegativeOmissionCount() {
+            assertThatExceptionOfType(IllegalArgumentException.class)
+                    .isThrownBy(() -> new StatementRunOutcome(0, -1, List.of()))
+                    .withMessageContaining("statementsOmitted");
         }
 
         /**
@@ -214,7 +274,7 @@ class StatementRunIndexTest {
         @Test
         @DisplayName("renders the index as a count of entries")
         void rendersTheIndexAsACount() {
-            String rendered = new StatementRunOutcome(1,
+            String rendered = new StatementRunOutcome(1, 0,
                     List.of(new StatementIndexEntry(FINGERPRINT, 0L, 9L))).toString();
 
             assertThat(rendered)

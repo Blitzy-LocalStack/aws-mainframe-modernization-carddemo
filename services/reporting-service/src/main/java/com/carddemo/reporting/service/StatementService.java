@@ -1,9 +1,11 @@
 package com.carddemo.reporting.service;
 
+import com.carddemo.common.codec.FixedWidthCodec;
 import com.carddemo.common.error.AbendDetail;
 import com.carddemo.common.error.ApiError;
 import com.carddemo.common.error.ClientInputException;
 import com.carddemo.common.money.Money;
+import com.carddemo.common.observability.ThrowableDigest;
 import com.carddemo.common.security.OpaqueIdentifier;
 import com.carddemo.common.time.TimestampFormatter;
 import com.carddemo.reporting.domain.CardXrefView;
@@ -25,12 +27,15 @@ import com.carddemo.reporting.repository.StatementTransactionRepository;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.regex.Pattern;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Limit;
@@ -553,6 +558,23 @@ public class StatementService {
      * than to be truncated into something that happens to validate.
      */
     private static final int MANIFEST_MAX_BYTES = RUN_ID_LENGTH + 16;
+
+    /**
+     * Diagnostic channel for this class.
+     *
+     * <p>Assumptions: the reference routes its own diagnostics to the job log rather than into either
+     * output -- {@code 9999-ABEND-PROGRAM} at L921 of {@code app/cbl/CBSTM03A.CBL} displays before it
+     * calls the abend service -- so a logger is the faithful destination and not an addition. A
+     * diagnostic written into either record stream would corrupt the record it landed in and, in the
+     * plain-text stream, would shift every index position after it.</p>
+     *
+     * <p>⚠️ Assumptions: every event this channel carries names an OBJECT, a BAND, an ORDINAL or a
+     * COUNT, and never a card number, a card fingerprint, an account identifier, a customer attribute
+     * or a monetary amount. {@code docs/architecture/observability.md} withholds all of those, and this
+     * class holds the widest concentration of them anywhere in the migration, so the constraint is
+     * stated once here and honoured at each call site rather than being rediscovered per event.</p>
+     */
+    private static final Logger LOG = LoggerFactory.getLogger(StatementService.class);
 
     private static final String ABEND_CULPRIT = "CBSTM03A";
 
@@ -1250,9 +1272,15 @@ public class StatementService {
      * {@code noStoredArtifactYieldsNoLocation} reports a location where {@code null} was expected,
      * {@code but was: "/api/v1/reports/statements/artifacts/Rk3IELBwhDXagAz_-uTGC7"}, and
      * {@code oneStoredArtifactIsReportedAlone} reports the same for the artifact the store does not
-     * hold. Removing the magnitude guard instead fails exactly one case,
-     * {@code aTotalNeedingATenthIntegerDigitIsRefused}, with {@code Expecting code to raise a
-     * throwable} -- so the two changes are independently asserted.
+     * hold. Removing the narrowing instead fails exactly one case,
+     * {@code aTotalNeedingATenthIntegerDigitIsNarrowed}, on the figure it publishes -- so the two
+     * behaviours are independently asserted.
+     *
+     * <p>⚠️ Assumptions: the figure published is the NARROWED one, not the aggregate the caller handed
+     * over. The two differ only for a card whose transactions sum past the statement regime's integer
+     * width, and for that card the narrowed figure is the one its rendered statement carries, so
+     * publishing the aggregate instead would answer the request edge with a total no artifact of the
+     * same card holds.
      *
      * @param heading the resolved heading row; must not be {@code null}
      * @param total the exact sum of the card's transaction amounts; must not be {@code null}
@@ -1262,14 +1290,12 @@ public class StatementService {
      * @return the heading response, with each artifact location, the produced-at stamp and the index
      *     position present only for an operator audience and only where the store holds the artifact;
      *     never {@code null}
-     * @throws ArithmeticException if the total needs more than
-     *     {@value #STATEMENT_TOTAL_INTEGER_DIGITS} integer positions
      * @throws IllegalStateException if the manifest names something that is not a run identifier this
      *     service could have published
      */
     private StatementResponse headingResponse(
             StatementHeading heading, Money total, long lineCount, ArtifactAudience audience) {
-        requireStatementTotalMagnitude(total);
+        Money published = requireStatementTotalMagnitude(total, "request-edge");
         Objects.requireNonNull(audience, "audience must not be null");
         // WHY : Assumptions: a cardholder audience consults the STORE NOT AT ALL, rather than reading
         //       the run and then discarding what it read. Every field those reads would fill is
@@ -1293,7 +1319,7 @@ public class StatementService {
                 heading.cardNum(),
                 String.valueOf(heading.accountId()),
                 assembleName(heading),
-                total,
+                published,
                 Math.toIntExact(lineCount),
                 plainText.isPresent() ? artifactLocation(runId.orElseThrow(), PLAIN_TEXT_OBJECT) : null,
                 markup.isPresent() ? artifactLocation(runId.orElseThrow(), HTML_OBJECT) : null,
@@ -1421,35 +1447,57 @@ public class StatementService {
     }
 
     /**
-     * Refuses a statement total the reference's own accumulator could not hold.
+     * Narrows a statement total to the integer positions the reference's own accumulator holds.
      *
-     * <p>⚠️ Refactoring Rationale: the total published by the two request-edge operations is a database
-     * aggregate over one card's transactions, and an aggregate is bounded by the data rather than by
-     * any declared picture. Every other path to a statement total meets
-     * {@code CobolEditMask.formatStatementAmount}, which refuses a tenth integer digit; this path does
-     * not emit an artifact and so met nothing. The check is placed on the one method both operations
-     * assemble their response through, rather than on each operation, so a third operation added later
-     * inherits it.
+     * <p>Purpose: the total published by the two request-edge operations is a database aggregate over
+     * one card's transactions, and an aggregate is bounded by the data rather than by any declared
+     * picture. The receiving field is not: the statement regime declares
+     * {@value #STATEMENT_TOTAL_INTEGER_DIGITS} integer positions, and the published amount schema of
+     * this service admits exactly that many, so a wider figure has to be reduced to what the regime can
+     * carry before it is published or rendered.
      *
-     * <p>Assumptions: the refusal is an {@code ArithmeticException} carrying the same meaning the
-     * encoder's is -- a figure outside the range the reference regime can represent -- rather than a
-     * client error, because no request parameter chose the figure. Trade-offs: the message names the
-     * FIELD and the bound and never the figure, because the figure is a sum of a cardholder's
-     * transaction amounts and the logging contract in {@code docs/architecture/observability.md} names
-     * a monetary amount as a value that is omitted rather than abbreviated.
+     * <p>⚠️ Refactoring Rationale: this narrows where it used to raise. Raising discarded far more than
+     * the digits that did not fit -- on the request edge the caller lost the heading, the name, the line
+     * count and both artifact locations along with the total, every one of which was already computed,
+     * and received an internal error instead; on the batch edge the run ended with no statement written
+     * for ANY card because one card's transactions summed high. The reference does neither. Its
+     * statement total moves into a narrower field and the surplus high-order digits are dropped, which
+     * the migration's divergence register records under {@code D-EDIT-MASK-OVERFLOW} together with the
+     * statement that the narrowing decision belongs to the caller assembling the band. This method is
+     * that caller for both edges, and it is where the decision is now taken.
+     *
+     * <p>Assumptions: the narrowing is {@link Money#narrowedToIntegerDigits(int)}, which discards
+     * high-order digits while keeping the sign, so an over-wide credit stays a credit. The encoder that
+     * renders the figure into a fixed-width record still REFUSES a figure its mask cannot print, and
+     * that is kept: an encoder has no band to attribute a narrowing to and must not emit a figure its
+     * own mask width would misrepresent. Narrowing here makes that refusal unreachable from these
+     * paths, which is the correct relationship between a caller's policy and an encoder's guard.
+     *
+     * <p>Trade-offs: the journal event names the SURFACE and the digit count and never the figure, the
+     * card or the account. The figure is a sum of a cardholder's transaction amounts and the logging
+     * contract in {@code docs/architecture/observability.md} names a monetary amount as a value that is
+     * omitted rather than abbreviated; the surface is what tells an operator which path narrowed, which
+     * is the part that cannot be recovered afterwards.
      *
      * @param total the accumulated statement total; must not be {@code null}
-     * @throws ArithmeticException if the total needs more than
-     *     {@value #STATEMENT_TOTAL_INTEGER_DIGITS} integer positions
+     * @param surface which path is assembling the figure, used only in the journal event -- the
+     *     request-edge response or the batch trailer band; must not be {@code null}
+     * @return {@code total} unchanged when it already fits
+     *     {@value #STATEMENT_TOTAL_INTEGER_DIGITS} integer positions, otherwise the same total with its
+     *     high-order digits discarded and its sign and cents intact
      */
-    private static void requireStatementTotalMagnitude(Money total) {
-        try {
-            Money.ofPicture(total.amount(), STATEMENT_TOTAL_INTEGER_DIGITS);
-        } catch (ArithmeticException overflow) {
-            throw new ArithmeticException("the statement total exceeds the "
-                    + STATEMENT_TOTAL_INTEGER_DIGITS
-                    + " integer positions the statement regime declares");
+    private static Money requireStatementTotalMagnitude(Money total, String surface) {
+        Money narrowed = total.narrowedToIntegerDigits(STATEMENT_TOTAL_INTEGER_DIGITS);
+        // WHY : Assumptions: identity distinguishes a narrowing that happened from one that did not,
+        //       because the narrowing operation returns its receiver unchanged when the figure already
+        //       fits. Journaling unconditionally would warn once per card of every run, which is a
+        //       warning an operator learns to ignore before the one that matters arrives.
+        if (narrowed != total) {
+            LOG.warn("event=statement.total.narrowed surface={} integerDigits={}"
+                            + " outcome=high-order-digits-discarded",
+                    surface, STATEMENT_TOTAL_INTEGER_DIGITS);
         }
+        return narrowed;
     }
 
     /**
@@ -1532,13 +1580,58 @@ public class StatementService {
      * be a number with no use. Alternatives Considered: indexing both, which doubles the counting and
      * publishes a figure nothing can act on.
      *
+     * <p>⚠️ Refactoring Rationale: each statement is now composed BEHIND A FAULT BOUNDARY and one that
+     * cannot be rendered is omitted with a warning instead of ending the run. Every record went straight
+     * to the caller's sink before, and no rendering refusal was caught, so one row of
+     * schema-legal data destroyed a whole night's output: a description holding a character the
+     * fixed-width charset cannot represent, a description whose markup escaping expands past its cell,
+     * or a card total wider than the statement regime's integer width each ended the run with no
+     * statement written for ANY card, and the column those descriptions live in carries no constraint
+     * that would have kept them out. Under the reference each cardholder's statement is created by its
+     * own pass of the mainline loop at L317 to L329 of {@code app/cbl/CBSTM03A.CBL}, so one cardholder's
+     * data is not a reason another cardholder has no statement; the migration answers a rendering
+     * refusal per statement, which is the same granularity.
+     *
+     * <p>⚠️ Assumptions: a statement is composed COMPLETELY before any of it reaches the caller's sink,
+     * and a statement that fails contributes NOTHING. A half-written statement would be worse than an
+     * omitted one twice over: the artifact would hold a heading with no trailer, and because the index
+     * positions are record ordinals into that same artifact, every statement after it would be located
+     * by a position that is wrong by however many records the failure had already written.
+     *
+     * <p>⚠️ Assumptions: exactly three refusal families are recoverable, and each is a statement about
+     * one card's own content -- a field the fixed-width charset cannot encode, a figure no mask can
+     * print, and a cell whose escaped form will not fit its declared width. Alternatives Considered and
+     * rejected: catching {@code RuntimeException} or {@code Exception}, which would absorb a defect in
+     * this class and report it forever as a skipped card; catching {@code IllegalArgumentException},
+     * which is the codec refusal's own supertype and would take every argument-validation defect with
+     * it; and catching anything the object store raises, which must NOT be recovered here -- a sink that
+     * cannot accept a record cannot produce any statement, so the run has to stop rather than walk the
+     * whole portfolio reporting every card as skipped. The flush below sits outside the recovery for
+     * exactly that reason.
+     *
+     * <p>Assumptions: the heading is resolved OUTSIDE the boundary, so a cross-reference row naming a
+     * customer or an account that does not resolve still stops the run. That is the reference's own
+     * disposition -- its customer and account lookups at L321 and L322 abend on a miss -- and it is a
+     * statement about referential integrity across the reporting views rather than about one card's
+     * renderable content.
+     *
+     * <p>Assumptions: one refusal raised INSIDE the boundary is not a rendering width at all and is
+     * recoverable nonetheless -- {@link #creditScoreOf(StatementHeading)}, which refuses a heading row
+     * carrying no credit score or a negative one. It is admitted deliberately: it is a defect in one
+     * card's own projected row, so the granularity is right, and register entry <b>R11</b> asks that the
+     * condition be REPORTED rather than worked around, which a warning naming the statement and a
+     * counted omission in the run's closing summary is. What would not satisfy that entry is rendering
+     * a substitute score, and nothing here does.
+     *
      * @param sink the destination for both record streams, cleared once before the first statement
-     * @return the number of statements produced and one index entry per statement, in the order the
-     *     cross-reference walk produced them, which is ascending card fingerprint
+     * @return the number of statements produced and one index entry per statement, ordered by ascending
+     *     card fingerprint for lookup rather than in the order the walk wrote them, which is ascending
+     *     card number; a statement omitted for an unrenderable field contributes neither, and the
+     *     omissions are journaled with the run's closing summary
      * @throws NullPointerException if {@code sink} is {@code null}
      * @throws IllegalStateException if a cross-reference row names a customer or an account that does
-     *     not resolve, or if a credit score cannot be carried by the statement band, either of which
-     *     stops the run as the reference's abend does
+     *     not resolve, which stops the run as the reference's abend does, or if the caller's sink
+     *     refuses a record, which stops the run because no later statement could be written either
      */
     public StatementRunOutcome generateStatements(StatementSink sink) {
         Objects.requireNonNull(sink, "sink must not be null");
@@ -1557,6 +1650,14 @@ public class StatementService {
         CountingSink counted = new CountingSink(sink);
         List<StatementIndexEntry> index = new ArrayList<>();
         int statementsProduced = 0;
+        // WHY : Trade-offs: the omissions are counted here and journaled at the end of the walk, and
+        //       they are NOT returned. The run outcome this method answers with is a record declaring a
+        //       produced count and an index whose size must equal it, and that type is not this class's
+        //       to widen; a count of omissions belongs beside the produced count and reaching it needs a
+        //       coordinated change to the outcome record and to the task that reads it. Until then the
+        //       journal carries both figures together, so an operator seeing a short artifact learns
+        //       from one line that statements were omitted and how many.
+        int statementsOmitted = 0;
 
         // WHY : Refactoring Rationale: the anchor is the WHOLE ordering tuple and both components
         //       advance from the same row. Only the fingerprint advanced before, which could not have
@@ -1573,16 +1674,179 @@ public class StatementService {
             List<StatementHeadingRow> chunk =
                     cardXrefs.findHeadingChunk(afterCardNum, afterFingerprint, HEADING_CHUNK_SIZE);
             if (chunk.isEmpty()) {
-                return new StatementRunOutcome(statementsProduced, List.copyOf(index));
+                // WHY : Assumptions: the closing summary is journaled at INFO when nothing was omitted
+                //       and at WARN when something was, because a run that produced a statement for
+                //       every card is an ordinary night and a run that did not is the one an operator
+                //       has to look at. Both carry both figures, so the artifact's record count can be
+                //       reconciled against the portfolio from one line either way.
+                if (statementsOmitted == 0) {
+                    LOG.info("event=statement.run.completed produced={} omitted={}",
+                            statementsProduced, statementsOmitted);
+                } else {
+                    LOG.warn("event=statement.run.completed produced={} omitted={}"
+                                    + " outcome=artifact-incomplete",
+                            statementsProduced, statementsOmitted);
+                }
+                // WHY : Assumptions: the index is SORTED by fingerprint here, while the artifact keeps
+                //       the order the walk wrote it in. The two orders are different on purpose. The
+                //       artifact is read by a person and its record order is a parity contract: the
+                //       reference walks the cross-reference in key order -- findHeadingChunk above
+                //       anchors on cardNum first for exactly that reason -- so the statements appear in
+                //       card-number order and must keep appearing in it. The index is read by
+                //       bisectIndex, which compares fingerprints, and a binary search over an unordered
+                //       array answers "not present" for entries that are present. A fingerprint is a
+                //       digest, so its order bears no relation to card-number order and the walk cannot
+                //       produce both at once.
+                //       Trade-offs: sorting here means the run holds one entry per statement in memory
+                //       before publishing, which it already did -- the index has to be complete before
+                //       it can be written, because a later entry cannot be inserted into a published
+                //       object. So the sort adds an ordering pass over that list and no retention.
+                //       Alternatives Considered: (1) ordering the walk by fingerprint instead, which
+                //       would make one order serve both. Rejected because it reorders the ARTIFACT, and
+                //       the record order of the statement document is observable output held to the
+                //       reference. (2) Leaving the index unsorted and scanning it linearly. Rejected
+                //       because the object is one range read per probe against the store, so a scan is
+                //       one request per entry where a bisect is a logarithmic number of them.
+                //       (3) Sorting at publication time in the task. Rejected because the ordering is a
+                //       property of the index this method produces rather than of how it is written, and
+                //       putting it there would let a second writer publish an unsorted index.
+                List<StatementIndexEntry> lookupOrdered = new ArrayList<>(index);
+                lookupOrdered.sort(Comparator.comparing(StatementIndexEntry::cardFingerprint));
+                return new StatementRunOutcome(statementsProduced, statementsOmitted,
+                        List.copyOf(lookupOrdered));
             }
             for (StatementHeadingRow row : chunk) {
+                // WHY : Assumptions: the heading is resolved before the boundary is entered, so an
+                //       unresolved customer or account still stops the run. Resolving it inside would
+                //       turn a broken join across the reporting views -- a condition affecting every
+                //       card that shares the missing row -- into a per-card omission an operator would
+                //       have to count to notice.
+                StatementHeading heading = StatementHeading.of(row);
+                // WHY : Assumptions: the anchor advances for an omitted statement exactly as it does for
+                //       a produced one, and it is advanced before the outcome is known so that both arms
+                //       below share one advance. An anchor left behind by a skipped row would re-read
+                //       that row on the next chunk and skip it again, which is a walk that does not
+                //       terminate.
+                afterCardNum = row.getCardNum();
+                afterFingerprint = row.getCardFingerprint();
+
+                StagedStatement staged = new StagedStatement();
+                try {
+                    emitStatement(heading, staged);
+                } catch (FixedWidthCodec.FieldCodecException | ArithmeticException
+                        | IllegalStateException unrenderable) {
+                    // WHY : Trade-offs: the warning names the statement's ORDINAL in the walk and a
+                    //       digest of the refusal, and nothing else. The ordinal is what an operator
+                    //       correlates against the artifact and the step ledger, where the card, the
+                    //       account and the field's own text are values docs/architecture/observability.md
+                    //       withholds -- and the offending text is the one thing certain to be
+                    //       cardholder-supplied, since it is the description that could not be rendered.
+                    LOG.warn("event=statement.omitted walkOrdinal={} failure={}"
+                                    + " outcome=statement-not-written",
+                            statementsProduced + statementsOmitted + 1,
+                            ThrowableDigest.of(unrenderable));
+                    statementsOmitted++;
+                    continue;
+                }
+
+                // WHY : Assumptions: the first-record ordinal is read AFTER the composition succeeded
+                //       and immediately before the flush, so it is the position the statement actually
+                //       occupies. Reading it before the composition would leave an omitted statement's
+                //       ordinal claimed by the next statement to be written.
                 long firstRecord = counted.statementRecords();
-                emitStatement(StatementHeading.of(row), counted);
+                staged.flushTo(counted);
                 index.add(new StatementIndexEntry(row.getCardFingerprint(), firstRecord,
                         counted.statementRecords() - firstRecord));
                 statementsProduced++;
-                afterCardNum = row.getCardNum();
-                afterFingerprint = row.getCardFingerprint();
+            }
+        }
+    }
+
+    /**
+     * A sink that holds one statement's records until the statement is known to be complete.
+     *
+     * <p>Purpose: this is the fault boundary's buffer. {@link #generateStatements(StatementSink)}
+     * composes one statement into an instance of this class and forwards the instance's contents to the
+     * real sink only once the composition has finished without a refusal, so a statement that cannot be
+     * rendered leaves no record behind in either artifact.
+     *
+     * <p>Assumptions: nothing here can refuse a record, and that is the property the boundary depends
+     * on. Both destinations are in-memory lists, so every exception the composition raises comes from
+     * the rendering it performs rather than from this sink -- which is what lets the caller distinguish
+     * an unrenderable statement from an unusable object store by placing the flush outside its recovery.
+     *
+     * <p>Trade-offs: one statement's records are held in memory at once. That is a deliberate cost and
+     * it is bounded by ONE statement rather than by the run: the walk still reads the portfolio in
+     * chunks and a card's transactions in chunks, and register entry <b>D-2</b> removes the reference's
+     * static per-card and per-run table dimensions rather than reinstating them here, so no bound is
+     * introduced on how many transactions a card may have or how many cards a run may cover. The
+     * alternative -- spooling each statement to a temporary object and copying it forward -- buys a
+     * lower memory ceiling for one more round trip per statement and a second object to reclaim when a
+     * statement is omitted, and the records of a single cardholder's statement are small enough that the
+     * trade does not pay.
+     */
+    private static final class StagedStatement implements StatementSink {
+
+        /** The plain-text records composed so far, in the order they were written. */
+        private final List<byte[]> plainRecords = new ArrayList<>();
+
+        /** The markup records composed so far, in the order they were written. */
+        private final List<byte[]> markupRecords = new ArrayList<>();
+
+        /**
+         * Refuses the artifact reset, which is a run-wide step and never a per-statement one.
+         *
+         * <p>Assumptions: this is unreachable from the composition path and is declared as a refusal
+         * rather than as a silent no-op, because a caller that reset the artifacts once per statement
+         * would discard every statement but the last and a no-op here would let that go unnoticed.</p>
+         *
+         * @throws UnsupportedOperationException always, because a staged statement has no artifact to
+         *     replace
+         */
+        @Override
+        public void replaceArtifacts() {
+            throw new UnsupportedOperationException(
+                    "a staged statement holds one statement's records and replaces no artifact");
+        }
+
+        /**
+         * Holds one plain-text record.
+         *
+         * @param record the record to hold; must not be {@code null}
+         */
+        @Override
+        public void writeStatementRecord(byte[] record) {
+            plainRecords.add(record);
+        }
+
+        /**
+         * Holds one markup record.
+         *
+         * @param record the record to hold; must not be {@code null}
+         */
+        @Override
+        public void writeMarkupRecord(byte[] record) {
+            markupRecords.add(record);
+        }
+
+        /**
+         * Forwards every held record to the real sink, plain-text stream first.
+         *
+         * <p>Assumptions: the order WITHIN each stream is the order the composition wrote it in, which
+         * is what both artifacts' contracts fix. The order BETWEEN the two streams is not preserved and
+         * does not need to be: they are separate destinations, and the composition steps already record
+         * that the interleaving between them is unobservable in either.</p>
+         *
+         * @param destination the sink to forward to; must not be {@code null}
+         * @throws IllegalStateException if the destination refuses a record, which the caller does not
+         *     recover from because a sink that cannot accept this statement cannot accept any
+         */
+        private void flushTo(StatementSink destination) {
+            for (byte[] record : plainRecords) {
+                destination.writeStatementRecord(record);
+            }
+            for (byte[] record : markupRecords) {
+                destination.writeMarkupRecord(record);
             }
         }
     }
@@ -1668,10 +1932,20 @@ public class StatementService {
      * them. The distinction is kept because the trailer carries the accumulated total, which does not
      * exist until the traversal has finished.</p>
      *
+     * <p>Assumptions: this step composes and does not decide what an unrenderable statement means. It
+     * writes to whatever sink it is handed and lets every refusal out, and the run loop hands it a
+     * staging sink so that a refusal reaching the loop has left nothing in the real artifacts. Deciding
+     * here would put the disposition in the step that cannot see whether any record had already been
+     * published.</p>
+     *
      * @param heading the heading row naming the card, its customer's printed attributes and its balance
-     * @param sink the destination for both record streams
-     * @throws IllegalStateException if the credit score cannot be carried by the statement band, or if
-     *     the sink refuses a record
+     * @param sink the destination for both record streams, which the run loop supplies as a per-statement
+     *     staging buffer
+     * @throws IllegalStateException if the credit score cannot be carried by the statement band, if a
+     *     rendered cell will not fit its declared width, or if the sink refuses a record
+     * @throws FixedWidthCodec.FieldCodecException if a field carries a character the fixed-width
+     *     charset cannot represent
+     * @throws ArithmeticException if a rendered figure needs more positions than its mask provides
      */
     private void emitStatement(StatementHeading heading, StatementSink sink) {
         createStatement(heading, sink);
@@ -1885,14 +2159,24 @@ public class StatementService {
      * both sit inside the traversal step the mainline performs at L326 for every cross-reference
      * row.</p>
      *
+     * <p>⚠️ Assumptions: the accumulated total is narrowed to the statement regime's integer width
+     * BEFORE the mapper is handed it, at the same helper the request edge narrows through. The
+     * accumulator is a sum over one card's transactions and is bounded by the data, while the
+     * intermediate display item the reference moves through is not, so a card that transacts past that
+     * width has to have its high-order digits discarded somewhere; doing it here means the artifact and
+     * the request-edge response publish the same figure for that card. The mapper is deliberately left
+     * strict: it refuses a figure its mask cannot print, which is the correct behaviour for a layer that
+     * has no band to attribute a narrowing to, and narrowing here makes that refusal unreachable from
+     * this path.
+     *
      * @param cardTotal the accumulated total of the card's transactions
      * @param sink the destination for both record streams
      * @throws IllegalStateException if the sink refuses a record, which stops the run rather than
      *     leaving a statement without the total it accumulated
      */
     private void emitCardTrailer(Money cardTotal, StatementSink sink) {
-        StatementTextMapper.PreparedTrailerFields trailer =
-                StatementTextMapper.prepareCardTrailerFields(cardTotal);
+        StatementTextMapper.PreparedTrailerFields trailer = StatementTextMapper.prepareCardTrailerFields(
+                requireStatementTotalMagnitude(cardTotal, "batch-trailer"));
 
         for (byte[] record : StatementTextMapper.emitCardTrailer(trailer)) {
             sink.writeStatementRecord(record);
@@ -1917,9 +2201,16 @@ public class StatementService {
      * not be invoked at all.</p>
      *
      * <p>Assumptions: a null score is a defect in the data rather than a state to render around, so it
-     * stops the run. The base column is declared {@code SMALLINT NOT NULL}, so the only way a null
+     * is refused here. The base column is declared {@code SMALLINT NOT NULL}, so the only way a null
      * reaches here is a relation redefined underneath this module, which is exactly the condition
      * register entry <b>R11</b> says to report rather than work around.</p>
+     *
+     * <p>⚠️ Assumptions: the refusal reaches the run loop's per-statement fault boundary, so it omits
+     * ONE card's statement with a warning and a counted omission rather than ending the run. That is
+     * still reporting the condition, which is what <b>R11</b> asks; what it stops doing is denying every
+     * other cardholder a statement over one row's missing column. The batch outcome carries the produced
+     * count and the closing journal line carries the omissions beside it, so the shortfall is visible
+     * without reading the artifact.</p>
      *
      * <p>Assumptions: a negative score is refused here as well as at the mapper, and the duplication is
      * deliberate: the source picture {@code PIC 9(03)} is unsigned and has no position to represent a
@@ -2174,11 +2465,23 @@ public class StatementService {
      *
      * <p>Purpose: this is what makes a run-wide artifact usable from a per-card response. The index
      * artifact holds one fixed-width record per statement in ascending card-fingerprint order, so an
-     * entry's position is its ordinal times {@link StatementIndexEntry#ENCODED_WIDTH} and a card can be
-     * found by bisection over the object's own size.
+     * entry's position is its ordinal times {@link StatementIndexEntry#ON_OBJECT_STRIDE} and a card can
+     * be found by bisection over the object's own size.
+     *
+     * <p>⚠️ Refactoring Rationale: the stride is the ON-OBJECT stride and no longer the entry's own
+     * content width, and this method's whole behaviour turned on the difference. The writer that
+     * publishes the index terminates every record it appends, so a published index of {@code n}
+     * statements is {@code n} times {@link StatementIndexEntry#ON_OBJECT_STRIDE} bytes and never
+     * {@code n} times {@link StatementIndexEntry#ENCODED_WIDTH}. Dividing by the content width made the
+     * alignment test below fail for EVERY normally published index, so the first successful statement
+     * run left both request-edge statement operations refusing every card and every account for as long
+     * as that index stood -- while deleting the index object alone restored them. The alignment test
+     * itself is kept exactly as strict as it was: it is what stops a probe landing mid-record and
+     * decoding a fingerprint spliced out of two cards, which would answer one cardholder with another
+     * cardholder's position.
      *
      * <p>Assumptions: the search reads ONE ENTRY PER PROBE and never the whole index. A portfolio of a
-     * million cards is an eighty-eight-megabyte index and twenty probes of eighty-eight bytes, so the
+     * million cards is an eighty-nine-megabyte index and twenty probes of eighty-eight bytes, so the
      * cost of a statement read stays flat as the portfolio grows. Alternatives Considered: reading the
      * whole index and building a map, which is simpler and one request rather than several, and whose
      * cost is the entire index transferred on every statement read; and recording the positions in a
@@ -2187,16 +2490,27 @@ public class StatementService {
      * <p>Assumptions: an absent index yields nothing rather than a failure. A run reaches the manifest
      * only after its index has been written, so the run named there normally has one; what remains
      * possible is a lifecycle rule expiring one object of a superseded run, and reporting no position
-     * for it is more useful than failing a statement read over it. A PRESENT index whose size is not a
-     * whole number of entries is a failure, because it means the object was truncated and every
-     * position derived from it would be wrong.
+     * for it is more useful than failing a statement read over it.
+     *
+     * <p>⚠️ Refactoring Rationale: an index that is present but UNUSABLE -- misaligned, vanished
+     * mid-search, or holding a record this reader cannot decode -- is now answered the same way an
+     * absent one is, with no position and an operational journal line, where it used to raise an
+     * untranslated failure that the request edge could only render as an internal error. The condition
+     * is a state of a stored object rather than anything the caller did or could do differently, and a
+     * caller told "internal error" for it loses the heading, the total and the line count as well as
+     * the position -- every one of which is computed without the index. Nothing unsafe is admitted by
+     * degrading: no position is derived from an unusable index at all, so the wrong-cardholder answer
+     * the alignment test exists to prevent is still prevented. What an operator gets instead is a
+     * warning naming the object, its byte length and the stride expected of it, which is what
+     * identifies the object to repair.
      *
      * @param runId the run whose index is searched, as the manifest named it; must not be {@code null}
      * @param cardFingerprint the fingerprint naming the card whose position is wanted; must not be
      *     {@code null}
      * @return the entry naming the card's first record and record count, or empty when no index is
-     *     stored or the index does not name the card
-     * @throws IllegalStateException if the stored index is not a whole number of entries
+     *     stored, when the stored index is not usable as an index, or when the index does not name the
+     *     card
+     * @throws NullPointerException if either argument is {@code null}
      */
     public Optional<StatementIndexEntry> locateInArtifact(String runId, String cardFingerprint) {
         Objects.requireNonNull(runId, "runId must not be null");
@@ -2211,13 +2525,64 @@ public class StatementService {
             return Optional.empty();
         }
         long size = index.get().sizeBytes();
-        if (size % StatementIndexEntry.ENCODED_WIDTH != 0) {
-            throw new IllegalStateException("the stored statement index is " + size
-                    + " bytes, which is not a whole number of entries; every position derived from it "
-                    + "would name the wrong card");
+        if (size % StatementIndexEntry.ON_OBJECT_STRIDE != 0) {
+            // WHY : Trade-offs: the journal line names the OBJECT, its byte length and the stride, and
+            //       nothing about the card that happened to ask. Those three are what an operator needs
+            //       to decide whether the object was truncated in transit or written by a producer
+            //       framing its records differently, and none of them identifies a cardholder -- where
+            //       the fingerprint that arrived would, since it names exactly one card.
+            LOG.warn("event=statement.index.unusable key={} bytes={} expectedStride={}"
+                            + " outcome=no-position",
+                    key, size, StatementIndexEntry.ON_OBJECT_STRIDE);
+            return Optional.empty();
         }
+        try {
+            return bisectIndex(key, size / StatementIndexEntry.ON_OBJECT_STRIDE, cardFingerprint);
+        } catch (NoSuchElementException | IllegalStateException | IllegalArgumentException unreadable) {
+            // WHY : Assumptions: exactly three refusals are caught and each one is a statement about
+            //       the stored object rather than about this code. The absence is the index vanishing
+            //       between the size being read and a probe being fetched; the illegal state is the
+            //       short read that same shrinkage produces; the illegal argument is a record whose
+            //       content this reader cannot decode, which is what a misframed producer writes.
+            //       Alternatives Considered: catching the runtime supertype, which would also swallow
+            //       a defect in the bisection arithmetic and report it as a missing position forever.
+            // WHY : Assumptions: the store's own failure type is deliberately NOT caught, so a bucket
+            //       that cannot be read still fails the request. An unreadable store is not a property
+            //       of this artifact and degrading it would report "no position" for an outage.
+            // WHY : Trade-offs: the failure reaches the journal as a DIGEST rather than as a message,
+            //       for the reason the report path records at its own write-refusal site -- a message
+            //       composed by a driver or an object-store client can carry a request URI, and an
+            //       artifact key is derived from a cardholder's identity.
+            LOG.warn("event=statement.index.unreadable key={} bytes={} expectedStride={} failure={}"
+                            + " outcome=no-position",
+                    key, size, StatementIndexEntry.ON_OBJECT_STRIDE,
+                    ThrowableDigest.of(unreadable));
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Bisects a whole-stride index for one card, reading one entry per probe.
+     *
+     * <p>Assumptions: the entry count is passed in rather than recomputed here, because the caller has
+     * already established that the object's byte length is a whole number of strides and dividing twice
+     * would let the two divisions disagree if one of them were ever changed.</p>
+     *
+     * @param key the index object's key; must not be {@code null}
+     * @param entries how many entries the object holds, being its byte length divided by
+     *     {@link StatementIndexEntry#ON_OBJECT_STRIDE}
+     * @param cardFingerprint the fingerprint naming the card whose position is wanted; must not be
+     *     {@code null}
+     * @return the entry naming that card, or empty when the index does not name it
+     * @throws NoSuchElementException if the index object is no longer stored, which is it having been
+     *     removed between the size being read and a probe being fetched
+     * @throws IllegalStateException if a probe returns fewer bytes than one entry
+     * @throws IllegalArgumentException if a probe returns a record this reader cannot decode
+     */
+    private Optional<StatementIndexEntry> bisectIndex(
+            String key, long entries, String cardFingerprint) {
         long low = 0;
-        long high = size / StatementIndexEntry.ENCODED_WIDTH - 1;
+        long high = entries - 1;
         while (low <= high) {
             long probe = low + (high - low) / 2;
             StatementIndexEntry entry = readIndexEntry(key, probe);
@@ -2237,19 +2602,25 @@ public class StatementService {
     /**
      * Reads one entry of the index artifact by its ordinal.
      *
-     * <p>Assumptions: the range is derived from the declared entry width rather than from anything read
-     * out of the artifact, so a probe cannot drift onto a record boundary that does not exist. The upper
+     * <p>Assumptions: the range is derived from the two declared numbers rather than from anything read
+     * out of the artifact, so a probe cannot drift onto a record boundary that does not exist. Its start
+     * is the ordinal times {@link StatementIndexEntry#ON_OBJECT_STRIDE}, because that is how far apart
+     * two entries begin in the published object, and its span is
+     * {@link StatementIndexEntry#ENCODED_WIDTH}, because that is how much of the stride is the entry's
+     * own content -- so the terminator the writer appended is stepped over and never decoded. The upper
      * bound is inclusive because that is what the store's range syntax means, and the conversion is done
      * here once rather than at each call site.</p>
      *
      * @param key the index object's key
      * @param ordinal which entry to read, counted from zero
      * @return the decoded entry, never {@code null}
+     * @throws NoSuchElementException if the index object is no longer stored
      * @throws IllegalStateException if the store returns a short read, which means the index shrank
      *     between the size being read and the entry being fetched
+     * @throws IllegalArgumentException if the bytes read are not one well-formed entry
      */
     private StatementIndexEntry readIndexEntry(String key, long ordinal) {
-        long firstByte = ordinal * StatementIndexEntry.ENCODED_WIDTH;
+        long firstByte = ordinal * StatementIndexEntry.ON_OBJECT_STRIDE;
         byte[] record = artifacts.readRange(key, firstByte,
                 firstByte + StatementIndexEntry.ENCODED_WIDTH - 1);
         if (record.length != StatementIndexEntry.ENCODED_WIDTH) {

@@ -375,7 +375,7 @@
  * <h2>What each member owns, so that no proof is duplicated and none is orphaned</h2>
  *
  * <ul>
- *   <li>{@code BatchRunRepositoryIT} across 13 cases -- the step ledger, the FIRST of the two tables
+ *   <li>{@code BatchRunRepositoryIT} across 17 cases -- the step ledger, the FIRST of the two tables
  *       this module owns. It holds the unique constraint over the run and step pair that makes a
  *       redriven step which already completed a no-op, the durability of a reopened attempt's own start
  *       time, and the exact catalog the production migration deposits -- all six Spring Batch tables
@@ -495,7 +495,7 @@
  *       stores as {@code 0005} and not {@code 05}: the program moves a two-character literal at
  *       {@code app/cbl/CBACT04C.cbl:483} into a field {@code app/cpy/CVTRA05Y.cpy:7} declares
  *       {@code PIC 9(04)}, so the move zero-fills rather than space-fills.</li>
- *   <li>{@code PostingUnitOfWorkIT} across 6 cases -- the atomicity proof, the account write that only
+ *   <li>{@code PostingUnitOfWorkIT} across 9 cases -- the atomicity proof, the account write that only
  *       it performs, and the daily-subset finder's ordering and window
  *       against a real engine. That last case is here rather than beside the job that calls the finder
  *       because a stubbed repository can model an ORDER BY but cannot evaluate one, and because the

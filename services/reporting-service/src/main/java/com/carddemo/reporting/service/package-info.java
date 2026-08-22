@@ -24,9 +24,10 @@
  *       {@code task} -- {@code task} already depends on it. The writer delegates to it instead.</li>
  *   <li>{@code StatementIndexEntry} is one fixed-width row of the statement run index: a card
  *       fingerprint and the record range that card's statement occupies.</li>
- *   <li>{@code StatementRunOutcome} is what one statement run produced -- three counts and no
- *       collection -- cross-checked so a statement count that disagrees with the index or record
- *       counts it came with is refused.</li>
+ *   <li>{@code StatementRunOutcome} is what one statement run produced -- the count of statements
+ *       written, the count of statements it read but could not render, and one index entry per written
+ *       statement -- cross-checked so a produced count that disagrees with the number of index entries
+ *       is refused.</li>
  * </ul>
  *
  * <p>Every inventory, file name, class name and count here is a measurement of that directory, and the

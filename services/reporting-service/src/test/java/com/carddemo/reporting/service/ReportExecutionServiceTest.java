@@ -606,6 +606,17 @@ class ReportExecutionServiceTest {
      * the condition, and the assembled-date sentence is asserted as the one entry that is true of the
      * input rather than merely available.</p>
      *
+     * <p>Refactoring Rationale: the third and fourth rows expected the assembled-date sentence and now
+     * expect a COMPONENT sentence, and the change is the point of the row rather than an adjustment to
+     * it. {@code 2022-07-XX} has a non-numeric day and {@code 2022-13-01} a month above twelve, and the
+     * reference answers each from its component tier at L340 and L357 of
+     * {@code app/cbl/CORPT00C.cbl} rather than from its assembled tier -- which the target could not
+     * do while it went straight from the width test to the shared edit. The two rows added below them
+     * hold the other side of that boundary: {@code 2022-02-30} has a month and a day the component
+     * tier admits and a date the calendar does not, so it must still carry the assembled sentence, at
+     * each end of the range. Without those two the tier could be strengthened past the reference's own
+     * tests and no case would notice.</p>
+     *
      * @param startDate the lower bound as stated, or blank to omit it
      * @param endDate the upper bound as stated, or blank to omit it
      * @param expectedField the request member the refusal must name
@@ -617,9 +628,11 @@ class ReportExecutionServiceTest {
     @CsvSource({
         ",2022-07-31,startDate,BLANK,Start Date - Month can NOT be empty...",
         "2022-07-01,,endDate,BLANK,End Date - Month can NOT be empty...",
-        "2022-07-XX,2022-07-31,startDate,NOT_OK,Start Date - Not a valid date...",
-        "2022-07-01,2022-13-01,endDate,NOT_OK,End Date - Not a valid date...",
-        "2022-7-1,2022-07-31,startDate,NOT_OK,Start Date - Not a valid date..."
+        "2022-07-XX,2022-07-31,startDate,NOT_OK,Start Date - Not a valid Day...",
+        "2022-07-01,2022-13-01,endDate,NOT_OK,End Date - Not a valid Month...",
+        "2022-7-1,2022-07-31,startDate,NOT_OK,Start Date - Not a valid date...",
+        "2022-02-30,2022-07-31,startDate,NOT_OK,Start Date - Not a valid date...",
+        "2022-07-01,2022-02-30,endDate,NOT_OK,End Date - Not a valid date..."
     })
     @DisplayName("a faulty custom bound is refused by field, by state and with the catalog's sentence")
     void aFaultyCustomRangeIsRefusedByField(String startDate, String endDate, String expectedField,
@@ -635,6 +648,266 @@ class ReportExecutionServiceTest {
                     assertThat(refused.field()).isEqualTo(expectedField);
                     assertThat(refused.state()).isEqualTo(expectedState);
                 });
+    }
+
+    /**
+     * Each of the reference's six component sentences is reachable, at the bound that carries it.
+     *
+     * <p>Purpose: this is the case that decides whether the reference's component tier exists in the
+     * target at all. Ten of the fourteen date sentences were unreachable before it, so a caller
+     * stating a month of thirteen, a day of thirty-two or a non-numeric year received the single
+     * assembled-date sentence for all three -- while the published contract enumerated all fourteen as
+     * the catalog this operation may carry. The six rows below are the six arms of
+     * {@code app/cbl/CORPT00C.cbl} L328 to L379, three per bound, each asserted against the constant
+     * the production class publishes rather than against a literal, so a drift in either the constant
+     * or the selection fails here.</p>
+     *
+     * <p>Assumptions: the field is asserted to be the BOUND on every row, never a component name. The
+     * request publishes {@code startDate} and {@code endDate} and the browser's field-to-control map
+     * recognises only those, so a synthetic per-component field identity would arrive with no control
+     * to mark. The component travels in the message; the bound travels in the field. Both halves are
+     * asserted on each row because asserting either alone would let the other regress.</p>
+     *
+     * <p>Assumptions: the two year rows carry a letter in the year, which the request schema's ISO
+     * pattern would refuse at the wire. They are here because this case drives the service directly,
+     * which is the level at which the selection lives, and because the sentence is the correct in-catalog
+     * answer for a caller that reaches the service with such a value -- the read operations take their
+     * bounds as unannotated query parameters. The reachability arithmetic this implies is registered as
+     * D-REPORT-DATE-MESSAGE-REACH.</p>
+     *
+     * @param startDate the lower bound as stated
+     * @param endDate the upper bound as stated
+     * @param expectedField the bound the refusal must name
+     * @param expectedMessage the reference sentence the refusal must carry, verbatim
+     */
+    @ParameterizedTest
+    @CsvSource({
+        "2022-13-01,2022-07-31,startDate,Start Date - Not a valid Month...",
+        "2022-07-32,2022-07-31,startDate,Start Date - Not a valid Day...",
+        "2O22-07-01,2022-07-31,startDate,Start Date - Not a valid Year...",
+        "2022-07-01,2022-99-31,endDate,End Date - Not a valid Month...",
+        "2022-07-01,2022-07-99,endDate,End Date - Not a valid Day...",
+        "2022-07-01,20x2-07-31,endDate,End Date - Not a valid Year..."
+    })
+    @DisplayName("all six of the reference's component sentences are selected, at the bound that owns them")
+    void eachComponentSentenceIsReachable(String startDate, String endDate, String expectedField,
+            String expectedMessage) {
+        ReportExecutionService service = serviceAt(MID_JULY);
+        ReportRequest request = customRange(startDate, endDate, MARK);
+
+        assertThatExceptionOfType(ClientInputException.class)
+                .isThrownBy(() -> service.resolveRange(
+                        request, ReportExecutionService.CUSTOM_REPORT_NAME))
+                .withMessage(expectedMessage)
+                .satisfies(refused -> {
+                    assertThat(refused.field())
+                            .as("the field names the bound, because that is the control a client marks")
+                            .isEqualTo(expectedField);
+                    assertThat(refused.state())
+                            .as("a stated but faulty component is not-ok, never blank")
+                            .isEqualTo(FieldValidationFlag.NOT_OK);
+                });
+    }
+
+    /**
+     * Asserts that when the two bounds fault in DIFFERENT tiers, the earlier tier names the refusal
+     * whichever bound it belongs to.
+     *
+     * <p>Purpose: the reference does not edit a bound at a time. {@code app/cbl/CORPT00C.cbl} runs each
+     * tier across both bounds before opening the next -- the six emptiness arms at L258 to L299, then
+     * the six component arms at L331 to L374, then the assembled edit for the lower bound at L399 and
+     * for the upper at L419. So the tier a fault sits in decides which of two simultaneous faults is
+     * named, and the bound it sits on does not.</p>
+     *
+     * <p>Assumptions: the two rows below are the same pair of faults in both arrangements, which is
+     * what makes the case an ordering assertion rather than two selection assertions. {@code 2022-02-30}
+     * passes the component tier -- day thirty is inside the reference's one-to-thirty-one range -- and is
+     * refused only by the assembled edit, because February has no thirtieth. {@code 2022-13-15} is
+     * refused by the component tier, because month thirteen is outside one to twelve. Whichever bound
+     * carries the month, the month is named: editing a bound to completion first would name the OTHER
+     * bound on one of these two rows, and only one sentence ever reaches a caller.</p>
+     *
+     * <p>Trade-offs: this asserts the message and the field rather than an ordering of internal calls.
+     * A call-order assertion would pass on an implementation that produced the wrong sentence and fail
+     * on a correct one that reorganised its methods, which is the wrong way round for a contract whose
+     * whole observable surface is which sentence a client is shown.</p>
+     *
+     * @param startDate the lower bound as stated
+     * @param endDate the upper bound as stated
+     * @param expectedField the bound whose tier is reached first, and which the refusal must name
+     * @param expectedMessage the reference sentence the refusal must carry, verbatim
+     */
+    @ParameterizedTest
+    @CsvSource({
+        "2022-02-30,2022-13-15,endDate,End Date - Not a valid Month...",
+        "2022-13-15,2022-02-30,startDate,Start Date - Not a valid Month..."
+    })
+    @DisplayName("the earlier tier names the refusal, whichever bound carries it")
+    void theEarlierTierNamesTheRefusal(String startDate, String endDate, String expectedField,
+            String expectedMessage) {
+        ReportExecutionService service = serviceAt(MID_JULY);
+        ReportRequest request = customRange(startDate, endDate, MARK);
+
+        assertThatExceptionOfType(ClientInputException.class)
+                .isThrownBy(() -> service.resolveRange(
+                        request, ReportExecutionService.CUSTOM_REPORT_NAME))
+                .withMessage(expectedMessage)
+                .satisfies(refused -> assertThat(refused.field())
+                        .as("the component tier runs for both bounds before either assembled edit")
+                        .isEqualTo(expectedField));
+    }
+
+    /**
+     * The component tier is no stronger than the reference's, so six faults still reach the edit.
+     *
+     * <p>Purpose: this is the counterweight to the case above and it is the one that stops the tier
+     * being "improved". Every row below states a component the reference's arms ADMIT -- its month arm
+     * tests {@code NOT NUMERIC OR > '12'} and so passes {@code 00}, its day arm tests
+     * {@code NOT NUMERIC OR > '31'} and so passes {@code 00} and a thirty-first of a thirty-day month,
+     * and its year arm tests {@code NOT NUMERIC} alone and so passes {@code 0000}. Each therefore has
+     * to arrive at the assembled edit and carry the assembled-date sentence, exactly as it did before
+     * the tier existed. A lower bound added to either arm, or a calendar test moved into the tier,
+     * would read better and would fail these rows.</p>
+     *
+     * <p>Assumptions: the three impossible calendar days are chosen to cover the three ways a day can
+     * be impossible while remaining under thirty-one -- a thirtieth of February, a thirty-first of a
+     * thirty-day month, and a twenty-ninth of February in a common year -- so the row set does not
+     * depend on one arithmetic path in the shared edit.</p>
+     *
+     * @param bound the lower bound as stated, which is the bound each row makes faulty
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "2022-00-15", "2022-03-00", "0000-03-15", "2022-02-30", "2022-04-31", "2023-02-29"
+    })
+    @DisplayName("a fault the reference's component arms admit still carries the assembled sentence")
+    void aFaultTheComponentTierAdmitsReachesTheAssembledEdit(String bound) {
+        ReportExecutionService service = serviceAt(MID_JULY);
+        ReportRequest request = customRange(bound, "2023-12-31", MARK);
+
+        assertThatExceptionOfType(ClientInputException.class)
+                .isThrownBy(() -> service.resolveRange(
+                        request, ReportExecutionService.CUSTOM_REPORT_NAME))
+                .withMessage(ReportExecutionService.MESSAGE_START_DATE_INVALID)
+                .satisfies(refused -> assertThat(refused.field())
+                        .isEqualTo(ReportExecutionService.START_DATE_FIELD));
+    }
+
+    /**
+     * A well-formed date below the supported calendar floor is accepted, at both bounds.
+     *
+     * <p>Purpose: the reference TOLERATES the unsupported-range verdict on both bounds -- L399 and
+     * L419 of {@code app/cbl/CORPT00C.cbl} each read
+     * {@code IF CSUTLDTC-RESULT-MSG-NUM NOT = '2513'} -- so a date under the floor is processed rather
+     * than declined. This case pins that at the extremes on both ends of the range, which is what
+     * stops a floor being introduced here in the belief that declining such a date is a correction.
+     * Declining it would change behaviour, which transformation rule T9 does not admit.</p>
+     *
+     * <p>Assumptions: the highest admissible year is included alongside the two low ones because a
+     * ceiling is as easy to introduce accidentally as a floor, and neither end has one in the
+     * reference. The pair is edited as a range rather than as two independent bounds so the ordering
+     * test is crossed as well.</p>
+     *
+     * @param startDate the lower bound as stated
+     * @param endDate the upper bound as stated
+     */
+    @ParameterizedTest
+    @CsvSource({
+        "1582-10-14,1582-10-15",
+        "0001-01-01,9999-12-31",
+        "1581-01-01,2022-07-31"
+    })
+    @DisplayName("a bound below the calendar floor is processed, because both reference call sites forgive it")
+    void aBoundBelowTheCalendarFloorIsProcessed(String startDate, String endDate) {
+        ReportExecutionService.DateRange range = serviceAt(MID_JULY).resolveRange(
+                customRange(startDate, endDate, MARK),
+                ReportExecutionService.CUSTOM_REPORT_NAME);
+
+        assertThat(range.start()).isEqualTo(LocalDate.parse(startDate));
+        assertThat(range.end()).isEqualTo(LocalDate.parse(endDate));
+    }
+
+    /**
+     * A year of zero is refused, which is the one low-end verdict the reference does not forgive.
+     *
+     * <p>Purpose: this is the boundary that separates the tolerance above from an absence of rules. The
+     * shared edit reports an era-zero year as its own outcome rather than as the unsupported-range one,
+     * and the reference's tolerance names only the latter by number, so a bound of {@code 0000-01-01}
+     * is refused where {@code 0001-01-01} is accepted. The two are one day apart in the calendar the
+     * date type models and on opposite sides of this rule, which is why they are asserted together
+     * rather than in separate cases.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("an era-zero year is refused where the year above it is accepted")
+    void anEraZeroYearIsRefused() {
+        LanguageEnvironmentResult verdict = DateEditValidator.evaluateWithLanguageEnvironment(
+                "0000-01-01", DateEditValidator.DATE_FORMAT_MASK);
+
+        assertThat(verdict.unsupportedRange())
+                .as("era zero is NOT the forgiven outcome, which is why the tolerance misses it")
+                .isFalse();
+
+        ReportExecutionService service = serviceAt(MID_JULY);
+
+        assertThatExceptionOfType(ClientInputException.class)
+                .isThrownBy(() -> service.resolveRange(
+                        customRange("0000-01-01", "2022-07-31", MARK),
+                        ReportExecutionService.CUSTOM_REPORT_NAME))
+                .withMessage(ReportExecutionService.MESSAGE_START_DATE_INVALID)
+                .satisfies(refused -> assertThat(refused.field())
+                        .isEqualTo(ReportExecutionService.START_DATE_FIELD));
+
+        assertThat(serviceAt(MID_JULY).resolveRange(
+                        customRange("0001-01-01", "2022-07-31", MARK),
+                        ReportExecutionService.CUSTOM_REPORT_NAME).start())
+                .as("the year above era zero is accepted, so the refusal is the era rule and not a floor")
+                .isEqualTo(LocalDate.of(1, 1, 1));
+    }
+
+    /**
+     * The shared edit is one entry point, and every report surface reaches the same one.
+     *
+     * <p>Purpose: the two read operations and the artifact collection each parsed their bounds with a
+     * bare calendar parse, so the three surfaces disagreed about the same value. This case asserts the
+     * shared entry point directly -- the one {@code ReportController} now delegates all six of its
+     * bound parses to -- so the agreement is pinned at the method the surfaces share rather than only
+     * through each surface's own transport case.</p>
+     *
+     * <p>Assumptions: the field constants are asserted to be the strings every surface publishes,
+     * because the sentence selection is by field equality. A surface that spelled the lower bound
+     * differently would be answered with the UPPER bound's sentence and nothing would fail, which is
+     * the failure this assertion exists to make impossible.</p>
+     *
+     * <p>This case takes no parameter and yields no value.</p>
+     */
+    @Test
+    @DisplayName("one shared bound edit serves every surface, and the two field names are its selector")
+    void oneSharedBoundEditServesEverySurface() {
+        assertThat(ReportExecutionService.START_DATE_FIELD).isEqualTo("startDate");
+        assertThat(ReportExecutionService.END_DATE_FIELD).isEqualTo("endDate");
+
+        assertThat(ReportExecutionService.editStatedBound(
+                        "1582-10-14", ReportExecutionService.START_DATE_FIELD))
+                .as("the forgiven range verdict is forgiven here too, on every surface")
+                .isEqualTo(LocalDate.of(1582, 10, 14));
+
+        assertThatExceptionOfType(ClientInputException.class)
+                .isThrownBy(() -> ReportExecutionService.editStatedBound(
+                        "0000-01-01", ReportExecutionService.END_DATE_FIELD))
+                .withMessage(ReportExecutionService.MESSAGE_END_DATE_INVALID)
+                .satisfies(refused -> assertThat(refused.field())
+                        .as("the upper bound's sentence is selected by the upper bound's field name")
+                        .isEqualTo(ReportExecutionService.END_DATE_FIELD));
+
+        assertThatExceptionOfType(ClientInputException.class)
+                .isThrownBy(() -> ReportExecutionService.editStatedBound(
+                        null, ReportExecutionService.START_DATE_FIELD))
+                .withMessage(ReportExecutionService.MESSAGE_START_DATE_MONTH_EMPTY)
+                .satisfies(refused -> assertThat(refused.state())
+                        .as("an absent bound is blank, so a client still renders the asterisk marker")
+                        .isEqualTo(FieldValidationFlag.BLANK));
     }
 
     /**
@@ -765,6 +1038,208 @@ class ReportExecutionServiceTest {
         assertThat(accepted.reportName()).isEqualTo(ReportExecutionService.MONTHLY_REPORT_NAME);
         assertThat(accepted.startDate()).isEqualTo("2022-07-01");
         assertThat(accepted.endDate()).isEqualTo("2022-07-31");
+    }
+
+    /**
+     * The correlation identity of the submitting request crosses into the execution input.
+     *
+     * <p>Purpose: the input carried the report type and the two bounds and nothing else, so the
+     * correlation identity stopped at the asynchronous boundary. It was on the request, in every log
+     * line the request emitted and on the response header, and then it was gone: a stored input named
+     * the report and the range but not the request that ordered it, so neither direction of the
+     * lookup an operator actually performs -- identity to run, run to identity -- could be walked.
+     * This case asserts the member is present, is the identity the context held, and is the fourth
+     * member rather than a replacement for one of the three the state machine reads.</p>
+     *
+     * <p>Assumptions: the identity is placed in the logging context directly rather than by driving a
+     * request through the shared filter, because the filter is exercised by its own tests in
+     * {@code common-lib} and what this case needs is the contract between the two: the key the filter
+     * publishes is read here, so a rename on either side fails this. The context is cleared in a
+     * {@code finally} block because the value would otherwise leak into every later case on this
+     * thread and make the three-member assertion above pass or fail by ordering.</p>
+     *
+     * <p>Assumptions: the absent case is asserted in the SAME case rather than in one of its own,
+     * because the two readings are only meaningful against each other -- an implementation that
+     * always appended a member, and one that never did, each satisfy half of this and neither
+     * carries the identity. The absent reading is also the one every other case in this class relies
+     * on, since none of them establishes a context.</p>
+     *
+     * <p>This case takes no parameter and yields no value beyond the assertions it makes.</p>
+     *
+     * @throws Exception if capturing the interaction raises, which fails the case rather than being
+     *     reported as an absent member
+     */
+    @Test
+    @DisplayName("a conforming correlation identity becomes the input's fourth member, and no member when absent")
+    void aCorrelationIdentityCrossesIntoTheExecutionInput() throws Exception {
+        ReportExecutionService service = serviceAt(MID_JULY);
+        when(this.sfn.startExecution(any(StartExecutionRequest.class)))
+                .thenReturn(StartExecutionResponse.builder().executionArn(EXECUTION_ARN).build());
+
+        try {
+            org.slf4j.MDC.put(com.carddemo.common.web.CorrelationIdFilter.CORRELATION_ID_MDC_KEY,
+                    "CDQATRACE20260822AA14");
+
+            service.start(selection(MARK, null, null, "Y"),
+                    ReportExecutionService.MONTHLY_REPORT_NAME,
+                    LocalDate.of(2022, 7, 1), LocalDate.of(2022, 7, 31), NO_SUPPLIED_KEY);
+
+            ArgumentCaptor<StartExecutionRequest> withIdentity =
+                    ArgumentCaptor.forClass(StartExecutionRequest.class);
+            verify(this.sfn).startExecution(withIdentity.capture());
+
+            // WHY : Assumptions: the whole input is compared rather than searched for the member,
+            //       because the three members the state machine reads are a contract with the
+            //       infrastructure that declares it -- an implementation that carried the identity by
+            //       renaming or reordering one of them would satisfy a containment assertion and would
+            //       break every run. Comparing the document makes the addition visibly additive.
+            assertThat(withIdentity.getValue().input()).isEqualTo(
+                    "{\"reportType\":\"monthly\",\"startDate\":\"2022-07-01\","
+                            + "\"endDate\":\"2022-07-31\","
+                            + "\"correlationId\":\"CDQATRACE20260822AA14\"}");
+        } finally {
+            org.slf4j.MDC.remove(com.carddemo.common.web.CorrelationIdFilter.CORRELATION_ID_MDC_KEY);
+        }
+
+        ReportExecutionService withoutContext = serviceAt(MID_JULY);
+        withoutContext.start(selection(MARK, null, null, "Y"),
+                ReportExecutionService.MONTHLY_REPORT_NAME,
+                LocalDate.of(2022, 8, 1), LocalDate.of(2022, 8, 31), NO_SUPPLIED_KEY);
+
+        ArgumentCaptor<StartExecutionRequest> withoutIdentity =
+                ArgumentCaptor.forClass(StartExecutionRequest.class);
+        verify(this.sfn, times(2)).startExecution(withoutIdentity.capture());
+
+        assertThat(withoutIdentity.getValue().input())
+                .as("with no request context the member is omitted, never emitted empty")
+                .isEqualTo("{\"reportType\":\"monthly\",\"startDate\":\"2022-08-01\","
+                        + "\"endDate\":\"2022-08-31\"}")
+                .doesNotContain("correlationId");
+    }
+
+    /**
+     * A malformed correlation identity is left out of the input rather than carried into it.
+     *
+     * <p>Purpose: the input is assembled by concatenation, so this is the case that keeps that safe.
+     * The value is re-tested against the rule the shared filter publishes instead of being trusted
+     * because it is in the context, and the two readings below are the two that matter: a value
+     * carrying the quotation mark would end the member early and change the document's shape, and a
+     * value beyond the permitted length is refused for the same reason the filter refuses it. Either
+     * would otherwise reach the orchestrator inside a document that no longer parses.</p>
+     *
+     * <p>Assumptions: the assertion is that the input is EXACTLY the three-member document, not
+     * merely that it excludes the offending characters. An implementation that sanitised the value
+     * and carried what was left would pass a containment assertion while putting a value into a
+     * stored input that correlates with nothing and looks like it correlates with something.</p>
+     *
+     * @param unusable a context value the shared conformance rule does not admit
+     * @throws Exception if capturing the interaction raises
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"has\"quote", "has\\solidus", "has space", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAA"})
+    @DisplayName("a correlation identity the shared rule refuses is omitted from the input")
+    void aMalformedCorrelationIdentityIsOmitted(String unusable) throws Exception {
+        ReportExecutionService service = serviceAt(MID_JULY);
+        when(this.sfn.startExecution(any(StartExecutionRequest.class)))
+                .thenReturn(StartExecutionResponse.builder().executionArn(EXECUTION_ARN).build());
+
+        try {
+            org.slf4j.MDC.put(com.carddemo.common.web.CorrelationIdFilter.CORRELATION_ID_MDC_KEY,
+                    unusable);
+
+            service.start(selection(MARK, null, null, "Y"),
+                    ReportExecutionService.MONTHLY_REPORT_NAME,
+                    LocalDate.of(2022, 7, 1), LocalDate.of(2022, 7, 31), NO_SUPPLIED_KEY);
+        } finally {
+            org.slf4j.MDC.remove(com.carddemo.common.web.CorrelationIdFilter.CORRELATION_ID_MDC_KEY);
+        }
+
+        ArgumentCaptor<StartExecutionRequest> started =
+                ArgumentCaptor.forClass(StartExecutionRequest.class);
+        verify(this.sfn).startExecution(started.capture());
+
+        assertThat(started.getValue().input()).isEqualTo(
+                "{\"reportType\":\"monthly\",\"startDate\":\"2022-07-01\","
+                        + "\"endDate\":\"2022-07-31\"}");
+    }
+
+    /**
+     * An accepted submission is journalled, and its record carries the same fields as the duplicate's.
+     *
+     * <p>Purpose: the only submission record this method raised was the duplicate one, so a resubmitted
+     * request was traceable and a first-time one was not -- the inverse of what an operator needs,
+     * because the first-time submission is the one that starts work. This case asserts the accepted
+     * record exists, is raised at information level, and names the five values that let it be joined to
+     * the duplicate record and to the run: the report, both bounds, the submission key and the
+     * execution name.</p>
+     *
+     * <p>Assumptions: the case also asserts what the record must NOT contain. The submission surface
+     * receives no customer, account or card value, so none can appear here -- but a later change that
+     * logged the whole request would satisfy every positive assertion above and quietly put caller data
+     * into an operational record. Asserting the absence is what makes that change fail a case rather
+     * than pass review.</p>
+     *
+     * <p>Assumptions: the correlation identity is asserted to be ABSENT from the message text. It
+     * reaches the record through the logging context, which the structured encoder renders alongside
+     * the message, so naming it in the message as well would put one value in a line twice and would
+     * disagree with every other event this class raises.</p>
+     *
+     * <p>This case takes no parameter and yields no value beyond the assertions it makes.</p>
+     *
+     * @throws Exception if capturing the emitted records raises
+     */
+    @Test
+    @DisplayName("an accepted submission raises an information record naming the run and its range")
+    void anAcceptedSubmissionIsJournalled() throws Exception {
+        ReportExecutionService service = serviceAt(MID_JULY);
+        when(this.sfn.startExecution(any(StartExecutionRequest.class)))
+                .thenReturn(StartExecutionResponse.builder().executionArn(EXECUTION_ARN).build());
+
+        // WHY : Assumptions: the capture is attached to this service's own logger rather than to the
+        //       root logger, so the assertion that no record mentions a card or an account is a
+        //       statement about this class and not about whatever else the test runtime logs. The
+        //       appender is detached and the level restored in a finally block because a logger is
+        //       process-wide state and leaving either in place would make later cases in the module
+        //       depend on the order they ran in.
+        ch.qos.logback.classic.Logger serviceLogger = (ch.qos.logback.classic.Logger)
+                org.slf4j.LoggerFactory.getLogger(ReportExecutionService.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> captured =
+                new ch.qos.logback.core.read.ListAppender<>();
+        ch.qos.logback.classic.Level restore = serviceLogger.getLevel();
+        captured.start();
+        serviceLogger.addAppender(captured);
+        serviceLogger.setLevel(ch.qos.logback.classic.Level.INFO);
+
+        ReportSubmissionResponse accepted;
+        try {
+            accepted = service.start(selection(MARK, null, null, "Y"),
+                    ReportExecutionService.MONTHLY_REPORT_NAME,
+                    LocalDate.of(2022, 7, 1), LocalDate.of(2022, 7, 31), "QA0822");
+        } finally {
+            serviceLogger.detachAppender(captured);
+            captured.stop();
+            serviceLogger.setLevel(restore);
+        }
+
+        java.util.List<ch.qos.logback.classic.spi.ILoggingEvent> submissionRecords =
+                captured.list.stream()
+                        .filter(event -> event.getFormattedMessage()
+                                .contains("event=report.submission.accepted"))
+                        .toList();
+
+        assertThat(submissionRecords)
+                .as("exactly one accepted record per accepted submission, so a count is a run count")
+                .hasSize(1);
+        assertThat(submissionRecords.get(0).getLevel())
+                .as("nothing failed, so the level matches the duplicate record beside it")
+                .isEqualTo(ch.qos.logback.classic.Level.INFO);
+        assertThat(submissionRecords.get(0).getFormattedMessage())
+                .contains("reportName=" + ReportExecutionService.MONTHLY_REPORT_NAME)
+                .contains("startDate=2022-07-01")
+                .contains("endDate=2022-07-31")
+                .contains("submission=QA0822")
+                .contains("execution=" + accepted.executionName())
+                .doesNotContain("correlationId");
     }
 
     /**
@@ -1519,8 +1994,15 @@ class ReportExecutionServiceTest {
         @Test
         @DisplayName("a bound rejected for any other reason is refused, so the tolerance stays narrow")
         void aDifferentlyRejectedBoundIsRefused() {
+            // WHY : Refactoring Rationale: the bound was 2022-13-01 and is now 2022-02-30, because a
+            //       month of thirteen no longer REACHES the shared edit -- the reference's component
+            //       tier answers it first, from L357 of app/cbl/CORPT00C.cbl, so this case would have
+            //       asserted the component sentence and stopped exercising the tolerance's narrowness
+            //       at all. A thirtieth of February has a month and a day the component tier admits
+            //       and a date the calendar does not, so it is the shape that still arrives at the
+            //       edit and is still rejected for something other than the forgiven range outcome.
             LanguageEnvironmentResult verdict = DateEditValidator.evaluateWithLanguageEnvironment(
-                    "2022-13-01", DateEditValidator.DATE_FORMAT_MASK);
+                    "2022-02-30", DateEditValidator.DATE_FORMAT_MASK);
 
             assertThat(verdict.acceptable()).as("the shared edit rejects this bound").isFalse();
             assertThat(verdict.messageNumber())
@@ -1531,7 +2013,7 @@ class ReportExecutionServiceTest {
                     .isFalse();
 
             ReportExecutionService service = serviceAt(MID_JULY);
-            ReportRequest request = customRange("2022-07-01", "2022-13-01", MARK);
+            ReportRequest request = customRange("2022-07-01", "2022-02-30", MARK);
 
             assertThatExceptionOfType(ClientInputException.class)
                     .isThrownBy(() -> service.resolveRange(
@@ -1616,10 +2098,13 @@ class ReportExecutionServiceTest {
          * <p>Trade-offs: the reference takes each bound as SIX separate screen components -- two-digit
          * month, two-digit day and four-digit year per bound, with hyphen separators as {@code FILLER}
          * at L62, L64, L68 and L70 -- and assembles them before editing, whereas this surface takes one
-         * ten-character value per bound. The narrower wire shape cannot say which of the three
-         * components a caller omitted, so an omitted bound reports the reference's month sentence for
-         * the whole bound; the per-component sentences survive individually in the structured error
-         * array where the client assembles them, which is where the six components now live.</p>
+         * ten-character value per bound. What the narrower shape costs is precisely and only the
+         * OMISSION sentences: a consolidated value is present whole or absent whole, so an absent bound
+         * reports the reference's month-omission sentence for the whole bound and the day and year
+         * omission sentences have no input that selects them. The six component RANGE sentences cost
+         * nothing, because an assembled bound still carries all three components: they are selected from
+         * the slices at the offsets this same group declares. The residual is registered as
+         * D-REPORT-DATE-MESSAGE-REACH.</p>
          *
          * <p>This case takes no parameter and yields no value.</p>
          */

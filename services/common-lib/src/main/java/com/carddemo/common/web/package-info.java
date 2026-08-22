@@ -31,7 +31,7 @@
  *
  * <h2>What this package holds, and what it deliberately does not</h2>
  *
- * <p>Four production types sit beside this charter:
+ * <p>Six production types sit beside this charter:
  *
  * <ul>
  *   <li>{@code PageResponse} -- the keyset page envelope, a record of FIVE
@@ -63,6 +63,21 @@
  *       bytes. It refuses an over-large body before the body is parsed and
  *       before the security chain verifies a token, so the work an over-large
  *       body would cause is never done.</li>
+ *   <li>{@code RejectedRequestErrorReportValve} -- the problem shape for a refusal
+ *       the container answers before it selects a web application. Assumptions: a
+ *       request target the container refuses while decoding never acquires a
+ *       context, so the filter chain, the dispatcher servlet, an advice and a
+ *       context error page are all unreachable for it, and the container's own
+ *       error reporter is the only stage left that can write a body. This type
+ *       occupies that stage and writes the same envelope, the same code vocabulary
+ *       and the same correlation header every other refusal carries, so a client
+ *       cannot tell the two apart by shape.</li>
+ *   <li>{@code RejectedRequestErrorReportValveCustomizer} -- the installation of
+ *       that reporter into the one container slot it can occupy. Assumptions: the
+ *       slot holds exactly one reporter and the framework's own customizer fills it,
+ *       so replacing the occupant is an ordering contract rather than a rendering
+ *       one, and it is kept beside the reporter so neither can be present without
+ *       the other.</li>
  * </ul>
  *
  * <p>Refactoring Rationale: this roster said TWO types and named the envelope and
@@ -301,7 +316,7 @@
  * <h2>The three contracts this package owns</h2>
  *
  * <p>Everything above reduces to three commitments, stated plainly so that they
- * can be checked against the four production types rather than inferred from
+ * can be checked against the six production types rather than inferred from
  * them:
  *
  * <ol>
@@ -327,9 +342,9 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel holds <b>46 production classes</b> and <b>11</b> package
- * charters -- one at the kernel root and one for each subpackage -- for <b>55</b>
- * compilation units in total. This package contributes four of the production
+ * <p>The shared kernel holds <b>48 production classes</b> and <b>11</b> package
+ * charters -- one at the kernel root and one for each subpackage -- for <b>59</b>
+ * compilation units in total. This package contributes six of the production
  * classes and one of the charters.
  *
  * <p>Refactoring Rationale: the per-package BREAKDOWN that stood here is gone, and
@@ -347,23 +362,23 @@
  * meter filter, the money codec module and the error advice, in every service:
  *
  * <pre>
- * root 1 + money 2 + codec 7 + error 7 + web 4 + security 9 + observability 4 + time 1 + validation 2 + messaging 5 + control 4 = 46
+ * root 1 + money 2 + codec 7 + error 7 + web 6 + security 9 + observability 4 + time 1 + validation 2 + messaging 5 + control 4 = 48
  * </pre>
  *
  * <p>Cross-check by compilation unit, adding one charter per package:
  *
  * <pre>
- * root 2 + money 3 + codec 8 + error 8 + web 5 + security 10 + observability 5 + time 2 + validation 3 + messaging 6 + control 5 = 57
+ * root 2 + money 3 + codec 8 + error 8 + web 7 + security 10 + observability 5 + time 2 + validation 3 + messaging 6 + control 5 = 59
  * </pre>
  *
  * <p>This package's own share is:
  *
  * <pre>
- * this package: web 4 production + 1 charter = 5 compilation units
+ * this package: web 6 production + 1 charter = 7 compilation units
  * </pre>
  *
- * <p>Assumptions: the authoritative totals are <strong>46 production classes and
- * 57 compilation units, 11 of the latter being charters</strong>. They are stated
+ * <p>Assumptions: the authoritative totals are <strong>48 production classes and
+ * 59 compilation units, 11 of the latter being charters</strong>. They are stated
  * beside the two labelled sums and not merely as bare totals for a reason: a bare
  * total invites a reader to trust it, whereas a labelled sum is re-derived from the
  * directory by a test, so any figure that does not reproduce these two sums is wrong
@@ -390,11 +405,11 @@
  * additionally claimed this package's row was the one that was already right, which
  * was the wrong row to be confident about.
  *
- * <h2>Why these four types live in the shared kernel</h2>
+ * <h2>Why these six types live in the shared kernel</h2>
  *
  * <p>Refactoring Rationale: the alternative is for each service to declare its
- * own page envelope, its own cursor sealer, its own correlation filter and its
- * own body bound. It deserves a precise answer
+ * own page envelope, its own cursor sealer, its own correlation filter, its
+ * own body bound and its own container-level error reporter. It deserves a precise answer
  * rather than a dismissal, because on the surface it removes a module from the
  * build and lets one team change an envelope without consulting seven others.
  *
@@ -422,6 +437,20 @@
  * quietly lose or repeat a row at the boundary, which is precisely the class of
  * defect the baseline's single include path exists to prevent. A cursor semantic
  * is either shared exactly or it is not shared at all.
+ *
+ * <p>Assumptions: the same argument carries the two container-level types, by a
+ * route worth stating because it is not the paging one. What they share is not a
+ * cursor semantic but an ERROR shape: every published contract in this repository
+ * declares one problem body and one correlation header for a refusal, and a caller
+ * written against any of the eight contracts parses that one shape. A per-service
+ * reporter would leave each service free to answer a container refusal in its own
+ * shape -- one rendering the problem body, one leaving the container's markup in
+ * place, one minting a correlation identifier and one omitting it -- and none of
+ * those disagreements is a compilation error either. The registration is shared for
+ * a second and narrower reason: the container offers exactly one reporter slot, so
+ * whether the shared reporter or the framework's default occupies it depends on
+ * installation order, which is a property no individual service can establish for
+ * itself.
  *
  * <p>Assumptions: single-sourcing is safe to rely on only because what it points
  * at does not move. The 30 copybooks of {@code app/cpy} are reference-only and

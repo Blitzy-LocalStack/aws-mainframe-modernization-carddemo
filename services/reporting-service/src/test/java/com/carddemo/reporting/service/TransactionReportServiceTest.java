@@ -263,19 +263,52 @@ class TransactionReportServiceTest {
         assertThat(bound.getValue().max()).isEqualTo(TransactionReportService.MAX_DIAGNOSTIC_ROWS);
     }
 
+    // WHY : Refactoring Rationale: this asserted that the PAGE path refuses an oversized range, and that
+    //       is what the defect was. The bound is a statement about how much of a range can be assembled
+    //       in memory on a request thread, and a keyset page assembles the page it was asked for -- so a
+    //       range the generating path streams to an object in full could not be read twenty rows at a
+    //       time, and the caller was told its end date was invalid. The two directions are now asserted
+    //       separately: the page serves, and the totals surface still refuses.
     /**
-     * Asserts that a range wider than the composable maximum is refused, naming the bound it exceeded.
+     * Asserts that a range above the composable maximum still serves a bounded keyset page.
      */
     @Test
-    @DisplayName("a range above the composable maximum is refused, naming the end bound")
-    void anOversizedRangeIsRefused() {
+    @DisplayName("a range above the composable maximum still serves a bounded page")
+    void anOversizedRangeStillServesABoundedPage() {
+        doReturn(List.of()).when(reports).findTransactionsWithUnresolvedDimensions(any(), any(), any(Limit.class));
+        doReturn((long) TransactionReportService.MAX_REPORT_LINES + 1).when(reports).countDrivingRows(any(), any());
+        doReturn(List.of()).when(reports).findReportLinesAfter(anyString(), any(), any(), any(Limit.class));
+        doReturn(List.of(line("0000000000000001", FINGERPRINT_ONE, "-10.00"))).when(reports).findReportLines(any(), any(), any(Limit.class));
+
+        PageResponse<TransactionReportLineResponse> page =
+                service.readDetailLinePage(RANGE_START, RANGE_END, null, false, sealer);
+
+        assertThat(page.items()).hasSize(1);
+        // WHY : Assumptions: the reconciliation is asserted to have RUN on this path, because removing
+        //       the cap must not take the parity obligation with it. It stands in for the three lookup
+        //       paragraphs of app/cbl/CBTRN03C.cbl, each of which abends on a miss, and it has to run per
+        //       page rather than once because the reference has no notion of a first page to privilege.
+        verify(reports).findTransactionsWithUnresolvedDimensions(any(), any(), any(Limit.class));
+        verify(reports, never()).streamReportLinesWithin(any(), any());
+    }
+
+    // WHY : Assumptions: this is the other half of the split and it is asserted on the SAME oversized
+    //       range, so the pair proves the cap moved rather than disappeared. The totals surface walks the
+    //       whole range on a request thread, which is what the cap bounds.
+    /**
+     * Asserts that the totals surface still refuses a range above the composable maximum.
+     */
+    @Test
+    @DisplayName("the totals surface still refuses a range above the composable maximum")
+    void anOversizedRangeIsStillRefusedByTheTotalsSurface() {
         doReturn(List.of()).when(reports).findTransactionsWithUnresolvedDimensions(any(), any(), any(Limit.class));
         doReturn((long) TransactionReportService.MAX_REPORT_LINES + 1).when(reports).countDrivingRows(any(), any());
 
         assertThatExceptionOfType(ClientInputException.class)
-                .isThrownBy(() -> service.readDetailLinePage(
-                        RANGE_START, RANGE_END, null, false, sealer))
+                .isThrownBy(() -> service.composeTotals(RANGE_START, RANGE_END))
                 .satisfies(refusal -> assertThat(refusal.fields()).contains("endDate"));
+
+        verify(reports, never()).streamReportLinesWithin(any(), any());
     }
 
     // WHY : Refactoring Rationale: this is the offset-paging case. The assertion is that the KEYSET
@@ -419,6 +452,69 @@ class TransactionReportServiceTest {
         service.composeTotals(RANGE_START, RANGE_END);
 
         verify(reports).streamReportLinesWithin(any(LocalDateTime.class), any(LocalDateTime.class));
+    }
+
+    // WHY : Assumptions: the two lines are each at the widest amount the ledger's own picture admits, so
+    //       their sum is reachable from conforming rows alone and is not a fabricated figure. The sum
+    //       needs a tenth integer position and the band masks provide nine, which is the exact condition
+    //       the reference meets and answers by discarding the digits it cannot carry: its three
+    //       accumulators are PIC S9(09)V99 at L134 to L136 of app/cbl/CBTRN03C.cbl and it adds into them
+    //       with no ON SIZE ERROR clause at L200, L201, L287 and L288.
+    // WHY : Refactoring Rationale: this behaviour used to be a raised failure that ended the whole run
+    //       and answered the value-composing surface with an internal error, so a range holding one
+    //       high-summing page produced no report and no bands at all. What is asserted now is the
+    //       narrowing and the completion together, because either alone would pass against a shape that
+    //       lost the rest of the report.
+    /**
+     * Asserts that a band figure past nine integer digits is narrowed and the bands are still composed.
+     */
+    @Test
+    @DisplayName("a band figure past nine integer digits is narrowed rather than refused")
+    void anOverWideBandFigureIsNarrowed() {
+        stubAssemblableRange();
+        doReturn(Stream.of(
+                line("0000000000000001", FINGERPRINT_ONE, "999999999.99"),
+                line("0000000000000002", FINGERPRINT_ONE, "999999999.99"))).when(reports).streamReportLinesWithin(any(), any());
+
+        List<ReportTotalsResponse> bands = service.composeTotals(RANGE_START, RANGE_END);
+
+        assertThat(amountOf(bands, ReportTotalsResponse.Band.ACCOUNT))
+                .as("the card-break figure keeps its low-order nine digits and its cents")
+                .isEqualTo(Money.of("999999999.98"));
+        assertThat(amountOf(bands, ReportTotalsResponse.Band.GRAND))
+                .as("the closing figure is composed from the narrowed page figure, as the reference"
+                        + " accumulates the figure it printed")
+                .isEqualTo(Money.of("999999999.98"));
+    }
+
+    // WHY : Assumptions: the driving count is stubbed ABOVE the composable maximum here, deliberately,
+    //       so this case carries both properties at once. The emitting path hands each record to its
+    //       sink as it goes and has never been bounded by that maximum, and an over-wide figure inside
+    //       such a range is exactly the combination that used to leave a wide range with no object: the
+    //       range was too wide for the value-composing surface to answer and one of its figures was too
+    //       wide for the emitting surface to print, so neither surface produced anything.
+    /**
+     * Asserts that a wide range whose figures narrow still writes the report rather than writing nothing.
+     */
+    @Test
+    @DisplayName("a wide range whose figures narrow still writes every record of the report")
+    void aRunWhoseFiguresNarrowStillWritesTheReport() {
+        doReturn(List.of()).when(reports).findTransactionsWithUnresolvedDimensions(any(), any(), any(Limit.class));
+        doReturn((long) TransactionReportService.MAX_REPORT_LINES + 1).when(reports).countDrivingRows(any(), any());
+        doReturn(Stream.of(
+                line("0000000000000001", FINGERPRINT_ONE, "999999999.99"),
+                line("0000000000000002", FINGERPRINT_ONE, "999999999.99"))).when(reports).streamReportLinesWithin(any(), any());
+        List<byte[]> written = new ArrayList<>();
+
+        service.generateReport(RANGE_START, RANGE_END, written::add);
+
+        assertThat(written)
+                .as("the report is emitted in full, where the raised failure wrote no object at all")
+                .isNotEmpty();
+        assertThat(written)
+                .as("every record the emitting path hands its sink is one declared report record")
+                .allSatisfy(record ->
+                        assertThat(record).hasSize(ReportBandLayouts.REPORT_RECORD_LENGTH));
     }
 
     /**

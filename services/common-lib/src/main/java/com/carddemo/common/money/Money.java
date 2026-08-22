@@ -58,55 +58,78 @@ import java.util.regex.Pattern;
  * its last cent flips an inclusive boundary comparison, and both posting boundaries in the reference
  * baseline are inclusive.</p>
  *
- * <h2>Contract two: one rounding mode for the whole money path, not selectable</h2>
+ * <h2>Contract two: two rounding modes, each fixed at its operation and neither selectable</h2>
  *
- * <p>Every monetary result this type produces is reduced to cents by {@code GENERAL_ROUNDING}, which
- * is {@link RoundingMode#HALF_UP}: {@link #of(BigDecimal)}, {@link #multipliedBy(BigDecimal)},
- * {@link #dividedBy(BigDecimal)} and {@link #monthlyInterest(BigDecimal)} alike. No entry point takes
- * a rounding mode, so no call site can select one, and the mode is a property of this type rather than
- * of any of its callers.</p>
+ * <p>Two modes are declared and the boundary between them is one operation wide.
+ * {@code GENERAL_ROUNDING}, which is {@link RoundingMode#HALF_UP}, reduces every general monetary
+ * result: {@link #of(BigDecimal)}, {@link #multipliedBy(BigDecimal)} and
+ * {@link #dividedBy(BigDecimal)}. {@code BASELINE_INTEREST_ROUNDING}, which is
+ * {@link RoundingMode#DOWN}, reduces exactly one quotient, the monthly accrual of
+ * {@link #monthlyInterest(BigDecimal)}, and reduces nothing else anywhere in the migration. No entry
+ * point takes a rounding mode, so no call site can select one; each mode is a property of the
+ * operation it governs rather than of any caller.</p>
  *
- * <p>Assumptions: the single mode is transformation rule T3 of the migration plan applied literally.
- * That rule states the money path as an exact decimal at scale 2 with {@code RoundingMode.HALF_UP} in
- * Java, and it states no exception for any operation; the plan's own arithmetic rule T4 constrains the
- * ORDER of the accrual's two operations and leaves the mode to T3, naming only "an explicit scale and
- * rounding mode". The plan is frozen, so the mode it names governs even where a reference statement
- * would round differently, and the difference is registered rather than absorbed.</p>
+ * <p>Assumptions: the general mode is transformation rule T3 of the migration plan applied to the
+ * operations the plan describes -- the reduction of an amount, a product and a quotient that have no
+ * reference statement behind them at all. The accrual is not one of those. It is the single arithmetic
+ * statement the plan singles out in section 0.7.3 as "the one formula that must be bit-exact", section
+ * 0.1.1.2 requires its observable behaviour to be unchanged, section 0.9.1 makes functional parity a
+ * non-negotiable constraint, and section 0.7.7 makes the committed golden masters the oracle every
+ * accrual output is compared against. A mode that differs from the reference on an exact half makes
+ * that comparison impossible at cent precision, which is the property those four sections exist to
+ * protect, so the accrual reduces the way the reference reduces.</p>
  *
- * <p>Refactoring Rationale: this type carried a second mode, {@code BASELINE_INTEREST_ROUNDING},
- * fixed at {@link RoundingMode#DOWN} and applied to the accrual quotient alone, on the ground that the
- * reference accrual truncates -- the statement at lines 464 and 465 of {@code app/cbl/CBACT04C.cbl}
- * stores into the two-place field declared at line 168 carrying no {@code ROUNDED} phrase, and a COBOL
- * arithmetic statement without one discards the excess digits of its result. That constant is
- * withdrawn. Preferring it to T3 read a parity argument as licence to depart from a frozen rule, which
- * inverts the order the plan sets: a behavioural difference from the reference is permitted when it is
- * documented, whereas a departure from a transformation rule is permitted only where the plan states an
- * exception, and it states none here. The accrual therefore rounds half up like every other reduction
- * on this type, and the cent this can differ by from the reference is registered as divergence
- * {@code C-ROUNDING} in {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+ * <p>Assumptions: the reference reduces by discarding, and the evidence is an ABSENCE that has to be
+ * read rather than a phrase that can be quoted. Lines 464 and 465 of {@code app/cbl/CBACT04C.cbl}
+ * compute {@code ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200} and store into
+ * {@code 05 WS-MONTHLY-INT PIC S9(09)V99} declared at line 168. The statement carries no
+ * {@code ROUNDED} phrase, and no statement anywhere in that program's 652 lines carries one, so the
+ * store discards the surplus fraction digits of its result rather than rounding them -- truncation
+ * toward zero, which {@link RoundingMode#DOWN} reproduces exactly, on both signs, because DOWN also
+ * rounds toward zero rather than toward negative infinity.</p>
  *
- * <p>Trade-offs: the accrual can now differ from the reference by one cent per accrued category, and
- * the difference does not stay confined to one term -- the accrual paragraph reduces every term before
- * accumulating it and adds the accumulated total to the account balance once per account, so a cent
- * gained on a category reaches the balance the next inclusive over-limit comparison is made against.
- * That is the cost of the single mode and it is why the divergence is registered with the parity
- * evidence rather than merely noted here. What is bought is one money contract for the whole
- * migration: a reader, a reviewer and an architecture test each check one mode, and no call site has to
- * establish which of two applies to the computation in front of it.</p>
+ * <p>Refactoring Rationale: this constant was declared once, withdrawn, and is reinstated here, and
+ * the round trip is recorded so that the next reader does not complete a third lap. The withdrawal
+ * argued that rule T3 names half up for the money path, states no exception, and is frozen, so the
+ * accrual should reduce half up and the resulting cent should be registered as a divergence. That
+ * reading fails on precedence in two ways. Rule T3 is the general money-path default and the accrual
+ * is the specific case the plan separately and repeatedly pins to the reference, so applying the
+ * general rule over the specific requirement inverts the plan's own order. And rule T9's permission to
+ * ship a documented behavioural difference is a permission to record a difference that cannot be
+ * avoided, not a licence to create one where the plan demands bit-exactness; using it here spent a
+ * documented divergence to buy a cosmetic uniformity and cost the golden-master comparison its
+ * precision. The divergence identifier that period created, {@code C-ROUNDING}, is therefore
+ * withdrawn in section 7.5 of {@code docs/architecture/cobol-to-service-traceability.md}, which
+ * records the reversal so a citation surviving anywhere still resolves.</p>
  *
- * <p>Assumptions: the difference is only ever a single cent, and only on an exact half. A quotient
- * whose third fraction digit is below five reduces identically under either mode -- {@code 1000.00} at
- * {@code 2.50} gives {@code 2.08333...} and both give {@code 2.08} -- so the divergence is reachable
- * only where the quotient lands exactly on a half cent, as {@code 1000.80} at {@code 2.50} does with a
- * quotient of {@code 2.0850} exactly: half up gives {@code 2.09} where truncation gave {@code 2.08}.
- * That vector is asserted in the tests, because a contract whose only observable case is an exact half
- * is otherwise checked by nothing.</p>
+ * <p>Trade-offs: the cost of the second mode is that a reader has to know which of two applies to the
+ * computation in front of them, and the mitigation is that the answer is never a judgement -- one mode
+ * covers a single named method whose Javadoc states it, the other covers everything else. What is
+ * bought is that the accrual is comparable against the committed goldens cent for cent, and that no
+ * cent of accrual difference propagates. The propagation is the reason the trade is worth making:
+ * line 467 of {@code app/cbl/CBACT04C.cbl} adds each already-reduced term into the account total and
+ * line 352 adds that total to the account balance once per account, so a cent gained on one category
+ * would reach the balance that the next over-limit comparison is made against, and that comparison is
+ * inclusive at line 407 of {@code app/cbl/CBTRN02C.cbl}.</p>
  *
- * <p>Alternatives Considered: a rounding-mode parameter on the accrual entry point, so a parity
- * caller could ask for truncation while other callers kept half up. Rejected because a mode parameter
- * is a second money contract in disguise: two call sites computing the same accrual could then
- * disagree by a cent with nothing in either one signalling that they had chosen differently. Fixing
- * one mode at the type gives one arithmetic with none of that exposure.</p>
+ * <p>Assumptions: the two modes differ only on an exact half, which is why the boundary needs
+ * asserting rather than sampling. A quotient whose third fraction digit is below five reduces
+ * identically under either -- {@code 1000.00} at {@code 2.50} gives {@code 2.08333...} and both give
+ * {@code 2.08} -- so the modes are distinguishable only where the quotient lands exactly on a half
+ * cent. Two such vectors are pinned in the tests: {@code 1000.80} at {@code 2.50} has the exact
+ * quotient {@code 2.0850}, and {@code 2419.60} at {@code 15.00} has the exact quotient {@code 30.245};
+ * truncation gives {@code 2.08} and {@code 30.24} where half up would give {@code 2.09} and
+ * {@code 30.25}. A contract whose only observable case is an exact half is otherwise checked by
+ * nothing.</p>
+ *
+ * <p>Alternatives Considered: a rounding-mode parameter on the accrual entry point, so a parity caller
+ * could ask for truncation while other callers kept half up. Rejected because a mode parameter is a
+ * third money contract in disguise: two call sites computing the same accrual could then disagree by a
+ * cent with nothing in either one signalling that they had chosen differently. Alternatives
+ * Considered: one truncating mode for the whole money path, which would need no boundary at all.
+ * Rejected because the three general operations have no reference statement to be faithful to, rule T3
+ * names their mode explicitly, and silently truncating a report total or a division would be a change
+ * with no baseline behind it.</p>
  *
  * <h2>Immutability and construction</h2>
  *
@@ -170,25 +193,66 @@ public final class Money implements Comparable<Money> {
     public static final int SCALE = 2;
 
     /**
-     * The rounding mode applied whenever a monetary result must be reduced to cents.
+     * The rounding mode applied whenever a general monetary result must be reduced to cents.
      *
      * <p>Assumptions: this is the mode transformation rule T3 of the migration plan states for the
-     * money path, and it governs EVERY reduction this type performs -- {@link #of(BigDecimal)},
-     * {@link #multipliedBy(BigDecimal)}, {@link #dividedBy(BigDecimal)} and
-     * {@link #monthlyInterest(BigDecimal)}. It is a constant rather than a parameter anywhere, because
-     * a selectable mode would be a second money contract in disguise.</p>
+     * money path, and it governs the three GENERAL reductions this type performs --
+     * {@link #of(BigDecimal)}, {@link #multipliedBy(BigDecimal)} and {@link #dividedBy(BigDecimal)}.
+     * It is a constant rather than a parameter anywhere, because a selectable mode would be a further
+     * money contract in disguise.</p>
      *
-     * <p>Assumptions: the name says GENERAL because the mode is general, not because a second mode
-     * exists beside it. Three of the four operations it governs have no reference statement to be
-     * faithful to at all -- general multiplication, general division and the reduction of a
-     * caller-supplied amount are target operations with no baseline counterpart -- and the fourth, the
-     * accrual quotient, is the one place where the reference would reduce differently. It is governed
-     * by this mode too, because rule T3 states no exception, and the resulting difference is registered
-     * as divergence {@code C-ROUNDING} rather than avoided by a second constant. The class
-     * documentation records the withdrawn constant and why preferring it inverted the plan's own order
-     * of precedence.</p>
+     * <p>Assumptions: the name says GENERAL because the mode is general, and because a second,
+     * narrower mode exists beside it. The three operations this one governs have no reference
+     * statement to be faithful to at all -- general multiplication, general division and the
+     * reduction of a caller-supplied amount are target operations with no baseline counterpart -- so
+     * rule T3's named mode is the only instruction available for them. The accrual quotient is the one
+     * reduction that DOES have a reference statement behind it, and it is governed by
+     * {@link #BASELINE_INTEREST_ROUNDING} instead, for the reasons the class documentation records
+     * under its second contract.</p>
      */
     public static final RoundingMode GENERAL_ROUNDING = RoundingMode.HALF_UP;
+
+    /**
+     * The rounding mode applied to the monthly interest accrual, and to nothing else.
+     *
+     * <p>Assumptions: this is {@link RoundingMode#DOWN} because the reference accrual statement
+     * discards its surplus fraction digits. Lines 464 and 465 of {@code app/cbl/CBACT04C.cbl} store
+     * the quotient of {@code ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200} into
+     * {@code 05 WS-MONTHLY-INT PIC S9(09)V99}, declared at line 168, and carry no {@code ROUNDED}
+     * phrase; no statement in that program's 652 lines carries one. A COBOL arithmetic statement
+     * storing into a fixed-scale field without {@code ROUNDED} discards the excess digits, which is
+     * truncation toward zero, and DOWN is the mode that truncates toward zero on both signs. FLOOR
+     * would agree on a positive quotient and differ on a negative one, and both signs are in the
+     * domain because the balance picture at line 7 of {@code app/cpy/CVACT01Y.cpy} and the rate
+     * picture at line 9 of {@code app/cpy/CVTRA02Y.cpy} are both signed.</p>
+     *
+     * <p>Assumptions: this mode reaches exactly one operation. {@link #monthlyInterest(BigDecimal)} is
+     * its only application site in the whole migration, and there is no entry point through which a
+     * caller can apply it to anything else, so a general money computation cannot acquire truncation
+     * by accident.</p>
+     *
+     * <p>Trade-offs: two modes on one type is the accepted cost of the accrual being comparable
+     * against the committed golden masters cent for cent. The plan's section 0.7.3 names this formula
+     * as "the one formula that must be bit-exact", section 0.1.1.2 requires the exact interest
+     * formula's observable behaviour to be unchanged, and section 0.7.7 makes those goldens the
+     * oracle; a mode differing from the reference on an exact half would make the accrual
+     * un-comparable at cent precision, which is exactly what those sections forbid. Rule T3's half up
+     * remains the general default and is the LESS specific instruction where the two meet.</p>
+     *
+     * <p>Refactoring Rationale: DO NOT change this to {@link RoundingMode#HALF_UP}. This constant has
+     * already been declared, withdrawn in favour of a single half-up path, and reinstated, and each
+     * lap cost a measured cent of parity: at {@code 2419.60} and a rate of {@code 15.00} the exact
+     * quotient is {@code 30.245}, where half up produces {@code 30.25} against the reference's
+     * {@code 30.24}, and at {@code 1000.80} and {@code 2.50} three category rows produce a
+     * {@code 6.27} balance movement against the reference's {@code 6.24}. The argument for half up was
+     * that rule T3 states the money path's mode with no exception and that a resulting difference
+     * could be registered as a divergence; it fails because a general default does not override the
+     * specific bit-exactness the plan demands for this one statement, and because rule T9's
+     * documented-divergence allowance exists to record differences that cannot be avoided rather than
+     * to authorise creating one. The identifier that period introduced, {@code C-ROUNDING}, is
+     * withdrawn in section 7.5 of {@code docs/architecture/cobol-to-service-traceability.md}.</p>
+     */
+    public static final RoundingMode BASELINE_INTEREST_ROUNDING = RoundingMode.DOWN;
 
     /**
      * The divisor that turns an annual percentage rate into a monthly fractional rate, which is 1200.
@@ -608,12 +672,14 @@ public final class Money implements Comparable<Money> {
      * Multiplies this amount by a factor and reduces the product to cents under the general contract.
      *
      * <p>Assumptions: this is the general-contract multiplication and it is deliberately NOT the
-     * operation the accrual formula uses, even though both reduce with {@code GENERAL_ROUNDING}. The
-     * difference is WHERE the single reduction falls, not which mode performs it: an accrual caller
-     * that multiplied by a rate here and then divided by {@code MONTHLY_RATE_DIVISOR} would reduce the
-     * intermediate product to cents before the division consumed it, which changes the result;
+     * operation the accrual formula uses, and it differs from the accrual in BOTH respects -- where
+     * the single reduction falls and which mode performs it. An accrual caller that multiplied by a
+     * rate here and then divided by {@code MONTHLY_RATE_DIVISOR} would reduce the intermediate
+     * product to cents before the division consumed it, and would reduce it half up rather than by
+     * discarding, so the result would differ twice over;
      * {@link #monthlyInterest(BigDecimal)} exists precisely so that the product is never reduced
-     * mid-formula.</p>
+     * mid-formula and so that the one reduction that does happen uses
+     * {@link #BASELINE_INTEREST_ROUNDING}.</p>
      *
      * @param factor the value to multiply by; must not be {@code null}. It may carry any scale, since
      *     the product is reduced afterwards
@@ -672,6 +738,83 @@ public final class Money implements Comparable<Money> {
     }
 
     /**
+     * Discards the high-order digits an amount cannot carry in a narrower picture, keeping its sign.
+     *
+     * <p>Purpose: this is the assignment a COBOL {@code MOVE} or {@code ADD} performs when a value
+     * wider than the receiving field arrives at it. The reference does that in several places on the
+     * reporting path and never guards it: {@code app/cbl/CBTRN03C.cbl} declares its three accumulators
+     * {@code PIC S9(09)V99} at L134 to L136 and adds into them at L200, L201, L287 and L288 with no
+     * {@code ON SIZE ERROR} clause, so a sum too wide for nine integer positions loses its high-order
+     * digits and the program carries on and emits a complete report. This method is how a caller
+     * assembling such a field states that it is making the same choice, deliberately and at the one
+     * place that can make it.</p>
+     *
+     * <p>⚠️ Assumptions: the narrowing is LOSSY and the loss is the CALLER'S decision, never this
+     * type's. {@link #ofPicture(BigDecimal, int)} exists to refuse a value a declared picture cannot
+     * hold, and it stays the right answer wherever the value is about to be persisted into a column of
+     * that width -- there the refusal is what stops a database-level overflow with no field name in it.
+     * This method is the other disposition, for a field being ASSEMBLED for presentation, where the
+     * reference itself truncates. A caller that cannot say which of the two it wants wants the
+     * refusal.</p>
+     *
+     * <p>⚠️ Assumptions: the remainder operation is chosen SPECIFICALLY because it takes its sign from
+     * the dividend, which is exactly what discarding high-order digits from a signed field does. An
+     * over-wide credit of {@code -1000000000.00} narrows to {@code 0.00} and an over-wide credit of
+     * {@code -1000000001.23} narrows to {@code -1.23}: still a credit, as the reference's own signed
+     * receiving field would leave it. Alternatives Considered: a modulus with always-positive
+     * semantics, of the kind several languages' {@code mod} operator provides. Rejected outright,
+     * because it would return {@code +999999998.77} for that same credit -- turning a refund into a
+     * charge of nearly a thousand million, in a figure a cardholder reads.</p>
+     *
+     * <p>Assumptions: the scale is untouched at {@link #SCALE} throughout. Only integer positions are
+     * discarded, because only integer positions are what a narrower picture lacks; the cents of the
+     * original value survive exactly, so a narrowed figure still reconciles to the cent against the
+     * low-order digits of the figure it came from.</p>
+     *
+     * <p>Trade-offs: an amount that already fits is returned as {@code this} rather than as a fresh
+     * equal instance, which makes the common case allocation-free and, more importantly, makes a
+     * no-narrowing outcome identity-detectable by a caller that wants to journal only the outcomes that
+     * did narrow.</p>
+     *
+     * @param integerDigits the number of integer digit positions the receiving picture allows, which
+     *     must be between one and the ten {@link #MAX_PICTURE_INTEGER_DIGITS} declares
+     * @return {@code this} when the amount already fits {@code integerDigits} integer positions,
+     *     otherwise a new amount at {@link #SCALE} decimal places holding the low-order
+     *     {@code integerDigits} integer positions of this amount with this amount's sign
+     * @throws IllegalArgumentException if {@code integerDigits} is outside one to
+     *     {@link #MAX_PICTURE_INTEGER_DIGITS}, which names a picture no reference field declares and
+     *     would otherwise silently widen or void the narrowing
+     */
+    public Money narrowedToIntegerDigits(int integerDigits) {
+        // WHY : Assumptions: the argument is validated on the SAME terms and with the same message as
+        //       ofPicture validates it, because the two methods are the two dispositions of one
+        //       question and a caller switching between them must not find one of them accepting a
+        //       width the other rejects.
+        if (integerDigits < 1 || integerDigits > MAX_PICTURE_INTEGER_DIGITS) {
+            throw new IllegalArgumentException("integerDigits must be between 1 and "
+                    + MAX_PICTURE_INTEGER_DIGITS + " but was " + integerDigits
+                    + "; no reference money picture declares a width outside that range");
+        }
+
+        // WHY : Assumptions: the bound is composed exactly as ofPicture composes it -- ten to the power
+        //       of the count, less one cent -- rather than being derived a second way. Two spellings of
+        //       one bound is how a value comes to be accepted by the test here and refused by the
+        //       factory below it, which would raise from inside a narrowing whose whole purpose is not
+        //       to raise.
+        BigDecimal bound = BigDecimal.TEN.pow(integerDigits).setScale(SCALE)
+                .subtract(BigDecimal.ONE.movePointLeft(SCALE));
+        if (amount.abs().compareTo(bound) <= 0) {
+            return this;
+        }
+
+        // WHY : Assumptions: the divisor is ten to the power of the count and NOT the bound above. The
+        //       bound is one cent short of the power, so dividing by it would shift every narrowed
+        //       figure by the accumulated cents of the quotient rather than cutting the value at a
+        //       digit position.
+        return ofPicture(amount.remainder(BigDecimal.TEN.pow(integerDigits)), integerDigits);
+    }
+
+    /**
      * Sums amounts that have each already been reduced to cents, adding no rounding of its own.
      *
      * <p>Trade-offs: this is an accumulator and emphatically not a reduce-at-the-end operation, and the
@@ -718,7 +861,7 @@ public final class Money implements Comparable<Money> {
      * <p>This reproduces the reference accrual statement at lines 464 and 465 of
      * {@code app/cbl/CBACT04C.cbl}, {@code COMPUTE WS-MONTHLY-INT = ( TRAN-CAT-BAL * DIS-INT-RATE) /
      * 1200}, with the order of its two operations preserved literally and its quotient reduced with
-     * {@code GENERAL_ROUNDING}.</p>
+     * {@code BASELINE_INTEREST_ROUNDING}, the mode that reproduces the reference's own discard.</p>
      *
      * <p>Trade-offs: the product is formed at full precision and the single reduction happens at the
      * division, never before it. Reordering to divide first is forbidden by transformation rule T4 of
@@ -733,25 +876,33 @@ public final class Money implements Comparable<Money> {
      * parenthesised in the reference source itself at line 465, so this order is a preserved
      * instruction and not an inference.</p>
      *
-     * <p>Assumptions: the quotient is reduced with {@link #GENERAL_ROUNDING}, which is half up, and
-     * that mode is transformation rule T3 applied without exception. The rule is not reachable from
-     * this signature, so no call site can select another.</p>
-     *
-     * <p>Trade-offs: the reference statement would reduce this quotient differently. It carries no
+     * <p>Assumptions: the quotient is reduced with {@link #BASELINE_INTEREST_ROUNDING}, which is
+     * truncation toward zero, because the reference statement reduces that way -- it carries no
      * {@code ROUNDED} phrase, and a COBOL arithmetic statement without one discards the excess digits
-     * of its result, so on a quotient landing exactly on a half cent -- {@code 1000.80} at
-     * {@code 2.50} gives {@code 2.0850} exactly -- the reference stores {@code 2.08} where this method
-     * returns {@code 2.09}. The difference is accepted, and it is accepted rather than avoided because
-     * the plan's transformation rule is frozen while a behavioural difference from the reference is
-     * permitted when it is documented: it is registered as divergence {@code C-ROUNDING} in
-     * {@code docs/architecture/cobol-to-service-traceability.md}, which carries the accrual's parity
-     * evidence with it. A predecessor of this method reduced with a second, truncating constant to
-     * avoid the cent; the class documentation records why that constant is withdrawn.</p>
+     * of its result when it stores into a fixed-scale field. The mode is not reachable from this
+     * signature, so no call site can select another, and it is deliberately NOT
+     * {@link #GENERAL_ROUNDING}: on a quotient landing exactly on a half cent the two part company,
+     * and this is the one operation on this type whose output is compared byte for byte against a
+     * committed golden master.</p>
+     *
+     * <p>Trade-offs: reproducing the reference's discard means this method is the single operation on
+     * this type that does not reduce half up, which a reader has to know. The cost is accepted because
+     * the alternative was measured: reducing half up produces {@code 2.09} where the reference stores
+     * {@code 2.08} at {@code 1000.80} and {@code 2.50}, and {@code 30.25} where the reference stores
+     * {@code 30.24} at {@code 2419.60} and {@code 15.00}, and neither cent stays local -- line 467 of
+     * {@code app/cbl/CBACT04C.cbl} accumulates each already-reduced term and line 352 applies the
+     * accumulated total to the account balance, which the next inclusive over-limit comparison is made
+     * against. The migration plan pins this formula to bit-exactness in section 0.7.3, so the parity
+     * requirement is the specific instruction and rule T3's half up is the general default it
+     * displaces. A predecessor of this method reduced with {@code GENERAL_ROUNDING} and registered the
+     * cent as divergence {@code C-ROUNDING}; that identifier is withdrawn in section 7.5 of
+     * {@code docs/architecture/cobol-to-service-traceability.md}.</p>
      *
      * @param annualRatePercentage the annual rate as a percentage, so {@code 15.00} means fifteen per
      *     cent; must not be {@code null}. It is a percentage and not a fraction because
      *     {@code MONTHLY_RATE_DIVISOR} carries the conversion, exactly as the reference literal does
-     * @return one month's interest on this balance, at {@code SCALE} decimal places
+     * @return one month's interest on this balance, at {@code SCALE} decimal places, with the surplus
+     *     fraction digits discarded exactly as the reference statement discards them
      * @throws NullPointerException if {@code annualRatePercentage} is {@code null}
      * @throws ArithmeticException if the magnitude of the result exceeds {@code MAX_MAGNITUDE}
      */
@@ -770,13 +921,20 @@ public final class Money implements Comparable<Money> {
         //   2.08333... -- so the alternative would fail on ordinary inputs. Supplying the scale and the
         //   mode to the division itself also makes a second rounding structurally impossible later in
         //   this method, which is the property the preserved arithmetic order depends on.
-        // Assumptions: the mode is GENERAL_ROUNDING, the one mode this type declares, because
-        //   transformation rule T3 names half up for the money path and states no exception for this
-        //   operation. The reference statement at app/cbl/CBACT04C.cbl lines 464 and 465 carries no
-        //   ROUNDED phrase and so discards the excess digits of its result, which differs from this by
-        //   one cent on a quotient landing exactly on a half cent; that difference is registered as
-        //   divergence C-ROUNDING rather than removed by reducing with a second mode here.
-        BigDecimal monthlyInterest = product.divide(MONTHLY_RATE_DIVISOR, SCALE, GENERAL_ROUNDING);
+        // Assumptions: the mode is BASELINE_INTEREST_ROUNDING and NOT GENERAL_ROUNDING, because the
+        //   reference statement at app/cbl/CBACT04C.cbl lines 464 and 465 carries no ROUNDED phrase and
+        //   so discards the excess digits of its result when it stores into the two-place field at line
+        //   168. Truncation toward zero is therefore the reference's own reduction, and this is the one
+        //   operation on this type whose output is compared byte for byte against a committed golden
+        //   master.
+        // WHY : Refactoring Rationale: this line reduced with GENERAL_ROUNDING for a period and the
+        //       resulting cent was registered as divergence C-ROUNDING. Reverting to that is the change
+        //       to NOT make: the migration plan's section 0.7.3 names this formula as the one that must
+        //       be bit-exact and section 0.7.7 makes the goldens the oracle, so half up here costs the
+        //       accrual its cent-precision comparability -- measured at 30.25 against 30.24 on a
+        //       2419.60 balance at 15.00, whose exact quotient is 30.245.
+        BigDecimal monthlyInterest =
+                product.divide(MONTHLY_RATE_DIVISOR, SCALE, BASELINE_INTEREST_ROUNDING);
 
         return new Money(monthlyInterest);
     }

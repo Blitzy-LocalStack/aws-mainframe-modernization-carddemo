@@ -39,32 +39,42 @@
  * which requires a fixture record to match its copybook layout exactly, sign overpunch included.
  * Those artifacts are read as evidence and are never modified.</p>
  *
- * <h2>The monthly accrual rounds half up, once, and the vectors that prove it</h2>
+ * <h2>The monthly accrual discards its surplus digits, once, and the vectors that prove it</h2>
  *
  * <p>{@code app/cbl/CBACT04C.cbl} line 168 declares {@code 05 WS-MONTHLY-INT PIC S9(09)V99.}, a
  * receiving field of scale 2, and lines 464 and 465 compute
  * {@code ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200} into it carrying no {@code ROUNDED} phrase, so the
- * reference discards the excess fraction digits rather than rounding them. The target does NOT
- * reproduce that mode: {@code Money#monthlyInterest} reduces its quotient with
- * {@code GENERAL_ROUNDING}, half up, which is the mode transformation rule T3 states for the money
- * path without exception, and the resulting cent is registered as divergence {@code C-ROUNDING} in
- * {@code docs/architecture/cobol-to-service-traceability.md}. Expectations here pin the mode, pin that
- * it is the one mode the type declares, and pin the difference from the reference in both directions,
- * so neither a silent revert to truncation nor a silent disappearance of the divergence passes.</p>
+ * reference discards the excess fraction digits rather than rounding them. The target reproduces that
+ * reduction: {@code Money#monthlyInterest} reduces its quotient with
+ * {@code BASELINE_INTEREST_ROUNDING}, which is {@code RoundingMode.DOWN}, so the accrual is comparable
+ * against the committed interest goldens cent for cent. {@code GENERAL_ROUNDING}, half up, remains the
+ * mode transformation rule T3 states for the general money path and continues to govern every OTHER
+ * reduction. Expectations here pin which mode reaches which operation and pin the accrual's agreement
+ * with the reference in both directions, so neither a silent move to half up nor a silent spread of
+ * truncation into the general operations passes.</p>
  *
  * <p>Assumptions: the mode is only observable on a quotient landing exactly on a half cent, so an
  * expectation that does not reach that input class asserts nothing about rounding at all. This is not a
- * theoretical caution: the reference fixtures do not reach it, which is also why the divergence is
- * unreachable on the shipped interest corpus. The happy-path interest fixture supplies a category
- * balance of {@code 1000.00} against a disclosure-group rate of {@code 15.00}, where the formula yields
- * {@code 12.5000} exactly, and at a rate of {@code 2.50} against the same balance the quotient is
- * {@code 2.08333...}; truncation and half up agree on both. Expectations here therefore carry
- * discriminating vectors alongside the fixture vectors: a category balance of {@code 1000.80} at a rate
- * of {@code 2.50}, whose quotient is {@code 2.0850} exactly, and {@code 1000.00} at {@code 2.71}, whose
- * quotient is {@code 2.2583...}. The required results are {@code 2.09} and {@code 2.26} where the
- * reference field would receive {@code 2.08} and {@code 2.25}, so the vectors fail on any
- * implementation that reduces by discarding the surplus digits. Without them the suite would report a
- * passing rounding contract while never having exercised the rounding.</p>
+ * theoretical caution: the reference fixtures do not reach it. The happy-path interest fixture supplies
+ * a category balance of {@code 1000.00} against a disclosure-group rate of {@code 15.00}, where the
+ * formula yields {@code 12.5000} exactly, and at a rate of {@code 2.50} against the same balance the
+ * quotient is {@code 2.08333...}; truncation and half up agree on both. Expectations here therefore
+ * carry discriminating vectors alongside the fixture vectors: a category balance of {@code 1000.80} at
+ * a rate of {@code 2.50}, whose quotient is {@code 2.0850} exactly, {@code 2419.60} at {@code 15.00},
+ * whose quotient is {@code 30.245} exactly, and {@code 1000.00} at {@code 2.71}, whose quotient is
+ * {@code 2.2583...}. The required results are {@code 2.08}, {@code 30.24} and {@code 2.25}, matching
+ * what the reference field receives, so each vector fails on any implementation that rounds the surplus
+ * digits up instead. Without them the suite would report a passing rounding contract while never having
+ * exercised the rounding.</p>
+ *
+ * <p>Refactoring Rationale: these vectors required {@code 2.09}, {@code 2.26} and a registered
+ * divergence {@code C-ROUNDING} while the accrual reduced half up, and they are inverted rather than
+ * deleted. That period read rule T3's general half up as governing the accrual too; the plan pins this
+ * one formula to bit-exactness in section 0.7.3 and makes the goldens its oracle in section 0.7.7, so
+ * the specific requirement displaces the general default and the identifier is withdrawn in section
+ * 7.5 of {@code docs/architecture/cobol-to-service-traceability.md}. Keeping the vectors and inverting
+ * their required values is what makes a future move back to half up fail here rather than pass
+ * quietly.</p>
  *
  * <p>The operand order is part of the same contract and is asserted with it. The product is formed
  * at full precision and only then divided, which is the order lines 464 and 465 use. Dividing

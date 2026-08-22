@@ -885,10 +885,15 @@ class ReportControllerTest {
     }
 
     // WHY : Assumptions: the mask a bound has to satisfy is the reference's own,
-    //       WS-DATE-FORMAT PIC X(10) VALUE 'YYYY-MM-DD' at app/cbl/CORPT00C.cbl L72, and the
-    //       reference's answer for a value that cannot be a date under it is the assembled-date
-    //       sentence at L400 for the start bound and L420 for the end bound. A query parameter
-    //       carries the same bound as a request body member, so it is held to the same mask.
+    //       WS-DATE-FORMAT PIC X(10) VALUE 'YYYY-MM-DD' at app/cbl/CORPT00C.cbl L72. A query
+    //       parameter carries the same bound as a request body member, so it is held to the same
+    //       mask and answered from the same catalogue of sentences.
+    // WHY : Refactoring Rationale: the sentence this case expects is the MONTH one and the note
+    //       above previously named the assembled-date sentence at L400. The value is 2022-13-45,
+    //       whose month is above twelve, and the reference answers that from its component tier at
+    //       L331 rather than from its assembled tier -- so naming L400 described an answer the
+    //       reference does not give for this input. The message is now asserted as well as the
+    //       status, because a case that asserts only the status cannot tell the two apart.
     /**
      * Asserts that a date query parameter that is not a calendar date answers 400.
      *
@@ -904,7 +909,113 @@ class ReportControllerTest {
                         .param("startDate", "2022-13-45")
                         .param("endDate", "2022-07-31"))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.fieldErrors[0].field").value("startDate"));
+                .andExpect(jsonPath("$.fieldErrors[0].field").value("startDate"))
+                .andExpect(jsonPath("$.fieldErrors[0].message")
+                        .value("Start Date - Not a valid Month..."));
+
+        verify(reports, never()).readDetailLinePage(any(), any(), any(), anyBoolean(), any());
+    }
+
+    // WHY : Assumptions: the two read operations and the submission operation are ONE surface as far
+    //       as a date bound is concerned, and this case is what holds them to that. They disagreed:
+    //       submission put each bound through the shared date edit and refused 0000-01-01 because
+    //       that edit reports an era-zero year, while both reads parsed their bounds with a bare
+    //       calendar parse and answered 200 with rows for a range the same service had just declared
+    //       unusable. The rows for the refused half of that pair were the disagreement's whole cost.
+    // WHY : Assumptions: this case exercises the READ paths only, and the submission half of the
+    //       agreement is asserted in ReportExecutionServiceTest instead. This class substitutes the
+    //       execution service, so a submitted bound never reaches the real edit here -- asserting it
+    //       through a stub would assert whatever the stub was told to do. The shared entry point is
+    //       static, so the read paths reach the real one even under substitution, which is why the
+    //       two halves of one agreement are pinned in two classes.
+    /**
+     * Asserts both read operations apply the same date edit a submitted bound is held to.
+     *
+     * <p>Assumptions: the refused row is {@code 0000-01-01}, which is the value the disagreement was
+     * observed on, and the three accepted rows are the extremes on either side of it: the two years
+     * below the supported calendar floor, which the reference forgives at
+     * {@code app/cbl/CORPT00C.cbl} L399 and L419 by testing its verdict number rather than its
+     * severity, and the highest year the ten-character mask can express. Accepting those three is as
+     * load-bearing as refusing the first: a floor introduced here in the belief that a pre-Gregorian
+     * bound is a fault would decline a bound the reference processes.</p>
+     *
+     * @param bound the lower bound as a caller states it on the query string
+     * @param partner the upper bound to pair it with, chosen so the pair is never inverted
+     * @param refused whether the shared edit must refuse the pair
+     * @throws Exception if a request cannot be performed
+     */
+    @ParameterizedTest
+    @CsvSource({
+        "0000-01-01,2022-07-31,true",
+        "1582-10-14,1582-10-15,false",
+        "0001-01-01,9999-12-31,false",
+        "1581-01-01,2022-07-31,false"
+    })
+    @DisplayName("both read operations edit a bound exactly as the submission operation does")
+    void bothReadOperationsApplyTheSubmissionDateEdit(String bound, String partner, boolean refused)
+            throws Exception {
+        when(reports.readDetailLinePage(any(), any(), any(), eq(false), any()))
+                .thenReturn(PageResponse.empty());
+        when(reports.composeTotals(any(), any())).thenReturn(List.of());
+
+        for (String path : List.of(ReportController.LINES_PATH, ReportController.TOTALS_PATH)) {
+            var performed = mockMvc.perform(get(ReportController.BASE_PATH + path)
+                            .principal(PRINCIPAL)
+                            .param("startDate", bound)
+                            .param("endDate", partner));
+
+            if (refused) {
+                performed.andExpect(status().isBadRequest())
+                        .andExpect(jsonPath("$.fieldErrors[0].field")
+                                .value(ReportExecutionService.START_DATE_FIELD))
+                        .andExpect(jsonPath("$.fieldErrors[0].message")
+                                .value(ReportExecutionService.MESSAGE_START_DATE_INVALID));
+            } else {
+                performed.andExpect(status().isOk());
+            }
+        }
+    }
+
+    // WHY : Assumptions: the read surfaces carry the reference's PER-COMPONENT sentences too, and not
+    //       merely the assembled one. Before the shared edit reached them they could carry neither:
+    //       their own parser answered a target-authored sentence that appears nowhere in the
+    //       reference, so a caller correcting a query bound was told something the operator of the
+    //       reference screen would never have been told.
+    /**
+     * Asserts a read operation answers a faulty bound component with the reference's own sentence.
+     *
+     * <p>Assumptions: one row per component per bound, six in all, which is the same register
+     * {@code ReportExecutionServiceTest} applies to the submission path. Both surfaces are asserted
+     * against the production constants rather than against literals, because the literals are pinned
+     * once against the reference in this class's verbatim-sentence cases and pinning them twice
+     * would let the two registers disagree about which is authoritative.</p>
+     *
+     * @param startDate the lower bound as stated on the query string
+     * @param endDate the upper bound as stated on the query string
+     * @param expectedField the bound the refusal must name
+     * @param expectedMessage the reference sentence the refusal must carry
+     * @throws Exception if the request cannot be performed
+     */
+    @ParameterizedTest
+    @CsvSource({
+        "2022-13-01,2022-07-31,startDate,Start Date - Not a valid Month...",
+        "2022-07-32,2022-07-31,startDate,Start Date - Not a valid Day...",
+        "2O22-07-01,2022-07-31,startDate,Start Date - Not a valid Year...",
+        "2022-07-01,2022-99-31,endDate,End Date - Not a valid Month...",
+        "2022-07-01,2022-07-99,endDate,End Date - Not a valid Day...",
+        "2022-07-01,20x2-07-31,endDate,End Date - Not a valid Year..."
+    })
+    @DisplayName("a read operation answers a faulty component with the reference's component sentence")
+    void aReadOperationAnswersTheReferenceComponentSentence(String startDate, String endDate,
+            String expectedField, String expectedMessage) throws Exception {
+
+        mockMvc.perform(get(ReportController.BASE_PATH + ReportController.LINES_PATH)
+                        .principal(PRINCIPAL)
+                        .param("startDate", startDate)
+                        .param("endDate", endDate))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors[0].field").value(expectedField))
+                .andExpect(jsonPath("$.fieldErrors[0].message").value(expectedMessage));
 
         verify(reports, never()).readDetailLinePage(any(), any(), any(), anyBoolean(), any());
     }
@@ -1847,24 +1958,32 @@ class ReportControllerTest {
                     .contains(sentence.text());
         }
 
-        // WHY : Assumptions: the six sentences this module holds as Java constants are pinned to
+        // WHY : Assumptions: the twelve sentences this module holds as Java constants are pinned to
         //       their literals SEPARATELY from the contract check above, because the two can drift
         //       in opposite directions -- a constant can be paraphrased while the document keeps the
         //       reference text, and nothing else in the build compares one against the other.
         /**
-         * Confirms the six sentences this module holds as constants equal their reference literals.
+         * Confirms the twelve sentences this module holds as constants equal their reference literals.
          *
-         * <p>Assumptions: only six of the nineteen have a Java constant, and that is the shipped
-         * shape rather than an omission: the consolidated bound means the twelve per-component
-         * sentences are addressed by the client from the published catalogue, while the six the
-         * service itself emits are declared here. The two assembled-date sentences carry a
-         * LOWER-CASE noun where the twelve per-component ones capitalise theirs, and the difference
-         * is carried rather than harmonised.</p>
+         * <p>Refactoring Rationale: this case held six constants and now holds twelve. The six added
+         * are the reference's per-component RANGE sentences, which had no Java constant because the
+         * service could not select them: a bound went from its width test straight to the assembled
+         * date edit, so a month above twelve, a day above thirty-one and a non-numeric year were all
+         * answered with one assembled sentence. They are selected from the components of the
+         * assembled bound now, so each needs a constant and each constant needs pinning here.</p>
+         *
+         * <p>Assumptions: twelve of the nineteen have a Java constant and seven do not, and the
+         * boundary is the shipped shape rather than an omission. The four Day and Year EMPTINESS
+         * sentences have no constant because no input selects them -- a consolidated bound is present
+         * whole or absent whole -- and the remaining three are composed by the controller rather than
+         * held whole, which the case below pins. The two assembled-date sentences carry a LOWER-CASE
+         * noun where the six per-component ones capitalise theirs, and the difference is carried
+         * rather than harmonised.</p>
          *
          * <p>This case takes no parameter and yields no value.</p>
          */
         @Test
-        @DisplayName("the six sentences held as constants are the reference literals verbatim")
+        @DisplayName("the twelve sentences held as constants are the reference literals verbatim")
         void theSentencesHeldAsConstantsAreTheReferenceLiterals() {
             assertThat(ReportExecutionService.MESSAGE_START_DATE_MONTH_EMPTY)
                     .as("app/cbl/CORPT00C.cbl L261")
@@ -1872,6 +1991,24 @@ class ReportControllerTest {
             assertThat(ReportExecutionService.MESSAGE_END_DATE_MONTH_EMPTY)
                     .as("app/cbl/CORPT00C.cbl L282")
                     .isEqualTo("End Date - Month can NOT be empty...");
+            assertThat(ReportExecutionService.MESSAGE_START_DATE_MONTH_INVALID)
+                    .as("app/cbl/CORPT00C.cbl L331")
+                    .isEqualTo("Start Date - Not a valid Month...");
+            assertThat(ReportExecutionService.MESSAGE_START_DATE_DAY_INVALID)
+                    .as("app/cbl/CORPT00C.cbl L340")
+                    .isEqualTo("Start Date - Not a valid Day...");
+            assertThat(ReportExecutionService.MESSAGE_START_DATE_YEAR_INVALID)
+                    .as("app/cbl/CORPT00C.cbl L348")
+                    .isEqualTo("Start Date - Not a valid Year...");
+            assertThat(ReportExecutionService.MESSAGE_END_DATE_MONTH_INVALID)
+                    .as("app/cbl/CORPT00C.cbl L357")
+                    .isEqualTo("End Date - Not a valid Month...");
+            assertThat(ReportExecutionService.MESSAGE_END_DATE_DAY_INVALID)
+                    .as("app/cbl/CORPT00C.cbl L366")
+                    .isEqualTo("End Date - Not a valid Day...");
+            assertThat(ReportExecutionService.MESSAGE_END_DATE_YEAR_INVALID)
+                    .as("app/cbl/CORPT00C.cbl L374")
+                    .isEqualTo("End Date - Not a valid Year...");
             assertThat(ReportExecutionService.MESSAGE_START_DATE_INVALID)
                     .as("app/cbl/CORPT00C.cbl L400, lower-case noun included")
                     .isEqualTo("Start Date - Not a valid date...");

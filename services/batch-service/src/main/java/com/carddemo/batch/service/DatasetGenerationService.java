@@ -5,6 +5,7 @@ import com.carddemo.batch.dto.DatasetGeneration;
 import com.carddemo.batch.dto.DatasetGeneration.DatasetFamily;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
@@ -12,11 +13,13 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -25,6 +28,7 @@ import software.amazon.awssdk.services.s3.model.Delete;
 import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
 import software.amazon.awssdk.services.s3.model.DeleteObjectsResponse;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.ListObjectVersionsRequest;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
@@ -178,6 +182,44 @@ import software.amazon.awssdk.services.s3.model.S3Exception;
  * -- a killed container runs no cleanup -- so it would replace a reliable small cost with an unreliable
  * one.</p>
  *
+ * <h2>Two orderings, and which question each answers</h2>
+ *
+ * <p>Refactoring Rationale: retention ordered generations by the business date embedded in the key and
+ * retained the newest five under that order, which destroyed the output of any run whose business date
+ * was older than the dates the family already held. A catch-up night for an earlier date allocated a
+ * generation that sorted OLDEST, so the very staging call that had just written it named it as the
+ * sixth-newest and scratched it -- reported as a successful allocation, a successful staging and a
+ * successful scratch, with no object left at the location the log had just published. The retention
+ * ordering is now the sequence in which generations were ALLOCATED, which is what a generation data group
+ * orders by: a base has no notion of the content date its dataset carries, and {@code (+1)} is by
+ * definition the current generation the moment it is created.</p>
+ *
+ * <p>Assumptions: the allocation instant is read from the per-generation reservation marker described
+ * above rather than from a counter, because that marker is written exactly once, under a conditional
+ * guard, at the moment the number is claimed -- so the store's own creation timestamp for it IS the
+ * allocation instant, and its body IS the run that took the number. One small read therefore answers
+ * both questions retention asks. Trade-offs: the accepted cost is one object read per listed generation
+ * on each retention pass, on top of the two levels of delimited listing the walk already performs. A
+ * family holds at most {@value #GDG_GENERATION_LIMIT} generations plus the one being written once the
+ * rule is in force, so the pass costs a handful of reads of a few bytes each; the alternative, a
+ * monotonic counter held outside the bucket, would need a second durable store that the sibling stager
+ * could not see and would leave the two implementations able to disagree about which generation is
+ * current.</p>
+ *
+ * <p>Assumptions: {@link #resolveCurrentGeneration} keeps ordering by the resolved partition date and
+ * then the generation number, and the two orderings relate as follows. Retention answers "which
+ * generation has aged out", which is a question about creation sequence, so it orders by allocation
+ * instant and falls back to the partition-date order only to break a tie between two generations claimed
+ * within one timestamp granularity. The {@code (0)} form answers "which dataset does the merge read",
+ * which is a question about the business date the dataset covers -- the combine flow at
+ * {@code app/jcl/COMBTRAN.jcl:24} and {@code :26} merges the backup and system-transaction datasets of
+ * the latest business date the family holds -- so it stays on the partition-date order. The two agree on
+ * every night whose business date advances, because a later date is then also the later allocation; they
+ * differ only on a back-dated catch-up run, where retention protects the generation that run created
+ * while {@code (0)} continues to name the latest business date. Neither can name a generation the other
+ * removed, because retention only ever reports generations OUTSIDE the retained window and {@code (0)}
+ * answers from what the family still holds.</p>
+ *
  * <h2>What this class touches in the bucket, and what it does not own</h2>
  *
  * <p>Trade-offs: the family roster, the two relative forms, the derivation of the partition-date and
@@ -196,8 +238,11 @@ import software.amazon.awssdk.services.s3.model.S3Exception;
  *   <li>It READS by listing. {@link #listGenerations(DatasetFamily, BusinessDate)} and the family-wide
  *       walk list with a delimiter, so the store returns one common prefix per generation;
  *       {@link #scratchGeneration} lists the SAME prefix undelimited, because there it wants every key
- *       rather than the level below. It also gets one object, the run entry beneath
- *       {@value #RUN_CLAIM_ROOT}, to learn which generation this run already took.</li>
+ *       rather than the level below. It also gets small objects: the run entry beneath
+ *       {@value #RUN_CLAIM_ROOT}, to learn which generation this run already took, and -- when the
+ *       retention window is computed -- the {@value #CLAIM_OBJECT_NAME} marker of each listed
+ *       generation, whose creation timestamp orders the window and whose body names the run that owns
+ *       the generation.</li>
  *   <li>It WRITES two kinds of object. The two reservation markers described above, each a few bytes
  *       and each written at most once under a conditional guard; and, through
  *       {@link #stageDataset(DatasetGeneration, String, Path)}, one dataset object per call, streamed
@@ -364,6 +409,18 @@ public class DatasetGenerationService {
     private static final int PRECONDITION_FAILED_STATUS = 412;
 
     /**
+     * The status the object store reports for a key that holds no object.
+     *
+     * <p>Assumptions: a store may report a missing key either as the typed no-such-key exception the
+     * software development kit models or as a bare not-found status on the generic service exception,
+     * and both mean the same thing where a bookkeeping object is read. Both are accepted as absence when
+     * an allocation claim is read for ordering, because failing a retention pass -- and with it a batch
+     * step -- over a missing few-byte marker would turn a housekeeping gap into a stopped nightly
+     * chain.</p>
+     */
+    private static final int NOT_FOUND_STATUS = 404;
+
+    /**
      * The status the object store reports when a concurrent conditional write is already in flight.
      *
      * <p>Assumptions: this status is distinct from the precondition failure above and means the outcome
@@ -419,6 +476,44 @@ public class DatasetGenerationService {
                     .thenComparingInt(DatasetGeneration::generationNumber);
 
     /**
+     * Orders generations of one family by the sequence in which their numbers were claimed.
+     *
+     * <p>Assumptions: the allocation instant is compared first, so the retained window is the
+     * most recently CREATED generations and the rule bites on the least recently created. That is the
+     * ordering a generation data group retires by, and it is the only ordering under which a generation
+     * a run has just allocated cannot be named as aged out by that same run.</p>
+     *
+     * <p>Assumptions: the partition-date order breaks a tie, and a tie is expected rather than
+     * hypothetical. Object-store creation timestamps carry a bounded granularity, so two generations
+     * claimed in quick succession -- two families staged by one step, or two runs a second apart -- can
+     * report the same instant, and a comparator that stopped at the instant would order them by whatever
+     * order the listing happened to return. The tie-break also makes this ordering degenerate exactly to
+     * {@link #FAMILY_ORDER} when no generation in a family carries a readable claim timestamp, which is
+     * what keeps a family written by a component that reserves nothing behaving as it did before.</p>
+     *
+     * <p>Trade-offs: the tie-break is the one place the defective ordering survives, and the residual
+     * exposure is closed separately rather than by strengthening the comparator. Two generations
+     * genuinely sharing an instant cannot be separated by any evidence the store holds, so the run's own
+     * allocation is protected by identity -- {@link #isAllocatedByThisRun} -- instead of by rank.</p>
+     */
+    private static final Comparator<ClaimedGeneration> ALLOCATION_ORDER =
+            Comparator.comparing(ClaimedGeneration::claimedAt)
+                    .thenComparing(ClaimedGeneration::generation, FAMILY_ORDER);
+
+    /**
+     * The instant a generation carrying no readable claim timestamp is ordered by, the epoch.
+     *
+     * <p>Assumptions: the epoch is a usable sentinel because no claim marker can carry it -- the marker
+     * is created by a running task, decades after it -- so a generation ordered at the epoch is
+     * unambiguously one whose allocation instant is unknown rather than one allocated very early. Such a
+     * generation is ordered as the oldest, which retires it first: it carries no reservation this
+     * migration's writers would have left, so it is the generation with the least evidence behind it, and
+     * every one of them is ordered among themselves by the partition-date tie-break so the outcome is
+     * deterministic rather than listing-dependent.</p>
+     */
+    private static final Instant UNDATED_ALLOCATION = Instant.EPOCH;
+
+    /**
      * The business date used to build a coordinate whose only purpose is to be asked how it renders.
      *
      * <p>Assumptions: the value never reaches a key. It is used to obtain a rendered date-partition
@@ -437,6 +532,44 @@ public class DatasetGenerationService {
 
     /** The bucket every staged dataset generation lives in, supplied by configuration. */
     private final String datasetBucket;
+
+    /**
+     * The rendered key prefixes this process has allocated, none of which retention may name.
+     *
+     * <p>Assumptions: the identity held is the RENDERED PREFIX rather than the coordinate value,
+     * because two coordinates that differ only in their business-date token -- the ten-character
+     * separated layout and the compact layout the interest step's parameter carries -- are unequal
+     * records that address the identical prefix. A coordinate-valued set would fail to recognise the
+     * allocation it had just made whenever the caller supplied the other layout, which is precisely the
+     * case a rerun of the interest step presents.</p>
+     *
+     * <p>Trade-offs: this is process-local state on a class whose reservation is otherwise entirely
+     * durable, and it is deliberately NOT the mechanism the protection rests on. The durable claim body
+     * carries the owning run, so a redriven attempt in a fresh container protects the generation its
+     * failed attempt allocated; this set additionally protects an allocation whose marker cannot be read
+     * back at all, which no durable read can cover. It is a concurrent set because a step may run its
+     * chunks on more than one thread and both an allocation and a retention pass may then be in
+     * flight.</p>
+     */
+    private final Set<String> allocatedKeyPrefixes = ConcurrentHashMap.newKeySet();
+
+    /**
+     * The run identifiers this process has allocated under, matched against a claim marker's body.
+     *
+     * <p>Assumptions: a run identifier reaches this class only as an argument of
+     * {@link #allocateNewGeneration}, so remembering it is the only way the retention decision -- whose
+     * published signature takes a family and nothing else, because five job steps call it that way --
+     * can tell the current run's generations from every other run's. The set is normally a single
+     * element: the orchestrator passes one execution name per task through
+     * {@code CARDDEMO_BATCH_RUN_ID}.</p>
+     *
+     * <p>Assumptions: the comparison this set feeds is against the DURABLE claim body, which is what
+     * makes the exclusion hold across containers and across a redrive. An attempt that allocated
+     * generation four and then failed left a marker whose body names the run; the next attempt of the
+     * same run learns the same identifier from its own caller, reads that body, and recognises the
+     * generation as its own even though this process never allocated it.</p>
+     */
+    private final Set<String> allocatingRunIds = ConcurrentHashMap.newKeySet();
 
     /**
      * Builds the service over its object-store client and its configured bucket.
@@ -506,6 +639,12 @@ public class DatasetGenerationService {
         //       different container, a retried branch or a restarted process reads the same answer.
         Optional<DatasetGeneration> alreadyAllocated = recordedAllocation(family, businessDate, runId);
         if (alreadyAllocated.isPresent()) {
+            // WHY : Assumptions: the recorded path protects the generation from retention just as the
+            //       claiming path does. This is the branch a redriven attempt and a second reference
+            //       within one job both take, and both of them go on to stage bytes into that
+            //       generation -- so a retention pass that could name it would destroy the output of the
+            //       very attempt that resolved it.
+            rememberAllocation(runId, alreadyAllocated.get());
             LOG.debug("event=batch.generation.resolved runId={} family={} generation={} source=recorded",
                     runId, family.name(), alreadyAllocated.get().generationNumber());
             return alreadyAllocated.get();
@@ -519,10 +658,28 @@ public class DatasetGenerationService {
         //       than the locally claimed one. Re-reading after the recording write is therefore not
         //       redundant: it is what makes both racers return one coordinate.
         DatasetGeneration allocated = recordedAllocation(family, businessDate, runId).orElse(claimed);
+        rememberAllocation(runId, allocated);
 
         LOG.info("event=batch.generation.allocated runId={} family={} generation={} prefix={}",
                 runId, family.name(), allocated.generationNumber(), allocated.keyPrefix());
         return allocated;
+    }
+
+    /**
+     * Records that this run holds one generation, so no retention pass in this process can name it.
+     *
+     * <p>Assumptions: both facts are kept because they answer the exclusion in two independent ways and
+     * either alone leaves a gap. The run identifier is matched against the durable claim body, which is
+     * what carries the exclusion across containers and across a redrive; the rendered prefix is matched
+     * directly, which is what carries it when the marker beneath that prefix cannot be read back. A
+     * generation is withheld from retention if EITHER matches.</p>
+     *
+     * @param runId the orchestrator execution this allocation belongs to; must not be {@code null}
+     * @param allocated the generation the run holds; must not be {@code null}
+     */
+    private void rememberAllocation(String runId, DatasetGeneration allocated) {
+        this.allocatingRunIds.add(runId);
+        this.allocatedKeyPrefixes.add(allocated.keyPrefix());
     }
 
     /**
@@ -714,6 +871,16 @@ public class DatasetGenerationService {
      * merge silently produced an empty output. The reference catalog held one generation sequence per
      * base and had no notion of a date to scope by, which is the shape restored here.</p>
      *
+     * <p>Assumptions: this form keeps the partition-date ordering while
+     * {@link #generationsToScratch(DatasetFamily)} orders by allocation sequence, and the difference is
+     * intended rather than an inconsistency left behind. The question here is which business date's
+     * dataset the merge reads, so the answer is the latest business date the family holds; the question
+     * retention asks is which generation was created least recently, so its answer is a creation-order
+     * one. The two coincide on every night whose business date advances and diverge only on a back-dated
+     * catch-up run, and neither can name a generation the other removed, because retention reports only
+     * generations outside the retained window and this form answers from what the family still holds.
+     * The class documentation states the relationship in full.</p>
+     *
      * @param family the generation-dataset family being read; must not be {@code null}
      * @return the newest generation staged for that family across every business date, or an empty
      *     result when the family holds none; never {@code null}
@@ -825,6 +992,13 @@ public class DatasetGenerationService {
      * generation number, matching the ordering the sibling stager's {@code GenerationPrefix} dataclass
      * derives from its own field order.</p>
      *
+     * <p>Assumptions: this form orders by the partition date because it is given coordinates and nothing
+     * else, and a coordinate carries no record of when its number was claimed. It is therefore the
+     * degenerate case of the family-wide overload below: that overload orders by allocation instant and
+     * breaks ties on this same partition-date order, so where no generation of a family carries a
+     * readable claim timestamp the two answer identically. The window arithmetic is shared between them
+     * rather than restated, so the retained count cannot come to differ by entry point.</p>
+     *
      * @param existing every generation currently present for one family, across every business date, in
      *     any order; must not be {@code null}
      * @return the generations beyond the retained count, oldest first, never {@code null} and empty when
@@ -843,17 +1017,7 @@ public class DatasetGenerationService {
         List<DatasetGeneration> ordered = new ArrayList<>(existing);
         ordered.sort(FAMILY_ORDER);
 
-        // WHY : Assumptions: the list is oldest first, so the retained window is the LAST
-        //       GDG_GENERATION_LIMIT entries and everything before them is scratched. Slicing from the
-        //       front rather than reversing and slicing from the back keeps the returned order oldest
-        //       first with no second sort, and the size guard above makes the bound safe -- an
-        //       arithmetic form such as subList(0, size - limit) would compute a negative bound for a
-        //       family holding fewer generations than the count.
-        if (ordered.size() <= GDG_GENERATION_LIMIT) {
-            return List.of();
-        }
-
-        return List.copyOf(ordered.subList(0, ordered.size() - GDG_GENERATION_LIMIT));
+        return beyondRetainedWindow(ordered);
     }
 
     /**
@@ -865,15 +1029,211 @@ public class DatasetGenerationService {
      * date and retain five generations per day, which is the defect this overload removes the
      * opportunity for.</p>
      *
+     * <p>Refactoring Rationale: this overload ordered the family by the business date embedded in each
+     * key and named everything before the newest five. A run whose business date was older than the
+     * dates the family already held therefore allocated a generation that sorted oldest, and the staging
+     * call that had just written bytes into it named it as aged out and deleted them -- logging an
+     * allocation, a staging and a scratch that each looked correct while leaving nothing at the location
+     * it had published. Two independent changes close that. The order is now the sequence in which the
+     * generations were CLAIMED, read from the reservation marker each one carries, so a generation
+     * created most recently is retained longest whatever date it covers; and a generation this run holds
+     * is withheld from the result outright, because a {@code (+1)} reference names the current
+     * generation by definition and the current generation is never the scratch candidate.</p>
+     *
+     * <p>Trade-offs: the result may leave a family holding one more than the retained count for exactly
+     * as long as the run that allocated the extra generation is in flight, and that is preferred to the
+     * alternative. Withholding is applied AFTER the window is taken rather than before it, so in the
+     * ordinary case -- where the generation this run allocated is also the most recently claimed -- it
+     * is never a candidate in the first place and the family settles at exactly the retained count. Only
+     * a back-dated run that ties with an older generation on the store's timestamp granularity retains
+     * an extra one, and it is retired by the next pass.</p>
+     *
+     * <p>Trade-offs: the pass reads one small object per listed generation, on top of the two levels of
+     * delimited listing the walk performs. A family holds at most {@value #GDG_GENERATION_LIMIT}
+     * generations plus the one being written, so the cost is a handful of reads of a few bytes each per
+     * staging call. Alternatives Considered: ordering by the newest object beneath each generation
+     * prefix, which needs no marker and would also order generations written by a component that
+     * reserves nothing. Declined here because it reports the last time a generation was WRITTEN rather
+     * than when it was allocated, so a step that re-staged an object into an older generation would
+     * promote it out of the scratch window; the marker is written exactly once, under a conditional
+     * guard, and cannot move.</p>
+     *
      * @param family the family whose aged-out generations are wanted; must not be {@code null}
-     * @return the generations beyond the retained count, oldest first, never {@code null} and empty when
-     *     the family holds no more than the retained count
+     * @return the generations beyond the retained count and not held by this run, oldest allocation
+     *     first, never {@code null} and empty when the family holds no more than the retained count
      * @throws NullPointerException if {@code family} is {@code null}
-     * @throws DatasetGenerationException if the existing generations of the family cannot be listed
+     * @throws DatasetGenerationException if the existing generations of the family cannot be listed, or
+     *     if a generation's reservation marker exists but cannot be read
      */
     public List<DatasetGeneration> generationsToScratch(DatasetFamily family) {
         Objects.requireNonNull(family, "family must not be null");
-        return generationsToScratch(listGenerations(family));
+
+        List<ClaimedGeneration> ordered = new ArrayList<>(claimedGenerations(listGenerations(family)));
+        ordered.sort(ALLOCATION_ORDER);
+
+        List<DatasetGeneration> agedOut = new ArrayList<>();
+        for (ClaimedGeneration candidate : beyondRetainedWindow(ordered)) {
+            if (isAllocatedByThisRun(candidate)) {
+                // WHY : Assumptions: a withheld candidate is reported at an operational level rather
+                //       than debug, because it is the observable trace of the protection working and it
+                //       is what distinguishes a family that legitimately holds a sixth generation from
+                //       one whose retention has stopped functioning.
+                LOG.info("event=batch.generation.scratch-withheld family={} generation={} runId={}"
+                                + " reason=allocated-by-this-run",
+                        family.name(), candidate.generation().generationNumber(),
+                        candidate.owningRunId());
+                continue;
+            }
+            agedOut.add(candidate.generation());
+        }
+
+        return List.copyOf(agedOut);
+    }
+
+    /**
+     * Returns the entries of an ordered list that fall outside the retained window.
+     *
+     * <p>Assumptions: the argument is ordered OLDEST FIRST, so the retained window is the last
+     * {@value #GDG_GENERATION_LIMIT} entries and everything before them has aged out. Slicing from the
+     * front rather than reversing and slicing from the back keeps the returned order oldest first with
+     * no second sort, and the size guard is what makes the bound safe -- the arithmetic form alone would
+     * compute a negative bound for a family holding fewer generations than the count.</p>
+     *
+     * <p>Assumptions: retention counts the newest {@value #GDG_GENERATION_LIMIT} entries as retained, so
+     * the rule bites on the sixth-newest and older. That is what the baseline's limit paired with
+     * {@code SCRATCH} means, and it is the same count the bucket's own lifecycle rule applies, so a step
+     * calling this and the bucket pruning on its own schedule agree rather than each acting on a
+     * different window.</p>
+     *
+     * <p>Refactoring Rationale: the arithmetic was inline in the pure decision, and the family-wide
+     * overload reached it by delegating. The overload now orders by different evidence, so it can no
+     * longer delegate; extracting the window is what keeps ONE definition of the retained count's
+     * arithmetic instead of two that a later edit could put into disagreement.</p>
+     *
+     * @param <T> the entry type, either a coordinate or a coordinate paired with its claim evidence
+     * @param orderedOldestFirst the family's entries, already ordered oldest first; must not be
+     *     {@code null}
+     * @return the entries beyond the retained count, oldest first, never {@code null} and empty when
+     *     there are no more than the retained count
+     */
+    private static <T> List<T> beyondRetainedWindow(List<T> orderedOldestFirst) {
+        if (orderedOldestFirst.size() <= GDG_GENERATION_LIMIT) {
+            return List.of();
+        }
+
+        return List.copyOf(orderedOldestFirst.subList(
+                0, orderedOldestFirst.size() - GDG_GENERATION_LIMIT));
+    }
+
+    /**
+     * Pairs every listed generation with the reservation evidence stored beneath its own prefix.
+     *
+     * <p>Assumptions: the evidence is read one generation at a time rather than through a single
+     * undelimited listing of the family. A listing would report every object of every generation to
+     * recover a handful of timestamps, and it would report the STAGED objects' timestamps rather than
+     * the marker's, which is the distinction the ordering rests on.</p>
+     *
+     * @param present the generations the family holds, in any order; must not be {@code null}
+     * @return one entry per generation, in the order supplied, never {@code null}
+     * @throws DatasetGenerationException if a generation's reservation marker exists but cannot be read
+     */
+    private List<ClaimedGeneration> claimedGenerations(List<DatasetGeneration> present) {
+        List<ClaimedGeneration> claimed = new ArrayList<>(present.size());
+        for (DatasetGeneration generation : present) {
+            claimed.add(claimedGeneration(generation));
+        }
+
+        return claimed;
+    }
+
+    /**
+     * Reads one generation's reservation marker for the instant it was claimed and the run that claimed it.
+     *
+     * <p>Assumptions: both facts come from the SAME object, which is why the marker is read rather than
+     * headed. Its creation timestamp is the allocation instant, because the marker is created exactly
+     * once under a conditional guard at the moment the number is taken, and its body is the identifier of
+     * the run that took it. A head request would answer the first question and leave the second needing a
+     * second request against the same key.</p>
+     *
+     * <p>Assumptions: a missing marker is reported as an entry with no evidence rather than as a failure,
+     * because a generation can legitimately carry none -- one staged by a component that reserves nothing,
+     * or one whose marker an earlier version-blind prune removed. Such an entry orders at
+     * {@link #UNDATED_ALLOCATION} and is therefore retired first, which is the deliberate reading: it is
+     * the generation with the least evidence behind it, and it cannot be one this run allocated, because
+     * every allocation here writes its marker before any caller can stage a byte into the generation.</p>
+     *
+     * @param generation the generation whose reservation is read; must not be {@code null}
+     * @return the generation paired with its claim instant and owning run, both of which may be absent
+     *     evidence; never {@code null}
+     * @throws DatasetGenerationException if the marker exists but the store refuses or fails the read
+     */
+    private ClaimedGeneration claimedGeneration(DatasetGeneration generation) {
+        String key = generation.keyPrefix() + CLAIM_OBJECT_NAME;
+        final ResponseBytes<GetObjectResponse> claim;
+        try {
+            claim = this.objectStore.getObjectAsBytes(GetObjectRequest.builder()
+                    .bucket(this.datasetBucket)
+                    .key(key)
+                    .build());
+        } catch (NoSuchKeyException absent) {
+            // WHY : Assumptions: the exception instance is deliberately unreferenced. Naming it is what
+            //       documents that this branch is the store reporting absence rather than a fault being
+            //       swallowed, which is the same discipline the recorded-allocation read applies.
+            return new ClaimedGeneration(generation, UNDATED_ALLOCATION, null);
+        } catch (S3Exception rejected) {
+            if (rejected.statusCode() == NOT_FOUND_STATUS) {
+                return new ClaimedGeneration(generation, UNDATED_ALLOCATION, null);
+            }
+            throw new DatasetGenerationException("could not read the reservation marker of dataset"
+                    + " family " + generation.family().mainframeBaseName() + " generation "
+                    + generation.generationNumber() + " at key " + key, rejected);
+        } catch (SdkException failure) {
+            // WHY : Trade-offs: a read that fails for any reason other than absence FAILS the retention
+            //       decision rather than defaulting the entry. Defaulting would order the generation at
+            //       the sentinel and make it the first candidate for deletion, so a transient read
+            //       failure over a live generation would become a permanent loss of its bytes; a failed
+            //       step is retried by the state machine and deletes nothing in the meantime.
+            throw new DatasetGenerationException("could not read the reservation marker of dataset"
+                    + " family " + generation.family().mainframeBaseName() + " generation "
+                    + generation.generationNumber() + " at key " + key, failure);
+        }
+
+        // WHY : Assumptions: an absent timestamp is treated exactly as an absent marker. The store
+        //       always reports one, but a stub or an emulator standing in for it need not, and a
+        //       comparator dereferencing a missing instant would fail the step rather than order the
+        //       family -- so the sentinel keeps the ordering total and lets the run-identity protection
+        //       carry the case on its own.
+        Instant claimedAt = claim.response().lastModified();
+        String owner = claim.asUtf8String().trim();
+
+        return new ClaimedGeneration(generation,
+                claimedAt == null ? UNDATED_ALLOCATION : claimedAt,
+                owner.isEmpty() ? null : owner);
+    }
+
+    /**
+     * Reports whether one candidate generation is held by a run this process has allocated for.
+     *
+     * <p>Assumptions: the two tests are an OR rather than an AND, and each covers what the other cannot.
+     * The prefix test recognises an allocation this process made even if its marker cannot be read back;
+     * the owner test recognises an allocation made by an earlier attempt of the same run, in another
+     * container, which is the case a redrive presents and which no process-local record could answer.</p>
+     *
+     * @param candidate the aged-out candidate to classify; must not be {@code null}
+     * @return {@code true} when the candidate must be withheld from the scratch list, {@code false} when
+     *     it may be retired
+     */
+    private boolean isAllocatedByThisRun(ClaimedGeneration candidate) {
+        if (this.allocatedKeyPrefixes.contains(candidate.generation().keyPrefix())) {
+            return true;
+        }
+
+        // WHY : Assumptions: the null check precedes the membership test because the set is a concurrent
+        //       one, whose membership test rejects a null argument outright rather than answering false.
+        //       A generation carrying no marker body would otherwise fail the retention pass with a
+        //       null-argument rejection instead of being classified as owned by nobody.
+        return candidate.owningRunId() != null
+                && this.allocatingRunIds.contains(candidate.owningRunId());
     }
 
     /**
@@ -1483,6 +1843,30 @@ public class DatasetGenerationService {
         }
 
         return value;
+    }
+
+    /**
+     * One listed generation paired with the reservation evidence read from beneath its own prefix.
+     *
+     * <p>Assumptions: this type exists so that the retention ordering is a comparison over VALUES rather
+     * than a comparison that re-reads the object store per comparison. A comparator that fetched a
+     * marker on each call would issue a number of requests proportional to the sort's comparison count
+     * instead of to the family's size, and would answer inconsistently if a concurrent writer changed
+     * anything mid-sort -- which a sort implementation is entitled to reject outright.</p>
+     *
+     * <p>Assumptions: the type is private and never returned by a published operation. The two
+     * published retention answers are lists of coordinates, because a coordinate is what a caller
+     * deletes; the evidence is an input to the decision and not part of its result.</p>
+     *
+     * @param generation the coordinate the evidence belongs to; never {@code null}
+     * @param claimedAt the instant the reservation marker was created, which is the instant the
+     *     generation number was claimed, or {@link #UNDATED_ALLOCATION} when no marker exists or the
+     *     store reported no timestamp for it; never {@code null}
+     * @param owningRunId the identifier of the run named by the marker's body, or {@code null} when the
+     *     generation carries no marker or the marker carries no body
+     */
+    private record ClaimedGeneration(DatasetGeneration generation, Instant claimedAt,
+            String owningRunId) {
     }
 
     /**

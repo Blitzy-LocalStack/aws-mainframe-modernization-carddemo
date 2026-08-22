@@ -2,12 +2,24 @@ package com.carddemo.batch.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.mockito.AdditionalAnswers.delegatesTo;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.withSettings;
 
 import com.carddemo.batch.domain.BatchRun;
 import com.carddemo.batch.domain.BatchRun.BatchRunStatus;
+import com.carddemo.batch.dto.BatchReturnCode;
+import com.carddemo.batch.service.BatchStepLedgerWriter;
 import jakarta.persistence.EntityManager;
 import java.sql.Timestamp;
+import java.time.Clock;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -240,6 +252,17 @@ class BatchRunRepositoryIT {
     private static final short RETURN_CODE_FAIL = 8;
 
     /**
+     * The clock the losing attempt of a collision reads its opening instant from.
+     *
+     * <p>Assumptions: it is fixed one hour after {@link #STARTED_AT} rather than at it, so a case that
+     * asserts the winner's opening instant survived cannot pass because the two instants happened to
+     * agree. The zone is the offset the instant is built from, so the value the writer reads back is the
+     * literal above plus an hour and not that instant rendered in the runner's own zone.</p>
+     */
+    private static final Clock LOSER_CLOCK =
+            Clock.fixed(STARTED_AT.plusHours(1).toInstant(ZoneOffset.UTC), ZoneOffset.UTC);
+
+    /**
      * The container every assertion in this class runs against, started once for the class.
      *
      * <p>Assumptions: the type is imported from {@code org.testcontainers.postgresql} and not from
@@ -383,14 +406,25 @@ class BatchRunRepositoryIT {
      * {@code V2__batch_feed_watermark.sql}; both are named because they are genuinely in this schema,
      * and their shape is pinned by {@code DailyFeedWatermarkRepositoryIT} rather than here.</p>
      *
-     * <p>Assumptions: THREE versions are expected and the table and sequence censuses below are
-     * unchanged by the third, which is not an inconsistency.
+     * <p>Assumptions: FOUR versions are expected, and the two censuses below respond differently to the
+     * last two, which is not an inconsistency.
      * {@code V3__batch_run_contract_restatement.sql} issues {@code COMMENT ON} statements only -- one
      * column comment and seven constraint comments -- so it adds no relation for either census to
-     * name. The version list is asserted separately from the relation censuses for exactly this
-     * reason: a migration that documents the schema must still be declared here, because the
-     * assertion's purpose is to prove the schema was reached through EVERY migration rather than
-     * through the first that happened to create a table.</p>
+     * name, while {@code V4__batch_posting_reject_outbox.sql} creates {@code posting_reject_outbox} and
+     * is therefore named in the table census and in neither the column count, which is scoped to
+     * {@code batch_run}, nor the sequence census, because its ordinal is an identity column and
+     * {@code information_schema.sequences} excludes the sequence behind one. The version list is
+     * asserted separately from the relation censuses for exactly this reason: a migration that only
+     * documents the schema must still be declared here, because the assertion's purpose is to prove the
+     * schema was reached through EVERY migration rather than through the first that happened to create a
+     * table.</p>
+     *
+     * <p>Refactoring Rationale: the expected version list and the table census were extended from three
+     * versions and nine tables when {@code V4__batch_posting_reject_outbox.sql} landed. This is the one
+     * edit per deliberate schema addition the closed census below states as its own cost, and paying it
+     * here rather than opening the census is what keeps an UNREVIEWED table from arriving unnoticed. The
+     * shape of the new table is asserted by {@code PostingRejectOutboxIT} and deliberately not
+     * restated.</p>
      *
      * <p>Assumptions: the sequence census reads {@code information_schema.sequences}, which excludes a
      * sequence owned by an identity column. So the implicit sequence behind {@code batch_run.id} is
@@ -412,7 +446,7 @@ class BatchRunRepositoryIT {
         assertThat(applied)
                 .as("the batch schema must be reached through db/migration and through nothing else,"
                         + " and through every migration it declares rather than only the first")
-                .containsExactly("1", "2", "3");
+                .containsExactly("1", "2", "3", "4");
 
         List<String> schemaCreation = this.jdbc.queryForList(
                 "SELECT description FROM batch.flyway_schema_history"
@@ -438,11 +472,13 @@ class BatchRunRepositoryIT {
                         + " ORDER BY table_name",
                 String.class);
         assertThat(tables)
-                .as("the batch schema holds exactly the step ledger, the feed watermark, Flyway's"
-                        + " history and the six Spring Batch job-repository tables")
+                .as("the batch schema holds exactly the step ledger, the feed watermark, the posting"
+                        + " reject outbox, Flyway's history and the six Spring Batch job-repository"
+                        + " tables")
                 .containsExactlyInAnyOrder(
                         "batch_run",
                         "daily_feed_watermark",
+                        "posting_reject_outbox",
                         "flyway_schema_history",
                         "batch_job_instance",
                         "batch_job_execution",
@@ -706,6 +742,261 @@ class BatchRunRepositoryIT {
                 .get()
                 .extracting(BatchRun::getStartedAt)
                 .isEqualTo(STARTED_AT.plusDays(1));
+    }
+
+    /**
+     * Confirms the refusal above is recognised as the collision, and another refusal is not.
+     *
+     * <p>Purpose: {@code BatchStepLedgerWriter.namesStepUniqueness} decides whether a refused ledger
+     * write is two executions competing for one step or a defect in the row being written, and the two
+     * outcomes are opposite -- the first is reported as a named concurrency condition and the second
+     * keeps the handling it has. This case drives that decision with exceptions the DATABASE raised
+     * rather than with constructed ones, because the property under assertion is that the constraint
+     * name the engine reports is read correctly.</p>
+     *
+     * <p>Assumptions: both halves are asserted in one case on purpose. A positive-only assertion is
+     * satisfied by a classifier that answered {@code true} unconditionally, which would report every
+     * integrity failure -- a status outside the domain, a code outside the rubric, an incoherent
+     * lifecycle -- as a competing execution and would hide a genuine data defect behind a scheduling
+     * diagnosis. Naming the discrimination is the whole of what makes the translation safe.</p>
+     *
+     * <p>Assumptions: the negative vector is the status-domain refusal, which reaches the classifier
+     * through the JDBC translation path rather than the provider's, so it carries no constraint name the
+     * classifier can read. That is the conservative answer the caller wants: an unrecognised refusal
+     * keeps its own diagnosis rather than being relabelled as a collision it may not be.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the step-uniqueness refusal is recognised and another integrity refusal is not")
+    void onlyTheStepUniquenessRefusalIsRecognised() {
+        commitOpenStep(RUN_ID, STEP_NAME, STARTED_AT);
+
+        Throwable collision =
+                catchThrowable(() -> commitOpenStep(RUN_ID, STEP_NAME, STARTED_AT.plusHours(1)));
+
+        assertThat(collision).isInstanceOf(DataIntegrityViolationException.class);
+        assertThat(BatchStepLedgerWriter.namesStepUniqueness(
+                (DataIntegrityViolationException) collision))
+                .as("the refusal the engine raised for %s is the collision",
+                        BatchStepLedgerWriter.STEP_UNIQUENESS_CONSTRAINT)
+                .isTrue();
+
+        Throwable otherRefusal = catchThrowable(() -> commitStatement(
+                "INSERT INTO batch.batch_run (run_id, step_name, status, started_at)"
+                        + " VALUES (?, ?, 'RUNNING', ?)",
+                RUN_ID, IN_FLIGHT_STEP_NAME, STARTED_AT));
+
+        assertThat(otherRefusal).isInstanceOf(DataIntegrityViolationException.class);
+        assertThat(BatchStepLedgerWriter.namesStepUniqueness(
+                (DataIntegrityViolationException) otherRefusal))
+                .as("a refusal about the row being written is not a competing execution")
+                .isFalse();
+    }
+
+    /**
+     * Confirms the loser of a collision is refused by name, writes nothing, and discloses nothing.
+     *
+     * <p>Purpose: two executions carrying one run identity both read no row and both insert one, so the
+     * database settles the race and the second insert is refused. This case asserts what the loser then
+     * REPORTS. Before the translation it exited on the entry point's generic job-failed code with a
+     * persistence-layer trace quoting the refused statement and the constraint name, which described the
+     * database rather than the cause and pointed an operator at the night's records instead of at the
+     * duplicate execution.</p>
+     *
+     * <p>Assumptions: the losing execution's state is reproduced by a repository view that reports no
+     * recorded row while the winner's row is committed, which is exactly the snapshot a loser holds --
+     * it read before the winner committed and inserts afterwards. The refusal below is therefore raised
+     * by the REAL constraint against a real committed row; only the read is arranged.</p>
+     *
+     * <p>Alternatives Considered: two threads racing on two transactions, with no arranged read at all.
+     * Rejected because the loser blocks on the unique index until the winner commits, so the case would
+     * depend on the interleaving of two commits to reach the branch it asserts -- and would pass while
+     * asserting nothing on the runs where the winner committed first. The race itself is exercised
+     * against two processes at run time; what this case has to be right about is the report.</p>
+     *
+     * <p>Assumptions: the surviving row is asserted to be the WINNER's, by its opening instant and its
+     * attempt count, rather than merely to be one row. A loser that had reopened the winner's row would
+     * also leave one row, and would have restarted the winner's clock and counted a second attempt
+     * against work it never did.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the losing attempt is refused by a named code, writes nothing and discloses nothing")
+    void theLosingAttemptOfARaceIsRefusedByName() {
+        commitOpenStep(RUN_ID, STEP_NAME, STARTED_AT);
+        BatchStepLedgerWriter loser =
+                new BatchStepLedgerWriter(repositoryBlindToRecordedRows(), LOSER_CLOCK);
+
+        Throwable refused = catchThrowable(() -> loser.openAttempt(RUN_ID, STEP_NAME));
+
+        assertThat(refused)
+                .isInstanceOf(BatchStepLedgerWriter.StepAttemptInProgressException.class)
+                .hasNoCause()
+                .hasMessageContaining(BatchStepLedgerWriter.OUTCOME_CODE_STEP_IN_PROGRESS)
+                .hasMessageContaining(BatchStepLedgerWriter.IN_PROGRESS_REASON)
+                .hasMessageContaining(RUN_ID)
+                .hasMessageContaining(STEP_NAME);
+        // WHY : Assumptions: the absence of the constraint name, of the driver's own duplicate-key
+        //       wording and of the refused statement is asserted POSITIVELY. Those three are what the
+        //       previous diagnosis consisted of, so a translation that named a code and then attached
+        //       the refusal as a cause would satisfy every assertion above while rendering the same
+        //       wall of persistence detail wherever the failure is logged.
+        assertThat(refused.getMessage())
+                .doesNotContain(BatchStepLedgerWriter.STEP_UNIQUENESS_CONSTRAINT)
+                .doesNotContain("duplicate key")
+                .doesNotContain("insert into");
+        assertThat(refused.getStackTrace())
+                .as("a diagnosed condition carries no frames, so no persistence trace is rendered")
+                .isEmpty();
+
+        this.entityManager.clear();
+        assertThat(this.repository.count())
+                .as("the refused attempt left the winner's row and added none of its own")
+                .isEqualTo(1L);
+        BatchRun surviving = this.repository.findByRunIdAndStepName(RUN_ID, STEP_NAME).orElseThrow();
+        assertThat(surviving.getStartedAt())
+                .as("the winner's opening instant is intact, so the loser reopened nothing")
+                .isEqualTo(STARTED_AT);
+        assertThat(surviving.getAttempt())
+                .as("the winner's attempt count is intact, so the loser counted nothing")
+                .isEqualTo(1);
+        assertThat(surviving.getStatus()).isEqualTo(BatchRunStatus.STARTED);
+    }
+
+    /**
+     * Confirms the attempt whose outcome a competitor recorded first is refused by name, not by state.
+     *
+     * <p>Purpose: two executions carrying one run identity collide in TWO orders, and the constraint
+     * catches only one of them. Insert against insert is refused by the database, which the case above
+     * covers. When one execution reads the other's committed row instead, it REOPENS that row -- an
+     * update, which the database has nothing to refuse -- runs the step body, and finds the row already
+     * closed when it comes to record its own outcome. This case asserts what it reports then.</p>
+     *
+     * <p>Refactoring Rationale: this case is new, and it is the one a two-process run against the fixed
+     * build actually produced. The loser failed on the entry point's generic job-failed code with the
+     * row transition's own {@code IllegalStateException} rendered by the batch framework's step logger,
+     * frames included, which is the same unreadable shape the insert-side code was introduced to
+     * remove -- so a fix that stopped at the constraint would have left the finding's symptom reachable
+     * through the more likely interleaving of the two.</p>
+     *
+     * <p>Assumptions: the winner's close is applied as a direct committed update rather than through a
+     * second writer, because what this case has to be right about is the LOSER's report, and driving a
+     * real second writer would decide the order by timing and pass while asserting nothing on the runs
+     * where the order came out the other way. The row it closes is the row this attempt genuinely opened,
+     * so the state the loser meets is the state the race produces.</p>
+     *
+     * <p>Assumptions: the winner's recorded outcome is asserted to survive intact. A losing attempt that
+     * overwrote it would report the collision and still corrupt the ledger, leaving a redrive to read a
+     * tier that belongs to neither attempt.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("the attempt whose outcome a competitor recorded first is refused by a named code")
+    void theAttemptThatLosesTheOutcomeRaceIsRefusedByName() {
+        BatchStepLedgerWriter loser = new BatchStepLedgerWriter(this.repository, LOSER_CLOCK);
+        Long rowId = loser.openAttempt(RUN_ID, STEP_NAME);
+        commitStatement("UPDATE batch.batch_run SET status = 'COMPLETED', finished_at = ?,"
+                        + " return_code = 0 WHERE id = ?",
+                Timestamp.valueOf(STARTED_AT.plusHours(2)), rowId);
+        this.entityManager.clear();
+
+        Throwable refused =
+                catchThrowable(() -> loser.closeAttempt(rowId, BatchReturnCode.CLEAN, false));
+
+        assertThat(refused)
+                .isInstanceOf(BatchStepLedgerWriter.StepOutcomeAlreadyRecordedException.class)
+                .hasNoCause()
+                .hasMessageContaining(BatchStepLedgerWriter.OUTCOME_CODE_STEP_OUTCOME_TAKEN)
+                .hasMessageContaining(BatchStepLedgerWriter.OUTCOME_TAKEN_REASON)
+                .hasMessageContaining(RUN_ID)
+                .hasMessageContaining(STEP_NAME);
+        // WHY : Assumptions: the empty trace is asserted in its own right, because the framework's step
+        //       logger renders whatever escapes a step WITH its frames -- that is where the 58 lines came
+        //       from -- so suppressing them on the throwable is the only place the rendering can be
+        //       prevented, and a populated trace here would reinstate the wall while every assertion
+        //       above still passed.
+        assertThat(refused.getStackTrace())
+                .as("a diagnosed condition carries no frames, so the framework renders none")
+                .isEmpty();
+
+        this.entityManager.clear();
+        BatchRun surviving = this.repository.findById(rowId).orElseThrow();
+        assertThat(surviving.getStatus())
+                .as("the recorded outcome belongs to the attempt that reached it first")
+                .isEqualTo(BatchRunStatus.COMPLETED);
+        assertThat(surviving.getReturnCode()).isEqualTo(RETURN_CODE_CLEAN);
+        assertThat(this.repository.count())
+                .as("the refused attempt added no row of its own")
+                .isEqualTo(1L);
+    }
+
+    /**
+     * Confirms an integrity refusal that is not the collision reaches the caller exactly as it arrived.
+     *
+     * <p>Assumptions: identity is asserted rather than type, because the contract is that the OTHER
+     * refusal keeps its own diagnosis. A translation that caught the refusal and raised a fresh
+     * exception of the same class would satisfy a type assertion while discarding the message, the cause
+     * chain and the constraint the engine actually named -- which is the diagnosis a data defect is
+     * repaired from.</p>
+     *
+     * <p>Assumptions: the refusal handed to the writer is one the DATABASE raised, captured from the
+     * status-domain violation above, so the case does not turn on a constructed exception behaving the
+     * way a real one is assumed to.</p>
+     *
+     * <p>This test takes no parameter and returns no value.</p>
+     */
+    @Test
+    @DisplayName("an integrity refusal that is not the collision keeps its own diagnosis")
+    void anUnrelatedIntegrityRefusalPropagatesUnchanged() {
+        Throwable captured = catchThrowable(() -> commitStatement(
+                "INSERT INTO batch.batch_run (run_id, step_name, status, started_at)"
+                        + " VALUES (?, ?, 'RUNNING', ?)",
+                RUN_ID, STEP_NAME, STARTED_AT));
+        assertThat(captured).isInstanceOf(DataIntegrityViolationException.class);
+        DataIntegrityViolationException refusal = (DataIntegrityViolationException) captured;
+        BatchStepLedgerWriter writer =
+                new BatchStepLedgerWriter(repositoryRefusingSaveWith(refusal), LOSER_CLOCK);
+
+        assertThat(catchThrowable(() -> writer.openAttempt(RUN_ID, STEP_NAME)))
+                .as("the refusal reaches the caller as the engine raised it, not relabelled")
+                .isSameAs(refusal);
+    }
+
+    /**
+     * Builds a repository view that reports no recorded row while writing through to the real table.
+     *
+     * <p>Assumptions: the view is a delegating mock rather than a spy, because the injected repository
+     * is a framework proxy and a delegating default answer is the supported way to override one method
+     * of an instance whose class cannot be subclassed. Every other call -- the insert, the count, the
+     * keyed read the assertions use -- reaches the real repository and therefore the real table.</p>
+     *
+     * @return the view, never {@code null}
+     */
+    private BatchRunRepository repositoryBlindToRecordedRows() {
+        BatchRunRepository blind = mock(BatchRunRepository.class,
+                withSettings().defaultAnswer(delegatesTo(this.repository)));
+        doReturn(Optional.empty()).when(blind).findByRunIdAndStepName(anyString(), anyString());
+        return blind;
+    }
+
+    /**
+     * Builds a repository view that reports no recorded row and refuses the write with one refusal.
+     *
+     * <p>Assumptions: the read is arranged as well as the write, so the writer takes its insert branch
+     * and the refusal is raised where a real insert would raise it rather than on an update.</p>
+     *
+     * @param refusal the refusal the write raises, captured from the engine; must not be {@code null}
+     * @return the view, never {@code null}
+     */
+    private BatchRunRepository repositoryRefusingSaveWith(DataIntegrityViolationException refusal) {
+        BatchRunRepository refusing = mock(BatchRunRepository.class,
+                withSettings().defaultAnswer(delegatesTo(this.repository)));
+        doReturn(Optional.empty()).when(refusing).findByRunIdAndStepName(anyString(), anyString());
+        doThrow(refusal).when(refusing).save(any(BatchRun.class));
+        return refusing;
     }
 
     /**

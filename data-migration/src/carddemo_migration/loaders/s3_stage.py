@@ -76,7 +76,7 @@ import stat
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import IO, Any, Final, Protocol
@@ -2376,14 +2376,97 @@ def delete_generation_prefix(
         _delete_batch(client, bucket, pending)
 
 
+#: Sentinel ordering instant for a generation whose creation time cannot be established.
+#: Assumptions: the epoch orders such a generation FIRST, so it retires before any generation
+#: whose creation time is known. That is the safe direction: an unknown generation is either a
+#: remnant of a writer that never reserved, or one whose marker an older prune removed, and both
+#: are older than anything this code path creates. It is not a silent default -- a metadata read
+#: that fails for any reason OTHER than absence is raised rather than sentinelled, so a permission
+#: fault cannot be mistaken for an aged-out generation and deleted on that basis.
+_UNKNOWN_CREATION_INSTANT: Final[datetime] = datetime.fromtimestamp(0, tz=timezone.utc)
+
+
+def _generation_creation_instant(
+    client: S3StagingClient,
+    bucket: str,
+    generation: GenerationPrefix,
+) -> datetime:
+    """Establish when a logical generation was allocated, for retention ordering.
+
+    Purpose
+    -------
+    Answer "which of these generations is the oldest ALLOCATION", which is the question generation
+    retention has to decide and which the date in the key cannot answer.
+
+    Parameters
+    ----------
+    client : S3StagingClient
+        S3 client used for the metadata reads.
+    bucket : str
+        The dataset bucket.
+    generation : GenerationPrefix
+        The generation whose creation instant is wanted.
+
+    Returns
+    -------
+    datetime
+        The claim marker's last-modified instant when the marker exists; otherwise the newest
+        last-modified instant among the objects beneath the prefix; otherwise
+        :data:`_UNKNOWN_CREATION_INSTANT`.
+
+    Raises
+    ------
+    StagingServiceError
+        If a metadata read fails for any reason other than the object being absent.
+    """
+    marker = f"{generation.prefix}{_CLAIM_OBJECT_NAME}"
+    try:
+        response = client.head_object(Bucket=bucket, Key=marker)
+    except Exception as exc:  # noqa: BLE001 - classified by service code, then re-raised sanitized
+        # WHY : Assumptions: absence is recognised by the service's own ERROR CODE through the
+        #   published reader and not by exception type, which is the discipline `_staged_digest`
+        #   and `_claim_generation` already apply in this module. Absence is expected -- a
+        #   generation staged before the claim marker convention existed carries none -- and any
+        #   OTHER failure is raised, because ordering a generation at the sentinel on a permission
+        #   fault would put it first in line for deletion.
+        if config.error_code(exc) not in _ABSENT_OBJECT_CODES:
+            raise StagingServiceError(
+                _provider_failure("the generation age probe", bucket, marker, exc)
+            ) from None
+    else:
+        recorded = response.get("LastModified") if isinstance(response, Mapping) else None
+        if isinstance(recorded, datetime):
+            return recorded
+    # WHY : Alternatives Considered: treating a markerless generation as unknown outright was
+    #   weighed and rejected in favour of falling back to its newest object. A generation staged
+    #   by a writer that did not reserve -- or one whose marker an older, version-blind prune
+    #   removed -- still carries the objects it was staged with, and their creation time answers
+    #   the same question the marker would have. Trade-offs: this costs one extra listing per
+    #   markerless generation, which is paid only where the marker is missing.
+    newest: datetime | None = None
+    for page in _paginate(
+        client,
+        "list_objects_v2",
+        "the generation age listing",
+        Bucket=bucket,
+        Prefix=generation.prefix,
+    ):
+        for item in page.get("Contents", []):
+            candidate = item.get("LastModified") if isinstance(item, Mapping) else None
+            if isinstance(candidate, datetime) and (newest is None or candidate > newest):
+                newest = candidate
+    return newest if newest is not None else _UNKNOWN_CREATION_INSTANT
+
+
 def prune_generations(
     client: S3StagingClient,
     settings: DatasetStagingSettings,
     domain: str,
     dataset: str,
     retention_count: int,
+    protected_prefix: str | None = None,
 ) -> tuple[str, ...]:
-    """Scratch every logical generation older than the newest configured count.
+    """Scratch every logical generation allocated before the newest configured count.
 
     Purpose
     -------
@@ -2402,19 +2485,24 @@ def prune_generations(
     dataset : str
         Dataset-family segment.
     retention_count : int
-        Number of newest generations to preserve.
+        Number of most recently allocated generations to preserve.
+    protected_prefix : str or None, optional
+        A generation prefix this call itself staged into, which is withheld from deletion
+        whatever the ordering says. ``None`` when the caller staged nothing.
 
     Returns
     -------
     tuple[str, ...]
-        Prefixes deleted, from oldest to newest. Empty when the family holds no more than
-        ``retention_count`` generations.
+        Prefixes deleted, from oldest allocation to newest. Empty when the family holds no more
+        than ``retention_count`` generations, or when every aged-out generation is protected.
 
     Raises
     ------
     GenerationRetentionError
         If the retention count is invalid, a discovered prefix carries an invalid date, or a
         delete reports a partial failure.
+    StagingServiceError
+        If a generation's age probe fails for any reason other than the marker being absent.
     ConfigurationError
         If either path segment is unacceptable to the prefix builder.
     """
@@ -2422,12 +2510,34 @@ def prune_generations(
     generations = list_generation_prefixes(
         client, settings.bucket, family_prefix(settings, domain, dataset)
     )
-    # WHY : Assumptions: the slice keeps the LAST ``count`` entries because
-    #   :func:`list_generation_prefixes` returns them oldest first. Note that ``[:-count]`` is
-    #   correct for the empty case as well -- with fewer generations than the count it yields
-    #   nothing -- whereas an index arithmetic form such as ``[0:len - count]`` would produce a
-    #   negative bound and silently select from the wrong end.
-    stale = generations[:-count]
+    # WHY : Refactoring Rationale: the ordering used to be the one `GenerationPrefix` derives,
+    #   business date then generation number, and that made a BACK-DATED run delete its own
+    #   freshly staged output. A generation whose business date precedes every existing partition
+    #   sorts first under that ordering, so the same staging call that created it selected it as
+    #   the oldest and scratched it -- while logging a successful stage. A generation data group's
+    #   retention order is CREATION SEQUENCE, not the content date in the name, and the two
+    #   coincide only while runs arrive in business-date order.
+    # WHY : Trade-offs: establishing the creation order costs one metadata read per generation of
+    #   the family, where the previous ordering cost none. The family holds `retention_count`
+    #   generations plus the arrivals being retired, so the read count is bounded and small, and
+    #   the alternative -- keeping a free ordering that deletes the run's own output -- is not a
+    #   saving. `latest_generation` and `current_generation` deliberately keep the business-date
+    #   ordering, because they answer the baseline's `(0)` reference, which names the newest
+    #   generation of the newest partition rather than the most recent allocation.
+    ordered = sorted(
+        generations,
+        key=lambda entry: (
+            _generation_creation_instant(client, settings.bucket, entry),
+            entry.business_date,
+            entry.generation,
+        ),
+    )
+    # WHY : Assumptions: the slice keeps the LAST ``count`` entries because ``ordered`` runs
+    #   oldest allocation first. Note that ``[:-count]`` is correct for the empty case as well --
+    #   with fewer generations than the count it yields nothing -- whereas an index arithmetic
+    #   form such as ``[0:len - count]`` would produce a negative bound and silently select from
+    #   the wrong end.
+    stale = [generation for generation in ordered[:-count] if generation.prefix != protected_prefix]
     for generation in stale:
         delete_generation_prefix(client, settings.bucket, generation.prefix)
     return tuple(generation.prefix for generation in stale)
@@ -3470,7 +3580,9 @@ def stage_dataset_file(
                 #   that carries no new information and consumes one of the five the lifecycle
                 #   rule retains. Retention still runs below, because a retry must leave the
                 #   family in the same state a first success would.
-                deleted = prune_generations(client, settings, domain, dataset, count)
+                deleted = prune_generations(
+                    client, settings, domain, dataset, count, protected_prefix=prefix
+                )
                 return StagedObject(
                     key=key,
                     prefix=prefix,
@@ -3566,7 +3678,7 @@ def stage_dataset_file(
     #   related ``IF MAXCC LE 08 THEN SET MAXCC = 0``.) What the baseline does NOT do is let a
     #   re-run write different content into a catalogued generation, which is why the digest decides
     #   which of the two cases a retry is.
-    deleted = prune_generations(client, settings, domain, dataset, count)
+    deleted = prune_generations(client, settings, domain, dataset, count, protected_prefix=prefix)
     return StagedObject(
         key=key,
         prefix=prefix,

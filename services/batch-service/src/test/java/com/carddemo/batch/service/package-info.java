@@ -85,12 +85,14 @@
  *   <li>{@code BatchServicesTest} -- 24 cases in five nested groupings: the category-balance
  *       arms, the interest accrual, the generation discipline, the durable step ledger and the
  *       ledger's failure-event publication.</li>
- *   <li>{@code BatchErrorPublisherTest} -- 7 cases against {@code BatchErrorPublisher}, which
+ *   <li>{@code BatchErrorPublisherTest} -- 9 cases against {@code BatchErrorPublisher}, which
  *       pairs with no roster entry above because it transcribes no paragraph: publishing a batch
  *       failure to a queue is behaviour the reference does not have, registered as divergence
  *       {@code D-BATCH-FAILURE-EVENT-PUBLISHED}. The cases cover the destination, the JSON body,
- *       the closed three-attribute set, the absence of both ordered-queue identifiers, and the two
- *       failure sources it swallows rather than raises.</li>
+ *       the closed three-attribute set, the absence of both ordered-queue identifiers, the two
+ *       failure sources it swallows rather than raises, and the per-run claim that makes one failed
+ *       run publish once however many callers reach the sink -- including that a send which FAILED
+ *       releases the claim, so the next occasion for the same run is not silenced by it.</li>
  *   <li>{@code DailyFeedWatermarkServiceTest} -- 8 cases against {@code DailyFeedWatermarkService},
  *       which pairs with no roster entry above on the same terms as the sender: it transcribes no
  *       paragraph because the reference has no consumed position to transcribe, its feed being a flat
@@ -270,17 +272,19 @@
  * failing.</p>
  *
  * <p>Trade-offs: the baseline discards the surplus digits of the accrual quotient and the migrated
- * code rounds them half up, so an assertion here on an amount landing exactly on a half cent expects
- * one cent MORE than the reference stores. The baseline carries no {@code ROUNDED} phrase on the
+ * code discards them too, so an assertion here on an amount landing exactly on a half cent expects
+ * exactly what the reference stores. The baseline carries no {@code ROUNDED} phrase on the
  * statement at {@code app/cbl/CBACT04C.cbl:464-465} -- measured, not assumed: the phrase appears
  * nowhere in that program's 652 lines and nowhere in {@code app/cbl} at all -- so its target field,
  * declared {@code WS-MONTHLY-INT PIC S9(09)V99} at line 168, discards surplus digits toward zero. The
- * migrated mode is transformation rule T3's half up, which the rule states for the money path with no
- * exception for the accrual, and the difference is registered as divergence {@code C-ROUNDING} in
- * {@code docs/architecture/cobol-to-service-traceability.md}. {@code InterestCalculationService}
- * declares {@code ACCRUAL_ROUNDING} derived from {@code Money.GENERAL_ROUNDING} and an assertion in
- * this package compares the two, so a constant that drifted from the behaviour it names fails the
- * build rather than misleading a reader.</p>
+ * migrated mode for the accrual quotient is therefore {@code Money.BASELINE_INTEREST_ROUNDING}, an
+ * exception to transformation rule T3's half up taken because the plan pins this formula to the
+ * reference at its section 0.7.3, and no divergence is registered -- {@code C-ROUNDING} is withdrawn in
+ * section 7.5 of {@code docs/architecture/cobol-to-service-traceability.md}.
+ * {@code InterestCalculationService} declares {@code ACCRUAL_ROUNDING} derived from
+ * {@code Money.BASELINE_INTEREST_ROUNDING} and an assertion in this package compares the two, so a
+ * constant that drifted from the behaviour it names fails the build rather than misleading a
+ * reader.</p>
  *
  * <p>Refactoring Rationale: this paragraph twice recorded the opposite disposition -- first that the
  * accrual rounded half up and diverged, then that it truncated and the divergence was withdrawn. The

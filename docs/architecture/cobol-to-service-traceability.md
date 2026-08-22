@@ -1097,12 +1097,12 @@ and an editor who adds an entry re-runs one command instead of reconciling a tal
 <!-- BEGIN_DIVERGENCE_COUNT -->
 | Population | Entries |
 |---|---:|
-| **The whole register — every `####` entry under `## 7`** | **124** |
+| **The whole register — every `####` entry under `## 7`** | **127** |
 | [§7.1](#71-divergences-arising-from-the-three-known-baseline-limitations) — the three known baseline limitations | 3 |
 | [§7.2](#72-divergences-owed-to-this-register-by-its-siblings) — owed by siblings | 8 |
 | [§7.3](#73-structural-divergences-that-are-not-defects) — structural, stated as bolded sentences rather than as identified entries | 0 |
-| [§7.4](#74-divergences-claimed-by-shipped-code) — claimed by shipped code | 106 |
-| [§7.5](#75-withdrawn-divergence-identifiers) — identifiers withdrawn because their subject does not exist | 3 |
+| [§7.4](#74-divergences-claimed-by-shipped-code) — claimed by shipped code | 108 |
+| [§7.5](#75-withdrawn-divergence-identifiers) — identifiers withdrawn because their subject does not exist | 4 |
 | [§7.6](#76-provisioned-topology-divergences-from-the-specifications-stated-counts) — provisioned-topology divergences from the specification's counts | 4 |
 | Entries anywhere outside `## 7` — the invariant that makes `## 7` the whole register | **0** |
 | Identifiers registered more than once — the invariant that makes an identifier resolve | **0** |
@@ -1119,9 +1119,9 @@ and an editor who adds an entry re-runs one command instead of reconciling a tal
 #       per-subsection counts and the two invariants -- from this file.
 # WHY : Assumptions: an entry is a level-four heading under `## 7` and nothing else, so
 #       the total counts `^#### ` and NOT `^#### D-`. FOUR headings quote their identifier
-#       in backticks -- `C-ROUNDING`, because it is a correction rather than a divergence,
-#       and the three withdrawn identifiers of §7.5 -- so the narrower pattern omits them
-#       and returns 119. Every superseded figure this block replaced disagreed with the
+#       in backticks -- and all four are now the withdrawn identifiers of §7.5, whose
+#       heading convention that quoting IS -- so the narrower pattern omits them and
+#       returns 123. Every superseded figure this block replaced disagreed with the
 #       file for exactly that reason, or for the equally avoidable one that entries had
 #       been appended past *Related documents* where no count of `## 7` could reach them.
 awk '
@@ -2108,6 +2108,28 @@ paragraph and delete the history. Rejected because the history is what makes the
 recount; a single clean figure with no record of having gone wrong nineteen times reads as
 reliable and is exactly as fragile.
 
+⚠️ **Every figure in the paragraphs above is superseded, and no future pass should re-measure
+them here.** The count moved to the derived block in [§7](#7-the-divergence-register), between the
+`BEGIN_DIVERGENCE_COUNT` and `END_DIVERGENCE_COUNT` markers, whose figures are the output of the
+command printed beneath it; running that command is now the whole procedure, and this paragraph
+exists only so a reader who reaches the nineteen historical recounts first is told where the
+current numbers live. As of the pass that withdrew `C-ROUNDING` and added
+[`D-TCATBAL-FILLER-DB-RENDER`](#d-tcatbal-filler-db-render--the-re-emitted-category-balance-filler-is-low-values-on-both-arms-because-the-filler-is-not-a-column)
+the table reads **one hundred and twenty-five** document-wide, **one hundred and six** in this
+subsection, **four** in [§7.5](#75-withdrawn-divergence-identifiers), zero entries outside
+`## 7` and zero identifiers registered twice.
+
+Refactoring Rationale: the two invariant rows are what let this paragraph replace the block above
+rather than adding a twentieth entry to it. The subtraction those recounts kept performing —
+document-wide total less the entries appended past *Related documents* — no longer has a subject:
+the duplicate footer block that used to sit inside this subsection, the residue of the file having
+once ended there, is removed in the same pass, so every entry now lies between the `## 7` heading
+and `## 8` where the awk count reaches it and the second invariant row proves it. Assumptions: the
+historical figures are still not edited out, for the reason each earlier pass gives — a recount is
+only auditable if what it replaced is still readable — but they are now superseded by a derived
+table rather than by another typed figure, which is the difference that stops the drift instead of
+recording it.
+
 #### D-SIGNED-ZERO-ZONED — the plain zoned pair normalises a negative-zero overpunch
 
 * **Baseline behaviour.** A zoned-decimal field carries its sign in the low-order
@@ -2498,20 +2520,57 @@ reliable and is exactly as fragile.
   balance of a thousand million or more loses one high-order digit.
 * **Target behaviour.** `CobolEditMask` raises on overflow, naming the offending
   magnitude, its scale and the mask that could not hold it.
-* **Category.** Documented divergence — overflow signalling.
+* **Target behaviour, at the total bands — the disposition, amended.** For the report and
+  statement TOTAL bands the disposition is no longer a raise, and the change is one of
+  observability rather than of arithmetic. Each caller assembling a band narrows the figure
+  to nine integer digits before it reaches the mask, through
+  `Money.narrowedToIntegerDigits(int)` in `common-lib`, which discards high-order digits by
+  remainder arithmetic and preserves the sign; the narrowing is then journalled at warn
+  level — `event=report.total.narrowed band=… integerDigits=9` from
+  `TransactionReportService` and `event=statement.total.narrowed surface=… integerDigits=9`
+  from `StatementService` — and the run completes with the artifact produced. The digits the
+  artifact then shows are the digits the baseline would have shown, because remainder
+  arithmetic at nine integer positions is exactly what a move into a nine-position edited
+  field does; what the baseline does not do is say so. The nine-digit ceiling is also the
+  entire published wire domain: `MonetaryAmount` in
+  `services/reporting-service/src/main/resources/openapi/reporting-api.yaml` is
+  `pattern: '^-?[0-9]{1,9}\.[0-9]{2}$'`, so a wider total has no representation on the wire
+  either.
+* **Category.** Documented divergence — overflow signalling. At the total bands the
+  divergence from the baseline is the WARN record, not the value.
 * **Why the difference is accepted.** A truncated amount is the
   plausible-number-that-is-wrong this class exists to prevent, and it is unrecoverable
   downstream because the truncated string carries no evidence of the digits it lost.
   The guard is not an expected path for the report masks: the three accumulators that
   feed them are declared `PIC S9(09)V99` at **L134-L136** of
   [`app/cbl/CBTRN03C.cbl`](../../app/cbl/CBTRN03C.cbl), exactly the nine positions the
-  masks provide. It stays reachable only because the shared money type admits ten
+  masks provide, and they are added into at **L200-L201** and **L287-L288** with no
+  `ON SIZE ERROR` clause on either statement — which is why the baseline's own overflow is
+  silent. It stays reachable only because the shared money type admits ten
   integer digits, so the narrowing decision belongs to the caller assembling the band —
   the only place that can decide what a balance too wide for its own field should show.
+  That statement is unchanged and is now exercised rather than deferred: the callers take
+  the decision, and the reason they narrow instead of raising is that a raise made ONE
+  arithmetic outcome destroy a whole run's output. A report or statement run is a batch
+  step whose product is an artifact; failing it discards every correct band in order to
+  refuse a single one that the baseline would have printed, which is a strictly worse
+  outcome than printing the baseline's own digits and recording that they were narrowed.
+  **Alternatives considered.** Keeping the raise and letting the step fail, which is the
+  more conservative reading of "a plausible number that is wrong". Rejected because the
+  narrowed figure is not a fabrication — it is the baseline's own value, digit for digit —
+  and because the warn record removes the property the guard existed to prevent, namely
+  that the loss leaves no evidence. The mask itself is unchanged and still raises, so a
+  caller that has NOT taken the decision still cannot truncate silently.
 * **Where it is verified.** `ReportingDtoMapperTest` asserts the exact edited forms
-  within the mask's width and the raise beyond it, for both masks.
+  within the mask's width and the raise beyond it, for both masks. `MoneyTest` asserts the
+  narrowing's remainder arithmetic and its sign preservation, and the report and statement
+  service tests assert that an over-wide total is narrowed, journalled and produced rather
+  than ending the run.
 * **Files.**
-  `services/reporting-service/src/main/java/com/carddemo/reporting/mapper/CobolEditMask.java`.
+  `services/reporting-service/src/main/java/com/carddemo/reporting/mapper/CobolEditMask.java`,
+  `services/common-lib/src/main/java/com/carddemo/common/money/Money.java`,
+  `services/reporting-service/src/main/java/com/carddemo/reporting/service/TransactionReportService.java`,
+  `services/reporting-service/src/main/java/com/carddemo/reporting/service/StatementService.java`.
 
 #### D-MONEY-MASK-NO-TRUNCATION — the browser's account edit mask widens where the baseline drops a digit
 
@@ -2555,17 +2614,22 @@ reliable and is exactly as fragile.
   string rather than paint one that would mislead, where this entry WIDENS a transcribed
   baseline picture rather than truncate. Both prefer what the operator can act on over
   byte-fidelity to a display artefact.
-* **Why this is a third disposition and not a contradiction.** The register now holds three
-  answers to one question, and they differ because the deciders differ. `D-EDIT-MASK-OVERFLOW`
-  **raises** in `CobolEditMask`, and records in terms that hand this decision onward: the
+* **Why this is a distinct disposition and not a contradiction.** The register holds four
+  answers to one question, and they differ because the deciders differ.
+  `D-EDIT-MASK-OVERFLOW` **raises** in `CobolEditMask`, and records in terms that hand this
+  decision onward: the
   guard "stays reachable only because the shared money type admits ten integer digits, so the
   narrowing decision belongs to the caller assembling the band — the only place that can decide
   what a balance too wide for its own field should show." This entry is one such caller's
-  answer. `D-AUTH-SUMMARY-MONEY-DOMAIN` **saturates**, because that column's meaning is a
-  bounded domain rather than an amount. A browser screen can do neither: raising would replace
-  a correct amount with a blank screen during render, and saturating would state a different
-  wrong number. Widening is the only disposition that keeps the amount true, which is why the
-  three coexist rather than compete.
+  answer. The reporting service's total bands are another, and they **narrow** with a warn
+  record, because a report or statement run's product is an artifact whose every other band is
+  correct and whose only wider representation would exceed the published wire domain — that
+  disposition is recorded under `D-EDIT-MASK-OVERFLOW` itself, at the total bands.
+  `D-AUTH-SUMMARY-MONEY-DOMAIN` **saturates**, because that column's meaning is a
+  bounded domain rather than an amount. A browser screen can do none of the three: raising would
+  replace a correct amount with a blank screen during render, saturating would state a different
+  wrong number, and narrowing would state a plausible one. Widening is the only disposition that
+  keeps the amount true, which is why the four coexist rather than compete.
 * **What was wrong before.** The mask had **no implementation in either layer**. Money crosses
   the boundary through `MoneyModule`, which writes `Money.toPlainString()`, so the wire carries
   `-1234.56`; the account-view screen painted that text raw while its own prose asserted that
@@ -6230,9 +6294,46 @@ this register for the identifier learns why it is absent rather than concluding 
 * **Impact.** A caller that retries with its original correlation identifier observes one run
   instead of two. A caller that wants a fresh copy sends a new identifier, which is what a new
   request does by default. Neither reprint nor retry is refused.
+* **The same identifier is also what joins the request to the run, and both submission outcomes
+  say so.** The identifier reached the execution NAME as a digest and stopped there, which made it
+  a discriminator and not a trace: a digest cannot be read back, so a stored run named the report
+  and the range but not the request that ordered it, and the identifier appeared in the request's
+  own log lines and nowhere an operator holding a run could reach. Two things follow from that and
+  both are target-only, because the reference has neither a request identity nor a submission
+  record. The identifier is now carried **verbatim as a fourth member of the orchestration input**,
+  beside the report type and the two bounds, so the run names its request and the lookup can be
+  walked from either end. And **both** submission outcomes are journalled at information level with
+  the same five fields — `event=report.submission.accepted` on the accepted arm and
+  `event=report.submission.deduplicated` on the folded one — where only the folded arm was
+  journalled before, which had the effect that a *resubmitted* request was traceable and a
+  first-time one was not, the inverse of what an operator needs since the first-time submission is
+  the one that starts work. Neither record carries a customer, account or card value, because the
+  submission surface receives none.
+* **Alternatives considered for the crossing.** (a) A tracing header field on the start call.
+  Rejected: that field admits only one tracing form and a caller-supplied request
+  identity is not one, so the value would be refused or dropped rather than carried. (b) Reading
+  the identity back out of the execution name. Rejected: the name carries a digest, which is
+  one-way by construction and is why the name works as a discriminator. (c) Replacing one of the
+  three existing input members. Rejected outright: those three are read by the state machine that
+  consumes the input, so the member is **appended** and the input's existing shape is unchanged —
+  which is also why the crossing needed no infrastructure change at all.
+* **What the crossing does not yet reach.** The identifier is not written into the **user metadata
+  of the produced objects**, so an operator holding an object alone still joins it to a request
+  through the run rather than directly. The object-writing surfaces are owned elsewhere in the
+  reporting service and the addition belongs with them. It is deliberately **not** placed on the
+  status response either: a caller polling a status already holds the identity it submitted with
+  and receives it back on the response header of every call, so putting it in the body would state
+  one value twice.
 * **Where it is verified.** `ReportExecutionServiceTest` asserts that two identifiers name two runs,
   that one identifier names one run, that a caller with no identifier is named freshly each time,
-  and that an already-started name answers with the existing handle rather than raising.
+  and that an already-started name answers with the existing handle rather than raising. It also
+  asserts the crossing in three readings: a conforming identity is the input's fourth member and
+  the other three are byte-identical to what they were, no identity at all leaves the input at
+  exactly three members rather than emitting an empty one, and an identity carrying a quotation
+  mark, a reverse solidus, a blank or more than the permitted width is omitted rather than
+  sanitised — which is what keeps a concatenated input document parseable. The accepted record is
+  asserted to be raised exactly once per accepted submission, at information level, naming the
+  report, both bounds, the submission key and the execution name, and carrying no caller data.
 * **Files.**
   `services/reporting-service/src/main/java/com/carddemo/reporting/service/ReportExecutionService.java`,
   `services/reporting-service/src/main/resources/openapi/reporting-api.yaml`.
@@ -6546,76 +6647,6 @@ this register for the identifier learns why it is absent rather than concluding 
   `ui/src/api/transactions.ts`,
   `ui/src/screens/transactionAdd/index.tsx`.
 
-#### `C-ROUNDING` — the interest accrual rounds half up where the baseline discards the surplus digits
-
-* **Baseline behaviour.** [`CBACT04C.cbl`](../../app/cbl/CBACT04C.cbl) computes the monthly
-  accrual at **L464-L465**, `COMPUTE WS-MONTHLY-INT = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200`,
-  and stores the quotient into `05 WS-MONTHLY-INT PIC S9(09)V99` declared at **L168**. The
-  statement carries **no `ROUNDED` phrase**, and neither does any other statement in the
-  program — a search for that phrase across all 652 lines returns no match — so the store
-  discards the surplus fraction digits rather than rounding them, which is truncation toward
-  zero.
-* **Target behaviour.** `Money.monthlyInterest(rate)` forms the product at full precision and
-  reduces the quotient once, at the division, with `Money.GENERAL_ROUNDING` — `HALF_UP`. The
-  type declares that ONE mode and exposes no way to select another, so the accrual, general
-  multiplication, general division and the reduction of a supplied amount all reduce
-  identically.
-* **The difference.** One cent, and only on a quotient landing exactly on a half cent. A
-  category balance of `1000.80` at a rate of `2.50` forms the scale-4 product `2502.0000`,
-  whose quotient is `2.0850` exactly: the baseline stores `2.08` and the target returns
-  `2.09`. Away from the half the two agree — `1000.00` at `2.50` gives `2.08333...` and both
-  return `2.08` — so the difference is unreachable on every vector the shipped interest
-  fixtures carry, all of which drive `1000.00` at `15.00` for an exact `12.5000`.
-* **Why the difference is accepted rather than removed.** Transformation rule T3 states the
-  money path as an exact decimal at scale 2 with `RoundingMode.HALF_UP` in Java and states no
-  exception for any operation; rule T4 constrains the accrual's operand ORDER and leaves its
-  mode to T3, naming only "an explicit scale and rounding mode". The plan is frozen, and it
-  admits a behavioural difference from the reference when the difference is registered — which
-  is what this entry does — while admitting a departure from a transformation rule only where
-  the plan states an exception. Reducing the accrual by discarding digits would satisfy parity
-  by breaking the rule; reducing it half up satisfies the rule and registers the parity
-  difference, which is the order the plan sets.
-* Trade-offs: the cent does not stay local, and the register states so rather than
-  understating the cost: **L467** adds each already-reduced term into the account total and
-  **L352** adds that total to the account balance once per account, so a cent gained on a
-  transaction category reaches the balance that the next over-limit comparison is made
-  against, and that comparison is inclusive (`app/cbl/CBTRN02C.cbl` **L407**). An operator
-  reconciling a migrated balance against a baseline balance should expect a difference of at
-  most one cent per accrued category per accrual run, in the target's favour.
-* Alternatives Considered: a second rounding constant fixed at `DOWN` and applied to the
-  accrual alone, which is what the code carried for a time and which reduced this difference to
-  nothing. Rejected on precedence: it put a parity argument above a frozen transformation rule,
-  and it left the type with two money contracts a reader had to keep apart. Alternatives
-  Considered: a rounding-mode parameter on the accrual entry point so a parity caller could ask
-  for truncation. Rejected because two call sites computing the same accrual could then
-  disagree by a cent with nothing in either one signalling that they had chosen differently.
-  Alternatives Considered: amending the plan to admit truncation. Rejected outright — the plan
-  is the agreed contract and is not editable from inside the migration.
-* **Where it is verified.** `MoneyTest` asserts both discriminating vectors against the API,
-  against an independently computed half-up counterfactual, and against the baseline's
-  truncating arithmetic which must DIFFER — so a silent revert to truncation and a silent
-  disappearance of this difference both fail. The negative side is asserted with two vectors
-  because no single negative input separates half up from both truncation and flooring. The
-  exact-quotient claim is asserted with `RoundingMode.UNNECESSARY`, so it throws rather than
-  passing if a future edit makes the vector inexact.
-  `InterestCalculationServiceTest.theNamedModeIsTheAppliedMode` and the sibling case in
-  `BatchServicesTest` hold `InterestCalculationService.ACCRUAL_ROUNDING` and
-  `Money.GENERAL_ROUNDING` to the same value, so the constant that names the mode beside the
-  accrual cannot drift from the mode the kernel applies. The fixture-driven golden comparison
-  in `CalculateInterestJobTest` is unaffected, which is itself evidence for the reachability
-  claim above.
-* **Files.** `services/common-lib/src/main/java/com/carddemo/common/money/Money.java`,
-  `services/common-lib/src/main/java/com/carddemo/common/money/package-info.java`,
-  `services/common-lib/src/test/java/com/carddemo/common/money/MoneyTest.java`,
-  `services/batch-service/src/main/java/com/carddemo/batch/service/InterestCalculationService.java`,
-  `services/batch-service/src/main/java/com/carddemo/batch/job/CalculateInterestJob.java`,
-  `services/batch-service/src/main/java/com/carddemo/batch/dto/InterestRateLookup.java`.
-
-<sub>Apache-2.0 · Authoritative artifact-to-target matrix, retirement register and
-behavioural-divergence register for CardDemo. The baseline under `app/**` is cited
-throughout and never modified. Convention:
-[`docs/CODE_DOCUMENTATION_STANDARD.md`](../CODE_DOCUMENTATION_STANDARD.md).</sub>
-
 #### D-TRAN-PAD-PROVENANCE — a re-emitted record's padding is recovered from its own attribution
 
 * **Baseline behaviour.** The padding bytes of a fixed-width record are a property of the record
@@ -6677,6 +6708,88 @@ throughout and never modified. Convention:
   `services/batch-service/src/main/java/com/carddemo/batch/job/BackupTransactionsJob.java`,
   `services/batch-service/src/main/java/com/carddemo/batch/job/CombineTransactionsJob.java`,
   `services/common-lib/src/main/java/com/carddemo/common/codec/FixedWidthCodec.java`.
+
+#### D-TCATBAL-FILLER-DB-RENDER — the re-emitted category-balance filler is low values on both arms, because the filler is not a column
+
+* **Baseline behaviour.** [`CVTRA01Y.cpy`](../../app/cpy/CVTRA01Y.cpy) **L4-L10** lays the
+  fifty-byte transaction-category-balance record out as four named items totalling twenty-eight
+  bytes — `TRANCAT-ACCT-ID PIC 9(11)`, `TRANCAT-TYPE-CD PIC X(02)`, `TRANCAT-CD PIC 9(04)`
+  and `TRAN-CAT-BAL PIC S9(09)V99` — followed by `FILLER PIC X(22)`, which occupies the
+  record's last twenty-two bytes at zero-based offsets 28-49.
+  [`CBTRN02C.cbl`](../../app/cbl/CBTRN02C.cbl) writes that record from **two** paragraphs and
+  neither one names the filler, so those bytes are a property of the record area the writing
+  program happened to hold and not of the row's data.
+  `2700-A-CREATE-TCATBAL-REC` at **L503-L510** runs when the keyed read at **L474** took its
+  `INVALID KEY` branch: it performs `INITIALIZE TRAN-CAT-BAL-RECORD` at **L504** — which,
+  carrying no `REPLACING` phrase, resets the four named elementary items to their category
+  defaults and does not reach a `FILLER` item at all — then moves the three key fields, adds
+  the feed amount at **L508** and `WRITE`s at **L510**. `2700-B-UPDATE-TCATBAL-REC` at
+  **L526-L528** runs when the read succeeded: it adds the feed amount to the balance the read
+  placed in the record area and `REWRITE`s at **L528**, so the stored record's own twenty-two
+  bytes go straight back out.
+* **What the committed expectations measure.** The two arms **disagree**, which is what makes the
+  span unreproducible from a column set rather than merely unspecified. Across the nine posting
+  golden trees the filler at offset 28 of `tcatbal.expected` holds **twenty-two `0x30` bytes** —
+  ASCII `'0'` — in the eight trees whose category row was REWRITTEN, arriving verbatim from the
+  seed image `tests/fixtures/posting/*/tcatbal.txt`, and **twenty-two `0x00` bytes** in
+  `zero_balance` alone, the one tree whose row was CREATED. Neither value carries information: one
+  is the seed dataset's own padding and the other is the low value the working-storage record area
+  held.
+* **Target behaviour.** Rule T1 of the migration plan drops `FILLER` rather than mapping it to a
+  column, so `ledger.transaction_category_balances` carries the four data columns and nothing
+  else, and a row cannot be asked what its filler used to be.
+  `TransactionCategoryBalanceRecordMapper.toRecord(entity)` therefore fills the span with its own
+  `FRESH_RECORD_PAD`, the low value, which is what a newly originated row's filler is; the
+  two-argument `toRecord(entity, sourceImage)` overload copies the span out of a supplied source
+  image and is used wherever the caller still holds the record it decoded.
+  [`BackupTransactionsJob`](../../services/batch-service/src/main/java/com/carddemo/batch/job/BackupTransactionsJob.java)
+  renders `tcatbalf.bkup` from the TABLE — it reads rows, not images — so it calls the
+  single-argument overload, and the staged object carries low values in that span on both arms.
+* **Category.** Documented divergence — mechanism preserved, one twenty-two-byte span of one
+  staged object reproducible on one of the two write arms and not on the other.
+* **The difference.** On the CREATE arm there is none: the target's low value is the baseline's low
+  value, and `zero_balance` agrees byte for byte. On the UPDATE arm the target stages twenty-two
+  low values where the baseline re-emits whatever the stored record held, which in this corpus is
+  twenty-two ASCII zeros. All four data fields agree on both arms, so the difference is confined
+  to the twenty-two bytes the schema does not carry.
+* **Why the difference is accepted rather than removed.** Three grounds, and the first is
+  structural. Rule T1 drops `FILLER`, so the provenance the update arm re-emits is discarded at
+  the column by the rule the whole data model is derived under — the drop for this record is
+  itself recorded in
+  [`data-model-and-schema-mapping.md`](data-model-and-schema-mapping.md), and reinstating it here
+  would put one record's padding back in contradiction of that document and of every other record
+  mapped the same way. Alternatives Considered: a twenty-two-byte column carrying the filler
+  image, rejected because it would store the writing program's record-area state as though it were
+  a fact about the account's category balance, and because a row created by the target has no such
+  state to store, so the column would be null or invented on exactly the arm that currently agrees.
+  Alternatives Considered: changing `FRESH_RECORD_PAD` to ASCII zeros so the eight rewritten trees
+  match, rejected because it would break the one arm that is byte-identical today in order to guess
+  at the arm that cannot be — the create arm's low values are not a coincidence but the
+  measured consequence of **L504** not reaching a `FILLER` item, and a row the target originates is
+  a create-arm row. Trade-offs: the accepted cost is that one span of one staged object cannot be
+  compared byte for byte on the rewrite arm, and the mitigation is that the span is named,
+  measured on both sides and asserted rather than quietly excluded.
+* **What a consumer sees.** A reader of the staged fixed-width `tcatbalf` generation gets four
+  correct data fields and a twenty-two-byte low-value tail on every record, where a baseline
+  generation would carry the tail each record was last written with. Nothing downstream reads that
+  span — the combine and report steps read the transaction datasets, and the reload path decodes
+  by the same layout, which drops the filler again on the way in — so the consequence is confined
+  to a byte-for-byte diff against a baseline generation, where this entry is the explanation.
+* **Where it is verified.** `TransactionCategoryBalanceRecordMapperTest` asserts the
+  single-argument overload writes the low value and that the two-argument overload reproduces a
+  supplied image's span exactly, so neither overload can silently acquire the other's behaviour.
+  `PostTransactionsJobParityIT` **normalises this span on both sides rather than comparing it**,
+  which is the direct consequence of the disagreement measured above, and
+  `theNormalisedSpansHoldExactlyWhatIsClaimedOnBothSides` then asserts what each side actually
+  holds — the produced low values, the committed ASCII zeros on the update arm — so the
+  normalisation cannot hide a change in either. `BackupTransactionsJobTest` and
+  `BackupTransactionsJobPersistenceTest` cover the staged object the single-argument overload
+  produces.
+* **Files.**
+  `services/batch-service/src/main/java/com/carddemo/batch/mapper/TransactionCategoryBalanceRecordMapper.java`,
+  `services/batch-service/src/main/java/com/carddemo/batch/job/BackupTransactionsJob.java`,
+  `services/batch-service/src/test/java/com/carddemo/batch/mapper/TransactionCategoryBalanceRecordMapperTest.java`,
+  `services/batch-service/src/test/java/com/carddemo/batch/job/PostTransactionsJobParityIT.java`.
 
 #### D-INTEREST-ROW-DISPLAY-WITHHELD — the per-row observation is kept, its record image is not
 
@@ -7546,9 +7659,179 @@ throughout and never modified. Convention:
   `services/reporting-service/src/main/java/com/carddemo/reporting/api/StatementController.java`,
   `services/reporting-service/src/test/java/com/carddemo/reporting/api/StatementControllerTest.java`.
 
+#### D-STMT-RENDER-FAULT-ISOLATED — one unrenderable statement is omitted, where the reference's run ends
+
+* **Baseline behaviour.** The statement generator has **no per-statement fault boundary**.
+  [`CBSTM03A.CBL`](../../app/cbl/CBSTM03A.CBL) composes each statement straight into the two
+  output files as it walks its tables, so a record it cannot render is not a statement that
+  fails — it is a step that fails. The run stops where it stopped, and because both output
+  files are written as the walk proceeds, what survives is a partial pair of files with no
+  record of where the walk was interrupted. The whole run's output is lost as an artifact
+  even though most of it was correct.
+* **Target behaviour.** Each statement is composed COMPLETELY into a per-statement buffer
+  before any byte reaches the sink. A statement whose content cannot be rendered therefore
+  writes nothing at all: it is journalled at warn level with its walk ordinal and the refusal
+  digest — `event=statement.omitted walkOrdinal=… failure=…` — it is omitted from the run
+  index, and the walk continues. The run then completes and reports both counts,
+  `event=statement.run.completed produced=… omitted=…`, at information level when nothing was
+  omitted and at warn level when something was. The boundary is expressed as the refusal
+  categories a single statement's own content can produce rather than as a blanket guard:
+  `StatementService` catches `FixedWidthCodec.FieldCodecException`, `ArithmeticException` and
+  `IllegalStateException` around the composition of one statement and nothing wider. Two of
+  those are demonstrably reachable from cardholder-supplied content — a character the
+  fixed-width charset cannot represent, and a markup cell whose escaping expands past the field
+  that must hold it — and each is asserted by its own case. The arithmetic arm is a residual
+  guard rather than a demonstrated path, and one figure that would otherwise take it is
+  deliberately resolved before it arrives: a total too wide for its own field is NARROWED under
+  `D-EDIT-MASK-OVERFLOW` above and the statement is still produced, so an over-wide amount costs
+  no statement at all. The two entries are read together for that reason — the narrowing is what
+  keeps the commonest wide-value case out of this boundary, and this boundary is what keeps the
+  content cases out of the run.
+* **Category.** Documented divergence — failure disposition. It changes no rendered byte of
+  any statement that renders; it changes what happens to the statements either side of one
+  that does not.
+* **Why the difference is accepted.** The reference's disposition is not a guarantee it
+  offers, it is the absence of one: nothing in the baseline states that a run is
+  all-or-nothing, and its own behaviour is not all-or-nothing either, because the partially
+  written files remain. Losing every other cardholder's statement to one unrenderable row —
+  forty-nine of them on the seed corpus, whose `app/data/ASCII/cardxref.txt` carries fifty
+  cards — is therefore not parity with anything the reference promises, while producing those
+  and naming the one is. **Alternatives considered.** Failing the run on the
+  first unrenderable statement, which is the more literal reading. Rejected on the count
+  above and on a second ground that matters operationally: a run that fails names one
+  cause, whereas a run that completes with an omission count names every cause in one pass,
+  so an operator correcting the underlying data corrects all of them at once instead of
+  rediscovering the next one on each rerun.
+* **What is deliberately NOT isolated.** Object-store and input/output failures are outside
+  the boundary and still end the run. The reasoning is that the boundary exists to separate
+  *this statement* from *the others*, and a sink that cannot be written is not a property of
+  one statement — no statement can be produced through it, so continuing would walk the whole
+  corpus, omit every statement in turn and then report a completed run with a produced count
+  of zero. That is the one outcome worse than failing, because it looks like a run whose input
+  was empty.
+* **The cost, stated rather than hidden.** A completed run no longer implies a complete
+  corpus, so the omission count is load-bearing: an operator reading only the completion
+  record's produced count, and not its omitted count, would take an incomplete corpus for a
+  whole one. The count is on the same record for exactly that reason, and the record is
+  raised at warn rather than information level whenever it is non-zero, so the level itself
+  carries the distinction.
+* **Where it is verified.** `StatementServiceTest` asserts the boundary in three directions —
+  a statement whose field cannot be encoded and one whose markup cell over-expands are each
+  omitted while the run continues and the surviving index stays contiguous, an unwritable sink
+  still stops the run, and an over-wide card total is narrowed and costs no statement, which is
+  the case that pins the narrowing as sitting BEFORE this boundary rather than inside it.
+* **Files.**
+  `services/reporting-service/src/main/java/com/carddemo/reporting/service/StatementService.java`,
+  `services/reporting-service/src/main/java/com/carddemo/reporting/service/StatementIndexEntry.java`,
+  `services/reporting-service/src/main/java/com/carddemo/reporting/sink/S3StatementSink.java`,
+  `services/reporting-service/src/test/java/com/carddemo/reporting/service/StatementServiceTest.java`.
+
+#### D-REPORT-DATE-MESSAGE-REACH — ten of the reference's fourteen date sentences are emitted, and four cannot be
+
+* **Baseline behaviour.** The report screen edits its two date bounds from **six** typed
+  screen components and holds **fourteen** sentences for them, in three tiers.
+  [`CORPT00C.cbl`](../../app/cbl/CORPT00C.cbl) tests each component for emptiness at
+  **L258-L302**, moving one of six sentences at **L261**, **L268**, **L275**, **L282**,
+  **L289** and **L296**; it then tests each component's range at **L328-L379**, moving one of
+  six more at **L331**, **L340**, **L348**, **L357**, **L366** and **L374** — the month arms
+  testing `NOT NUMERIC OR > '12'`, the day arms `NOT NUMERIC OR > '31'` and the year arms
+  `NOT NUMERIC` alone; and it finally puts each assembled bound through the shared date edit,
+  moving `'Start Date - Not a valid date...'` at **L400** or
+  `'End Date - Not a valid date...'` at **L420**. Every arm performs `SEND-TRNRPT-SCREEN`,
+  whose last statement is `GO TO RETURN-TO-CICS`, so exactly one of the fourteen reaches an
+  operator per turn and it is the first fault in tier order.
+* **Target behaviour.** The bounds cross the service boundary as two assembled ten-character
+  values rather than as six components, so the six emptiness sentences cannot all be
+  selected — but the six RANGE sentences can be, because an assembled ISO bound always
+  carries all three components. `ReportExecutionService.editStatedBound` reads the three
+  slices back out of the ten characters at the reference's own offsets — the group at
+  **L60-L71** puts the year at positions 0-3, the month at 5-6 and the day at 8-9 — applies
+  the reference's three arms in the reference's order with the reference's own tests, and
+  carries the matching sentence verbatim. **Ten** of the fourteen are therefore emitted: both
+  Month emptiness sentences, all six range sentences and both assembled-date sentences.
+* **Which four cannot be, and why.** The **Day and Year emptiness sentences of each bound**,
+  at **L268**, **L275**, **L289** and **L296**. A consolidated wire value is present whole or
+  absent whole and cannot be partially absent, so there is no input that means "the day
+  component is empty while the others are not". An absent bound reports its Month emptiness
+  sentence, which is the reference's own first arm and therefore the sentence the reference
+  itself shows for a wholly empty bound.
+* **A narrower reachability statement, because the two counts differ.** Ten sentences are
+  emitted by the implementation; **eight** are reachable by a caller that obeys the published
+  schemas. The two `Not a valid Year` sentences answer a year that is not four digits, and
+  `IsoDate` in `reporting-api.yaml` constrains every bound carrier this context publishes —
+  the request body's two bounds and the query parameters of the two read operations — to
+  `^[0-9]{4}-[0-9]{2}-[0-9]{2}$`. They are selected and published all the same, because a
+  caller that sends a non-conforming year is then answered with the reference's own sentence
+  for it rather than with an off-catalog one.
+* **Category.** Documented divergence — message granularity under a consolidated wire shape.
+  No sentence is paraphrased, invented or reordered; four of the fourteen have no input that
+  selects them.
+* **Why the difference is accepted.** The alternative is to widen the request to six members
+  so that a component can be individually absent, which would put the reference's screen
+  shape on the wire and give a REST caller six fields where the resource has two.
+  **Alternatives considered.** Naming the component in the error's `field` value instead —
+  `startDateMonth` and so on — so that all twelve per-component sentences became
+  "addressable". Rejected because the field identity is the property a client marks, the
+  request publishes `startDate` and `endDate`, and the browser's own field-to-control map
+  recognises only those; a synthetic name would mark no control at all, so the error would
+  arrive with nowhere to render. The component identity travels in the message, which is
+  where the reference puts it too — it moves the component's name into the sentence and
+  separately points the cursor at that component's field, and a consolidated bound has one
+  control to point at where the screen had three.
+* **Tier order across the two bounds — NOT a divergence, because it is enforced.** The
+  reference interleaves its tiers ACROSS the two bounds: every emptiness arm for both bounds
+  at **L258-L302**, then every range arm for both at **L328-L379**, and only then the
+  assembled edit for the lower bound at **L400** and for the upper at **L420**. So the tier a
+  fault sits in decides which of two simultaneous faults is named, and the bound it sits on
+  does not. `ReportExecutionService.editStatedBounds` runs the same three tiers in the same
+  order across the same pair — `requireStatableBound` for both bounds, then
+  `requireComponentsInRange` for both, then `requireAssembledBound` for both — and all four
+  surfaces that state a range reach it: the submission through `resolveCustomRange`, and the
+  line listing, the totals reading and the artifact collection through `ReportController`'s
+  own paired delegate. `editStatedBound` remains for a caller holding a single bound and
+  composes the same three tiers in the same order.
+* **Why that order is enforced rather than accepted as a difference.** Editing the lower bound
+  to completion before starting the upper reversed the choice on a reachable, schema-conforming
+  input. A range stating `2022-02-30` below and `2022-13-15` above is refused by the reference
+  on the UPPER bound — month thirteen fails a range arm at **L366**, before either assembled
+  edit is reached — while `2022-02-30` passes every range arm, day thirty being inside the
+  reference's `> '31'` test, and is refused only by the assembled edit. Bound-at-a-time editing
+  named the LOWER bound and `'Start Date - Not a valid date...'` instead. Exactly one sentence
+  reaches a caller either way, so the difference was in WHICH of two simultaneous faults is
+  named — an observable difference in the sentence shown and the control marked, which is the
+  class of change transformation rule T9 does not admit. It is pinned by
+  `ReportExecutionServiceTest.theEarlierTierNamesTheRefusal`, which asserts the same pair of
+  faults in both arrangements so that the assertion is about the tier and not about the bound.
+  It predates the component tier and is unchanged by it.
+* **One surface, not three, and that is parity rather than divergence.** The same edit is
+  applied by the submission operation, by both date-range read operations and by the artifact
+  collection, through the single entry point `ReportExecutionService.editStatedBound`. It is
+  recorded here because the three surfaces once differed: the reads parsed their bounds with a
+  bare calendar parse and so accepted `0000-01-01`, which the shared edit refuses as an era-zero
+  year, and answered rows for a range the same service had declared unusable. Sharing the edit
+  also means the reads forgive what the reference forgives — a bound below the supported calendar
+  floor, which `CORPT00C.cbl` accepts at **L399** and **L419** by testing the verdict's message
+  number rather than its severity — so no floor is imposed on any surface.
+* **Where it is verified.** `ReportExecutionServiceTest` asserts each of the six range
+  sentences against the production edit path, and asserts that a month of `00`, a day of
+  `00`, a year of `0000` and the three impossible calendar days still carry the
+  assembled-date sentence — which is what holds the tier from being strengthened past the
+  reference's own tests. It also asserts the floor tolerance at both bounds and the era-zero
+  refusal beside it, so neither a floor nor a ceiling can be introduced silently.
+  `ReportControllerTest` asserts the same agreement from the wire: both read operations refuse
+  `0000-01-01` and accept the three low and high extremes, and each of the six component
+  sentences reaches a read surface at the bound that owns it. It also holds the twelve sentences
+  this context carries as constants against the reference literals, and
+  `ReportingApiContractTest` holds each emitted constant against the packaged contract's catalog,
+  so a sentence that drifts from either side fails a named case.
+* **Files.**
+  `services/reporting-service/src/main/java/com/carddemo/reporting/service/ReportExecutionService.java`,
+  `services/reporting-service/src/main/java/com/carddemo/reporting/api/ReportController.java`,
+  `services/reporting-service/src/main/resources/openapi/reporting-api.yaml`.
+
 ### 7.5 Withdrawn divergence identifiers
 
-**THREE** identifiers are collected here, and one test decides membership: the difference the
+**FOUR** identifiers are collected here, and one test decides membership: the difference the
 identifier registered **does not exist** — either it was never built, or the delivered artifact
 matches the specification the entry claimed it diverged from. They sit outside the live
 subsections so that those subsections carry only live differences while each identifier still
@@ -7556,7 +7839,7 @@ resolves to something for a reader who meets it in an older comment, a review no
 message. Every heading here quotes its identifier in backticks, which is the signal
 distinguishing this subsection's entries from live ones at a glance and in a search.
 
-Assumptions: three is this subsection's population and NOT a count of every withdrawn identifier
+Assumptions: four is this subsection's population and NOT a count of every withdrawn identifier
 in the register, because one withdrawal is recorded in place instead.
 [`D-12`](#d-12--withdrawn-the-account-view-information-line-no-longer-announces-a-successful-read)
 opens with its own `**Status.** **Withdrawn.**` line and stays in
@@ -7582,15 +7865,85 @@ kept as a `####` entry inside §7.4 would be counted in that subsection's row of
 as though it registered a live difference, which is the one thing it must not be read as. The
 derived table in [§7](#7-the-divergence-register) therefore gives this subsection its own row.
 
-Refactoring Rationale: one identifier has moved OUT of this subsection rather than into it.
-`C-ROUNDING`, the
-interest-accrual rounding difference, was withdrawn here on the reading that the accrual should
-reduce as the baseline does; that disposition is reversed and the entry is LIVE again in §7.4,
-because transformation rule T3 states half up for the money path with no exception for the
-accrual and the plan is frozen. A reader arriving from a comment that describes `C-ROUNDING` as
-withdrawn is reading a citation from that intervening period; the live entry in §7.4 is
-authoritative, and it records the reversal in its own reasoning rather than leaving the two
-readings to be reconciled from the outside.
+Refactoring Rationale: one identifier has now entered this subsection **twice**, and the record of
+the round trip is why its entry is longer than the difference it once described.
+[`C-ROUNDING`](#c-rounding--the-accrual-reduces-as-the-baseline-reduces-so-the-rounding-difference-has-no-subject),
+the interest-accrual rounding difference, was withdrawn here, restored as a live entry in §7.4 on
+the reading that transformation rule T3 states half up for the money path with no exception for
+the accrual, and is withdrawn again: rule T3 is the money path's GENERAL default, while
+&sect;0.7.3 of the plan names the accrual formula as the one that must be bit-exact,
+&sect;0.1.1.2 requires its observable behaviour to be unchanged and &sect;0.7.7 makes the
+committed interest goldens its oracle, so the specific requirement displaces the general default
+and the accrual reduces as the baseline reduces. Assumptions: a reader arriving from a comment
+that describes `C-ROUNDING` as a live divergence is reading a citation from that intervening
+period, and this subsection is where it resolves. Trade-offs: keeping a withdrawal record that has
+been written twice costs a reader one extra paragraph; deleting it would cost the next reader the
+whole argument, and the argument is the only thing that stops the mode being exchanged a third
+time.
+
+#### `C-ROUNDING` — the accrual reduces as the baseline reduces, so the rounding difference has no subject
+
+This identifier is withdrawn because the difference it registered **does not exist in the
+delivered artifact**: the monthly accrual discards the surplus fraction digits of its quotient,
+which is what the reference statement does, so there is no cent left for an entry to record. The
+entry is kept rather than deleted because the identifier was cited from six source files and from
+three documents during the period the difference was live, and a reader meeting one of those
+citations needs to land on the reversal rather than on a missing anchor.
+
+* **What it claimed.** That `Money.monthlyInterest(rate)` reduced the accrual quotient with
+  `Money.GENERAL_ROUNDING`, `HALF_UP`, where
+  [`CBACT04C.cbl`](../../app/cbl/CBACT04C.cbl) **L464-L465** computes
+  `COMPUTE WS-MONTHLY-INT = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200` into
+  `05 WS-MONTHLY-INT PIC S9(09)V99` at **L168** carrying **no `ROUNDED` phrase** — and no
+  statement in that program's 652 lines carries one — so the reference discards the surplus
+  digits. On a quotient landing exactly on a half cent the target therefore credited one cent
+  more: `2.09` against the reference's `2.08` at a category balance of `1000.80` and a rate of
+  `2.50`, and `30.25` against `30.24` at `2419.60` and `15.00`.
+* **What is actually shipped.** Two rounding modes, each fixed at its operation and neither
+  selectable. `Money.GENERAL_ROUNDING`, `HALF_UP`, reduces a supplied amount, a general product
+  and a general quotient — the three operations that have no reference statement behind them at
+  all — and `Money.BASELINE_INTEREST_ROUNDING`, `DOWN`, reduces the monthly accrual and nothing
+  else in the migration. `DOWN` rather than `FLOOR` because the reference's store discards toward
+  ZERO and both the balance picture at [`CVACT01Y.cpy`](../../app/cpy/CVACT01Y.cpy) **L7** and the
+  rate picture at [`CVTRA02Y.cpy`](../../app/cpy/CVTRA02Y.cpy) **L9** are signed, so the negative
+  quotient is reachable and the two modes part company on it.
+  `InterestCalculationService.ACCRUAL_ROUNDING` is derived from the kernel constant rather than
+  restated, so the name beside the service cannot drift from the mode the arithmetic applies.
+* **Why the claim was made, and why it is reversed.** The claim read rule T3 — which states the
+  money path as an exact decimal at scale 2 with `RoundingMode.HALF_UP` and states no exception —
+  as governing the accrual too, and used rule T9's documented-divergence allowance to admit the
+  resulting cent. It fails on precedence in two ways. Rule T3 is the GENERAL money-path default
+  while the accrual is the single statement the plan pins to the reference three separate times,
+  so applying the general rule over the specific requirement inverts the plan's own order; and
+  rule T9 admits a difference that cannot be avoided rather than authorising one where
+  bit-exactness is demanded, so using it here spent a registered divergence to buy uniformity and
+  cost the accrual its cent-precision comparability against the goldens &sect;0.7.7 makes the
+  oracle. Assumptions: the two readings cannot both be held, because the mode is a single constant
+  applied at one division, which is precisely why this had to be settled rather than annotated.
+* **Why the withdrawal is a withdrawal and not a live entry with the sign flipped.** A register
+  entry records a DIFFERENCE. Truncating as the reference truncates leaves none: the accrual now
+  agrees with `WS-MONTHLY-INT` on every input, including the exact halves that separate the modes.
+  An entry saying so would be a heading in the live register whose whole subject is that nothing
+  differs, which is the state this register exists to keep distinguishable from drift.
+* **Where the reversal is verified.** `MoneyTest` pins both exact-half vectors — `1000.80` at
+  `2.50`, whose quotient is `2.0850` exactly, and `2419.60` at `15.00`, whose quotient is `30.245`
+  exactly — each asserted against the reference's value AND against the half-up counterfactual
+  it must NOT equal, with `RoundingMode.UNNECESSARY` guarding the exactness claim so an edit to
+  either operand throws instead of quietly weakening the vector. The negative side is asserted
+  with two vectors, because no single negative input separates truncation toward zero from both
+  half up and flooring. `InterestCalculationServiceTest.theNamedModeIsTheAppliedMode` holds
+  `ACCRUAL_ROUNDING`, `Money.BASELINE_INTEREST_ROUNDING` and the literal `DOWN` to one another and
+  separately asserts that `GENERAL_ROUNDING` is still `HALF_UP`, so neither mode can absorb the
+  other. The fixture-driven golden comparison in `CalculateInterestJobTest` is unchanged, because
+  every shipped interest fixture drives `1000.00` at `15.00` for an exact `12.5000` — which is
+  why the corpus could not have detected either mode and why the constructed vectors carry the
+  contract.
+* **Files.** `services/common-lib/src/main/java/com/carddemo/common/money/Money.java`,
+  `services/common-lib/src/main/java/com/carddemo/common/money/package-info.java`,
+  `services/common-lib/src/test/java/com/carddemo/common/money/MoneyTest.java`,
+  `services/batch-service/src/main/java/com/carddemo/batch/service/InterestCalculationService.java`,
+  `services/batch-service/src/test/java/com/carddemo/batch/service/InterestCalculationServiceTest.java`,
+  `services/batch-service/src/test/java/com/carddemo/batch/service/BatchServicesTest.java`.
 
 #### `D-REJECT-109-DURABLE` — the durable reason-109 reject row was never built
 

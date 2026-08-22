@@ -48,14 +48,14 @@
  *
  * <h2>The directory, measured rather than remembered</h2>
  *
- * <p>Twelve compilation units sit in this directory: this charter and the eleven Spring Data
+ * <p>Thirteen compilation units sit in this directory: this charter and the twelve Spring Data
  * interfaces enumerated below, each marked LANDED against the directory beside it. The marker line
  * is re-measured on every build by
  * {@code services/common-lib/src/test/java/com/carddemo/common/architecture/PackageCharterInventoryTest.java},
- * so a twelfth interface arriving without an entry here fails the build:</p>
+ * so a thirteenth interface arriving without an entry here fails the build:</p>
  *
  * <pre>
- * this directory: 12 java files = 11 classes + 1 charter
+ * this directory: 13 java files = 12 classes + 1 charter
  * </pre>
  *
  * <p>Refactoring Rationale: this section carried a prose sentence and no marker line, and the prose
@@ -100,12 +100,12 @@
  * both disciplines are visible in one place and neither is implied by a declaration made
  * elsewhere.</p>
  *
- * <h2>The eleven interfaces, and what does not belong here</h2>
+ * <h2>The twelve interfaces, and what does not belong here</h2>
  *
- * <p>Eleven interfaces belong here and no twelfth; with this charter that makes twelve compilation
- * units at the target. Each is listed with the schema-qualified table it reaches and the access
- * discipline that table is reached with, because the discipline is the part a caller cannot infer
- * from the name.</p>
+ * <p>Twelve interfaces belong here and no thirteenth; with this charter that makes thirteen
+ * compilation units at the target. Each is listed with the schema-qualified table it reaches and the
+ * access discipline that table is reached with, because the discipline is the part a caller cannot
+ * infer from the name.</p>
  *
  * <p>Refactoring Rationale: the roster stood at eight and was closed at eight, and reopening it to ten
  * is a correction of substance rather than of arithmetic. {@code CBEXPORT} reads five masters and this
@@ -114,7 +114,7 @@
  * {@code CardRepository} are therefore added as ordered read-only walks and appear in the roster
  * below.</p>
  *
- * <p>Refactoring Rationale: each entry states LANDED, and at this revision ALL ELEVEN are, so the
+ * <p>Refactoring Rationale: each entry states LANDED, and at this revision ALL TWELVE are, so the
  * roster and the directory now hold the same set. Two earlier revisions both understated it. The first marked
  * every entry PLANNED, including {@code BatchRunRepository} whose file was already present, so a reader
  * consulting the roster to learn whether the step ledger had an interface was told it did not. The second
@@ -138,11 +138,17 @@
  * <p>Assumptions: the last two to arrive, {@code AccountRepository} and {@code CardXrefRepository}, came
  * with the jobs that read them rather than with a service, which is what the earlier revisions predicted:
  * the account master and the cross-reference are read by the posting job and by the interest accrual, and
- * neither is reached by any rule in {@code com.carddemo.batch.service}. Every one of the eleven now
+ * neither is reached by any rule in {@code com.carddemo.batch.service}. Every one of the twelve now
  * has at least one production caller, and each caller is a job or a service in this module rather
- * than a test. Assumptions: the eleventh, {@code DailyFeedWatermarkRepository}, is the one whose
+ * than a test. Assumptions: {@code DailyFeedWatermarkRepository} is the one whose
  * caller is a SERVICE rather than a job -- {@code DailyFeedWatermarkService} owns the read and the
  * advance, and the two jobs reach the row only through it.</p>
+ *
+ * <p>Refactoring Rationale: the roster was REOPENED again, from eleven to twelve, for
+ * {@code PostingRejectOutboxRepository}. The reason is the same class of shortfall that reopened it
+ * from eight to ten: the DIRECTORY was short of what a job needed, not the count. A posting reject's
+ * image had no durable home, so a staging failure destroyed the only copy of it while the reject row
+ * it described stayed committed.</p>
  *
  * <dl>
  *   <dt>{@code BatchRunRepository} into {@code batch.batch_run}</dt>
@@ -301,6 +307,29 @@
  *       this module's second, so the schema ruling below is unaffected: the table is inside
  *       {@code batch} and adds no cross-schema reach at all.</p></dd>
  *
+ *   <dt>{@code PostingRejectOutboxRepository} into {@code batch.posting_reject_outbox}</dt>
+ *   <dd>LANDED. The THIRD of the tables this module owns, and the third entry here with no baseline
+ *       record behind it. It carries one row per feed record the posting job accounted for, holding
+ *       that record's 430-byte reject image where the record was rejected, so the image is as durable
+ *       as the reject row and the feed watermark that commit alongside it. Access is a keyed insert
+ *       inside the per-record transaction, two counts, an ordered replay by ingest sequence, and an
+ *       idempotent mark-staged update; there is deliberately no delete, so a staged run stays
+ *       replayable and the runtime role needs no privilege beyond the SELECT, INSERT and UPDATE the
+ *       {@code batch} schema already grants it.
+ *       <p>Refactoring Rationale: the images were previously accumulated in a process-local temporary
+ *       file and staged only after the record walk finished. A staging failure therefore left the
+ *       database work and the watermark committed while the only copy of the images was deleted with
+ *       the file, so the redrive read above the watermark, found nothing, and reported a clean run
+ *       with zero counters over a reject the ledger still held. A table is the only place that image
+ *       can outlive the attempt that produced it, which is why the transactional outbox the plan
+ *       already adopts for the authorization reply at its section 0.4.3 is the pattern here too.</p>
+ *       <p>Assumptions: the grain is one row per record ACCOUNTED FOR rather than one row per
+ *       reject, because the counters this replaces reported both a processed total and a rejected
+ *       total and a reject-only table can reconstruct only the second. Its owning migration is
+ *       {@code services/batch-service/src/main/resources/db/migration/V4__batch_posting_reject_outbox.sql},
+ *       so the schema ruling below is unaffected: the table is inside {@code batch} and adds no
+ *       cross-schema reach at all.</p></dd>
+ *
  * </dl>
  *
  * <p><b>What does not belong in this package.</b> No repository implementation class. No
@@ -361,7 +390,7 @@
  *
  * <h2>Why this package reaches four schemas it does not own</h2>
  *
- * <p>Nine of the eleven interfaces target a table another bounded context owns. That is the single
+ * <p>Nine of the twelve interfaces target a table another bounded context owns. That is the single
  * most consequential fact about this package, so it is stated before any query detail rather than
  * after it: {@code ledger} belongs to {@code transaction-service}, {@code account} to
  * {@code account-service}, {@code card} to {@code card-service} and {@code reference} to
@@ -553,13 +582,15 @@
  *
  * <h2>The two ordered-walk contracts this package defines</h2>
  *
- * <p>Four of the eleven interfaces expose an ordered walk, and in every case the ordering is part of
+ * <p>Five of the twelve interfaces expose an ordered walk, and in every case the ordering is part of
  * the contract rather than a convenience. A walk in a different order still returns every row and
  * still produces output a comparison rejects, so each ordering is recorded here with the evidence
  * that settles it. Assumptions: the two added by the customer and card projections are the simplest
- * of the four -- each orders by its own single-column primary key, which is the record-key order the
+ * of the five -- each orders by its own single-column primary key, which is the record-key order the
  * reference's sequential read produces -- and each records that reasoning on its own method rather
- * than here, because neither needed a multi-source argument to settle it.</p>
+ * than here, because neither needed a multi-source argument to settle it. Assumptions: the fifth,
+ * the reject-outbox replay, orders by the feed's ingest sequence, which is the order the records were
+ * read in and therefore the order their images occupied the dataset the walk rebuilds.</p>
  *
  * <p><b>The category-balance walk orders by account identifier, then transaction type code, then
  * transaction category code.</b> Assumptions: that ordering is the VSAM key order and is provable

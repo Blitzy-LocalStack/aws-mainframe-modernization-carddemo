@@ -78,10 +78,10 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * <p>Assumptions: three further boundaries hold, and the package charter beside this file is the
  * authority for all of them. Tier one's interest test owns ALL interest arithmetic, including the
  * rounding boundary: the BASELINE divide truncates -- no {@code ROUNDED} phrase appears in
- * {@code app/cbl/CBACT04C.cbl} or anywhere else under {@code app/cbl} -- while the delivered target
- * reduces with {@code Money.GENERAL_ROUNDING}, which is {@code HALF_UP}, and that difference is
- * registered as divergence {@code C-ROUNDING}. No case here asserts any rounding behaviour on that
- * path. Tier two's job tests own the graded return-code tier, the inversion
+ * {@code app/cbl/CBACT04C.cbl} or anywhere else under {@code app/cbl} -- and the delivered target
+ * reduces that one quotient with {@code Money.BASELINE_INTEREST_ROUNDING}, which is
+ * {@code RoundingMode.DOWN}, so the two agree and no divergence is registered. No case here asserts
+ * any rounding behaviour on that path. Tier two's job tests own the graded return-code tier, the inversion
  * of a baseline step gate into an orchestrator predicate, the business-date job parameter, the combine
  * step's job-level semantics, and parity against the reference goldens; this class owns only the
  * repository's ordering. And no case here asserts a byte image or the fixed-width encoding of a record:

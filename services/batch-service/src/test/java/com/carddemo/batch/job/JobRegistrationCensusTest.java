@@ -10,6 +10,7 @@ import com.carddemo.batch.repository.CardRepository;
 import com.carddemo.batch.repository.CardXrefRepository;
 import com.carddemo.batch.repository.CustomerRepository;
 import com.carddemo.batch.repository.DailyTransactionRepository;
+import com.carddemo.batch.repository.PostingRejectOutboxRepository;
 import com.carddemo.batch.repository.TransactionCategoryBalanceRepository;
 import com.carddemo.batch.repository.TransactionRejectRepository;
 import com.carddemo.batch.repository.TransactionRepository;
@@ -95,6 +96,14 @@ class JobRegistrationCensusTest {
                 .withBean(TransactionRepository.class, () -> mock(TransactionRepository.class))
                 .withBean(TransactionRejectRepository.class,
                         () -> mock(TransactionRejectRepository.class))
+                // WHY : Assumptions: the reject outbox is contributed because PostTransactionsJob's
+                //       bean method takes it -- a posting reject's 430-byte image is now written into
+                //       batch.posting_reject_outbox inside the same per-record transaction as the
+                //       reject row, so the seam is a constructor dependency and not an internal
+                //       detail. Like the projections above it carries no stub behaviour, because this
+                //       census asserts which beans are REGISTERED and never runs a job body.
+                .withBean(PostingRejectOutboxRepository.class,
+                        () -> mock(PostingRejectOutboxRepository.class))
                 .withBean(TransactionCategoryBalanceRepository.class,
                         () -> mock(TransactionCategoryBalanceRepository.class))
                 .withBean(PostingValidationService.class, () -> mock(PostingValidationService.class))

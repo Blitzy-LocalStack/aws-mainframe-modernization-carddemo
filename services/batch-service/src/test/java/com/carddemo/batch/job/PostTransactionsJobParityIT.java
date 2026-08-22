@@ -158,14 +158,24 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  *
  * <p>Assumptions: the second class is a dropped {@code FILLER} span. The migration plan's rule T1 drops
  * {@code FILLER} rather than mapping it to a column, so the entity carries no member for it and the
- * encoder rebuilds it as blanks; the reference's two writers disagree about it, so there is no single
- * value to rebuild it as. Measured across the nine trees: the twenty bytes at offset 330 of every
- * {@code tranfile.expected} are LOW VALUES, because
+ * encoder writes its own low-value pad there; the reference's two writers disagree about it, so there is
+ * no single value an encoder could rebuild it as. Measured across the nine trees: the twenty bytes at
+ * offset 330 of every {@code tranfile.expected} are LOW VALUES, because
  * {@code app/cbl/CBTRN02C.cbl:426-438} moves the posted fields into a record area individually and
  * never touches its pad; the twenty-two bytes at offset 28 of {@code tcatbal.expected} are ASCII ZEROS
  * in the eight scenarios whose category row was rewritten, inherited from the seed image, and LOW
  * VALUES in {@code zero_balance} alone, whose row was created -- {@code INITIALIZE} at
  * {@code app/cbl/CBTRN02C.cbl:504} does not reach a {@code FILLER} item.</p>
+ *
+ * <p>Assumptions: normalising these spans rather than comparing them is a REGISTERED consequence of
+ * that disagreement and not a convenience. {@code D-TCATBAL-FILLER-DB-RENDER} and
+ * {@code D-TRAN-PAD-PROVENANCE}, both in section 7.4 of
+ * {@code docs/architecture/cobol-to-service-traceability.md}, record that a row read back from the
+ * ledger schema carries no pad provenance once rule T1 has dropped the span, so the create arm is
+ * byte-identical and the rewrite arm cannot be. The spans are not merely excluded:
+ * {@link #theNormalisedSpansHoldExactlyWhatIsClaimedOnBothSides()} asserts what each side actually
+ * holds -- the produced low values, and the committed ASCII zeros on the eight rewritten trees -- so
+ * the normalisation cannot hide a change on either side of the comparison.</p>
  *
  * <p>Assumptions: the account master and the reject stream are normalised NOWHERE and are compared
  * whole, three hundred and four hundred and thirty bytes respectively. Their pads agree already, and
@@ -460,11 +470,11 @@ class PostTransactionsJobParityIT {
      * row, so both normalised spans are populated by a real write.</p>
      *
      * <p>Assumptions: the four claims asserted are the four the class header measures -- the job writes
-     * the injected instant into the processing stamp, the encoder rebuilds both pads as blanks, the
-     * committed posted record's pad holds low values, and the committed category record's pad holds
-     * ASCII zeros on this scenario's update arm. If any of the four ever stops holding, the policy
-     * above has stopped describing the artifacts and this case says so rather than the comparison
-     * silently absorbing it.</p>
+     * the injected instant into the processing stamp, both encoders write the LOW VALUE into the
+     * dropped pad rather than a blank, the committed posted record's pad holds low values, and the
+     * committed category record's pad holds ASCII zeros on this scenario's update arm. If any of the
+     * four ever stops holding, the policy above has stopped describing the artifacts and this case
+     * says so rather than the comparison silently absorbing it.</p>
      *
      * @throws Exception if the framework's own launch path raises, or a committed file cannot be read
      */

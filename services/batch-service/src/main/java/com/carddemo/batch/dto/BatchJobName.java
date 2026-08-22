@@ -346,12 +346,19 @@ public enum BatchJobName {
      * not anything calls this method.</p>
      *
      * <p>Assumptions: the derivation is a rule the job classes already follow and not a guess about
-     * them. Five of the seven jobs declare {@code STEP_NAME} as their own {@code JOB_NAME} followed by
-     * {@value #STEP_NAME_SUFFIX}; the export and import jobs name their single step with the bare
-     * {@code JOB_NAME} instead, because each is one step with nothing to distinguish it from its job.
-     * Stripping the suffix when it is present and resolving what remains therefore covers both
-     * spellings, and {@code BatchJobNameTest} asserts the round trip for every constant under both
-     * spellings so the rule cannot rot silently if a step is renamed.</p>
+     * them. All seven jobs declare {@code STEP_NAME} as their own {@code JOB_NAME} followed by
+     * {@value #STEP_NAME_SUFFIX}. Stripping the suffix when it is present and resolving what remains
+     * therefore covers every step name this module writes, and {@code BatchJobNameTest} asserts the
+     * round trip for every constant under both spellings so the rule cannot rot silently if a step is
+     * renamed.</p>
+     *
+     * <p>Refactoring Rationale: the export and import jobs used to name their single step with the
+     * bare {@code JOB_NAME}, on the reasoning that one step with nothing to distinguish it from its
+     * job needs no suffix. The cost was that any query over the ledger filtering on the suffix -- the
+     * obvious way to select this module's step rows -- silently returned five of the seven jobs and
+     * gave no indication that two were missing. Uniformity is worth more here than the shorter name.
+     * Trade-offs: the tolerance for a bare name is KEPT rather than removed, because ledger rows
+     * written by an earlier build still carry it and this method has to resolve those too.</p>
      *
      * <p>Alternatives Considered: this derivation against the ledger taking the job name as a parameter
      * of its own entry point, which is what the delivered wiring does. The parameter won on directness:

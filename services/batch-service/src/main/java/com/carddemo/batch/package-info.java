@@ -102,14 +102,15 @@
  * asserts it. Arithmetic order is preserved under transformation rule T4: a product is formed at full
  * precision and only then divided.</p>
  *
- * <p>Trade-offs: the reference accrual reduces by discarding its surplus digits where this module
- * rounds half up, so on a quotient landing exactly on a half cent this module credits one cent more.
- * The difference is registered as divergence {@code C-ROUNDING} in
- * {@code docs/architecture/cobol-to-service-traceability.md}, and it is registered rather than removed
- * because transformation rule T3 names half up for the money path and states no exception for the
- * accrual. A predecessor of this paragraph described a second, truncating contract that avoided the
- * cent; that constant is withdrawn, and this module is where the divergence shows up because it is the
- * module that accrues.</p>
+ * <p>Assumptions: the reference accrual reduces by discarding its surplus digits and so does this
+ * module, under {@code Money.BASELINE_INTEREST_ROUNDING}, so on a quotient landing exactly on a half
+ * cent the two credit the same amount and no divergence is registered; {@code C-ROUNDING}, the
+ * identifier the half-up reading carried, is withdrawn in section 7.5 of
+ * {@code docs/architecture/cobol-to-service-traceability.md}. Trade-offs: the money path therefore
+ * carries two modes rather than one, and transformation rule T3's half up is the general default that
+ * governs every reduction except this quotient. The exception is accepted because the plan pins this
+ * one formula to the reference at its section 0.7.3 and makes the golden masters its oracle at 0.7.7,
+ * and this module is where that shows up because it is the module that accrues.</p>
  *
  * <p>Assumptions: a business date arrives as a job parameter and is never read from the clock. That
  * is what makes a rerun reproducible, and it is the property the golden comparison depends on --

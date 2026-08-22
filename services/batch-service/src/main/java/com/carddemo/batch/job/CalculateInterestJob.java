@@ -93,15 +93,19 @@ import org.springframework.transaction.PlatformTransactionManager;
  * re-expressed here. Dividing first would reduce the intermediate to two decimals and then scale it up
  * again, which yields a different number of cents on many inputs.</p>
  *
- * <p>Trade-offs: the division reduces half up under {@code Money.GENERAL_ROUNDING}, the one mode the
- * shared money type declares, and the reference would reduce it differently. A search for
+ * <p>Assumptions: the division discards its surplus digits under
+ * {@code Money.BASELINE_INTEREST_ROUNDING}, which is the mode the shared money type reserves for this
+ * one quotient, and it is what the reference does rather than a departure from it. A search for
  * {@code ROUNDED} across all 652 lines of the reference returns nothing and an untagged COBOL
- * {@code COMPUTE} discards its surplus digits, so on a quotient landing exactly on a half cent the
- * reference credits one cent less than this job does. The cost is accepted because transformation rule
- * T3 names half up for the money path and states no exception for the accrual, and it is recorded as
- * divergence {@code C-ROUNDING} in {@code docs/architecture/cobol-to-service-traceability.md} rather
- * than absorbed. What that buys is one money contract across the module: a reader does not have to
- * establish which of two modes governs the formula in front of them.</p>
+ * {@code COMPUTE} discards its surplus digits, so this job discards them too, under
+ * {@code Money.BASELINE_INTEREST_ROUNDING}. On a quotient landing exactly on a half cent it therefore
+ * credits what the reference credits, and no divergence is registered for the reduction --
+ * {@code C-ROUNDING} is withdrawn in section 7.5 of
+ * {@code docs/architecture/cobol-to-service-traceability.md}. Trade-offs: the module now carries two
+ * money modes rather than one, so a reader does have to establish which governs the formula in front of
+ * them. That cost is accepted because the plan pins this formula to the reference at its section 0.7.3
+ * and makes the goldens the oracle at 0.7.7, and a cent of drift here reaches the account balance the
+ * next inclusive over-limit comparison is made against.</p>
  *
  * <h2>Where the generated transactions go, and the three datasets not to confuse</h2>
  *
@@ -536,13 +540,14 @@ public class CalculateInterestJob {
         //       The delegate multiplies at full precision and only then divides with an explicit scale
         //       and rounding mode; dividing first would round the intermediate to two decimals and then
         //       scale it back up, which lands on a different cent for many balance-and-rate pairs.
-        // WHY : Trade-offs: the delegate reduces half up, under the one mode the shared money type
-        //       declares, and the reference would reduce this quotient by discarding its surplus digits
-        //       -- it carries no ROUNDED phrase anywhere in its 652 lines. On a quotient landing exactly
-        //       on a half cent the reference therefore credits a cent less. That difference is accepted
-        //       because transformation rule T3 states half up for the money path without exception, and
-        //       it is registered as divergence C-ROUNDING with the accrual's parity evidence rather than
-        //       removed by applying a second mode here.
+        // WHY : Assumptions: the delegate reduces by discarding surplus digits, under
+        //       Money.BASELINE_INTEREST_ROUNDING, which is what the reference does -- it carries no
+        //       ROUNDED phrase anywhere in its 652 lines and its receiving field is PIC S9(09)V99. On a
+        //       quotient landing exactly on a half cent the two therefore agree to the cent, and no
+        //       divergence is registered for the reduction. Trade-offs: this is the one place the money
+        //       path departs from transformation rule T3's half up, which costs the module a second
+        //       mode; the plan pins this formula to the reference at its section 0.7.3 and makes the
+        //       goldens the oracle at 0.7.7, so the alternative cost a byte comparison.
         // WHY : Assumptions: the per-row value is accumulated ALREADY REDUCED, because :467 adds
         //       WS-MONTHLY-INT after the preceding statement has stored it into PIC S9(09)V99. The
         //       account increment is therefore the sum of the reduced terms and not the reduction of

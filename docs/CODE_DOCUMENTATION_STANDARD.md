@@ -459,21 +459,23 @@ compilable as written.
  * multiplying second yields a different final cent on many balances, and the
  * golden-master comparison would flag it as a parity failure.
  *
- * <p>WHY this path reduces half up although the reference discards the digits.
- * Trade-offs: the mode is a property of the money contract, not of the caller.
- * The accrual paragraph in {@code app/cbl/CBACT04C.cbl} stores its result into
- * {@code PIC S9(09)V99} and carries no {@code ROUNDED} phrase — and no statement
- * anywhere in that program does — so the reference discards the surplus digits, which
- * is truncation toward zero. This method reduces half up instead, through
- * {@code Money.GENERAL_ROUNDING}, the one mode the money type declares, because
- * transformation rule T3 states that mode for the money path and states no exception
- * for the accrual. The one cent this can differ by is registered as divergence
- * {@code C-ROUNDING} rather than absorbed. The mode is not reachable from a signature,
- * so no call site selects anything.
+ * <p>WHY this path discards the surplus digits where the rest of the money path
+ * rounds them. Assumptions: the reference's reduction is established by an ABSENCE,
+ * so it has to be stated rather than inferred. The accrual paragraph in
+ * {@code app/cbl/CBACT04C.cbl} stores its result into {@code PIC S9(09)V99} and
+ * carries no {@code ROUNDED} phrase — and no statement anywhere in that program
+ * does — so the store discards the surplus digits, which is truncation toward zero.
+ * This method reduces the same way, through {@code Money.BASELINE_INTEREST_ROUNDING},
+ * because the plan names this one formula as the one that must be bit-exact and makes
+ * the committed goldens its oracle. Trade-offs: {@code Money.GENERAL_ROUNDING}, half
+ * up, remains the general money-path default and is the LESS specific instruction
+ * where the two meet, so this method is the single operation on that type not reduced
+ * by it. Neither mode is reachable from a signature, so no call site selects anything.
  *
  * @param categoryBalance the category balance to accrue against; never {@code null}
  * @param annualRatePercent the annual disclosure-group rate as a percentage
- * @return the monthly interest, scaled to two decimal places, reduced half up
+ * @return the monthly interest, scaled to two decimal places, with the surplus
+ *     fraction digits discarded exactly as the reference statement discards them
  * @throws IllegalArgumentException if either argument is negative
  */
 public Money monthlyInterest(Money categoryBalance, BigDecimal annualRatePercent) {

@@ -319,10 +319,10 @@ missing from the tree listing below, so a reader could not have derived the righ
 from this document either. The listing is now re-measured against the module by the same
 test, name by name.
 
-<!-- source-inventory: 46 production classes + 11 charters = 57 compilation units -->
+<!-- source-inventory: 48 production classes + 11 charters = 59 compilation units -->
 **Eleven packages** — a root and ten flat subpackages — each with one
 `package-info.java` under `src/main/java` (see §8, they are mandatory), holding
-**46** production classes for **57** compilation units. That census is machine-checked the
+**48** production classes for **59** compilation units. That census is machine-checked the
 same way the test census in §10.1 is: `ServiceReadmeInventoryTest` parses the
 `source-inventory` comment below and re-measures all three figures against this module's own
 tree, so a class added without a listing edit fails the build instead of ageing quietly in
@@ -357,7 +357,7 @@ step silently. Each caption is now derivable from the listing directly beneath i
 derivable from `find src/main/java -name '*.java'` and its `src/test/java` counterpart, so a
 reader who doubts a number can settle it in one command rather than by trusting this paragraph.
 
-⚠ Assumptions: the test-side caption is **62 `*Test` + 1 `*IT`**, so this module carries 63 test
+⚠ Assumptions: the test-side caption is **63 `*Test` + 1 `*IT`**, so this module carries 64 test
 classes. Two earlier drafts of this paragraph stated 56 (55 plus one) and then 61 plus one; each
 was measured before the cases that overtook it were added, and neither is a figure to carry
 forward, because the `test-inventory` marker in §10.1 is the copy `ServiceReadmeInventoryTest`
@@ -374,11 +374,11 @@ package would be reported as drift rather than folded into its parent's row. `sr
 holds **thirteen** package directories, each with its own charter — the eleven that mirror
 `src/main/java` plus `architecture` and `profile`, which have no production counterpart.
 
-<!-- source-inventory: 46 production types + 11 charters in 11 packages -->
+<!-- source-inventory: 48 production types + 11 charters in 11 packages -->
 <!-- source-listing:begin -->
 
 ```text
-src/main/java/com/carddemo/common/          11 packages · 46 production types
+src/main/java/com/carddemo/common/          11 packages · 48 production types
   package-info.java
   CardDemoCommonAutoConfiguration.java
   money/          package-info.java · Money.java · MoneyModule.java
@@ -394,6 +394,8 @@ src/main/java/com/carddemo/common/          11 packages · 46 production types
                   RethrowingDigestErrorHandler.java
   web/            package-info.java · CorrelationIdFilter.java · PageResponse.java
                   CursorToken.java · RequestBodySizeFilter.java
+                  RejectedRequestErrorReportValve.java
+                  RejectedRequestErrorReportValveCustomizer.java
   security/       package-info.java · JwtRoleConverter.java · CardNumberMasker.java
                   CognitoAccessTokenValidator.java · OpaqueIdentifier.java
                   HtmlTextEncoder.java · InternalServiceToken.java
@@ -412,7 +414,7 @@ src/main/resources/
   META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
   META-INF/services/tools.jackson.databind.JacksonModule
 
-src/test/java/com/carddemo/common/           13 packages · 62 *Test + 1 *IT
+src/test/java/com/carddemo/common/           13 packages · 63 *Test + 1 *IT
   package-info.java · CardDemoCommonAutoConfigurationIT.java
   architecture/   package-info.java · LayeringRulesTest.java            ← pinned, §7
                   ApplicationContextWiringContractTest.java
@@ -447,6 +449,7 @@ src/test/java/com/carddemo/common/           13 packages · 62 *Test + 1 *IT
   web/            package-info.java · CorrelationIdFilterTest.java
                   CursorTokenTest.java · PageResponseTest.java
                   RequestBodySizeFilterTest.java
+                  RejectedRequestErrorReportValveTest.java
   security/       package-info.java · JwtRoleConverterTest.java
                   CognitoAccessTokenValidatorTest.java · CardNumberMaskerTest.java
                   OpaqueIdentifierTest.java · HtmlTextEncoderTest.java
@@ -537,7 +540,7 @@ the last re-measurement of this table found each row exactly as printed and the 
 | `error` | `GlobalExceptionHandlerTest` 71 · `ApiErrorTest` 36 · `AbendDetailTest` 21 · `GlobalExceptionHandlerPathMaskingTest` 20 · `ApiErrorSecurityHandlersTest` 9 · `ProtocolRefusalRenderingTest` 9 · `AbsentAndUnconvertibleValueTest` 8 across 1 `@Nested` group · `RejectedParameterOrderingTest` 5 across 1 `@Nested` group · `ApiErrorWireShapeTest` 4 | **183** |
 | `security` | `OpaqueIdentifierTest` 30 · `HtmlTextEncoderTest` 24 · `SealedSelectorTest` 18 · `ApprovedOriginPolicyTest` 15 · `InternalServiceTokenTest` 14 · `CardNumberMaskerTest` 13 · `CognitoAccessTokenValidatorTest` 11 · `MaskedCardNumberTest` 9 · `JwtRoleConverterTest` 7 | **141** |
 | `money` | `MoneyTest` 31 · `MoneyModuleTest` 10 | **41** |
-| `web` | `PageResponseTest` 17 · `CursorTokenTest` 16 · `RequestBodySizeFilterTest` 14 · `CorrelationIdFilterTest` 9 | **56** |
+| `web` | `PageResponseTest` 17 · `CursorTokenTest` 16 · `RequestBodySizeFilterTest` 14 · `CorrelationIdFilterTest` 9 · `RejectedRequestErrorReportValveTest` 8 | **64** |
 | `messaging` | `MessagingCorrelationIdTest` 16 · `RethrowingDigestErrorHandlerTest` 14 · `MessageExpiryTest` 11 · `QueueDestinationTest` 11 · `QueueClientBudgetTest` 8 · `MessageSinkSuppressionTest` 6 | **66** |
 | `observability` | `FailureSummaryTest` 17 · `MetricsConfigTest` 12 · `ThrowableDigestTest` 11 · `StructuredLoggingDefaultsTest` 8 · `SensitiveLoggingAndJsonStrictnessDefaultsTest` 7 · `LogSafeTextTest` 5 | **60** |
 | `architecture` | `LayeringRulesTest` 10 · `PublishedContractClosureTest` 8 · `SharedKernelInventoryTest` 12 across 1 `@Nested` group · `RuntimeConfigurationContractTest` 5 · `PackageCharterInventoryTest` 4 across 1 `@Nested` group · `ServiceCatalogInventoryTest` 4 across 1 `@Nested` group · `ServiceReadmeInventoryTest` 6 across 1 `@Nested` group · `ApplicationContextWiringContractTest` 3 · `CrossSchemaPrivilegeContractTest` 3 across 1 `@Nested` group · `DiagnosticRenderingRulesTest` 3 · `ReleasedMigrationImmutabilityTest` 2 · `RuntimeDeletePrivilegeContractTest` 2 | **62** |
@@ -706,7 +709,7 @@ repeats in the type's own Javadoc.
 
 | Class | Responsibility | Source authority |
 |---|---|---|
-| `Money` | `BigDecimal` scale-2 arithmetic under **one** fixed mode, `GENERAL_ROUNDING` = `HALF_UP`, governing every reduction to cents including the accrual quotient; exposes the multiply-then-divide interest helper. The reference truncates that quotient instead, which is registered divergence `C-ROUNDING`, never target behaviour — see §5.3.1 | `app/cpy/CVACT01Y.cpy` line 7; `app/cbl/CBACT04C.cbl` lines 464 to 465 |
+| `Money` | `BigDecimal` scale-2 arithmetic under **two** fixed modes, neither selectable: `GENERAL_ROUNDING` = `HALF_UP` reduces a supplied amount, a general product and a general quotient, and `BASELINE_INTEREST_ROUNDING` = `DOWN` reduces the monthly accrual **and nothing else**, because the reference statement discards its surplus digits; exposes the multiply-then-divide interest helper — see §5.3.1 | `app/cpy/CVACT01Y.cpy` line 7; `app/cbl/CBACT04C.cbl` lines 464 to 465 and line 168 |
 | `MoneyModule` | Jackson module serialising money as a JSON **string** | §5.1 |
 | `CopybookLayout` | The layout descriptor — offset, length and type per field; one descriptor, many readers | `app/cpy/**` record copybooks |
 | `FixedWidthCodec` | Record ⇄ field-map by offset and length | all base record copybooks |
@@ -842,7 +845,7 @@ One invariant, at every hop:
 | Hop | Representation |
 |---|---|
 | SQL | `NUMERIC(p,2)` |
-| Java | `BigDecimal`, scale 2, `RoundingMode.HALF_UP` |
+| Java | `BigDecimal`, scale 2, `RoundingMode.HALF_UP` — except the monthly accrual, which discards with `RoundingMode.DOWN` because the reference statement does (§5.3.1) |
 | Python (the ETL) | `Decimal` |
 | JSON on the wire | **string** |
 
@@ -956,72 +959,91 @@ not a reduced sum. Accumulating at full precision and reducing once at the end
 produces a different total, because rounding does not distribute over addition.
 Reduce each term, then add.
 
-#### 5.3.1 One rounding mode for the whole money path, not selectable
+#### 5.3.1 Two rounding modes, split by one operation, neither selectable
 
-This module declares **one** rounding mode, and it governs every reduction to cents:
+This module declares **two** rounding modes. The boundary between them is exactly one
+operation wide:
 
 | Mode | Value | Operations it governs |
 |---|---|---|
-| `GENERAL_ROUNDING` | `HALF_UP` | `Money.of(BigDecimal)`, `multipliedBy`, `dividedBy`, `monthlyInterest` |
+| `GENERAL_ROUNDING` | `HALF_UP` | `Money.of(BigDecimal)`, `multipliedBy`, `dividedBy` |
+| `BASELINE_INTEREST_ROUNDING` | `DOWN` | `monthlyInterest` — and nothing else in the migration |
 
-**No entry point takes a rounding mode**, so no call site can select one.
+**No entry point takes a rounding mode**, so no call site can select one, and neither mode
+can be applied to an operation the other governs.
 
-Assumptions: the single mode is transformation rule T3 applied literally — it states
-the money path as an exact decimal at scale 2 with `RoundingMode.HALF_UP` in Java and
-states no exception for any operation, while rule T4 constrains the accrual's operand
-ORDER and leaves its mode to T3. Three of the four operations have no reference
-statement to be faithful to at all. The fourth, the accrual quotient, is the one place
-the reference would reduce differently: the statement at
-[`app/cbl/CBACT04C.cbl` lines 464 to 465] stores its quotient into a field declared
-with two decimal places at line 168 and carries **no `ROUNDED` phrase**, and no
-statement anywhere in that program's 652 lines carries one either, so a COBOL store
-into a fixed-scale item discards the surplus digits — truncation toward zero.
+Assumptions: the general mode is transformation rule T3 applied to the operations that
+rule describes — it states the money path as an exact decimal at scale 2 with
+`RoundingMode.HALF_UP` in Java, and all three of the operations it governs here have **no
+reference statement to be faithful to at all**, so the rule's named mode is the only
+instruction available for them.
 
-**Where the target and the baseline part company.** On every vector the reference
-fixtures carry they agree, which is precisely why a test using only those vectors would
-not detect a wrong mode — and why the registered divergence is unreachable on the
-shipped interest corpus:
+Assumptions: the accrual mode is the reference's own reduction, and the evidence is an
+**absence** rather than a phrase. The statement at
+[`app/cbl/CBACT04C.cbl` lines 464 to 465] stores its quotient into
+`05 WS-MONTHLY-INT PIC S9(09)V99` declared at line 168 and carries **no `ROUNDED`
+phrase**; no statement anywhere in that program's 652 lines carries one either, and a
+COBOL store into a fixed-scale item without that phrase discards the surplus digits —
+truncation toward **zero**. `DOWN` reproduces that on both signs; `FLOOR` would agree on a
+positive quotient and disagree on a negative one, and negatives are reachable because the
+balance picture at `app/cpy/CVACT01Y.cpy` line 7 and the rate picture at
+`app/cpy/CVTRA02Y.cpy` line 9 are both signed.
 
-| Balance | Annual rate | Quotient | `monthlyInterest` | Baseline truncation | Discriminating? |
+**Where the two modes part company.** Only on a quotient landing exactly on a half cent,
+which is why a test drawn from the reference fixtures alone cannot detect a wrong mode:
+
+| Balance | Annual rate | Quotient | `monthlyInterest` (`DOWN`) | Half-up counterfactual | Discriminating? |
 |---|---|---|---|---|---|
 | `1000.00` | `25.00` | `20.8333…` | `20.83` | `20.83` | no |
 | `1000.00` | `2.50` | `2.0833…` | `2.08` | `2.08` | no |
-| `1000.00` | `2.71` | `2.2583…` | **`2.26`** | **`2.25`** | **yes** |
-| `1000.80` | `2.50` | `2.0850` exactly | **`2.09`** | **`2.08`** | **yes** |
-| `-1000.80` | `2.50` | `-2.0850` exactly | **`-2.09`** | **`-2.08`** | **yes** |
+| `1000.00` | `15.00` | `12.5000` exactly | `12.50` | `12.50` | no — every shipped interest fixture |
+| `1000.00` | `2.71` | `2.2583…` | **`2.25`** | **`2.26`** | **yes** |
+| `1000.80` | `2.50` | `2.0850` exactly | **`2.08`** | **`2.09`** | **yes** |
+| `2419.60` | `15.00` | `30.245` exactly | **`30.24`** | **`30.25`** | **yes** |
+| `-1000.00` | `2.71` | `-2.2583…` | **`-2.25`** | **`-2.26`** | **yes** |
 
-`MoneyTest` asserts each discriminating vector three ways — against the API, against an
-independently computed half-up counterfactual, and against the baseline's truncating
-arithmetic which **must differ** — so both the mode and the registered difference are
-pinned rather than described. The negative side is asserted with two vectors, because no
-single negative input separates half up from both truncation and `FLOOR`, and the
-exact-quotient claim is asserted with `RoundingMode.UNNECESSARY` so it throws rather
-than passing if a future edit makes the vector inexact.
+`MoneyTest` asserts each discriminating vector three ways — against the API, against
+independently computed truncating arithmetic, and against the half-up counterfactual it
+**must differ from** — so the mode is pinned rather than described. The negative side
+carries two vectors, because no single negative input separates truncation toward zero from
+both half up and `FLOOR`, and each exact-quotient claim is asserted with
+`RoundingMode.UNNECESSARY` so it throws rather than passing if a future edit makes the
+vector inexact.
 
-**The one-cent difference is registered, not absorbed.** It is
-[divergence `C-ROUNDING` in §7.4 of the traceability register](../../docs/architecture/cobol-to-service-traceability.md),
-which carries the reachability measurement and the consequence: line 467 adds each
-reduced term into the account total and line 352 adds that total to the account balance,
-so a cent gained on a transaction category reaches the balance the next **inclusive**
-over-limit comparison is made against.
+**Refactoring Rationale: do not collapse these back into one mode.** This module carried
+`BASELINE_INTEREST_ROUNDING`, withdrew it in favour of a single half-up path, and carries it
+again; the withdrawal registered the resulting cent as divergence `C-ROUNDING`, and that
+identifier is now
+[withdrawn in §7.5 of the traceability register](../../docs/architecture/cobol-to-service-traceability.md)
+because the difference no longer exists. The argument for one mode was that rule T3 names
+half up for the money path and states no exception. It fails on precedence: rule T3 is the
+money path's **general** default, while §0.7.3 of the plan names this accrual formula as
+the one that must be **bit-exact**, §0.1.1.2 requires its observable behaviour to be
+unchanged and §0.7.7 makes the committed interest goldens its oracle — so a mode that
+differs on an exact half makes the accrual un-comparable at cent precision, which is what
+those sections exist to prevent. Rule T9's documented-divergence allowance records a
+difference that cannot be avoided; it does not authorise creating one.
 
-**Alternatives Considered: a second mode fixed at `DOWN` for the accrual alone**, which
-this module carried for a time and which reduced the difference to nothing. Rejected on
-precedence: the plan is frozen, it admits a behavioural difference from the reference
-when the difference is registered, and it admits a departure from a transformation rule
-only where it states an exception — so matching the baseline cent for cent would satisfy
-parity by breaking the rule that exists to keep the money path uniform. Alternatives
-Considered: keeping the mode on the accrual entry point so a parity caller could ask for
-truncation while other callers kept half up. Rejected because a selectable mode is a
-second money contract in disguise — two call sites computing the same accrual could
-disagree by a cent with nothing in either one signalling that they had chosen
-differently.
+**Why the cent would not have stayed local.** Line 467 of `app/cbl/CBACT04C.cbl` adds each
+already-reduced term into the account total and line 352 adds that total to the account
+balance once per account, so a cent gained on a transaction category would reach the balance
+the next **inclusive** over-limit comparison is made against
+(`app/cbl/CBTRN02C.cbl` line 407). Measured: three category rows of `1000.80` at `2.50`
+move a balance by `6.24` under the shipped mode and by `6.27` under half up.
 
-Trade-offs: one mode costs a cent against the baseline in the one computation where the
-baseline states a mode at all, where two modes cost every reader of this module having to
-know which operation takes which. The cost is paid down by the difference being bounded
-at one cent on an exact half, by its being unreachable on the shipped corpus, and by its
-being asserted in both directions rather than described.
+**Alternatives Considered: a rounding-mode parameter on the accrual entry point**, so a
+parity caller could ask for truncation while other callers kept half up. Rejected because a
+selectable mode is a third money contract in disguise — two call sites computing the same
+accrual could disagree by a cent with nothing in either one signalling that they had chosen
+differently. **Alternatives Considered: one truncating mode for the whole money path**, which
+would need no boundary at all. Rejected because the three general operations have no
+reference statement behind them, rule T3 names their mode explicitly, and silently truncating
+a report total or a division would be a change with no baseline to justify it.
+
+Trade-offs: two modes cost every reader of this module having to know which operation takes
+which, and the cost is paid down by the split being one method wide and stated in that
+method's own contract. What it buys is an accrual that matches the committed goldens cent for
+cent, which is the property the plan makes non-negotiable.
 
 ---
 
@@ -1774,7 +1796,7 @@ need justifying.
 | Decision | Category or categories | What the comment must say |
 |---|---|---|
 | `Money` scale 2, and the multiply-then-divide helper | `Assumptions:` + `Trade-offs:` | Cite `app/cbl/CBACT04C.cbl` lines 464 to 465; state that dividing first *"yields different cents on many inputs"* and that at a 2.50 rate it yields `0.00` |
-| `GENERAL_ROUNDING` half up for every reduction, the accrual included | `Assumptions:` + `Trade-offs:` | State that rule T3 names the mode with no exception, and that the reference accrual carries no `ROUNDED` phrase so the target differs by a cent on an exact half — registered as `C-ROUNDING`; see §5.3.1 |
+| `GENERAL_ROUNDING` half up for the general reductions, `BASELINE_INTEREST_ROUNDING` `DOWN` for the accrual alone | `Assumptions:` + `Trade-offs:` + `Refactoring Rationale:` | State that rule T3 names half up for the general money path, that the reference accrual carries no `ROUNDED` phrase so it discards toward zero, and that §0.7.3 pins that one formula to bit-exactness; record that the constant was once withdrawn in favour of a single half-up path so the next reader does not flip it back — see §5.3.1 |
 | The accrual carrying no rounding-mode parameter | `Alternatives Considered:` + `Trade-offs:` | Name the mode-taking form and reject it: a selectable mode is a second money contract in disguise, so two call sites could disagree by a cent unnoticed — see §5.3.1 |
 | Money serialised as a JSON string | `Alternatives Considered:` | Name the JSON number and reject it — most clients parse it into an IEEE-754 double and destroy exactness at the boundary the user sees |
 | `ZonedDecimalCodec`'s explicit EBCDIC sign mode | `Assumptions:` | Quote `tests/README.md` lines 273 to 274 verbatim; note that EBCDIC here names a sign convention, not an encoding |
@@ -1795,8 +1817,8 @@ need justifying.
 
 ### 10.1 What each suite must cover
 
-<!-- test-inventory: 62 tests + 1 integration tests -->
-**63** test classes: **62** matching `*Test`, run by Surefire, and **1** matching `*IT`, run by
+<!-- test-inventory: 63 tests + 1 integration tests -->
+**64** test classes: **63** matching `*Test`, run by Surefire, and **1** matching `*IT`, run by
 Failsafe. That census is machine-checked — `ServiceReadmeInventoryTest` in this module parses the
 comment above and re-measures both figures against this module's own test tree, so the count fails
 the build when it drifts rather than ageing quietly in prose.
@@ -1918,7 +1940,8 @@ files.
 | `2022-06-10 19:27:53.000000` | — | exactly **26** characters; the final four fractional digits are structurally always `0000` (§6.2) |
 | balance `1000.00` × rate `15.00` ÷ 1200 | **`12.50`** | exact; divide-first gives `10.00` |
 | balance `1000.00` × rate `2.50` ÷ 1200 | **`2.08`** | quotient `2.0833…`, and **both** rounding modes give `2.08`, so this vector does **not** discriminate them; **divide-first gives `0.00`** — the failure multiply-before-divide prevents |
-| balance `1000.80` × rate `2.50` ÷ 1200 | **`2.09`** half up / **`2.08`** baseline truncation | quotient `2.0850` **exactly** — the only kind of vector on which the target and the baseline differ at all, and therefore the one a rounding-regression test must carry |
+| balance `1000.80` × rate `2.50` ÷ 1200 | **`2.08`** — the accrual discards, as the reference statement does | quotient `2.0850` **exactly** — the only kind of vector on which the two rounding modes differ at all, and therefore the one a rounding-regression test must carry; half up would give `2.09` |
+| balance `2419.60` × rate `15.00` ÷ 1200 | **`30.24`** | quotient `30.245` **exactly**, at the rate the interest fixtures themselves carry — the second exact-half vector, and the one verified against a running job; half up would give `30.25` |
 | `'DEFAULT   '` | `DEFAULT` | a disclosure-group id arrives space-padded; **trailing blanks are padding, not data** |
 
 ⚠ **A false-positive class to avoid when hunting for negative overpunch.**

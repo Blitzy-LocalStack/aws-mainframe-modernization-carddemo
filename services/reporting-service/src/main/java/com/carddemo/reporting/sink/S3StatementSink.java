@@ -42,6 +42,32 @@ import java.util.Objects;
  * <p>Assumptions: this class is created per run rather than registered as a singleton bean. It holds two
  * open uploads, so a shared instance would let two runs write into one artifact, and its lifecycle is
  * exactly one run's.</p>
+ *
+ * <p>⚠️ Refactoring Rationale: publication is {@link #complete()} and {@link #close()} ABORTS, where
+ * {@code close()} used to complete both writers. The old shape read as though it honoured the
+ * complete-versus-close split {@code S3ArtifactWriter} declares, and it defeated it on the one path the
+ * split exists for: every caller holds this sink in a try-with-resources, so a generation that raised
+ * part way unwound through {@code close()}, which completed both uploads and thereby PUBLISHED the
+ * partial artifacts of a run that had just failed. A run that could not render one of its statements left
+ * a complete-looking plain-text object and a complete-looking markup object under its own run prefix,
+ * with no index and no manifest naming them, and no pending multipart upload to show they had been
+ * abandoned -- so nothing reclaimed them and nothing said they were partial. With publication explicit,
+ * an unwind reaches an abort: nothing is stored, which is the disposition the reference has, because
+ * {@code app/jcl/CREASTMT.JCL} deletes both statement outputs at L66 before allocating them fresh at L79
+ * and a run that ends before the allocation therefore leaves neither behind.</p>
+ *
+ * <p>Alternatives Considered: keeping publication in {@code close()} and deleting the two objects from
+ * the failure path instead. Rejected because it publishes and then unpublishes -- a reader listing the
+ * run prefix between the two moments sees exactly the misleading artifact the abort avoids -- and
+ * because it needs a delete grant this task's role does not hold and should not: the write path is
+ * additive by design so that nothing a previous run stored can be removed by a later one's failure.</p>
+ *
+ * <p>Trade-offs: the residue window narrows rather than closing outright. Both artifacts are published by
+ * two separate storage calls, so a store that accepts the first completion and refuses the second leaves
+ * the plain-text object stored while the markup object is aborted. That window is one refused call wide
+ * where it used to be every failed run wide, no object store offers a multi-object commit that would
+ * close it, and the manifest scheme means the residue is never addressable -- the run is disclosed only
+ * by the manifest write that a refused completion never reaches.</p>
  */
 public final class S3StatementSink implements StatementService.StatementSink, AutoCloseable {
 
@@ -140,40 +166,50 @@ public final class S3StatementSink implements StatementService.StatementSink, Au
     }
 
     /**
-     * Publishes both artifacts, attempting the second even when the first fails.
+     * Publishes both artifacts, which a caller reaches only when the whole run was written.
      *
-     * <p>Assumptions: both writers are closed on every path and the second failure is suppressed onto the
-     * first. Returning after the first failure would leave the markup artifact's upload in flight with no
-     * abort, which charges storage for parts that nothing will ever complete.</p>
+     * <p>Purpose: this is the ONE call that makes a run's two artifacts readable, and it is reached from
+     * the success path only. Everything about the failure disposition recorded on the class follows from
+     * that: {@link #close()} cannot publish, so an unwind cannot.</p>
      *
-     * @throws IOException if either artifact could not be published
+     * <p>Assumptions: the plain-text artifact is completed FIRST and a refusal there stops this method
+     * without attempting the markup artifact, whose upload the subsequent {@code close()} then aborts.
+     * Attempting the second completion after the first was refused would store an artifact for a run that
+     * is already known to have failed, which is the residue this shape exists to avoid; the abort needs
+     * no suppression handling of its own because {@code S3ArtifactWriter#close()} does not throw.</p>
+     *
+     * @throws IOException if either artifact could not be published, in which case the manifest write
+     *     that would have disclosed this run is never reached and the previous run stays current
+     * @throws IllegalStateException if this sink has already been completed or already been closed,
+     *     because either means a caller has lost track of which run it is publishing
+     */
+    public void complete() throws IOException {
+        plainText.complete();
+        markup.complete();
+    }
+
+    /**
+     * Discards artifacts that were never completed, publishing nothing.
+     *
+     * <p>⚠️ Refactoring Rationale: this method used to complete both writers, and completing them is
+     * what published them; the reasoning for moving that to {@link #complete()} is recorded in full on
+     * the class. What is left here is the resource-clause half: it runs on every path, including the
+     * unwind of a failed run, and on that path it must leave the run's two keys holding nothing.</p>
+     *
+     * <p>Assumptions: this declares no checked exception, matching {@code S3ReportSink} and the writer
+     * beneath it, so a failed generation's own exception reaches the caller unaccompanied by a
+     * storage-housekeeping failure it did not cause. The reasoning is recorded on
+     * {@code S3ArtifactWriter#close()}.</p>
+     *
+     * <p>Assumptions: both writers are closed unconditionally and in sequence, so a close after a
+     * completion is a no-op on each and a close after a partial completion aborts only the writer that
+     * was never completed. That idempotence is required rather than incidental: every caller holds this
+     * sink in a try-with-resources, so this method always runs after {@link #complete()} on the success
+     * path and must neither fail there nor publish anything a second time.</p>
      */
     @Override
-    public void close() throws IOException {
-        // WHY : Assumptions: publication is an explicit `complete()` and close() only releases, which
-        //       is why this method does both rather than relying on the close alone. S3ArtifactWriter
-        //       publishes on complete() and ABORTS an upload that was never completed, so a pass that
-        //       failed part way leaves the previous object standing instead of overwriting it with a
-        //       truncated one. Closing without completing would therefore publish nothing at all.
-        // WHY : Assumptions: both writers are completed, the second failure is suppressed onto the
-        //       first, and both are closed in a finally on every path. Returning after the first
-        //       failure would leave the other artifact's upload in flight with no abort, which charges
-        //       storage for parts that nothing will ever complete.
-        try {
-            try {
-                plainText.complete();
-            } catch (IOException plainTextFailure) {
-                try {
-                    markup.complete();
-                } catch (IOException markupFailure) {
-                    plainTextFailure.addSuppressed(markupFailure);
-                }
-                throw plainTextFailure;
-            }
-            markup.complete();
-        } finally {
-            plainText.close();
-            markup.close();
-        }
+    public void close() {
+        plainText.close();
+        markup.close();
     }
 }

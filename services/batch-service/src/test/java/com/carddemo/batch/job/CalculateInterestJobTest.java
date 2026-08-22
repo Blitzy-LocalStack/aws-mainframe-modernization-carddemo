@@ -618,23 +618,38 @@ class CalculateInterestJobTest {
         }
 
         /**
-         * An unrecognised option on the command line is ignored rather than rejected.
+         * An unrecognised option on the command line is refused by name, not silently ignored.
          *
-         * <p>Assumptions: the tolerance is deliberate and is what lets an orchestration container
-         * override carry arguments this module does not read without failing the task. The two
-         * options this module defines are the job token and the business date; anything else on the
-         * line is left to the framework's own command-line property source.</p>
+         * <p>Assumptions: the parser accepts the job token, the business date and nothing else, so a
+         * third token is a fault rather than an override to pass through. Refactoring Rationale: this
+         * case asserted the OPPOSITE until the module's argument contract was tightened to reject an
+         * unrecognised token before any context exists; it is inverted here rather than deleted,
+         * because the tolerance it used to pin is exactly what let a misspelled option run a job to
+         * completion under a name nobody typed. The expectation is written against the diagnostic's
+         * two load-bearing halves -- the offending token echoed whole, and the accepted options named
+         * -- rather than the whole sentence, so a wording change does not fail a contract check.</p>
          */
         @Test
-        @DisplayName("ignore an unrecognised option instead of refusing the command line")
-        void anUnrecognisedOptionIsIgnored() {
+        @DisplayName("refuse an unrecognised option by name instead of ignoring it")
+        void anUnrecognisedOptionIsRefusedByName() {
             String[] withAnExtraOverride = {
                 BatchApplication.JOB_OPTION + CalculateInterestJob.JOB_NAME,
                 BatchApplication.BUSINESS_DATE_OPTION + COMPACT_BUSINESS_DATE,
                 "--carddemo-unrecognised-override=whatever",
             };
 
-            BatchJobParameters parsed = BatchApplication.parseArguments(withAnExtraOverride);
+            assertThatThrownBy(() -> BatchApplication.parseArguments(withAnExtraOverride))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("--carddemo-unrecognised-override=whatever")
+                    .hasMessageContaining(BatchApplication.JOB_OPTION)
+                    .hasMessageContaining(BatchApplication.BUSINESS_DATE_OPTION);
+
+            String[] withoutTheOverride = {
+                BatchApplication.JOB_OPTION + CalculateInterestJob.JOB_NAME,
+                BatchApplication.BUSINESS_DATE_OPTION + COMPACT_BUSINESS_DATE,
+            };
+
+            BatchJobParameters parsed = BatchApplication.parseArguments(withoutTheOverride);
 
             assertThat(parsed.jobName()).isEqualTo(BatchJobName.CALCULATE_INTEREST);
             assertThat(parsed.requireBusinessDate().token()).isEqualTo(COMPACT_BUSINESS_DATE);

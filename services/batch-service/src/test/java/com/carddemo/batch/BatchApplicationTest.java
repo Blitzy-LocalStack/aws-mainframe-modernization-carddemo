@@ -8,6 +8,9 @@ import com.carddemo.batch.dto.BatchErrorEvent;
 import com.carddemo.batch.dto.BatchJobName;
 import com.carddemo.batch.dto.BatchReturnCode;
 import com.carddemo.batch.service.BatchErrorPublisher;
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -21,6 +24,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.slf4j.LoggerFactory;
 import org.springframework.batch.core.BatchStatus;
 import org.springframework.batch.core.ExitStatus;
@@ -214,6 +219,258 @@ class BatchApplicationTest {
 
         assertThat(BatchApplication.requiredJobName(arguments)).isEqualTo("post-transactions");
         assertThat(BatchApplication.requiredBusinessDate(arguments)).isEqualTo("2022-07-18");
+    }
+
+    /**
+     * Confirms a business-date token that is the right width and character class but names a day that
+     * never occurred is refused during argument resolution.
+     *
+     * <p>Assumptions: the cases cover both accepted layouts and every arm of the calendar chain this
+     * gate consults -- a February 30 in each layout, a February 29 in a non-leap year, a 31st in a
+     * thirty-day month, a month above and below its range, a day above and below its range, and the
+     * all-zero token. The compact spellings are included deliberately: the separated layout alone would
+     * pass against a gate that only ever looked at characters five and eight, and the compact form is
+     * the one the reference driver injects.</p>
+     *
+     * <p>Refactoring Rationale: the assertion is made against {@code parseArguments} rather than only
+     * against the date accessor, because the property being defended is that nothing is STARTED for
+     * such a token. A rejection raised inside the accessor but not reached by the parser would satisfy
+     * an accessor-level test and still run the job.</p>
+     *
+     * @param token the impossible business-date token to submit, supplied by the value source
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"2023-02-30", "2023023000", "2023-02-29", "2023-13-01", "2023-01-00",
+            "2023-00-01", "0000-00-00", "2023-01-32", "2024-04-31", "2023133000"})
+    @DisplayName("a business date naming no day that exists is refused, in either layout")
+    void impossibleBusinessDateIsRefused(String token) {
+        String[] arguments = {VALID_JOB, BatchApplication.BUSINESS_DATE_OPTION + token};
+
+        assertThatThrownBy(() -> BatchApplication.parseArguments(arguments))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(BatchApplication.BUSINESS_DATE_OPTION)
+                .hasMessageContaining(token)
+                .hasMessageContaining("names no day that exists");
+    }
+
+    /**
+     * Confirms the calendar gate refuses only impossibility, and specifically that it does not import
+     * the century and future-date policies of the chain it borrows its month and day rules from.
+     *
+     * <p>Assumptions: {@code 0001-01-01} and {@code 9999-12-31} are the load-bearing cases. Both name
+     * real days and both fail the borrowed chain's century test, so an implementation that had read that
+     * chain's aggregate verdict instead of its month and day components would refuse them -- and this
+     * module accepted them before the gate existed, which makes refusing them a regression rather than
+     * a stricter reading. {@code 2024-02-29} proves the leap arm admits a real leap day rather than
+     * refusing every February 29, and {@code 2022071800} proves the compact layout survives.</p>
+     *
+     * @param token the acceptable business-date token to submit, supplied by the value source
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"2024-02-29", "2022-07-18", "2022071800", "0001-01-01", "9999-12-31",
+            "2100-02-28", "2000-02-29"})
+    @DisplayName("a real day is accepted and returned byte for byte, century notwithstanding")
+    void realBusinessDateIsAcceptedVerbatim(String token) {
+        String[] arguments = {VALID_JOB, BatchApplication.BUSINESS_DATE_OPTION + token};
+
+        assertThat(BatchApplication.requiredBusinessDate(arguments)).isEqualTo(token);
+        assertThat(BatchApplication.parseArguments(arguments).businessDate().orElseThrow().token())
+                .isEqualTo(token);
+    }
+
+    /**
+     * Confirms a token of the accepted width and character class that matches NEITHER layout is refused
+     * here rather than inside a running step.
+     *
+     * <p>Assumptions: every case is exactly ten characters of ASCII digits and hyphen-minus, so each one
+     * passes the width and character-class gate ahead of the calendar gate. That is what makes them the
+     * interesting cases: their fault is discoverable only by asking where the separators are.</p>
+     *
+     * @param token the mislaid-separator token to submit, supplied by the value source
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"2023-02-3-", "20-23-02-1", "2023-0218-", "-023-02-18", "2023--2-18"})
+    @DisplayName("a ten-character token in neither layout is refused, naming both layouts")
+    void unrecognisedDateLayoutIsRefused(String token) {
+        String[] arguments = {VALID_JOB, BatchApplication.BUSINESS_DATE_OPTION + token};
+
+        assertThatThrownBy(() -> BatchApplication.parseArguments(arguments))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(token)
+                .hasMessageContaining("YYYY-MM-DD")
+                .hasMessageContaining("YYYYMMDDnn");
+    }
+
+    /**
+     * Confirms an impossible business date is reported through the same named usage diagnostic and the
+     * same hard-failure tier as any other malformed command line, with no application context created.
+     *
+     * <p>Assumptions: the capture is asserted to hold the usage event as its FIRST record, which is what
+     * shows the rejection happened during argument resolution. A rejection raised later would be preceded
+     * by the framework's own startup records on the same logger.</p>
+     */
+    @Test
+    @DisplayName("an impossible business date reports the usage code at the hard-failure tier")
+    void impossibleBusinessDateReportsUsageCode() {
+        int status = BatchApplication.execute(
+                new String[] {VALID_JOB, "--business-date=2023-02-30"});
+
+        assertThat(status).isEqualTo(BatchApplication.EXIT_STATUS_HARD_FAILURE);
+        assertThat(this.captured.list).isNotEmpty();
+        assertThat(this.captured.list.getFirst().getFormattedMessage())
+                .contains("event=batch.usage.rejected")
+                .contains(BatchApplication.ERROR_CODE_USAGE)
+                .contains("2023-02-30");
+    }
+
+    /**
+     * Confirms an unrecognised token is refused by name rather than skipped, whether it is spelled as an
+     * option or supplied bare.
+     *
+     * <p>Assumptions: the typo case {@code --business-dat=} is the one that motivated the gate, and it is
+     * asserted to echo the whole token INCLUDING its value. The near-miss and the option supplied with no
+     * value at all are different faults with different remedies, and echoing only the text before the
+     * equals sign would render them identically.</p>
+     *
+     * @param token the unrecognised token to place on an otherwise valid command line
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"--bogus=1", "post-transactions", "--business-dat=2022-07-18",
+            "--jobs=export", "-job=export", "--spring.profiles.active=prod", "--help=x",
+            "--helpful", "--job", "--business-date"})
+    @DisplayName("an unrecognised token is refused by name, not skipped")
+    void unrecognisedArgumentIsRefusedByName(String token) {
+        String[] arguments = {VALID_JOB, VALID_DATE, token};
+
+        assertThatThrownBy(() -> BatchApplication.parseArguments(arguments))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(token)
+                .hasMessageContaining("is not an option this module accepts");
+    }
+
+    /**
+     * Confirms the shape gate is applied before the option gates, so a command line carrying both a typo
+     * and the two correct options reports the typo instead of parsing successfully.
+     */
+    @Test
+    @DisplayName("a typo alongside two correct options is reported, not overlooked")
+    void aTypoBesideCorrectOptionsIsStillReported() {
+        int status = BatchApplication.execute(
+                new String[] {"--business-dat=2022-07-18", VALID_JOB, VALID_DATE});
+
+        assertThat(status).isEqualTo(BatchApplication.EXIT_STATUS_HARD_FAILURE);
+        assertThat(this.captured.list.getFirst().getFormattedMessage())
+                .contains("event=batch.usage.rejected")
+                .contains(BatchApplication.ERROR_CODE_USAGE)
+                .contains("--business-dat=2022-07-18");
+    }
+
+    /**
+     * Confirms the unrecognised-token diagnostic passes through the same neutralising and bounding path
+     * as every other echoed value, so a hostile token cannot forge or flood a log record.
+     *
+     * <p>Assumptions: both properties are asserted in one test because they are one property of one
+     * code path. The token carries a line break, a NUL and enough characters to exceed the echo bound,
+     * so a diagnostic that neutralised without bounding, or bounded without neutralising, fails here.</p>
+     */
+    @Test
+    @DisplayName("a hostile unrecognised token is neutralised and bounded before it is echoed")
+    void unrecognisedArgumentDiagnosticIsSanitisedAndBounded() {
+        String hostile = "--x\nevent=forged\u0000" + "y".repeat(400);
+
+        int status = BatchApplication.execute(new String[] {VALID_JOB, VALID_DATE, hostile});
+
+        assertThat(status).isEqualTo(BatchApplication.EXIT_STATUS_HARD_FAILURE);
+        String logged = this.captured.list.getFirst().getFormattedMessage();
+        assertThat(logged).doesNotContain("\n").doesNotContain("\u0000");
+        assertThat(logged).contains("...[truncated]");
+        assertThat(logged).contains(BatchApplication.ERROR_CODE_USAGE);
+    }
+
+    /**
+     * Confirms a null element in a programmatically supplied argument array is skipped rather than
+     * rejected, so the two option gates remain the ones that report what is genuinely missing.
+     *
+     * <p>Assumptions: a process argument vector cannot carry one -- the platform passes every argument
+     * as text -- so this defends only the Java-to-Java call path, where a rejection would have no token
+     * to name.</p>
+     */
+    @Test
+    @DisplayName("a null argument element is skipped, not reported as an unrecognised token")
+    void nullArgumentElementIsSkipped() {
+        String[] arguments = {VALID_JOB, null, VALID_DATE};
+
+        assertThat(BatchApplication.parseArguments(arguments).jobName())
+                .isEqualTo(BatchJobName.POST_TRANSACTIONS);
+    }
+
+    /**
+     * Confirms {@code --help} answers with the usage text on standard output, starts nothing, and emits
+     * no failure diagnostic at all.
+     *
+     * <p>Assumptions: the returned status is asserted to be the hard-failure tier rather than the clean
+     * one. Zero from this process asserts that the NAMED JOB completed cleanly and the orchestration gate
+     * tests for exactly zero, so a state definition that carried this token by mistake would report a
+     * clean night in which nothing ran. The absence of an error code, not the status, is what
+     * distinguishes this from a rejection, and both are asserted.</p>
+     *
+     * <p>Assumptions: standard output is redirected and restored around the call. Nothing in this module
+     * runs test methods concurrently, so the redirect cannot be observed by another test.</p>
+     */
+    @Test
+    @DisplayName("--help prints the usage text, starts nothing and reports no error code")
+    void helpPrintsUsageAndStartsNothing() {
+        PrintStream original = System.out;
+        ByteArrayOutputStream answered = new ByteArrayOutputStream();
+        int status;
+        try {
+            System.setOut(new PrintStream(answered, true, StandardCharsets.UTF_8));
+            status = BatchApplication.execute(new String[] {BatchApplication.HELP_OPTION});
+        } finally {
+            System.setOut(original);
+        }
+
+        String printed = answered.toString(StandardCharsets.UTF_8);
+        assertThat(status).isEqualTo(BatchApplication.EXIT_STATUS_HARD_FAILURE);
+        assertThat(printed)
+                .contains("Usage:")
+                .contains(BatchApplication.JOB_OPTION)
+                .contains(BatchApplication.BUSINESS_DATE_OPTION)
+                .contains("post-transactions")
+                .contains("2022071800")
+                .contains("No other argument is read.");
+        assertThat(printed).contains(BatchApplication.JOB_NAMES);
+        assertThat(this.captured.list).isNotEmpty();
+        assertThat(this.captured.list)
+                .noneMatch(event -> event.getFormattedMessage()
+                        .contains(BatchApplication.ERROR_CODE_USAGE));
+        assertThat(this.captured.list.getFirst().getFormattedMessage())
+                .contains("event=batch.usage.requested");
+    }
+
+    /**
+     * Confirms a help request is answered whatever else the command line carries, so an operator who
+     * cannot yet compose a valid command line can still discover what one looks like.
+     */
+    @Test
+    @DisplayName("--help is answered even beside a command line that would otherwise be rejected")
+    void helpIsAnsweredBesideARejectedCommandLine() {
+        PrintStream original = System.out;
+        ByteArrayOutputStream answered = new ByteArrayOutputStream();
+        int status;
+        try {
+            System.setOut(new PrintStream(answered, true, StandardCharsets.UTF_8));
+            status = BatchApplication.execute(
+                    new String[] {"--job=no-such-job", BatchApplication.HELP_OPTION});
+        } finally {
+            System.setOut(original);
+        }
+
+        assertThat(status).isEqualTo(BatchApplication.EXIT_STATUS_HARD_FAILURE);
+        assertThat(answered.toString(StandardCharsets.UTF_8)).contains("Usage:");
+        assertThat(this.captured.list)
+                .noneMatch(event -> event.getFormattedMessage()
+                        .contains(BatchApplication.ERROR_CODE_USAGE));
     }
 
     /**

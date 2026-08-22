@@ -1432,11 +1432,20 @@ history. Reaching this runbook with the schemas absent means the apply did not c
 # WHY : Assumptions: ON_ERROR_STOP is set so a partially applied security model cannot be
 #       mistaken for a successful boundary. Without it psql continues past a failed GRANT
 #       and exits zero, leaving a role with privileges nobody granted deliberately.
-# WHY : Assumptions: V0 is idempotent by construction, so re-running it is part of the
-#       documented sequence rather than a workaround. It must be re-run once the per-service
-#       Flyway migrations have created their tables: the batch role's UPDATE on
-#       account.accounts is granted BY NAME inside a to_regclass guard, so on a first run
-#       that grant is reported as outstanding in a NOTICE instead of being applied.
+# WHY : Assumptions: V0 is idempotent by construction, so re-running it is safe and a
+#       re-run against an already-migrated database is a useful confirmation -- the guarded
+#       block for the batch role's UPDATE on account.accounts is silent once that grant is
+#       in place, and reports it outstanding while it is not.
+# WHY : Refactoring Rationale: this note used to say V0 MUST be re-run after the per-service
+#       Flyway migrations, because that named grant sits inside a to_regclass guard and is
+#       skipped on a first run. The instruction was wrong about who performs it rather than
+#       about the mechanism: no step in the deployed path re-runs this file, so an
+#       environment provisioned by following it was left without that privilege and the
+#       nightly posting job failed its account rewrite. The grant is now issued by
+#       services/account-service/src/main/resources/db/migration/
+#       V3__batch_account_write_grant.sql, in the account context's own chain and as the role
+#       that owns the table, so no second pass over this file is required by anything.
+#       Confirm the outcome with the probe below instead of re-running this file for it.
 # WHY : Assumptions: `apply-credentials` follows immediately and takes no options. V0
 #       creates all sixteen login roles with NO password, so until it has run every role
 #       exists and none can authenticate -- and a per-role invocation is exactly what leaves
@@ -1452,6 +1461,50 @@ sequences; schema-wide `SELECT` on `account` with `UPDATE` on the single named t
 `account.accounts`; and `SELECT` alone on `reference` and on `card`. The reason for the write half is
 a single unit of work: transaction posting commits the transaction, the category balance and the
 account together, as `app/cbl/CBTRN02C.cbl` does, and the grant is what keeps that one ACID commit.
+
+Every grant in that list except one comes from `V0`. The exception is the `UPDATE` on
+`account.accounts`: a privilege that names a table cannot be issued by a file that runs before any
+table exists, so it is issued by
+`services/account-service/src/main/resources/db/migration/V3__batch_account_write_grant.sql` inside
+the account context's own Flyway chain. Confirm it before staging or loading anything, because a
+missing grant here does not surface until the nightly chain rewrites an account master.
+
+```bash
+# WHAT: prove the batch role's account write is present and is exactly one table wide.
+# WHY : Assumptions: run this AFTER the owning services have started and applied their chains, which
+#       is what creates account.accounts and issues the grant. Run before it and the first query
+#       fails on a missing relation, which is a sequencing answer rather than a privilege answer.
+# WHY : Assumptions: has_table_privilege is read rather than a job being run. It answers from the
+#       engine's own access-control list, so it holds on an empty database and it distinguishes a
+#       missing grant from a job that failed for some other reason.
+# WHY : Trade-offs: the second query is the half that stops an over-broad remedy passing for a fix.
+#       Granting UPDATE across the account schema would satisfy the first query and would also hand
+#       the batch role account.customers, which carries the encrypted national and government-issued
+#       identifiers, so both are asserted or neither is worth asserting.
+psql --set ON_ERROR_STOP=on -Atc \
+  "SELECT has_table_privilege('carddemo_batch', 'account.accounts', 'UPDATE')"
+psql --set ON_ERROR_STOP=on -Atc \
+  "SELECT format('%I.%I %s', t.schemaname, t.tablename, p.priv)
+     FROM pg_catalog.pg_tables t
+     CROSS JOIN (VALUES ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE')) p(priv)
+    WHERE t.schemaname = 'account'
+      AND has_table_privilege('carddemo_batch',
+                              format('%I.%I', t.schemaname, t.tablename), p.priv)
+      AND NOT (t.tablename = 'accounts' AND p.priv = 'UPDATE')"
+```
+
+The first must print `t` and the second must print nothing at all. On a first query printing `f`, read
+`SELECT version, success FROM account.flyway_schema_history ORDER BY installed_rank` and act on which
+of two states it shows. **No version `3` row** means the environment is running an `account-service`
+image built before that migration, so redeploy that service and let its own chain apply it. **A
+version `3` row with `success = true`** means the role `carddemo_batch` did not exist when the chain
+ran, so that migration reported the omission as a warning — `account.accounts UPDATE was NOT granted`
+in the service's log — and applied nothing; the bootstrap had not been applied to this database yet.
+Flyway will not re-run a recorded migration, so re-apply the bootstrap instead: its own guarded block
+finds the table this time and issues the grant. Use the mechanism the environment was provisioned
+with — on the deployed path that is a `-replace=aws_lambda_invocation.database_bootstrap` apply, as
+[deploy.md](deploy.md) Step 4c records, because `V0` reads each credential from a session setting.
+Do not type the grant by hand and do not widen it to the schema.
 
 ```bash
 # WHAT: confirm the bootstrap ran before staging anything, without needing a path into the VPC.

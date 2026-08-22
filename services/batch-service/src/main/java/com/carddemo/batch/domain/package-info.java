@@ -37,17 +37,24 @@
  * {@code docs/CODE_DOCUMENTATION_STANDARD.md}, cited by path and never restated.
  * <h2>What this package holds, and which contract each mapping is bound to</h2>
  *
- * <p>Eleven entity types belong here and no twelfth; with this charter that makes twelve compilation
- * units. Each mapping is listed with the schema-qualified table it targets and the baseline
- * record that fixes its field set.
+ * <p>Twelve entity types belong here and no thirteenth; with this charter that makes thirteen
+ * compilation units. Each mapping is listed with the schema-qualified table it targets and the
+ * baseline record that fixes its field set.
  *
- * <p>Assumptions: twelve is this package's contract as the migration plan assigns it and also a
- * measurement of the directory, because all eleven entities have landed -- {@code BatchRun},
- * {@code DailyFeedWatermark}, {@code Account}, {@code CardXref}, {@code DisclosureGroup},
- * {@code Transaction}, {@code DailyTransaction}, {@code TransactionCategoryBalance},
- * {@code TransactionReject}, {@code Customer} and {@code Card} -- so nothing in the roster below is
- * planned. The roster stays closed at eleven, which is what keeps the question "which entity owns
- * this table" with a definite answer.
+ * <p>Assumptions: thirteen is this package's contract as the migration plan assigns it and also a
+ * measurement of the directory, because all twelve entities have landed -- {@code BatchRun},
+ * {@code DailyFeedWatermark}, {@code PostingRejectOutbox}, {@code Account}, {@code CardXref},
+ * {@code DisclosureGroup}, {@code Transaction}, {@code DailyTransaction},
+ * {@code TransactionCategoryBalance}, {@code TransactionReject}, {@code Customer} and {@code Card}
+ * -- so nothing in the roster below is planned. The roster stays closed at twelve, which is what
+ * keeps the question "which entity owns this table" with a definite answer.
+ *
+ * <p>Refactoring Rationale: the roster read eleven and CLOSED at eleven while a posting reject's
+ * 430-byte image had no durable home at all -- it was accumulated in a process-local temporary file
+ * and staged only after the record walk, so a staging failure destroyed the only copy of it while the
+ * reject row it described stayed committed. {@code PostingRejectOutbox} is the twelfth, and it is a
+ * reopening of the same kind as the tenth and eleventh: the directory was short of what a job needed,
+ * not the count.
  *
  * <p>Refactoring Rationale: the roster read ten and CLOSED at ten while {@code DailyFeedWatermark}
  * was already mapped in this directory, and the omission was not a miscount -- it left the module's
@@ -188,6 +195,20 @@
  *   <dd>The one mapping whose contract is not a single copybook. The reject record is a rejected
  *       daily transaction carried whole, followed by a numeric reason and its description.</dd>
  *
+ *   <dt>{@code PostingRejectOutbox} into {@code batch.posting_reject_outbox}, with no baseline
+ *       record behind it</dt>
+ *   <dd>The THIRD table this module owns, and the third mapping here answering to no copybook. It
+ *       carries one row per feed record the posting job accounted for, holding that record's
+ *       430-byte reject image where the record was rejected, so the image commits with the reject
+ *       row and the feed watermark rather than after them.
+ *       <p>Assumptions: the image is stored as fixed-width {@code CHAR(430)} and transcoded through
+ *       ISO-8859-1, so the bytes round-trip unchanged instead of being re-derived from
+ *       {@code ledger.transaction_rejects} -- that table belongs to {@code transaction-service} and
+ *       carries neither a run nor a business date, so it cannot say which run produced a row.
+ *       Trade-offs: the same 430 bytes therefore exist in two schemas at once. That duplication is
+ *       accepted because the two answer different questions: the ledger's row is the reject itself,
+ *       and this row is the evidence of which run must publish it.</p></dd>
+ *
  * </dl>
  *
  * <p>Assumptions: the 430 figure is derived rather than assumed, and it is corroborated twice
@@ -243,7 +264,7 @@
  * {@code account} and {@code card} to {@code account-service} and {@code card-service}, and
  * {@code reference} to {@code reference-service}. This module reaches them through a narrowly-scoped database grant
  * held by a dedicated role, and through nothing else. Reading this package as though it owned
- * eleven tables is the single most consequential misreading available here, which is why the
+ * twelve tables is the single most consequential misreading available here, which is why the
  * boundary is stated before any mapping detail rather than after it.</p>
  *
  * <p>Assumptions: the grant graph is not created here, and neither are the tables. The schemas,
@@ -286,12 +307,13 @@
  *
  * <h2>Why the mappings are local rather than borrowed</h2>
  *
- * <p>Nine of the eleven tables mapped here already have an entity somewhere else in the reactor,
+ * <p>Nine of the twelve tables mapped here already have an entity somewhere else in the reactor,
  * so declaring a second mapping over the same table looks like duplication and has to be
  * justified as something other than that. Assumptions: the ratio moved from seven-of-eight to
- * nine-of-ten when the customer and card projections landed, and it is nine-of-ELEVEN now that
- * {@code DailyFeedWatermark} is counted -- the denominator moved and the numerator did not, because
- * the watermark is a table this module owns rather than one it borrows. The exceptions are therefore
+ * nine-of-ten when the customer and card projections landed, and it is nine-of-TWELVE now that
+ * {@code DailyFeedWatermark} and {@code PostingRejectOutbox} are counted -- the denominator moved
+ * twice and the numerator did not, because both are tables this module owns rather than borrows.
+ * The exceptions are therefore
  * the two {@code batch} mappings, and every other mapping here is a second view of a table another
  * context defines.</p>
  *
@@ -351,7 +373,7 @@
  * right to. Keeping the commit atomic needs no coordinator at all, which makes it both the
  * lower-risk option and the one that preserves observable behaviour.</p>
  *
- * <p>Assumptions: the write set is closed and the grant is what closes it. Of the eleven mappings
+ * <p>Assumptions: the write set is closed and the grant is what closes it. Of the twelve mappings
  * here, {@code DisclosureGroup}, {@code Customer} and {@code Card} are read-only from this module,
  * and {@code DailyTransaction} is an input stream that no job in this package writes. A mapping in this package that acquired a
  * write path into {@code reference} would be reaching outside the granted set, and would fail on
@@ -502,8 +524,8 @@
  * <h2>What this package exposes, and why every column decision is parity-observable</h2>
  *
  * <p>What consumers get from this package is nine mappings over tables another service owns and
- * two entities over the two tables this module owns. What makes that a stricter contract than it
- * sounds is that five of the eleven land directly on a committed expectation file, so a column type,
+ * three entities over the three tables this module owns. What makes that a stricter contract than it
+ * sounds is that five of the twelve land directly on a committed expectation file, so a column type,
  * length or scale chosen wrongly here does not merely misbehave -- it fails a byte comparison.
  * Under {@code tests/golden/posting/} the pairings are: {@code Account} against
  * {@code acctdat.expected}, {@code Transaction} against {@code tranfile.expected},

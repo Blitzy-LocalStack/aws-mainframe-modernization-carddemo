@@ -7,6 +7,7 @@ import com.carddemo.common.control.OnlineWriteGateInterceptor;
 import com.carddemo.common.error.GlobalExceptionHandler;
 import com.carddemo.common.money.MoneyModule;
 import com.carddemo.common.web.CorrelationIdFilter;
+import com.carddemo.common.web.RejectedRequestErrorReportValveCustomizer;
 import com.carddemo.common.web.RequestBodySizeFilter;
 import com.carddemo.common.web.CursorToken;
 import java.time.Clock;
@@ -27,6 +28,7 @@ import org.springframework.context.ApplicationContextInitializer;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.Ordered;
 import org.springframework.core.env.MutablePropertySources;
 import org.springframework.core.env.StandardEnvironment;
 import org.springframework.core.env.SystemEnvironmentPropertySource;
@@ -121,7 +123,8 @@ class CardDemoCommonAutoConfigurationIT {
      * wrong way round.</p>
      */
     @Test
-    @DisplayName("a servlet web context receives the clock, money module, both filters and the advice")
+    @DisplayName("a servlet web context receives the clock, money module, both filters, the advice"
+            + " and the container-refusal customizer")
     void contributesEveryComponentToAWebContext() {
         new WebApplicationContextRunner()
                 .withConfiguration(UNDER_TEST)
@@ -166,6 +169,26 @@ class CardDemoCommonAutoConfigurationIT {
                             .as("an unnamed bound must fall back to the documented default rather"
                                     + " than leaving the body unbounded")
                             .isEqualTo(RequestBodySizeFilter.DEFAULT_MAX_BODY_BYTES);
+
+                    // WHY : Assumptions: the container-refusal customizer is asserted HERE beside the
+                    //       advice, the two filters and the firewall handler, because it is the fifth
+                    //       member of the same refusal-rendering set and its condition is evaluated in
+                    //       the same pass. It is the only member of that set that answers a request no
+                    //       filter and no advice is ever invoked for -- one the container refused
+                    //       before selecting a web application -- so a consumer that received the
+                    //       other four and not this one would still answer that class of refusal as an
+                    //       unparseable page carrying no correlation identity.
+                    assertThat(context).hasSingleBean(RejectedRequestErrorReportValveCustomizer.class);
+
+                    // WHY : Assumptions: the precedence is asserted rather than left to the class,
+                    //       because it is load-bearing rather than cosmetic. This customizer removes
+                    //       whatever error reporter the host already holds, and it can only do that
+                    //       deterministically if it is applied after every customizer that adds one.
+                    //       An assertion on presence alone would pass for a precedence that let the
+                    //       framework's own reporter be installed afterwards.
+                    assertThat(context.getBean(RejectedRequestErrorReportValveCustomizer.class)
+                            .getOrder())
+                            .isEqualTo(Ordered.LOWEST_PRECEDENCE);
                 });
     }
 
@@ -228,6 +251,17 @@ class CardDemoCommonAutoConfigurationIT {
                     assertThat(context).doesNotHaveBean(GlobalExceptionHandler.class);
                     assertThat(context).doesNotHaveBean(FilterRegistrationBean.class);
                     assertThat(context).doesNotHaveBean(RequestRejectedHandler.class);
+
+                    // WHY : Assumptions: the container-refusal customizer is asserted ABSENT here for
+                    //       a reason the other absences do not carry. Its own conditions name the
+                    //       embedded container's classes, which ARE on this module's test path, so the
+                    //       class condition passes and only the web-application condition withholds
+                    //       the bean. That makes this the case that proves the withholding is decided
+                    //       by application type and not merely by a classpath that happens to be
+                    //       thin: a batch task assembled with the container on its path but no web
+                    //       server must still not receive a customizer for a server it never starts.
+                    assertThat(context)
+                            .doesNotHaveBean(RejectedRequestErrorReportValveCustomizer.class);
                 });
     }
 

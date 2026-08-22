@@ -502,13 +502,13 @@ services, repositories and adapters as non-`package-info.java` main-source Java:
 
 | Maven module | main-source classes | owned Flyway migrations |
 |---|---:|---|
-| `common-lib` | 46 | none — it owns no schema |
+| `common-lib` | 48 | none — it owns no schema |
 | `auth-service` | 30 | `V1__auth.sql`, `V2__auth_identity_sync.sql`, `V3__auth_identity_sync_operations.sql`, `V4__auth_folded_user_id.sql`, `V5__auth_folded_user_id_trim.sql`, `V6__auth_canonical_user_id.sql`, `V7__auth_identity_sync_provisioning_guard.sql`, `V8__auth_addressable_user_id.sql` |
-| `account-service` | 45 | `V1__account.sql`, `V2__account_inquiry_reply_ledger.sql` |
+| `account-service` | 45 | `V1__account.sql`, `V2__account_inquiry_reply_ledger.sql`, `V3__batch_account_write_grant.sql` |
 | `card-service` | 25 | `V1__card.sql`, `V2__card_num_digit_domain.sql` |
 | `transaction-service` | 40 | `V1__ledger.sql`, `V2__ledger_transaction_id_allocator.sql`, `V3__ledger_bytewise_collation.sql` |
 | `reference-service` | 56 | `V1__reference.sql`, `V2__seed_reference.sql`, `V3__reference_inquiry_reply_ledger.sql`, `V4__drop_reference_inquiry_reply_ledger.sql` |
-| `batch-service` | 64 | `V1__batch.sql`, `V2__batch_feed_watermark.sql`, `V3__batch_run_contract_restatement.sql` |
+| `batch-service` | 66 | `V1__batch.sql`, `V2__batch_feed_watermark.sql`, `V3__batch_run_contract_restatement.sql`, `V4__batch_posting_reject_outbox.sql` |
 | `authorization-service` | 57 | `V1__authorization.sql`, `V2__authorization_outbox_claim_version.sql`, `V3__authorization_outbox_fifo_identities.sql`, `V4__authorization_outbox_send_acceptance.sql` |
 | `reporting-service` | 64 | none by design — it owns no table, only read-only views |
 
@@ -568,11 +568,50 @@ the transaction boundary and the post-commit append of the 430-byte reject image
 component owns the decisions and the writes, so the test drives the same code the night
 runs. One class in, none out, and no migration, queue or schema object with it.
 
+Refactoring Rationale: `batch-service` then reads 66 where it read 64, and its migration
+list gains `V4__batch_posting_reject_outbox.sql`. The two classes are
+`com.carddemo.batch.domain.PostingRejectOutbox` and
+`com.carddemo.batch.repository.PostingRejectOutboxRepository`, and they exist because the
+sentence above — "the post-commit append of the 430-byte reject image" — described the
+defect rather than the design. That append went to a process-local temporary file, so a
+staging failure left the posted rows, the reject rows and the feed watermark committed while
+the only copy of the images was deleted with the file; the redrive then read above the
+watermark, found nothing, and reported a clean run with zero counters over a reject the
+ledger still held. The image now commits inside the same per-record transaction as the
+record work, and the dataset is rebuilt by replaying those rows in ingest order. Two classes
+in, none out, one migration with them, and no queue or cross-schema reach — the table sits
+in `batch`, which this module owns.
+
+Refactoring Rationale: the `account-service` migration list gains
+`V3__batch_account_write_grant.sql` without the class figure moving, because a grant is a
+privilege and not a type. It arrives as a new version rather than as an edit to `V1__account.sql`
+for the immutability reason above, and it arrives in this module rather than in
+`data-migration/sql/V0__schemas_and_roles.sql` because V0 runs before any service migrates:
+the grant it carried was guarded on `account.accounts` already existing, so on every first
+deployment the guard was false and the batch role could not write the account master at all.
+Siting the grant in the chain that creates the table makes the ordering structural.
+
 The counts exclude package charters, which are
 documentation rather than delivery. `ServiceCatalogInventoryTest` in `common-lib`
 asserts every count in this table against the module it names, so a figure here that
 drifts from the tree fails the build — which is what a countable claim in a document
 has to be to be worth stating.
+
+Refactoring Rationale: `common-lib` reads 48 where it read 46. Two classes were added,
+`com.carddemo.common.web.RejectedRequestErrorReportValve` and its companion
+`com.carddemo.common.web.RejectedRequestErrorReportValveCustomizer`, and they exist because a
+request target the container refuses while decoding it never acquires a web application: the
+filter chain, the dispatcher servlet, an exception advice and a context error page are all
+downstream of a selection that never happens, so none of them can answer it. Every published
+contract in this repository declares one problem body and one correlation header for a refusal,
+and that class of refusal was answered instead by the container's own markup status page with no
+correlation identifier — a body a JSON client cannot parse and no identifier with which to report
+it. The valve occupies the one container stage that still runs and writes the same envelope every
+other refusal carries; the customizer installs it into the single reporter slot deterministically,
+which is an ordering guarantee no individual service can establish for itself. Both are in the
+shared kernel rather than in a bounded context for the reason the error advice is: eight filter
+chains answering one refusal in eight shapes is the drift a shared kernel exists to prevent. Two
+classes in, none out, and no migration, queue or schema object with them.
 
 Refactoring Rationale: `common-lib` reads 45 where it read 44. The class added is
 `com.carddemo.common.codec.DateInquiryReplyCodec`, the positional reply body of the

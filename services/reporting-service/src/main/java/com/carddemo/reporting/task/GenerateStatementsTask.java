@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -60,16 +61,23 @@ import software.amazon.awssdk.services.s3.S3Client;
  * previous run staying intact and readable under its own keys is what lets a failed run leave a working
  * one behind.</p>
  *
- * <p>Trade-offs: the sink is closed in a try-with-resources so the artifacts are published only when the
- * run has finished writing, and a run that throws leaves the previous run current. What is given up
- * is that a partially produced run yields nothing rather than a partial file; what is bought is that no
- * reader can be handed a truncated statement file that looks complete.</p>
+ * <p>Trade-offs: the sink is COMPLETED inside the try block and its resource clause only aborts, so the
+ * artifacts are published exactly when the run has finished writing and a run that throws leaves the
+ * previous run current and stores nothing of its own. What is given up is that a partially produced run
+ * yields nothing rather than a partial file; what is bought is that no reader can be handed a truncated
+ * statement file that looks complete, and no operator has to reclaim an object no manifest names.</p>
  */
 @Component("generate-statements")
 public class GenerateStatementsTask implements ReportingTask {
 
     /** Journal logger for this task's outcome. */
     private static final Logger LOG = LoggerFactory.getLogger(GenerateStatementsTask.class);
+
+    /**
+     * The diagnostic-context key under which this run's identifier is published while the generator
+     * runs, so that the generator's own lines name the run it minted here.
+     */
+    private static final String RUN_CONTEXT_KEY = "statementRunId";
 
     /** The statement generator this task drives. */
     private final StatementService statements;
@@ -143,14 +151,46 @@ public class GenerateStatementsTask implements ReportingTask {
         String runPrefix = StatementService.runKeyPrefix(prefix, runId);
 
         StatementRunOutcome outcome;
+        // WHY : Assumptions: the run identifier is put into the diagnostic CONTEXT for the duration of
+        //       the generator call, so every line the generator logs while it runs names the run --
+        //       including its per-statement omission warning, which is the one line an operator needs
+        //       attributed and the one the generator cannot attribute itself. The generator takes a sink
+        //       and nothing else, and the identifier is minted here, so it has no way to name the run
+        //       from inside.
+        //       Alternatives Considered: (1) threading the identifier in as a second parameter to
+        //       generateStatements. Rejected because the generator would then accept a value it uses for
+        //       nothing but a log line, and every implementation of the seam and every test double would
+        //       carry it. (2) Adding a fifth key to the console pattern in the shared kernel's defaults.
+        //       Rejected because that pattern is read by all eight services and only this one has a run
+        //       identifier, so seven would render an always-empty column. Neither is needed: the default
+        //       structured console format is `ecs`, which emits every context entry, so a key placed here
+        //       reaches the log with no shared change at all.
+        //       Trade-offs: the key is removed in a finally rather than left for the next task, because
+        //       the runner's thread is reused and a stale entry would attribute a later task's lines to
+        //       this run -- which is worse than no attribution, being a confident wrong answer.
+        MDC.put(RUN_CONTEXT_KEY, runId);
         try (S3StatementSink sink = new S3StatementSink(
                 new S3ArtifactWriter(s3, bucket, runPrefix + S3StatementSink.PLAIN_TEXT_OBJECT),
                 new S3ArtifactWriter(s3, bucket, runPrefix + S3StatementSink.HTML_OBJECT))) {
             outcome = statements.generateStatements(sink);
+            // WHY : Refactoring Rationale: the two artifacts are completed EXPLICITLY here, where the
+            //       resource clause used to complete them on its way out. Completing on the way out
+            //       completed them on the failure path too, so a run that raised part way published its
+            //       partial artifacts under this run's prefix -- two objects nothing addressed, that no
+            //       manifest named, and that no incomplete-upload lifecycle rule reclaimed because the
+            //       uploads had been completed rather than abandoned. Reached from here, completion
+            //       happens only after the generator has returned, and the resource clause aborts on
+            //       every other path. The two writes and their order are unchanged: the same
+            //       plain-text-then-markup pair, completed here instead of at the resource clause, and
+            //       still ahead of the index and the manifest below.
+            sink.complete();
+        } finally {
+            MDC.remove(RUN_CONTEXT_KEY);
         }
         publishIndex(runPrefix, outcome);
         publishManifest(runId);
         int produced = outcome.statementsProduced();
+        int omitted = outcome.statementsOmitted();
 
         // WHY : Assumptions: the journal line names the business date, the run and the count, and no
         //       cardholder value of any kind. The count is what an operator reconciles against the
@@ -160,8 +200,28 @@ public class GenerateStatementsTask implements ReportingTask {
         //       same reason it is publishable in a key: it is 122 random bits and derives from no
         //       cardholder value, and without it an operator reading this line cannot tell which of the
         //       stored runs it describes.
-        LOG.info("event=reporting.statements.produced businessDate={} run={} statements={}",
-                businessDate == null ? "unset" : businessDate, runId, produced);
+        // WHY : Assumptions: the omitted count is carried on THIS line rather than left to the
+        //       generator's own event, because this is the line an operator reconciles a night against.
+        //       Reporting the produced figure alone made a run that dropped a cardholder's statement
+        //       read exactly like a run that dropped nothing, which is what a review found wrong with
+        //       the statement surface: the loss was recoverable from a second event most readers of this
+        //       one never see.
+        // WHY : Assumptions: the level is raised when anything was omitted, so the condition is
+        //       reachable by a log query that filters on level rather than only by one that parses the
+        //       count. Trade-offs: the run is still reported as PRODUCED and the process still exits
+        //       clean, because the artifacts are published and every statement the run could render is
+        //       addressable through the index -- a failure status would discard a night's correct output
+        //       over one unrenderable row, which is the disposition the omission boundary exists to
+        //       retire.
+        if (omitted == 0) {
+            LOG.info("event=reporting.statements.produced businessDate={} run={} statements={}"
+                            + " omitted={}",
+                    businessDate == null ? "unset" : businessDate, runId, produced, omitted);
+        } else {
+            LOG.warn("event=reporting.statements.produced businessDate={} run={} statements={}"
+                            + " omitted={} outcome=artifact-incomplete",
+                    businessDate == null ? "unset" : businessDate, runId, produced, omitted);
+        }
     }
 
     /**

@@ -240,8 +240,18 @@ MONEY_TOTAL_QUERY_NAME: Final[str] = "money_totals.sql"
 #   cost is bounded by a test comparing the pin against the shipped file and reporting the measured
 #   digest in its failure, so a forgotten pin fails with the value to paste rather than at an
 #   operator's next run. Re-measure with `sha256sum data-migration/sql/verify/money_totals.sql`.
+# WHY : Refactoring Rationale: this pin was re-measured when the query's own header comment was
+#   corrected. That comment described the grants the batch role holds -- its reason for NOT running
+#   this pass as that role -- and it said "V0 grants it SELECT, INSERT and UPDATE across ledger and
+#   account". V0 grants SELECT on account and nothing more; the single account write the batch role
+#   holds is UPDATE on account.accounts, granted by that service's own
+#   V3__batch_account_write_grant.sql. The old text therefore overstated the privilege it was
+#   arguing about, and it also wrote a bare "V3" that a reader could resolve to either that
+#   migration or this directory's V3__verification_surfaces.sql. Correcting a comment moves the
+#   digest exactly as correcting a statement would, which is the point of pinning identity rather
+#   than shape.
 MONEY_TOTAL_QUERY_DIGEST: Final[str] = (
-    "99669bc6472997ccaefb007f1d69bc8c225b88cc31cf39d4e0ff4fc55d6e5c25"
+    "cc302170ab8a8cf4889dbc56c9914eed82a582af840f70a64a4e86e4866513bf"
 )
 
 # WHY : Assumptions: the ONE relation the committed query is permitted to read is the aggregate-only

@@ -152,6 +152,20 @@ class ReleasedMigrationImmutabilityTest {
                 released("account-service", "V2__account_inquiry_reply_ledger.sql",
                         "fe43b6017e84bcd7d1b9375943829417e6c21c3089589b934e1bdfd439c04e14",
                         258081528),
+                // WHY : Assumptions: V3 grants the batch role UPDATE on account.accounts, issued by
+                //       the schema owner in the chain that creates the table. It arrives as a NEW
+                //       versioned migration rather than as an edit to V1 for the usual reason -- V1
+                //       is released and its checksum is recorded wherever it ran -- and its digests
+                //       are recorded here in the same commit that adds it.
+                // WHY : Refactoring Rationale: the grant previously lived in
+                //       data-migration/sql/V0__schemas_and_roles.sql behind a guard testing whether
+                //       account.accounts exists. V0 runs BEFORE any service migrates, so that guard
+                //       was false on every first deployment and the privilege was never granted;
+                //       posting then failed with "permission denied for table accounts". Siting the
+                //       grant beside the CREATE makes the ordering structural instead of documented.
+                released("account-service", "V3__batch_account_write_grant.sql",
+                        "d2b1c922abcac616e7d8e0e8c3f6e6a7b627606d4a931bd4bfee3ae8a9ab8dee",
+                        -951685515),
                 released("auth-service", "V1__auth.sql",
                         "9d31078cdb4ca20303c0cced1d221cb2c168af22d840180d2aaac65cf1d017be",
                         1349438659),
@@ -217,6 +231,20 @@ class ReleasedMigrationImmutabilityTest {
                 released("batch-service", "V3__batch_run_contract_restatement.sql",
                         "fe28fc38579cb7c46a4087d1c0cf86dcf666b31f637c619f3747033cd5dd58e2",
                         -174390203),
+                // WHY : Assumptions: V4 creates batch.posting_reject_outbox, which makes a posting
+                //       reject's 430-byte image as durable as the reject row and the feed watermark
+                //       that commit beside it. Its digests are recorded here in the same commit that
+                //       adds it, on the same terms as every other entry.
+                // WHY : Refactoring Rationale: the images were accumulated in a process-local
+                //       temporary file and staged only after the record walk, so a staging failure
+                //       left the database work and the watermark committed while the only copy of
+                //       the images was deleted. The redrive then read above the watermark, found
+                //       nothing, and reported a clean run with zero counters over a reject the
+                //       ledger still held. A table is the only place that image can outlive the
+                //       attempt that produced it.
+                released("batch-service", "V4__batch_posting_reject_outbox.sql",
+                        "dc51475765d8ef9379c57b8863846b46e5efa4d55f7446c381311891857c0efb",
+                        -1121644449),
                 released("card-service", "V1__card.sql",
                         "8708a75dc3543f58999c666be63ec270f9cfe941a22630f0187d02823f36555a",
                         1450941986),

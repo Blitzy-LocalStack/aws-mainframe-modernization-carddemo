@@ -1944,7 +1944,7 @@ loading data before the delete grants and views the loaders and verifiers read a
 |:---|:---|:---|:---|
 | 4a | Establish TLS trust and the admin connection | operator | a query returns from the writer endpoint |
 | 4b | `V0__schemas_and_roles.sql` — 8 schemas, 3 role tiers | **Terraform**, during the Step 3 apply | 8 schemas and 16 login roles present |
-| 4c | 24 Flyway migrations across the 7 owning services | **each service, at start-up** | every owning schema has its history rows |
+| 4c | 28 Flyway migrations across the 7 owning services | **each service, at start-up** | every owning schema has its history rows |
 | 4d | `V1` views, `V2` delete grants, `V3` verification surfaces | operator, in that order | each file's paired `verify/` script exits 0 |
 | 4e | Stage, decode, load, verify the record data | operator | all three verification passes exit 0 |
 | 4f | Reconcile the identifier allocator, then switch | operator | allocator is past every loaded identifier |
@@ -2028,8 +2028,8 @@ aws rds-data execute-statement \
 # WHAT: defines the one assertion helper every gate in 4b, 4c and 4d uses, so each gate fails on the
 #       spot instead of printing a number for a human to compare.
 # WHY : Refactoring Rationale: the earlier form of these gates printed a count and left the
-#       comparison to the reader. A count that reads plausibly -- 7 schemas instead of 8, 23
-#       migrations instead of 24 -- is exactly the value that gets glanced at and accepted, and the
+#       comparison to the reader. A count that reads plausibly -- 7 schemas instead of 8, 27
+#       migrations instead of 28 -- is exactly the value that gets glanced at and accepted, and the
 #       consequence surfaces later as a load failure whose cause is two sub-steps upstream. Comparing
 #       in the shell makes the wrong value impossible to walk past.
 # WHY : Alternatives Considered: asserting inside the SQL with a `DO $$ ... RAISE EXCEPTION $$` block
@@ -2139,6 +2139,16 @@ The batch role's cross-schema grants are deliberately limited to the account and
 needed to preserve the posting unit of work as one database transaction. Do not replace those grants
 with schema-wide privileges.
 
+One of those grants does not come from `V0` at all, and knowing which one is what makes the gate at
+the end of this sub-step worth reading. `carddemo_batch` needs `UPDATE` on **`account.accounts`** and
+on nothing else in that schema — the posting job rewrites the account master as the third of its
+three writes, and the interest job rewrites it on each account control break — and a privilege that
+names one table cannot be issued by a file that runs before any table exists. `V0` therefore attempts
+it only inside a guard, reports it outstanding on a first run, and the grant is issued by
+`services/account-service/src/main/resources/db/migration/V3__batch_account_write_grant.sql` in that
+context's own Flyway chain, after `V1__account.sql` has created the table and under the role that owns
+it. Nothing here has to be run by hand for that to happen; the gate below is how you confirm it did.
+
 **`V0` itself is not an operator command.** `infra/lambda/database_admin.py` applies it through the
 Aurora Data API, and the environment root invokes that function during `apply`
 (`aws_lambda_invocation.database_bootstrap`), so the schemas and all three role tiers exist by the
@@ -2183,8 +2193,8 @@ have `DELETE`, so the grant has to be expressed where the tables are already the
 #       login, which is the blast radius this file exists to avoid.
 
 ```
-**Seven services own migrations, not eight**, and the twenty-four files divide unevenly: `auth` 7,
-`reference` 4, `authorization` 4, `ledger` 3, `account` 2, `card` 2, `batch` 2. `reporting-service`
+**Seven services own migrations, not eight**, and the twenty-eight files divide unevenly: `auth` 8,
+`reference` 4, `authorization` 4, `batch` 4, `ledger` 3, `account` 3, `card` 2. `reporting-service`
 owns none. Nothing in this runbook applies them — each service runs its own chain at start-up, so the
 Step 3 apply is what triggers them, and this sub-step is the gate that says they finished.
 
@@ -2239,6 +2249,77 @@ for s in auth account card ledger reference batch '"authorization"'; do
     --query 'records[0][0].longValue' --output text)"
 done
 ```
+
+With the chains complete, confirm the one cross-schema table privilege the nightly batch chain cannot
+run without. This is a separate gate from the count above because a complete set of migrations and a
+complete privilege graph are different facts: the count says every file applied, and this says the
+engine ended up holding the entry that lets posting commit its third write.
+
+```bash
+# WHAT: asserts that carddemo_batch holds UPDATE on account.accounts, and that it holds no other write
+#       on any table in that schema.
+# WHY : Assumptions: this runs AFTER 4c's completion gate rather than beside 4b's role checks. The
+#       privilege names a table, so it cannot exist until the account chain has created that table --
+#       V0 attempts it inside a guard and reports it outstanding on a first run, and
+#       services/account-service/src/main/resources/db/migration/V3__batch_account_write_grant.sql is
+#       what issues it, in the account chain and as the role that owns the table.
+# WHY : Assumptions: has_table_privilege is read rather than a job being run. It answers from the
+#       engine's own access-control list, so it distinguishes "the grant is present" from "a job
+#       happened to work", and it can be answered on a database holding no rows at all.
+# WHY : Assumptions: the result is cast to text. A Data API boolean arrives under a different response
+#       field than a string does, so casting keeps the query expression identical to the one an
+#       operator can paste into psql and read.
+# WHY : Trade-offs: two statements rather than one. The first alone would pass against a schema-wide
+#       write grant -- which is the shape this arrangement exists to avoid, because account.customers
+#       carries the encrypted national and government-issued identifiers -- and the second alone would
+#       pass against no grant at all.
+batch_account_update="$(aws rds-data execute-statement \
+  --resource-arn "$cluster_arn" --secret-arn "$master_secret_arn" --database "$db_name" \
+  --sql "SELECT has_table_privilege('carddemo_batch', 'account.accounts', 'UPDATE')::text" \
+  --query 'records[0][0].stringValue' --output text)"
+carddemo_expect 'carddemo_batch UPDATE on account.accounts' 'true' "$batch_account_update"
+
+batch_account_excess="$(aws rds-data execute-statement \
+  --resource-arn "$cluster_arn" --secret-arn "$master_secret_arn" --database "$db_name" \
+  --sql "SELECT count(*)::text FROM pg_catalog.pg_tables t
+           CROSS JOIN (VALUES ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE')) p(priv)
+          WHERE t.schemaname = 'account'
+            AND has_table_privilege('carddemo_batch',
+                                    format('%I.%I', t.schemaname, t.tablename), p.priv)
+            AND NOT (t.tablename = 'accounts' AND p.priv = 'UPDATE')" \
+  --query 'records[0][0].stringValue' --output text)"
+carddemo_expect 'account writes held by carddemo_batch beyond the master' '0' "$batch_account_excess"
+```
+
+On `FAIL` for the first gate, read
+`SELECT version, success FROM account.flyway_schema_history ORDER BY installed_rank` and act on what
+it says. There are three answers and they need three different remedies:
+
+- **No version `3` row.** This environment is running an `account-service` image built before that
+  migration. Redeploy that service so its own chain applies it — the grant is not an operator
+  statement and must not be typed by hand.
+- **A version `3` row with `success = false`.** The migration ran and failed, and its own failure text
+  names the cause. It is not a missing role: that case is handled below.
+- **A version `3` row with `success = true` and the probe still `false`.** The role `carddemo_batch`
+  did not exist when that migration ran, so it reported the omission as a warning — search the
+  service's own log for `account.accounts UPDATE was NOT granted` — and applied nothing. That means
+  Step 3 had not committed before Step 4 started this service, which the documented order forbids.
+  Flyway will not re-run a recorded migration, so the remedy is to re-apply the bootstrap, whose own
+  guarded block now finds the table and issues the grant. Re-apply it the way
+  [teardown.md](teardown.md) step 9 does — `terraform -chdir="infra/envs/<env>" apply` over a plan
+  built with `-replace=aws_lambda_invocation.database_bootstrap` — and not with `psql -f`, for the
+  reason Step 4b gives: `V0` reads every credential from a session setting the Lambda binds. Re-read
+  this gate afterwards. Do not hand-write the grant and do not widen it to the schema.
+
+Until that gate passes, `--job=post-transactions` fails with `permission denied for table accounts`
+and returns 8. It fails safely — all three writes of the posting unit of work roll back together, so
+no half-posted transaction is left behind — but the nightly chain cannot complete, so treat this gate
+as blocking rather than advisory.
+
+On `FAIL` for the second gate, something has widened the batch role's reach across this schema. Read
+`SELECT relname, relacl FROM pg_catalog.pg_class WHERE relnamespace = 'account'::regnamespace` and
+`SELECT * FROM pg_catalog.pg_default_acl` to find whether it arrived as a table grant or a default
+privilege. Do not resolve either gate by granting `UPDATE` on the account schema wholesale.
 
 ### Step 4d - Apply the three operator SQL files, in order
 

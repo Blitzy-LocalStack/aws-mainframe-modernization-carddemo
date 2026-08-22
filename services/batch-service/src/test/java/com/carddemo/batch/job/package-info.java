@@ -77,10 +77,11 @@
  *   <li>{@code JobRegistrationCensusTest} across 5 cases -- assembles a context over all seven job
  *       configurations and asserts bidirectionally that every declared token resolves to a job bean
  *       of that name and that no bean carries a name outside the vocabulary.</li>
- *   <li>{@code BatchJobRosterTest} across 5 cases -- the same agreement read from the classes
+ *   <li>{@code BatchJobRosterTest} across 6 cases -- the same agreement read from the classes
  *       themselves by reflection, plus distinctness of the registered names and of the durable
- *       ledger step names.</li>
- *   <li>{@code PostTransactionsJobTest} across 33 cases -- the posting job's step, the PER-RECORD
+ *       ledger step names, and that every job's ledger step name carries the
+ *       {@code -step} suffix while still resolving back to its job.</li>
+ *   <li>{@code PostTransactionsJobTest} across 34 cases -- the posting job's step, the PER-RECORD
  *       transactional boundary and the reference order of the three writes inside it, the isolation of
  *       a failing record from the records committed before it, the boundary a rejected record's row is
  *       written inside, its reject-count result in both the forms the orchestrator can read, the two

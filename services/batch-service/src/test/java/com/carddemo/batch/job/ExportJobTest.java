@@ -642,8 +642,19 @@ class ExportJobTest {
                 .as("the registered name is READ from the vocabulary, never retyped")
                 .isEqualTo(BatchJobName.EXPORT.token());
         assertThat(ExportJob.STEP_NAME)
-                .as("a single-step job has nothing to distinguish, so its ledger step shares the name")
-                .isEqualTo(ExportJob.JOB_NAME);
+                .as("the persisted step name is the job token plus the vocabulary's step suffix")
+                .isEqualTo(ExportJob.JOB_NAME + BatchJobName.STEP_NAME_SUFFIX)
+                .endsWith(BatchJobName.STEP_NAME_SUFFIX);
+        // WHY : Refactoring Rationale: this used to require the step name to EQUAL the job token, on
+        //       the ground that a single-step job has nothing to distinguish. It was the only place
+        //       the bare spelling was pinned, so it held two of the seven jobs outside the shape the
+        //       other five share -- and a ledger selection over the chain's step rows, which the
+        //       suffix invites spelling as LIKE '%-step', returned five of seven with nothing
+        //       reporting the omission. The suffix is asserted as well as the composition, because
+        //       the composition alone would still pass if the suffix constant itself were emptied.
+        assertThat(BatchJobName.forStepName(ExportJob.STEP_NAME))
+                .as("the suffixed step name still resolves back to the job that wrote it")
+                .isEqualTo(BatchJobName.EXPORT);
     }
 
     /**

@@ -64,15 +64,18 @@ import com.carddemo.reference.dto.DisclosureGroupRateResponse;
  * reason the arithmetic sits in batch-service and the conversion sits here.</p>
  *
  * <p>Assumptions: the reference program carries no {@code ROUNDED} phrase on that statement, so it
- * discards the surplus digits of the quotient, while the migrated accrual reduces half up under
- * {@code Money.GENERAL_ROUNDING} -- the one mode the money path declares, applied to every reduction.
- * That reduction belongs to the accrual and not to this conversion, which applies none.</p>
+ * discards the surplus digits of the quotient, and the migrated accrual discards them the same way
+ * under {@code Money.BASELINE_INTEREST_ROUNDING} -- one of the two modes the money path declares, and
+ * the one that applies to the accrual quotient alone. That reduction belongs to the accrual and not to
+ * this conversion, which applies none.</p>
  *
- * <p>Assumptions: the migrated accrual therefore differs from the reference by one cent on a quotient
- * landing exactly on a half cent, and that difference is registered as {@code C-ROUNDING} in
- * {@code docs/architecture/cobol-to-service-traceability.md}. It is a live divergence of the ACCRUAL
- * and not of this conversion: the rate this class moves is an operand carried across unchanged, so no
- * cent of that difference originates here, which is the property this class exists to keep true.</p>
+ * <p>Assumptions: the migrated accrual therefore does NOT differ from the reference on a quotient
+ * landing exactly on a half cent, and no divergence is registered for it; {@code C-ROUNDING}, the
+ * identifier a half-up reading carried for a period, is withdrawn in section 7.5 of
+ * {@code docs/architecture/cobol-to-service-traceability.md}. Either way the reduction would have been
+ * the ACCRUAL's and not this conversion's: the rate this class moves is an operand carried across
+ * unchanged, so no cent of any difference could originate here, which is the property this class
+ * exists to keep true.</p>
  *
  * <p>Assumptions: no binary floating-point type appears anywhere on this path, and unlike the same
  * prohibition in some sibling contexts it is mechanised rather than left to review. Rule A3 of

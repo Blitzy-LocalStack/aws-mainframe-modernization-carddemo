@@ -111,13 +111,20 @@
 #     time. Each form is mapped where it occurs; the site census and the long-form
 #     argument stay in docs/architecture/batch-orchestration.md and the decision in
 #     docs/adr/ADR-005-batch-orchestration.md, not in a second copy here:
-#       (a) COND=(0,NE), eight step gates -> the DEFAULT SUCCESS EDGE, which two
-#           different routes leave and the graph keeps apart: an integration fault
-#           raises a States error the state's Catch takes, while a task whose
-#           CONTAINER exits non-zero raises nothing and is read by the
-#           Check*ExitCode Choice after it, whose Default routes to NotifyFailure.
-#           Both end at Fail, but treating Catch as the handler for a non-zero exit
-#           would describe a chain that continues past a failed step.
+#       (a) COND=(0,NE), eight step gates -> the DEFAULT SUCCESS EDGE, which is
+#           the CLEAN rule of the Check*ExitCode Choice after each work state:
+#           reached when the integration returned a task envelope and the
+#           container in it exited 0. Assumptions: the synchronous run-task
+#           integration reports an essential container that exited NON-ZERO as
+#           the error States.TaskFailed and puts the exit code inside that
+#           error's Cause payload -- it does not return the code as a result --
+#           so a non-zero exit is taken by the state's Catch and the Choice
+#           after it is never entered. Both routes still end at Fail for the
+#           four states whose non-zero exit is a failure. Posting is the one
+#           state where a specific non-zero code is NOT a failure, so it alone
+#           carries an ordered Catch for States.TaskFailed ahead of the generic
+#           one, which classifies the Cause and takes the warn path; see
+#           local.posting_task_failure_catch and ClassifyPostingTaskFailure.
 #       (b) COND=(4,LT), one step gate at app/jcl/TRANBKP.jcl:51 -> no state. It
 #           gates that job's OWN STEP10 re-DEFINE of the transaction cluster, after
 #           its own STEP05R unload and STEP05 DELETE, and cannot observe CBTRN02C,
@@ -502,11 +509,45 @@ locals {
   }
 
   ecs_retry = [{
-    # WHY : Assumptions: a non-zero container exit does not throw an ECS API
-    #       error in the synchronous integration; it is returned and handled by
-    #       the Choice states below. This retry therefore covers launch and
-    #       observation faults rather than replaying a deterministic application
-    #       outcome.
+    # WHY : Assumptions: the synchronous run-task integration RAISES on a non-zero
+    #       essential-container exit. The error name is States.TaskFailed and the
+    #       exit code is recoverable only from that error's Cause payload, so a
+    #       deterministic application outcome and a launch fault arrive under one
+    #       error name and cannot be told apart by name. That is why this list
+    #       carries ECS API fault names only: each of the four below is raised by
+    #       the integration's CALL to ECS rather than by the job, so no entry in
+    #       this list can replay work that already ran. They are the ECS analogue
+    #       of local.lambda_retry's four Lambda-prefixed names, member for member
+    #       -- a server-side fault, the service exception RunTask throttling
+    #       surfaces as, the explicit throttling name, and an SDK client-side
+    #       transport fault.
+    # WHY : Trade-offs: naming an error the integration never raises costs nothing,
+    #       because a retrier that never matches is inert, while omitting one costs
+    #       a real retry on a fault that would have cleared. The list is therefore
+    #       the full ECS-prefixed fault set rather than the narrowest one that
+    #       could be confirmed from a single observed failure.
+    # WHY : Refactoring Rationale: States.TaskFailed was REMOVED from this list. It
+    #       replayed a DETERMINISTIC outcome: posting exits 4 on a reject night,
+    #       which this integration reports as States.TaskFailed, so every attempt
+    #       re-read the same feed against the same ledger key and returned 4 again
+    #       -- up to var.retry_max_attempts times -- before the failure path was
+    #       reached at all. The batch.batch_run ledger is what made the repeats
+    #       harmless rather than corrupting: attempts after the first recorded
+    #       batch.step.skipped against the already-recorded return code, which is
+    #       what shows the replay to have been futile rather than protective. Every
+    #       state that named it also carries a Catch, so removing it does not lose
+    #       a failure; the failure now reaches that Catch on the first attempt
+    #       instead of the fourth.
+    # WHY : Trade-offs: a LAUNCH fault now takes the failure path on its first
+    #       attempt too, because States.TaskFailed is also how this integration
+    #       reports a task that never ran -- an image-pull failure, a capacity
+    #       failure, a task that stopped without its container reporting -- and
+    #       those are genuinely retryable. The cost is accepted because the error
+    #       name cannot separate them from an application exit at retry time,
+    #       retrying the ambiguous name is what made the posting warn tier
+    #       unreachable, and the recovery for a launch fault is an operator
+    #       redrive, which the batch.batch_run ledger makes safe: a step that
+    #       completed before the fault is a no-op on the way back through.
     # WHY : Refactoring Rationale: States.Timeout was REMOVED from this list, and it
     #       was the more dangerous of the two entries. TimeoutSeconds expiring on a
     #       `.sync` ECS state does not stop the container -- Step Functions abandons
@@ -526,11 +567,31 @@ locals {
     #       while it is still running, so the second attempt reads no record and
     #       proceeds. The ledger is what makes a redrive safe, not what makes
     #       overlapping tasks safe.
-    # WHY : Trade-offs: States.TaskFailed is KEPT. It is raised for a launch or
-    #       observation fault -- a capacity failure, a pull failure, a task that
-    #       stopped without the container reporting -- in each of which the task is
-    #       already terminal, so a replacement attempt cannot overlap with anything.
-    ErrorEquals     = ["States.TaskFailed"]
+    # WHY : Assumptions: States.TaskFailed is a WILDCARD in a retrier, not one name
+    #       among many -- Amazon States Language defines it, where it appears in a
+    #       Retry or a Catch, as matching every known error name except
+    #       States.Timeout. So the entry this list replaces was never "retry the
+    #       job's own failure": it retried the ECS API faults below as well, and
+    #       everything else the integration can raise, under one indistinguishable
+    #       name. Naming the faults explicitly is therefore what KEEPS the transient
+    #       retry the wildcard used to provide, while leaving the deterministic
+    #       application exit -- which arrives under the same wildcard name -- to be
+    #       classified once by the Catch instead of replayed.
+    # WHY : Assumptions: ECS.AmazonECSException is the name this integration is
+    #       documented to report for a RunTask that could not be placed for want of
+    #       capacity, which is the transient fault most worth retrying here and the
+    #       one confirmed against AWS guidance rather than inferred. The other three
+    #       follow the <Service>.<ExceptionName> form the language uses for service
+    #       exceptions -- the same form as local.lambda_retry's Lambda.ServiceException
+    #       and Lambda.SdkClientException, which AWS names outright -- applied to the
+    #       ECS API's own modelled ServerException and ThrottlingException and to the
+    #       SDK's client-side transport fault.
+    ErrorEquals = [
+      "ECS.AmazonECSException",
+      "ECS.SdkClientException",
+      "ECS.ServerException",
+      "ECS.ThrottlingException",
+    ]
     IntervalSeconds = var.retry_interval_seconds
     MaxAttempts     = var.retry_max_attempts
     BackoffRate     = var.retry_backoff_rate
@@ -553,6 +614,50 @@ locals {
     ResultPath  = "$.failure"
     Next        = "NotifyFailure"
   }]
+
+  # WHY : Assumptions: Amazon States Language evaluates catchers IN DECLARATION
+  #       ORDER and the first match wins, so the States.TaskFailed entry has to be
+  #       concatenated AHEAD of local.common_catch rather than beside it. Reversing
+  #       the two would let the States.ALL wildcard swallow the error before the
+  #       specific catcher was consulted, which is the shape that made the warn tier
+  #       unreachable in the first place.
+  # WHY : Refactoring Rationale: PostTransactions is the only state in this module
+  #       whose non-zero container exit is not a failure -- app/cbl/CBTRN02C.cbl
+  #       moves 4 to RETURN-CODE at :229-230 on a positive reject count, argued at
+  #       local.posting_warn_return_code -- and the synchronous integration reports
+  #       that exit as States.TaskFailed. Without this catcher the generic one took
+  #       it to NotifyFailure, so CheckPostingExitCode's warn rule was never
+  #       evaluated and a reject night failed the whole nightly chain, skipping the
+  #       interest, backup, combine, statement and report work the baseline performs
+  #       unconditionally.
+  # WHY : Trade-offs: the caught error lands at $.postingFailure and NOT at $.failure,
+  #       which every other catcher in this file writes. A night that WARNS continues
+  #       with this member still in the execution state, and NotifyFailure serialises
+  #       the WHOLE state object into its message rather than reading $.failure by
+  #       path, so writing it to $.failure would carry a member named for failure into
+  #       any later notification the same run produces. Keeping the two names apart is
+  #       what lets $.failure keep meaning "the error that ended the run".
+  # WHY : Assumptions: a posting failure the classifier REFUSES reaches NotifyFailure
+  #       through that Choice's Default, so its error sits at $.postingFailure and no
+  #       $.failure member exists on that path. That is safe for exactly the reason
+  #       above -- the notification formats the whole object -- and it is recorded here
+  #       so the absence reads as a consequence rather than a missing assignment.
+  # WHY : Assumptions: States.TaskFailed is a WILDCARD in a catcher too -- the language
+  #       defines it as matching every known error name except States.Timeout -- so this
+  #       first entry receives the ECS API faults in local.ecs_retry once their retries
+  #       are spent, not only the job's own exit. That is why the classification is done
+  #       by GUARDS on the Cause rather than by the error name: a fault that never ran
+  #       the job carries no batch container reporting 4, so it takes the Choice's
+  #       Default to NotifyFailure and ends the run exactly as it did before, one Choice
+  #       hop later. The single documented exception is what keeps the sweep intact:
+  #       States.Timeout does NOT match this entry, so an abandoned-wait expiry still
+  #       falls through to local.common_catch and still reaches the cancellation
+  #       sub-chain that stops the task the state stopped waiting for.
+  posting_task_failure_catch = concat([{
+    ErrorEquals = ["States.TaskFailed"]
+    ResultPath  = "$.postingFailure"
+    Next        = "ClassifyPostingTaskFailure"
+  }], local.common_catch)
 
   # WHY : Refactoring Rationale: these bounds and the two rule sets below replace a
   #       "????-??-??" StringMatches pattern that was repeated at six Choice sites
@@ -715,8 +820,10 @@ locals {
   #       as a failed batch run and skip the interest, backup, combine, statement and
   #       report work the baseline unconditionally performs. The cost accepted is that
   #       the chain does not stop to have the reject stream reviewed; that review is an
-  #       operator action on the DALYREJS generation, and the reject count is what the
-  #       Choice below branches on to raise the warning.
+  #       operator action on the DALYREJS generation, and the warning that names it is
+  #       raised by ClassifyPostingTaskFailure, which reads this code out of the failed
+  #       task's Cause -- the synchronous integration raises on a non-zero exit rather
+  #       than returning it, so the Choice on the result path never sees a 4.
   # WHY : Assumptions: the backup-before-delete interlock TRANBKP.jcl:51 really does
   #       express is preserved elsewhere and is recorded here so the two are not
   #       confused again. Its STEP05R unloads the master to TRANSACT.BKUP(+1) (:33,
@@ -793,11 +900,24 @@ locals {
   #       token that does not match that enum is not a plan-time error: the
   #       container starts, fails to resolve the job and exits non-zero, so the
   #       chain reports a failed step for what is really a spelling mistake.
-  # WHY : Assumptions: each entry's `next` names an exit-code Choice rather than
-  #       the following work state, because the synchronous run-task integration
-  #       does NOT throw on a non-zero container exit -- it returns the exit code
-  #       in the task envelope. Wiring one work state straight to the next would
-  #       run the whole chain over a failed step's output.
+  # WHY : Assumptions: each entry's `next` names an exit-code Choice rather than the
+  #       following work state, and `next` is only ever taken when the integration
+  #       RETURNED a task envelope. A non-zero essential-container exit does not get
+  #       here at all: the synchronous run-task integration raises States.TaskFailed
+  #       for it, so the entry's `catch` decides what happens instead. The Choice on
+  #       the success edge therefore asserts the clean code rather than sorting
+  #       every possible code, and wiring one work state straight to the next would
+  #       still be wrong -- it would run the chain over a task whose envelope this
+  #       module never inspected.
+  # WHY : Assumptions: `catch` is per-entry because exactly one of these five states
+  #       has a non-failing non-zero exit. PostTransactions takes the ordered
+  #       classifier, and the other four keep the generic catcher, which means a
+  #       non-zero exit from preflight, interest, backup or combine is a hard
+  #       failure on its first attempt. Trade-offs: that asymmetry is deliberate and
+  #       is stated here so it reads as a decision rather than an omission -- none
+  #       of those four programs has a documented warn tier to preserve, so giving
+  #       them a classifier would invent a soft-failure semantic the baseline does
+  #       not have.
   # WHY : Refactoring Rationale: one JCL job per state, and the state ORDER carries
   #       what each job's DD statements and generation references used to. The
   #       lineage, job by job:
@@ -852,26 +972,31 @@ locals {
       job         = "preflight-daily-transactions"
       result_path = "$.preflight"
       next        = "CheckPreflightExitCode"
+      catch       = local.common_catch
     }
     PostTransactions = {
       job         = "post-transactions"
       result_path = "$.posting"
       next        = "CheckPostingExitCode"
+      catch       = local.posting_task_failure_catch
     }
     CalculateInterest = {
       job         = "calculate-interest"
       result_path = "$.interest"
       next        = "CheckInterestExitCode"
+      catch       = local.common_catch
     }
     BackupTransactions = {
       job         = "backup-transactions"
       result_path = "$.backup"
       next        = "CheckBackupExitCode"
+      catch       = local.common_catch
     }
     CombineTransactions = {
       job         = "combine-transactions"
       result_path = "$.combine"
       next        = "CheckCombineExitCode"
+      catch       = local.common_catch
     }
   }
 
@@ -923,7 +1048,7 @@ locals {
       ResultSelector = local.ecs_result_selector
       ResultPath     = job_config.result_path
       Retry          = local.ecs_retry
-      Catch          = local.common_catch
+      Catch          = job_config.catch
       Next           = job_config.next
     }
   }
@@ -1874,12 +1999,16 @@ locals {
               }
 
               # WHY : Assumptions: the predicate is exit code ZERO and nothing else, with no
-              #       warn tier. Every other exit-code Choice in this chain admits a soft
-              #       path because the baseline job it replaces carried one -- a reject count
-              #       that sets RC=4, a COND=(4,LT) that lets a warning through. This gate
-              #       replaces no baseline job at all: it is a binary statement about whether
-              #       the migrated data matches its source, and there is no reading of
-              #       "partly matches" that business processing may proceed on.
+              #       warn tier. Exactly ONE work state in this module has a soft path --
+              #       PostTransactions, because the program it replaces sets RC=4 on a
+              #       positive reject count -- and even there the warn OUTCOME is reached
+              #       through a Catch classifier rather than through the Choice, because the
+              #       synchronous integration raises on a non-zero exit instead of returning
+              #       it. Every other exit-code gate in this file, this one included, admits
+              #       zero and routes everything else to a failure state. This gate replaces
+              #       no baseline job at all: it is a binary statement about whether the
+              #       migrated data matches its source, and there is no reading of "partly
+              #       matches" that business processing may proceed on.
               # WHY : Refactoring Rationale: the clean verdict now transitions to
               #       MigrationVerified rather than straight to PreflightDailyTransactions,
               #       because this Choice lives inside the StageSeedDatasets branch and a branch
@@ -1948,6 +2077,28 @@ locals {
           Default = "NotifyFailure"
         }
 
+        # WHY : Assumptions: only the CLEAN rule of this Choice -- and of every other
+        #       Check*ExitCode gate in this file -- is reachable through the
+        #       synchronous run-task integration. That integration returns a task
+        #       envelope only when the essential container exited 0, and raises
+        #       States.TaskFailed for every other outcome, so local.ecs_result_selector
+        #       can only ever lift a zero into $.posting.exitCode. The warn rule below
+        #       and this state's Default are therefore not entered on any path the
+        #       nightly chain takes today; the warn OUTCOME is reached instead through
+        #       local.posting_task_failure_catch and ClassifyPostingTaskFailure.
+        # WHY : Trade-offs: the warn rule and the Default are KEPT rather than deleted,
+        #       and the reason differs for each. The Default is kept because a Choice
+        #       with no Default raises States.NoChoiceMatched, a Choice state cannot
+        #       carry a Catch, and the error would therefore end the execution without
+        #       running NotifyFailure, the residual-task sweep or the bracket release --
+        #       one edge is a cheap price for keeping every failure on the path that
+        #       releases the write bracket. The warn rule is kept because it is the one
+        #       declarative statement of the rc=4 contract on the RESULT path, it costs
+        #       one rule, and deleting it would leave the two halves of the same
+        #       contract -- result path and error path -- to be read from two different
+        #       states with nothing connecting them. Both are annotated as unreachable
+        #       here so a later reader does not have to rediscover it from an execution
+        #       history, which is how this was found.
         CheckPostingExitCode = {
           Type = "Choice"
           Choices = [
@@ -1970,6 +2121,188 @@ locals {
           Parameters = {
             code         = "POSTING_REJECTS_PRESENT"
             "exitCode.$" = "$.posting.exitCode"
+          }
+          ResultPath = "$.warning"
+          Next       = "CalculateInterest"
+        }
+
+        # WHY : Refactoring Rationale: this state and the Pass after it are what make
+        #       the posting warn tier reachable at all. The exit code of a failed
+        #       `.sync` task survives only inside the caught error's Cause, which the
+        #       integration supplies as the DescribeTasks view of the stopped task
+        #       serialised into a JSON STRING -- not as an object -- so the code has to
+        #       be recognised in that string rather than compared as a number.
+        # WHY : Assumptions: StringMatches is the comparator used because it is the only
+        #       one in Amazon States Language that admits a wildcard, and exactly one
+        #       character is special in its pattern: "*". The four patterns are combined
+        #       under Or, and each one carries a BOUNDARY character after the digit --
+        #       "," or "}" -- for a reason that decides whether this rule is correct: a
+        #       bare *"ExitCode":4* also matches "ExitCode":40 and "ExitCode":41, which
+        #       would read a hard failure as a reject night. Two spacings are covered
+        #       because both are shapes a JSON serialiser produces: compact, which is
+        #       what the integration emits, and one space after the colon.
+        # WHY : Assumptions: the digit is written out literally rather than interpolated
+        #       from local.posting_warn_return_code. A StringMatches pattern is matched
+        #       character by character against a payload, so the one character the
+        #       rule's correctness turns on has to be readable here; interpolating it
+        #       would also hide the pattern from the declared-pattern inventory in
+        #       data-migration/tests/test_step_functions_asl_contract.py, which finds
+        #       patterns by their literal text.
+        # WHY : Trade-offs: an unrecognised Cause FAILS CLOSED to NotifyFailure. A
+        #       pretty-printed payload that put ExitCode last, with a newline between
+        #       the digit and the closing brace, would take that edge and report a
+        #       reject night as a failed run. That direction is chosen deliberately:
+        #       over-matching would continue the chain past a genuine hard failure,
+        #       while under-matching stops a night that is recoverable by redrive and
+        #       whose reject stream is already durable -- the rejects are committed to
+        #       ledger.transaction_rejects and staged as the DALYREJS generation before
+        #       posting exits, so nothing is lost by stopping.
+        # WHY : Alternatives Considered: States.StringToJson on the Cause in a Pass
+        #       state, then a NumericEquals on the decoded ExitCode, which would be
+        #       exact and would need no patterns. Rejected because a Pass state cannot
+        #       carry a Catch: a Cause that is not parseable JSON -- which is what an
+        #       integration-level fault produces, the case most in need of routing --
+        #       would fail the intrinsic and end the execution there, skipping
+        #       NotifyFailure, the residual-task sweep and the bracket release.
+        # WHY : Assumptions: the third conjunct requires the Cause to NAME the batch
+        #       container, and it is what binds the classification to this task rather
+        #       than to any failure that happens to carry a 4. var.batch_container_name
+        #       is the same input the ContainerOverrides above address, so the pattern
+        #       and the override cannot disagree with each other. They do FAIL TOGETHER
+        #       if the input itself names no container in the definition: an unmatched
+        #       override is ignored rather than rejected, as that variable's own
+        #       declaration records, so the image's baked-in command would run and this
+        #       rule would refuse every Cause -- two symptoms from one wrong value, not
+        #       a warn tier that quietly stops matching on its own.
+        #       The closing quote is inside the pattern, so a longer container name that
+        #       merely begins with this one cannot satisfy it, and the SAME two spacings
+        #       the exit-code rules cover are covered here for the same reason -- a
+        #       compact-only name pattern refused a payload whose members were separated
+        #       with a space, which is a warn tier that stops matching on a serialiser
+        #       detail rather than on the outcome. A Cause carrying no
+        #       container entries at all -- a RunTask response holding only Failures, or
+        #       a plain-text integration message -- fails closed to NotifyFailure.
+        # WHY : Trade-offs: that conjunct proves the payload is THIS task's stopped-task
+        #       description; it does not attribute the exit code to one entry inside it.
+        #       The batch task definition carries the telemetry collector sidecar beside
+        #       the application container -- enable_telemetry_collector defaults to true
+        #       in infra/modules/ecs-service and neither environment root overrides it --
+        #       and both containers are essential, so the Cause can carry two entries and
+        #       an ExitCode of 4 on either one satisfies the rule. Making the attribution
+        #       exact needs the task definition to declare ONE container whose exit code
+        #       can reach the Cause, which is a property of that definition rather than
+        #       of this graph.
+        # WHY : Alternatives Considered: passing enable_telemetry_collector = false for
+        #       the batch workload in infra/envs/dev/main.tf and infra/envs/prod/main.tf,
+        #       which would leave the run-to-completion task with one container whose exit
+        #       code can reach the Cause and so make the attribution above exact. It was
+        #       considered against those two roots and REJECTED; the sidecar is
+        #       deliberately RETAINED. Both roots already pass the collector inputs under
+        #       a rationale that cites specification sections 0.2.1.4 and 0.9.3 as
+        #       requiring metrics and tracing to be DELIVERED rather than documented as
+        #       absent, and that rationale names THIS state machine's own meters as what
+        #       the previous withdrawal of those inputs stranded. Disabling the sidecar
+        #       withdraws its OTEL_* environment, its volume and the task role's
+        #       telemetry policy together, so the nightly chain would lose traces and
+        #       metrics outright. That is a certain and permanent loss of a required
+        #       capability, whereas the residual recorded below needs the collector to
+        #       stop with exactly 4 in the same stop event -- a code the AWS Distro for
+        #       OpenTelemetry does not publish as a status -- and leaves the true code
+        #       durable either way. Do not make that change without withdrawing the
+        #       sections-0.2.1.4-and-0.9.3 rationale in both roots first: flipping the
+        #       flag alone would satisfy this graph by breaking a documented decision
+        #       those roots record, which is how one narrow correctness gain becomes a
+        #       silent capability regression across seven jobs.
+        # WHY : Alternatives Considered: one pattern spanning Name and ExitCode, to bind
+        #       them inside a single container entry. Rejected because it is not
+        #       expressible: the only wildcard is "*", the comparator has no negation,
+        #       and a pattern holding both tokens matches a name taken from one entry
+        #       with an exit code taken from the next just as readily as it matches one
+        #       entry -- while pinning an order between the two members would bet the
+        #       whole warn tier on a key order this integration does not document, which
+        #       is the class of assumption that made the tier unreachable to begin with.
+        # WHY : Trade-offs: the residual is bounded and detectable rather than silent. It
+        #       needs the collector to stop with exactly 4 in the same stop event; the
+        #       outcome is a chain that CONTINUES, and the code posting actually finished
+        #       with is already durable in batch.batch_run for that run, so an operator
+        #       comparing the recorded code against the warn code published with the
+        #       notification sees the disagreement.
+        ClassifyPostingTaskFailure = {
+          Type = "Choice"
+          Choices = [
+            {
+              And = [
+                {
+                  Variable  = "$.postingFailure.Cause"
+                  IsPresent = true
+                },
+                {
+                  Variable = "$.postingFailure.Cause"
+                  IsString = true
+                },
+                {
+                  Or = [
+                    {
+                      Variable      = "$.postingFailure.Cause"
+                      StringMatches = "*\"Name\":\"${var.batch_container_name}\"*"
+                    },
+                    {
+                      Variable      = "$.postingFailure.Cause"
+                      StringMatches = "*\"Name\": \"${var.batch_container_name}\"*"
+                    },
+                  ]
+                },
+                {
+                  Or = [
+                    {
+                      Variable      = "$.postingFailure.Cause"
+                      StringMatches = "*\"ExitCode\":4,*"
+                    },
+                    {
+                      Variable      = "$.postingFailure.Cause"
+                      StringMatches = "*\"ExitCode\":4}*"
+                    },
+                    {
+                      Variable      = "$.postingFailure.Cause"
+                      StringMatches = "*\"ExitCode\": 4,*"
+                    },
+                    {
+                      Variable      = "$.postingFailure.Cause"
+                      StringMatches = "*\"ExitCode\": 4}*"
+                    },
+                  ]
+                },
+              ]
+              Next = "RecordCaughtPostingWarning"
+            },
+          ]
+          Default = "NotifyFailure"
+        }
+
+        # WHY : Assumptions: the payload is STATIC, and it has to be. This state is
+        #       entered from a Catch, and a task state applies no ResultPath when it
+        #       fails, so $.posting does not exist on this edge -- the "exitCode.$"
+        #       reference RecordPostingWarning uses would address nothing here and
+        #       raise States.Runtime. The value written is the same code the
+        #       classifier above matched on, which is what makes the literal correct
+        #       rather than merely convenient.
+        # WHY : Assumptions: the two members and the code string are identical to
+        #       RecordPostingWarning's, so an execution that warned reports one shape
+        #       at $.warning whichever route produced it. POSTING_REJECTS_PRESENT is
+        #       the same token BatchApplication documents for this outcome and the same
+        #       one docs/adr/ADR-005-batch-orchestration.md names, so it is a contract
+        #       across three artifacts rather than a label chosen here.
+        # WHY : Trade-offs: $.postingFailure is left in the execution state rather than
+        #       cleared. It carries the Cause the classification was made from, which is
+        #       the only record of the failed task's identity on a night that continues,
+        #       and NotifyFailure formats the whole state object rather than reading
+        #       $.failure by path, so leaving it cannot mislead a later failure
+        #       notification into naming this task.
+        RecordCaughtPostingWarning = {
+          Type = "Pass"
+          Result = {
+            code     = "POSTING_REJECTS_PRESENT"
+            exitCode = local.posting_warn_return_code
           }
           ResultPath = "$.warning"
           Next       = "CalculateInterest"
@@ -2968,12 +3301,20 @@ locals {
         Next = "CheckExportExitCode"
       }
 
-      # WHY : Assumptions: the exit code is checked in a SEPARATE Choice state
-      #       rather than folded into the task's Catch, because a non-zero container
-      #       exit does not raise an ECS API error -- runTask.sync completes
-      #       successfully and reports the code in its result. This is the same
-      #       two-state shape every work state of the daily chain uses, and the
-      #       reason the result selector exists.
+      # WHY : Assumptions: this Choice asserts the CLEAN code and nothing else, and
+      #       its Default is not reached through the synchronous integration. A
+      #       non-zero essential-container exit is raised as States.TaskFailed with
+      #       the code inside the error's Cause, so the task's Catch above takes it
+      #       to NotifyDatasetFailure before this state is entered. That is the
+      #       correct outcome here and the asymmetry is deliberate: the export and
+      #       import jobs have no warn tier to preserve, so every non-zero exit is a
+      #       hard failure, and only PostTransactions in the daily chain classifies
+      #       a Cause to keep a specific code out of the failure path.
+      # WHY : Trade-offs: the state is kept rather than collapsed into the Catch. It
+      #       is what asserts that a RETURNED envelope carried a zero -- the result
+      #       selector's only consumer -- and a Choice without a Default raises
+      #       States.NoChoiceMatched, which no Catch can take because a Choice state
+      #       cannot carry one.
       CheckExportExitCode = {
         Type = "Choice"
         Choices = [{
@@ -3365,9 +3706,11 @@ locals {
         }
 
         # WHY : Assumptions: a separate Choice, for the reason the dataset machine
-        #       records against its own pair -- a non-zero container exit completes the
-        #       synchronous integration successfully and reports the code in its result,
-        #       so the task's Catch never sees it.
+        #       records against its own pair -- it asserts that a RETURNED task
+        #       envelope carried a zero. A non-zero container exit does not reach it:
+        #       the synchronous integration raises States.TaskFailed for that and the
+        #       task's Catch takes it to NotifyAuthorizationExtractFailure, which is
+        #       the correct outcome for an extract with no warn tier of its own.
         CheckUnloadExitCode = {
           Type = "Choice"
           Choices = [{

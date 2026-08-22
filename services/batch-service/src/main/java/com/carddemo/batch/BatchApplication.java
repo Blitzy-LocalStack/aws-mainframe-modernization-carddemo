@@ -9,6 +9,8 @@ import com.carddemo.batch.dto.BusinessDate;
 import com.carddemo.batch.service.BatchErrorPublisher;
 import com.carddemo.common.observability.LogSafeText;
 import com.carddemo.common.observability.ThrowableDigest;
+import com.carddemo.common.validation.DateEditValidator;
+import com.carddemo.common.validation.FieldValidationFlag;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -73,7 +75,7 @@ import org.springframework.context.ConfigurableApplicationContext;
  *
  * <h2>Contract one: the argument contract</h2>
  *
- * <p>Two options, both required, neither defaulted:</p>
+ * <p>Two options, both required, neither defaulted, and NOTHING ELSE accepted:</p>
  *
  * <ul>
  *   <li>{@code --job=<name>} selects the job. {@code <name>} is exactly one of the seven tokens in
@@ -82,9 +84,32 @@ import org.springframework.context.ConfigurableApplicationContext;
  *       {@code export} and {@code import}. The token is the name a job bean registers under, so it
  *       is looked up rather than switched on.</li>
  *   <li>{@code --business-date=<token>} supplies the business date as a job parameter under the key
- *       {@link #BUSINESS_DATE_PARAMETER}. The token is an OPAQUE ten-character value: it is
- *       validated for width and character class only and is then forwarded exactly as received.</li>
+ *       {@link #BUSINESS_DATE_PARAMETER}. The token is ten characters of ASCII digits and ASCII
+ *       hyphen-minus in one of two accepted layouts, it must name a day that exists, and it is then
+ *       forwarded to the job exactly as received.</li>
+ *   <li>{@link #HELP_OPTION} is the one further token this class reads. It is not an argument to a
+ *       run: it prints the usage text and terminates without starting anything.</li>
  * </ul>
+ *
+ * <p>Refactoring Rationale: this class previously stated that any OTHER argument "is ignored by this
+ * class and left to the framework's own command-line property source", and it behaved that way -- an
+ * unknown option and a bare positional argument both ran the job silently. That contract is
+ * withdrawn, because tolerance here has no beneficiary and one concrete victim. The orchestration
+ * state that starts a task passes exactly these two options and nothing else, and every deployment
+ * setting -- the datasource coordinates, the dataset bucket, the region, the error-sink address --
+ * arrives through the environment rather than through this argument vector, so no correct invocation
+ * carries a third token. What tolerance did buy was a misspelled option running to completion under
+ * a value nobody supplied: {@code --business-dat=2022-07-18} was discarded in silence, and the run
+ * then failed for the unrelated-looking reason that the business date was missing. Every
+ * unrecognised token is therefore rejected by name, before any context exists, at
+ * {@link #EXIT_STATUS_HARD_FAILURE} with {@link #ERROR_CODE_USAGE}.</p>
+ *
+ * <p>Trade-offs: the cost of that strictness is that a framework property can no longer be passed on
+ * the command line -- {@code --spring.profiles.active=prod} is now a rejected token rather than a
+ * silently honoured one. It is accepted because the same setting is reachable as
+ * {@code SPRING_PROFILES_ACTIVE} in the container environment, which is where this module's own
+ * configuration documents every setting as arriving from, so nothing becomes unreachable; only the
+ * second, undocumented route to it closes.</p>
  *
  * <p>Assumptions: the business date is required for ALL SEVEN jobs, not only for the one whose
  * reference step carries a {@code PARM}, and the reason is stated here because a reader who checks
@@ -126,6 +151,36 @@ import org.springframework.context.ConfigurableApplicationContext;
  * {@code PARM='2022071800'}. Both are ten characters plus a six-digit suffix. Reformatting the
  * token into either single layout would therefore change the identifiers of one of those two
  * committed scenarios and break its golden comparison, so this class reformats neither.</p>
+ *
+ * <p>Refactoring Rationale: a passthrough is not a licence to accept a day that never occurred, and
+ * this class previously granted one. Width and character class were the whole of the check, so
+ * {@code 2023-02-30} and its compact spelling {@code 2023023000} were both admitted and the failure
+ * then landed in three different places depending on which job ran: four jobs abended late inside a
+ * step with an unhandled parse failure reported as a generic job failure rather than as a rejected
+ * argument, the preflight job reported a clean night for a date that does not exist, and the
+ * export and import pair completed and PERSISTED datasets under the object key
+ * {@code export/2023023000/} -- durable artefacts filed under an impossible day, which nothing
+ * downstream reports as an error because the key is well shaped. Calendar validity is therefore
+ * asserted HERE, during argument resolution, before an application context exists: the token must
+ * resolve to a real day in one of the two accepted layouts or the command line is refused with
+ * {@link #ERROR_CODE_USAGE} naming the offending value, and no job, no ledger row and no object
+ * follows.</p>
+ *
+ * <p>Assumptions: the calendar rules applied are exactly the month, day, month-length and leap-year
+ * gates of {@code com.carddemo.common.validation.DateEditValidator}, which is this repository's one
+ * migrated form of the reference date-edit chain, and DELIBERATELY NOT the whole of that chain. Two
+ * of its gates are excluded and the exclusion is the load-bearing part of this decision. Its
+ * century gate admits only the two century values {@code app/cpy/CSUTLDPY.cpy} lines 70 and 71
+ * accept, and its date-of-birth range refuses a date that is not strictly in the past. Both are
+ * correct for the field they were written for -- an account or customer date a person typed into a
+ * screen -- and both are wrong for this one: a business date is an ORCHESTRATION PARAMETER naming
+ * the night being processed, so a catch-up run for a historical date and a scenario date outside
+ * those two centuries are legitimate inputs rather than user errors, and a future business date is
+ * how a scheduled chain is exercised ahead of the night it processes. Alternatives Considered:
+ * calling that chain's aggregate verdict and accepting whatever it says, which is one line shorter.
+ * Rejected because it would refuse {@code 0001-01-01} and {@code 9999-12-31} -- both of which this
+ * module accepts today and neither of which is a calendar fault -- and would move a screen-field
+ * policy onto a machine-supplied parameter. Only impossibility rejects here.</p>
  *
  * <p>Assumptions: the reference program's own linkage carries a halfword length prefix ahead of the
  * date -- {@code app/cbl/CBACT04C.cbl:176} opens {@code 01 EXTERNAL-PARMS.}, line 177 declares
@@ -275,6 +330,39 @@ public class BatchApplication {
      * a parameter under {@link #BUSINESS_DATE_PARAMETER}.</p>
      */
     public static final String BUSINESS_DATE_OPTION = "--business-date=";
+
+    /**
+     * The one token that asks this class for its own contract instead of for a run, {@code --help}.
+     *
+     * <p>Assumptions: it is spelled with two leading hyphens and nothing after it, matching the two
+     * options beside it, and it is matched EXACTLY. A single-hyphen abbreviation is deliberately not
+     * recognised, for the same reason {@code -job} is not recognised as {@code --job=}: this module
+     * accepts one spelling per token so that a near-miss is reported rather than guessed at.</p>
+     */
+    public static final String HELP_OPTION = "--help";
+
+    /**
+     * The field label the calendar rejection composes its message against, {@code business date}.
+     *
+     * <p>Assumptions: the migrated date-edit chain prefixes every message it assembles with the label
+     * it was given, so this value appears verbatim inside the diagnostic an operator reads. It names
+     * the thing being validated rather than the option carrying it, because the option name is
+     * already the first thing in that diagnostic and repeating it twice in one sentence reads as a
+     * defect in the message rather than as emphasis.</p>
+     */
+    public static final String BUSINESS_DATE_FIELD_LABEL = "business date";
+
+    /**
+     * The count of leading token characters that carry the calendar date itself, eight.
+     *
+     * <p>Assumptions: both accepted layouts reduce to the same eight digits -- four of year, two of
+     * month, two of day -- and the migrated date-edit chain accepts exactly that unseparated width,
+     * which is the width the reference date field holds at {@code app/cpy/CSUTLDWY.cpy} lines 5, 16
+     * and 25. The two characters beyond it in the compact layout are the reference driver's own
+     * trailing digits at {@code app/jcl/INTCALC.jcl:22} ({@code PARM='2022071800'}) and carry no
+     * calendar meaning, so they are excluded from the check rather than validated as part of a day.</p>
+     */
+    public static final int CALENDAR_DATE_DIGITS = 8;
 
     /**
      * Job-parameter key under which the business-date token reaches a job, {@code businessDate}.
@@ -520,13 +608,15 @@ public class BatchApplication {
      * {@code calculate-interest}, {@code backup-transactions}, {@code combine-transactions},
      * {@code export} or {@code import}. {@code --business-date=<token>} supplies the business date,
      * and {@code <token>} must be exactly ten characters, each one an ASCII digit or an ASCII
-     * hyphen-minus; it is forwarded to the job verbatim under the parameter key
-     * {@link #BUSINESS_DATE_PARAMETER} and is never reformatted, so {@code 2024-01-15} and
-     * {@code 2022071800} are both accepted and each is emitted as supplied. Any other argument is
-     * ignored by this class and left to the framework's own command-line property source. An absent,
-     * blank, repeated or unrecognised option is a hard failure: a diagnostic naming every accepted
-     * value is written to standard error and the process terminates in the
-     * {@link #EXIT_STATUS_HARD_FAILURE} tier without an application context ever being created.</p>
+     * hyphen-minus, arranged in one of the two accepted layouts and naming a day that exists; it is
+     * forwarded to the job verbatim under the parameter key {@link #BUSINESS_DATE_PARAMETER} and is
+     * never reformatted, so {@code 2024-01-15} and {@code 2022071800} are both accepted and each is
+     * emitted as supplied. {@link #HELP_OPTION} prints the usage text and runs nothing. Every OTHER
+     * argument -- an unknown option, a bare positional value -- is rejected by name. An absent,
+     * blank, repeated, unrecognised or calendar-impossible value is a hard failure: a diagnostic
+     * naming the offending token and every accepted value is written to standard error and the
+     * process terminates in the {@link #EXIT_STATUS_HARD_FAILURE} tier without an application context
+     * ever being created.</p>
      *
      * <p><b>The exit-status contract, which stands in for a return value.</b> This method returns no
      * value because it does not return at all: it ends by calling {@link System#exit(int)}, and the
@@ -573,9 +663,34 @@ public class BatchApplication {
      *     {@code null}, which is treated as an empty argument list
      * @return the process exit status: {@link #EXIT_STATUS_CLEAN} on a clean completion,
      *     {@link #EXIT_STATUS_SOFT_WARN} on a completion that produced rejects, and
-     *     {@link #EXIT_STATUS_HARD_FAILURE} on any failure, including a malformed command line
+     *     {@link #EXIT_STATUS_HARD_FAILURE} on any failure, including a malformed command line and a
+     *     command line that asked for the usage text instead of a run
      */
     static int execute(String[] args) {
+        // WHY : Assumptions: a help request is answered BEFORE the argument vector is parsed, and it
+        //       is answered whatever else the vector carries, because an operator who cannot get the
+        //       usage text out of the image without first composing a valid command line has no way
+        //       to discover what a valid command line is. It therefore never reaches the parser, which
+        //       is why the parser treats the same token as unrecognised: the parser's job is to
+        //       produce job parameters, and a help request produces none.
+        // WHY : Alternatives Considered: reporting the conventional zero for a help request, which is
+        //       what a general-purpose command-line tool does. Rejected on this module's own
+        //       exit-status contract: zero from this process asserts that the NAMED JOB completed
+        //       cleanly, and the orchestration gate is `NumericEquals 0`, so a state definition that
+        //       carried this token by mistake would report a clean night in which nothing ran and the
+        //       chain would continue over unprocessed data. The hard-failure tier is the lowest value
+        //       that gate refuses, so a run that did no work cannot be mistaken for one that did.
+        // WHY : Trade-offs: the accepted cost is that `docker run <image> --help` exits non-zero, so
+        //       a shell that stops on a non-zero status stops on it. The usage text is on standard
+        //       output rather than standard error precisely so that such a caller can still capture
+        //       it, and no failure diagnostic and no error code accompany it.
+        if (helpRequested(args)) {
+            LOG.info("event=batch.usage.requested option={} consequence=no job was started",
+                    HELP_OPTION);
+            System.out.println(usage());
+            return EXIT_STATUS_HARD_FAILURE;
+        }
+
         final BatchJobParameters parameters;
         // WHY : Assumptions: the command line is validated BEFORE any context is built, so a
         //       malformed command costs no database connection, no parameter-store lookup and no
@@ -1282,18 +1397,95 @@ public class BatchApplication {
      * one. A job that creates a generation knows its own family and builds the coordinate itself, so
      * the holder is empty here rather than guessed.
      *
+     * <p>Refactoring Rationale: the vector's SHAPE is now checked before either option is read, and it
+     * is checked here rather than in the caller so that one method remains the whole answer to whether
+     * a command line is acceptable. Splitting it -- a shape gate in {@code execute} and the option
+     * gates here -- would let this public method accept a vector the process refuses, which is exactly
+     * the two-parsers-disagreeing defect the rationale above records as already having happened once
+     * in this class.
+     *
      * @param args the container command arguments; may be {@code null} or empty, both of which are
      *     rejected as a missing job option
      * @return the parsed parameters, never {@code null}
-     * @throws IllegalArgumentException when the job option is absent or names an unknown job, when the
-     *     business-date option is absent or malformed, or when the record's own invariants refuse the
-     *     combination
+     * @throws IllegalArgumentException when the vector carries a token that is neither of the two
+     *     accepted options, when the job option is absent or names an unknown job, when the
+     *     business-date option is absent, malformed or names a day that does not exist, or when the
+     *     record's own invariants refuse the combination
      */
     public static BatchJobParameters parseArguments(String[] args) {
+        // WHY : Assumptions: the shape gate runs FIRST, so a vector carrying both a typo and a valid
+        //       pair of options reports the typo rather than reporting nothing. Running it last would
+        //       make the common case -- a misspelled option ALONGSIDE the two correct ones -- report a
+        //       successful parse for a command line that was not the one the caller wrote.
+        rejectUnrecognisedArguments(args);
+
         BatchJobName resolvedJob = BatchJobName.resolve(requiredJobName(args));
         BusinessDate resolvedDate = new BusinessDate(requiredBusinessDate(args));
 
         return new BatchJobParameters(resolvedJob, Optional.of(resolvedDate), Optional.empty());
+    }
+
+    /**
+     * Reports whether the command line asks for the usage text rather than for a run.
+     *
+     * @param args the container command arguments to search, which may be {@code null} and is then
+     *     treated as carrying no tokens at all
+     * @return {@code true} when any token is exactly {@link #HELP_OPTION}, {@code false} otherwise
+     */
+    static boolean helpRequested(String[] args) {
+        if (args == null) {
+            return false;
+        }
+        for (String argument : args) {
+            // WHY : Assumptions: the comparison is exact rather than a prefix test, so `--helpful` and
+            //       `--help=x` are NOT help requests and fall through to the unrecognised-token
+            //       rejection that names them. A prefix test would silently answer a request nobody
+            //       made and would hide the typo it was built to expose.
+            if (HELP_OPTION.equals(argument)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Refuses any token on the command line that is neither of the two options this module defines.
+     *
+     * <p>The rejection names the offending token, neutralised and bounded by
+     * {@link #sanitiseForDiagnostic(String)}, because the whole value of this gate to an operator is
+     * learning WHICH token was wrong.</p>
+     *
+     * @param args the container command arguments to inspect, which may be {@code null} and is then
+     *     treated as carrying no tokens at all
+     * @throws IllegalArgumentException on the first token that starts with neither {@link #JOB_OPTION}
+     *     nor {@link #BUSINESS_DATE_OPTION}
+     */
+    private static void rejectUnrecognisedArguments(String[] args) {
+        if (args == null) {
+            return;
+        }
+        for (String argument : args) {
+            // WHY : Assumptions: a null ELEMENT is skipped rather than rejected, and the distinction
+            //       is not cosmetic. A process argument list cannot carry one -- the platform passes
+            //       every argument as text -- so a null can only arrive from Java code calling this
+            //       method directly, and a rejection naming it would have no token to name. Skipping
+            //       leaves the two option gates below to report whatever is genuinely missing.
+            if (argument == null) {
+                continue;
+            }
+            if (argument.startsWith(JOB_OPTION) || argument.startsWith(BUSINESS_DATE_OPTION)) {
+                continue;
+            }
+            // WHY : Refactoring Rationale: the whole token is echoed, including any text after an
+            //       equals sign, because the two mistakes this gate exists to expose are told apart by
+            //       exactly that text: `--business-dat=2022-07-18` is a misspelled option carrying a
+            //       correct value, while `--business-date` with no value at all is a different fault
+            //       with a different remedy. Echoing only the part before the equals sign would render
+            //       the two identically.
+            throw new IllegalArgumentException("argument '" + sanitiseForDiagnostic(argument)
+                    + "' is not an option this module accepts; only " + JOB_OPTION + ", "
+                    + BUSINESS_DATE_OPTION + " and " + HELP_OPTION + " are read");
+        }
     }
 
     /**
@@ -1325,16 +1517,17 @@ public class BatchApplication {
     /**
      * Extracts the mandatory {@code --business-date=} token and checks its shape.
      *
-     * <p>The token is returned exactly as received. Nothing here parses it into a date, normalises a
-     * separator or pads a field, because the value is concatenated into deterministic transaction
-     * identifiers downstream and the committed expectation files exercise two different ten-character
-     * spellings of it.</p>
+     * <p>The token is returned exactly as received. Nothing here parses it into a date to be handed
+     * on, normalises a separator or pads a field, because the value is concatenated into deterministic
+     * transaction identifiers downstream and the committed expectation files exercise two different
+     * ten-character spellings of it. The calendar check below reads the token and returns a verdict on
+     * it; it never returns a rendering of it.</p>
      *
      * @param args the container command arguments to search, which may be {@code null}
      * @return the business-date token, exactly as supplied
-     * @throws IllegalArgumentException when the option is absent, supplied more than once, or carries
-     *     a value that is not exactly {@link #BUSINESS_DATE_LENGTH} characters of ASCII digits and
-     *     ASCII hyphen-minus
+     * @throws IllegalArgumentException when the option is absent, supplied more than once, carries a
+     *     value that is not exactly {@link #BUSINESS_DATE_LENGTH} characters of ASCII digits and ASCII
+     *     hyphen-minus, or carries a value that names no day that exists
      */
     static String requiredBusinessDate(String[] args) {
         String value = optionValue(args, BUSINESS_DATE_OPTION);
@@ -1352,7 +1545,99 @@ public class BatchApplication {
                     + "' is not exactly " + BUSINESS_DATE_LENGTH
                     + " characters of ASCII digits and hyphen-minus");
         }
+        // WHY : Assumptions: the width and character-class gate above runs FIRST and this one second,
+        //       because the calendar check reads fixed offsets out of the token and a value of another
+        //       width has no offsets to read. Reversing them would report an impossible day for a
+        //       value whose real fault is that it is nine characters long.
+        requireRealCalendarDay(value);
         return value;
+    }
+
+    /**
+     * Refuses a business-date token that names no day that exists, in either accepted layout.
+     *
+     * <p>Assumptions: the layouts are resolved by {@link BusinessDate#identifierPrefix()} rather than
+     * by a third test written here. That method already reconciles the separated
+     * {@code YYYY-MM-DD} layout and the compact {@code YYYYMMDDnn} layout the reference driver injects
+     * at {@code app/jcl/INTCALC.jcl:22} into one ten-digit form, and reusing it is what keeps this
+     * module holding ONE answer about which layouts exist. Alternatives Considered: reading the
+     * hyphen positions again here, which would need no throwaway record. Rejected because a second
+     * copy of a layout rule is how the two come to disagree, and a disagreement between them would
+     * accept a token for validation in one shape and address a dataset with it in another.</p>
+     *
+     * <p>Assumptions: only IMPOSSIBILITY rejects. The month, day, month-length and leap-year gates of
+     * the migrated date-edit chain decide the verdict; its century gate and its date-of-birth range
+     * are deliberately not consulted, for the reasons set out on this class. That is why the verdict
+     * is read from the month and day components rather than from the chain's aggregate: the aggregate
+     * also carries the century verdict, and a business date outside the two centuries that chain
+     * accepts is a legitimate orchestration parameter rather than a calendar fault. Every failure this
+     * method must catch marks the month or the day -- an out-of-range month marks the month, an
+     * out-of-range day marks the day, and all three combination arms mark both -- so reading those two
+     * components is exactly the intended boundary and not an approximation of it.</p>
+     *
+     * @param token the business-date token, already known to be exactly
+     *     {@link #BUSINESS_DATE_LENGTH} characters of ASCII digits and ASCII hyphen-minus
+     * @throws IllegalArgumentException when the token is in neither accepted layout, or when the day
+     *     it names does not exist; the message quotes the offending value, neutralised and bounded
+     */
+    private static void requireRealCalendarDay(String token) {
+        final String compactForm;
+        try {
+            compactForm = new BusinessDate(token).identifierPrefix();
+        } catch (IllegalStateException unrecognisedLayout) {
+            // WHY : Refactoring Rationale: this arm closes a gap the width and character-class gate
+            //       leaves open. A value such as `2023-02-3-` is ten characters of digits and hyphens
+            //       and therefore passed every earlier check, but it is in neither layout, so it used
+            //       to reach a running step and fail there -- inside a job, as an unhandled illegal
+            //       state, reported as a generic job failure rather than as a rejected argument.
+            //       Refusing it here reports it as what it is, before anything starts.
+            throw new IllegalArgumentException(BUSINESS_DATE_OPTION + " value '"
+                    + sanitiseForDiagnostic(token) + "' is in neither the separated layout"
+                    + " YYYY-MM-DD nor the compact layout YYYYMMDDnn, so it names no day",
+                    unrecognisedLayout);
+        }
+
+        DateEditValidator.DateEditResult edit = DateEditValidator.validate(
+                BUSINESS_DATE_FIELD_LABEL, compactForm.substring(0, CALENDAR_DATE_DIGITS));
+        if (edit.month().isValid() && edit.day().isValid()) {
+            return;
+        }
+
+        throw new IllegalArgumentException(BUSINESS_DATE_OPTION + " value '"
+                + sanitiseForDiagnostic(token) + "' names no day that exists: "
+                + calendarFaultOf(edit));
+    }
+
+    /**
+     * Extracts the reported text of the month or day failure from a date edit that has one.
+     *
+     * <p>Assumptions: the text is taken from the PER-COMPONENT error list rather than from the edit's
+     * aggregate message, and the difference is observable. The aggregate message keeps the FIRST
+     * failure's text, so a token such as {@code 1899-02-30} -- whose century fails a gate this class
+     * does not apply, and whose day fails one it does -- would report the century as its reason while
+     * being rejected for the day. Reading the component that actually decided the verdict keeps the
+     * diagnostic and the decision the same thing.</p>
+     *
+     * @param edit the outcome of a date edit in which the month component, the day component, or both
+     *     are in error
+     * @return the reported text of the first month or day failure, trimmed; never {@code null}
+     * @throws IllegalStateException if neither component is in error, which would mean this method was
+     *     called for an edit that did not reject, or if a component in error carries no text
+     */
+    private static String calendarFaultOf(DateEditValidator.DateEditResult edit) {
+        for (FieldValidationFlag.FieldError error : edit.fieldErrors()) {
+            if (DateEditValidator.FIELD_MONTH.equals(error.field())
+                    || DateEditValidator.FIELD_DAY.equals(error.field())) {
+                return error.message().trim();
+            }
+        }
+        // WHY : Assumptions: this is an invariant assertion rather than a reachable branch. The caller
+        //       enters only when the month or the day component is in error, and the edit's own
+        //       assembly raises if a component in error carries no text, so a component in error is
+        //       always present in the list with a message. Returning a placeholder sentence instead
+        //       would let a real inconsistency between the two types ship as a plausible diagnostic.
+        throw new IllegalStateException("date edit " + edit
+                + " was rejected with no month or day failure to report");
     }
 
     /**
@@ -1436,13 +1721,15 @@ public class BatchApplication {
      * the message would be sent to a second failure.</p>
      *
      * @return the multi-line usage text, naming both options, all seven accepted job tokens, the
-     *     shape of the business-date token and the three exit-status tiers
+     *     shape and calendar requirement of the business-date token, the fact that nothing else on the
+     *     command line is read, and the three exit-status tiers
      */
     static String usage() {
         String newline = System.lineSeparator();
         StringBuilder message = new StringBuilder();
         message.append("Usage: ").append(JOB_OPTION).append("<name> ")
                 .append(BUSINESS_DATE_OPTION).append("<token>").append(newline)
+                .append("   or: ").append(HELP_OPTION).append(newline)
                 .append(newline)
                 .append("  ").append(JOB_OPTION)
                 .append("<name> is required. <name> must be exactly one of:").append(newline);
@@ -1453,13 +1740,30 @@ public class BatchApplication {
                 .append("  ").append(BUSINESS_DATE_OPTION)
                 .append("<token> is required. <token> must be exactly ")
                 .append(BUSINESS_DATE_LENGTH).append(newline)
-                .append("      characters, each one an ASCII digit or an ASCII hyphen-minus. It is")
+                .append("      characters, each one an ASCII digit or an ASCII hyphen-minus, laid out")
                 .append(newline)
-                .append("      forwarded to the job verbatim and is never reformatted, so both")
+                .append("      either as YYYY-MM-DD or as the compact YYYYMMDDnn, and it must name a")
                 .append(newline)
-                .append("      2024-01-15 and 2022071800 are accepted and each is emitted exactly")
+                .append("      day that exists. It is forwarded to the job verbatim and is never")
                 .append(newline)
-                .append("      as supplied.").append(newline)
+                .append("      reformatted, so both 2024-01-15 and 2022071800 are accepted and each")
+                .append(newline)
+                .append("      is emitted exactly as supplied.").append(newline)
+                .append(newline)
+                // WHY : Assumptions: the usage text states the strictness explicitly rather than
+                //       leaving an operator to infer it from a rejection, because the rejection an
+                //       unrecognised token produces is the one diagnostic in this module that an
+                //       operator is most likely to read as a bug in the image rather than as a
+                //       decision. Naming the rule beside the options makes the refusal legible.
+                .append("  No other argument is read. An unrecognised option and a bare positional")
+                .append(newline)
+                .append("      argument are both refused by name; every deployment setting arrives")
+                .append(newline)
+                .append("      through the environment rather than through this command line.")
+                .append(newline)
+                .append(newline)
+                .append("  ").append(HELP_OPTION)
+                .append(" prints this text and starts nothing.").append(newline)
                 .append(newline)
                 .append("  Neither option has a default. Exit status: ").append(EXIT_STATUS_CLEAN)
                 .append(" clean, ").append(EXIT_STATUS_SOFT_WARN)

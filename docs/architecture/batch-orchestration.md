@@ -259,7 +259,7 @@ the distinction, so the two figures cannot be mistaken for a disagreement.
 | 1 | `QuiesceOnlineWrites` | [`app/jcl/CLOSEFIL.jcl`](../../app/jcl/CLOSEFIL.jcl) L22–L30 — an SDSF operator command issuing `CEMT SET FIL(...) CLO` | Function setting a read-only flag in Parameter Store |
 | 2 | `StageSeedDatasets` | the whole `IDCAMS REPRO` master-refresh block — the ten load jobs listed in [State 2](#state-2--refreshing-and-verifying-the-eleven-seed-datasets), plus the `DALYTRAN.PS` daily feed. The verification nested inside it replaces **nothing**: the baseline verified no load at all | `Parallel` wrapping one branch. The branch runs a `Map` of eleven branches, each a synchronous run-task on the data-migration image invoking `refresh-dataset` — fetch, stage a generation, load, verify, and for the transaction master reconcile the identifier allocator — and then `VerifyMigration`, a run-task invoking `verify-all`, followed by a `Choice` admitting only exit code zero. Ten Map branches load and verify; `transactions` stages only, because no TRANSACT extract is committed. This state's single outgoing edge is the ONLY edge into state 3 |
 | 3 | `PreflightDailyTransactions` | `CBTRN01C` — **which has no JCL driver in the baseline**; see [State 3](#state-3--cbtrn01c-has-no-jcl-driver-in-the-baseline) | Container task |
-| 4 | `PostTransactions` | [`app/jcl/POSTTRAN.jcl`](../../app/jcl/POSTTRAN.jcl) L23–L41 driving `CBTRN02C` | Container task, explicit run-scoped outcome handoff, then a `Choice` that distinguishes clean, warn and invalid/fatal outcomes |
+| 4 | `PostTransactions` | [`app/jcl/POSTTRAN.jcl`](../../app/jcl/POSTTRAN.jcl) L23–L41 driving `CBTRN02C` | Container task with **two** outcome routes: a `Choice` on the returned task envelope for the clean exit, and an ordered `States.TaskFailed` catcher feeding a `Choice` that classifies the error's `Cause` for the warn exit; see [the state-4 status handoff](#the-state-4-status-handoff-is-explicit) |
 | 5 | `CalculateInterest` | [`app/jcl/INTCALC.jcl`](../../app/jcl/INTCALC.jcl) L22–L41 driving `CBACT04C` | Container task; the business date arrives as a parameter, never as a clock read |
 | 6 | `BackupTransactions` | [`app/jcl/TRANBKP.jcl`](../../app/jcl/TRANBKP.jcl) L23–L67, **and** the unload halves of [`app/jcl/TRANREPT.jcl`](../../app/jcl/TRANREPT.jcl) L23–L55 and [`app/jcl/PRTCATBL.jcl`](../../app/jcl/PRTCATBL.jcl) L29–L39 | Container task exporting **three** generations: the full transaction copy, the card-ordered daily subset, and the category-balance unload |
 | 7 | `CombineTransactions` | [`app/jcl/COMBTRAN.jcl`](../../app/jcl/COMBTRAN.jcl) L22–L48 — a DFSORT merge followed by a `REPRO` reload | Container task using SQL ordering |
@@ -280,20 +280,46 @@ the numeric interval and timeout values will be per-environment parameters of
 |---|---|---|---|---|
 | 1, 12 | Function invoke | Explicit, parameterised | Up to 3 attempts on a transient parameter-store or throttling error, exponential backoff | To `NotifyFailure` |
 | 2 | `Map` over eleven branches, each a synchronous run-task | Explicit per branch **and** on the `Map` state | Up to 3 attempts per branch on task-launch failure | Branch catch aborts the `Map`, then to `NotifyFailure` |
-| 3 | Synchronous run-task, then a `Choice` admitting only exit code zero | Explicit, parameterised | Up to 3 attempts on task-launch and container-start failure only | To `NotifyFailure` |
-| 4, 6, 7, 8, 9, 10 | Synchronous run-task | Explicit, parameterised | Up to 3 attempts on task-launch and container-start failure only | To `NotifyFailure` |
-| 5 | Synchronous run-task, read run-scoped posting outcome, then a `Choice` | Explicit, parameterised | Up to 3 attempts on task-launch and container-start failure only | Task/runtime or malformed outcome goes through cleanup, `NotifyFailure`, resume and `Fail` |
-| 11 | Function invoke | Explicit, parameterised | Up to 3 attempts on a transient connection error, exponential backoff | To `NotifyFailure` |
+| 3 | Synchronous run-task, then a `Choice` admitting only exit code zero | Explicit, parameterised | Up to 3 attempts on an ECS **service fault** only | To `NotifyFailure` |
+| 4 | Synchronous run-task, a `Choice` on the returned envelope, and an ordered `States.TaskFailed` catcher feeding a `Cause` classifier | Explicit, parameterised | Up to 3 attempts on an ECS **service fault** only | `States.TaskFailed` to the classifier, which routes exit code 4 to the warning and everything else to `NotifyFailure`; every other error to `NotifyFailure` |
+| 5, 6, 7, 8, 9 | Synchronous run-task, then a `Choice` admitting only exit code zero | Explicit, parameterised | Up to 3 attempts on an ECS **service fault** only | To `NotifyFailure` |
+| 10, 11 | Function invoke | Explicit, parameterised | Up to 3 attempts on a transient connection error, exponential backoff | To `NotifyFailure` |
 
-Assumptions: the retry policies above are scoped to **launch and infrastructure
-faults**, not to application outcomes. A container that started and then exited
-non-zero has already done work against the database, so retrying it would repeat
-that work; the reject-count path at state 4 and the run ledger described in
+Assumptions: each retrier names **service fault errors only** — the four
+`ECS.*` names for the run-task states, the four `Lambda.*` names for the function
+states — and `States.TaskFailed` is deliberately **absent** from all of them.
+Naming the four is a *replacement* for that entry and not a narrowing of it,
+because `States.TaskFailed` in a retrier is a wildcard over every known error name
+except `States.Timeout`: it was already retrying these service faults, under a name
+that could not be told apart from the job's own exit. `ECS.AmazonECSException` is
+the name AWS documents for a `RunTask` that could not be placed for want of
+capacity; the rest follow the `<Service>.<ExceptionName>` form the language uses for
+service exceptions. That wildcard name is what the synchronous run-task integration
+raises for a non-zero essential-container exit, so retrying it replays an
+application outcome: a
+container that started and then exited non-zero has already done work against the
+database, and a reject night simply returns the same code on every attempt. The
+`batch.batch_run` ledger described in
 [The restart story](#the-restart-story-there-is-no-baseline-checkpoint-contract-to-preserve)
-are what handle application outcomes. Retrying an application failure is the
-single most likely way to turn a one-night reject into a double-posted
-transaction, which is why the two classes of failure are separated here rather
-than covered by one policy.
+is what makes those repeats a recorded no-op rather than a double posting, which
+is also what shows the retry to be futile: nothing about the outcome changes
+between attempts.
+
+Trade-offs: the same error name also reports a task that never ran — an image-pull
+failure, a capacity failure — and those are genuinely retryable. Excluding the name
+sends them to the failure path on their first attempt, and the recovery is an
+operator redrive, which the ledger makes safe because a step that completed before
+the fault is a no-op on the way back through. The exclusion is accepted because the
+name cannot separate the two classes at retry time, and retrying it is what made
+the state-4 warn tier unreachable.
+
+Assumptions: `States.Timeout` is likewise absent, for a reason that must not be
+conflated with the one above. A synchronous run-task state whose timeout expires
+does **not** stop its container — Step Functions abandons the wait and the task
+keeps running — so retrying that error would start a second task of the same job
+while the first was still writing. An expiry therefore goes straight to the failure
+path, where the residual-task cancellation sub-chain stops the abandoned task
+before the run is declared failed.
 
 Trade-offs: the failure path passes through the resume state before it fails. A
 caught error routes to `NotifyFailure` and then to a resume of online writes, and
@@ -322,16 +348,19 @@ flowchart TD
     end
     S2 --> S3
     S3["3 PreflightDailyTransactions<br/>CBTRN01C - no JCL driver"] --> S4
-    S4["4 PostTransactions<br/>replaces POSTTRAN.jcl / CBTRN02C"] --> R4
+    S4["4 PostTransactions<br/>replaces POSTTRAN.jcl / CBTRN02C"] -->|"task envelope returned"| C4
 
-    R4["ReadPostingOutcome<br/>run-scoped status handoff"] --> C4
-    C4{"Choice:<br/>returnCode + rejectCount"}
-    C4 -->|"RC 0 and rejects 0 - clean"| D4["DeletePostingOutcome"]
-    C4 -->|"RC 4 and rejects > 0 - warn"| W4["RecordRejectWarning"]
-    C4 -->|"any inconsistent value"| I4["InvalidPostingOutcome"]
-    W4 --> D4
-    D4 --> S5
-    I4 --> CP4["DeletePostingOutcomeIfPresent"]
+    C4{"CheckPostingExitCode:<br/>exitCode from the envelope"}
+    C4 -->|"exactly 0 - clean"| S5
+    C4 -->|"exactly 4 - not reached, see below"| W4["RecordPostingWarning"]
+    C4 -->|"any other code - not reached"| NF
+    W4 --> S5
+
+    S4 -.->|"States.TaskFailed<br/>(catcher declared first)"| CL4
+    CL4{"ClassifyPostingTaskFailure:<br/>Cause carries exit code 4?"}
+    CL4 -->|"yes - warn"| CW4["RecordCaughtPostingWarning"]
+    CL4 -->|"no - fatal or launch fault"| NF
+    CW4 --> S5
 
     S5["5 CalculateInterest<br/>replaces INTCALC.jcl / CBACT04C<br/>business date is a parameter"] --> S6
     S6["6 BackupTransactions<br/>replaces TRANBKP.jcl<br/>writes three generations"] --> S7
@@ -346,7 +375,7 @@ flowchart TD
     S1 -.->|Catch| NF
     S2 -.->|"Catch (the Parallel's; the Map and the gate raise to it)"| NF
     S3 -.->|Catch| NF
-    S4 -.->|Catch| CP4
+    S4 -.->|"Catch (States.ALL, declared second)"| NF
     S5 -.->|Catch| NF
     S6 -.->|Catch| NF
     S7 -.->|Catch| NF
@@ -356,13 +385,14 @@ flowchart TD
 
     VMF --> NF
 
-    CP4 --> NF
     NF["NotifyFailure"] --> RF["ResumeOnlineWritesOnFailure<br/>idempotent"]
     RF --> GF{"onlineWritesEnabled?"}
     GF -->|true| FA["Fail: CardDemoBatchFailed<br/>redrive resumes from the failed state"]
     GF -->|false| ST["Fail: CardDemoOnlineWritesStranded<br/>writes may still be refused"]
 %% The posting warn branch comes from CBTRN02C and the return-code contract.
 %% TRANBKP.jcl's COND=(4,LT) is local to that separate job and is not this edge.
+%% State 4's two catchers are evaluated in declaration order: States.TaskFailed
+%% first, so the warn classifier is consulted before the States.ALL wildcard.
 %% Both release edges are gated on the flag's RESULTING state rather than on the call
 %% returning, which is what stops an execution reporting a bracket it did not release.
 ```
@@ -370,48 +400,155 @@ flowchart TD
 ### The state-4 status handoff is explicit
 
 The posting warn branch cannot be inferred from
-[`TRANBKP.jcl`](../../app/jcl/TRANBKP.jcl), and it also cannot be recovered from
-the optimized ECS integration's ordinary output: `runTask.sync` reports task and
-container metadata, not an application-defined reject count. The target
-`PostTransactions` task therefore receives a unique `run_id` and a run-scoped
-Parameter Store name such as
-`/carddemo/<environment>/batch/<run_id>/post-transactions`. Before it exits, it
-writes this JSON value:
+[`TRANBKP.jcl`](../../app/jcl/TRANBKP.jcl), and the way the orchestrator learns
+about it is decided by the integration rather than chosen freely.
 
-```json
-{
-  "returnCode": 4,
-  "processedCount": 42,
-  "rejectCount": 2
-}
-```
+**The integration's error contract, stated first, because everything below follows
+from it.** For `arn:aws:states:::ecs:runTask.sync`, an essential container that
+exits non-zero is **not** an ordinary result. Step Functions raises the error
+`States.TaskFailed`, and the exit code survives only inside that error's `Cause`,
+which the integration supplies as the `DescribeTasks` view of the stopped task
+serialised into a JSON **string**. The state's `Next` — and therefore any `Choice`
+on the state's result — is reached only when the container exited **0**.
 
-The container exits zero for the two completed business outcomes — return code
-0 with no rejects, or return code 4 with one or more rejects — so the synchronous
-task reaches the business `Choice` instead of conflating a soft reject with a
-runtime failure. A fatal application outcome fails the task and follows the
-state's `Catch`. After a completed task, `ReadPostingOutcome` reads the exact
-run-scoped parameter, parses it with `States.StringToJson`, and applies these
-closed invariants:
+**The job's return code is unchanged, and must be.**
+[`app/cbl/CBTRN02C.cbl`](../../app/cbl/CBTRN02C.cbl) L229–L230 moves 4 to
+`RETURN-CODE` when `WS-REJECT-COUNT > 0`, `batch-service` reproduces exactly that,
+and AAP §0.5.1.7 makes it a parity requirement. Making the container exit zero on
+a reject night would resolve the routing problem by discarding the contract the
+routing exists to carry, so the orchestration learns to read the code out of the
+failure instead.
 
-| Outcome | Required values | Next state |
+**How state 4 is wired.** `PostTransactions` declares **two catchers, in order**:
+
+| Order | `ErrorEquals` | `ResultPath` | Next |
+|---|---|---|---|
+| 1 | `States.TaskFailed` | `$.postingFailure` | `ClassifyPostingTaskFailure` |
+| 2 | `States.ALL` | `$.failure` | `NotifyFailure` |
+
+Assumptions: Amazon States Language evaluates catchers in **declaration order**
+and the first match wins, so the order is load-bearing. The `States.ALL` wildcard
+placed first would swallow the error before the specific catcher was consulted,
+which is precisely the shape that made this warn tier unreachable.
+
+Assumptions: catcher 1's name is **itself a wildcard**. The language defines
+`States.TaskFailed`, wherever it appears in a `Retry` or a `Catch`, as matching
+every known error name except `States.Timeout`. So catcher 1 also receives the
+`ECS.*` integration faults once their retries are spent — which is safe, and is why
+the classification is done by guards on the `Cause` rather than by the error name: a
+fault that never ran the job carries no batch container reporting 4, so it takes the
+classifier's `Default` and ends the run exactly as before, one `Choice` hop later.
+The single documented exception is load-bearing in the other direction:
+`States.Timeout` does **not** match catcher 1, so an abandoned-wait expiry falls
+through to catcher 2 and still reaches the residual-task sweep that stops the task
+the state stopped waiting for.
+
+`ClassifyPostingTaskFailure` is a `Choice` that guards with `IsPresent` and
+`IsString` on `$.postingFailure.Cause`, then requires the `Cause` to **name the
+batch container**, and only then matches the exit code. All three groups are
+`StringMatches` patterns; the last two groups are each combined under `Or`:
+
+| `StringMatches` pattern | Shape it admits |
+|---|---|
+| `*"Name":"<batch container>"*` | compact serialisation of the container's name |
+| `*"Name": "<batch container>"*` | one space after the colon |
+| `*"ExitCode":4,*` | compact serialisation, another member follows |
+| `*"ExitCode":4}*` | compact serialisation, last member of its object |
+| `*"ExitCode": 4,*` | one space after the colon, another member follows |
+| `*"ExitCode": 4}*` | one space after the colon, last member of its object |
+
+The name comes from `var.batch_container_name`, the same input the
+`ContainerOverrides` address, and it is what binds the classification to this task
+rather than to any failure that happens to carry a 4: a `Cause` with no container
+entries at all — a `RunTask` response holding only `Failures`, or a plain-text
+integration message — fails closed. Both spacings are covered in both groups for one
+reason: a compact-only pattern refuses a payload whose members are separated with a
+space, which would be a warn tier that stops matching on a serialiser detail rather
+than on the outcome.
+
+Assumptions: `StringMatches` is the only comparator in the language that admits a
+wildcard, and exactly one character is special in its pattern — `*`. Each pattern
+carries a **boundary character** after the digit, and that is what makes the rule
+correct rather than merely plausible: a bare `*"ExitCode":4*` also matches
+`"ExitCode":40`, which would read a hard failure as a reject night.
+
+| Outcome | How it is recognised | Next state |
 |---|---|---|
-| Clean | `returnCode = 0` and `rejectCount = 0` | Delete the parameter, then continue |
-| Warn | `returnCode = 4` and `rejectCount > 0` | Record the warning, delete the parameter, then continue |
-| Invalid | Any other pairing, missing parameter or malformed JSON | Delete the parameter if present, notify, resume online writes, then fail |
+| Clean | the integration RETURNED an envelope and `exitCode = 0` | `CheckPostingExitCode` continues to state 5 |
+| Warn | `States.TaskFailed` whose `Cause` matches one of the four patterns | `RecordCaughtPostingWarning` writes `{code = "POSTING_REJECTS_PRESENT", exitCode = 4}` to `$.warning`, then state 5 |
+| Fatal, launch fault, or unrecognised `Cause` | `States.TaskFailed` that matches none of the patterns, or any other error | `NotifyFailure`, the residual-task sweep, the bracket release, then `Fail` |
 
-Assumptions: the parameter name is unique per execution, contains no financial
-record data, and is deleted on both completed branches and on the failure path
-when it exists. The task role receives
-`ssm:PutParameter` only on its execution prefix; the state-machine role receives
-`ssm:GetParameter` and `ssm:DeleteParameter` on the same prefix. Alternatives
-Considered: encoding warn as the ECS process exit code was rejected because it
-turns a completed business result into infrastructure failure before a `Choice`
-can inspect it. Querying Aurora from the orchestrator was also rejected because
-Step Functions has no direct PostgreSQL integration and adding a Lambda solely to
-relay one result would duplicate the run ledger's application responsibility.
-The handoff is a **target design**: its state-machine IAM and status states are
-not authored yet.
+Assumptions: `RecordCaughtPostingWarning`'s payload is **static**. A task state
+applies no `ResultPath` when it fails, so `$.posting` does not exist on this edge
+and the `"exitCode.$"` reference `RecordPostingWarning` uses would address nothing.
+Its two members and its code string are identical to `RecordPostingWarning`'s, so
+an execution that warned reports one shape at `$.warning` whichever route produced
+it.
+
+Assumptions: only the CLEAN rule of `CheckPostingExitCode` — and of every other
+`Check*ExitCode` gate in the chain — is reachable, because the result they inspect
+can only ever carry a zero. The warn rule and the `Default` edges are kept anyway,
+and the reasons differ: a `Choice` with no `Default` raises
+`States.NoChoiceMatched`, a `Choice` state cannot carry a `Catch`, and that error
+would end the execution without publishing the notification, sweeping the residual
+tasks or releasing the write bracket; while the warn rule is the one declarative
+statement of the rc=4 contract on the result path, beside which the classifier
+reads as the same contract on the error path. They are annotated as unreachable at
+the states themselves so a reader does not have to rediscover it from an execution
+history.
+
+Trade-offs: an unrecognised `Cause` **fails closed**. Over-matching would continue
+the chain past a genuine hard failure; under-matching stops a night that is
+recoverable by redrive and whose reject stream is already durable — the rejects are
+committed to `ledger.transaction_rejects` and staged as the `DALYREJS` generation
+before posting exits.
+
+Trade-offs: the name conjunct proves the payload is **this task's** stopped-task
+description; it does not attribute the exit code to one entry inside it. The batch
+task definition carries the telemetry collector beside the application container —
+`enable_telemetry_collector` defaults to `true` in `infra/modules/ecs-service` and
+neither environment root overrides it — and both containers are essential, so an
+`ExitCode` of 4 on either satisfies the rule. Attributing it within the pattern
+language is not expressible: the only wildcard is `*`, the comparator has no
+negation, and a pattern holding both tokens matches a name from one entry with an
+exit code from the next just as readily as it matches one entry, while pinning an
+order between the two members would bet the whole warn tier on a key order this
+integration does not document. Making it exact is a property of the **task
+definition** rather than of this graph: passing `enable_telemetry_collector = false`
+for the batch workload in the environment roots leaves one container able to report
+an exit code, and a run-to-completion task has no long-lived telemetry to export
+anyway. The residual is bounded and detectable rather than silent — it needs the
+collector to stop with exactly 4 in the same stop event, the outcome is a chain that
+continues, and the code posting actually finished with is durable in
+`batch.batch_run` for that run.
+
+Alternatives Considered, and why each was rejected:
+
+* **Exit zero and hand the outcome over out of band** — the container writing a
+  run-scoped Parameter Store value such as
+  `/carddemo/<environment>/batch/<run_id>/post-transactions` carrying
+  `returnCode`, `processedCount` and `rejectCount`, with a later state reading and
+  deleting it. Rejected because it requires the container to exit zero on a reject
+  night, which contradicts the return-code contract above, and because it adds a
+  parameter whose creation, reading and deletion have to succeed on both the
+  completed branches and the failure path for the chain to be correct at all.
+* **`States.StringToJson` on the `Cause`, then `NumericEquals` on the decoded
+  `Containers[i].ExitCode`** — exact, attributing the code to a named container, and
+  needing no patterns. Rejected because a `Pass` state cannot carry a `Catch`: a
+  `Cause` that is not parseable JSON, which is what an integration-level fault
+  produces and is the case most in need of routing, would fail the intrinsic with
+  `States.IntrinsicFailure` and end the execution there, skipping `NotifyFailure`,
+  the residual-task sweep and the bracket release. A missing reference path on a
+  one-container payload raises `States.Runtime`, which `States.ALL` does not catch,
+  so that route trades a rare detectable misroute for a rare silent unnotified abort
+  of the whole chain.
+* **Querying Aurora from the orchestrator** — rejected because Step Functions has
+  no direct PostgreSQL integration, and adding a function solely to relay one
+  result would duplicate the run ledger's application responsibility.
+* **Treating code 4 as a failure** — rejected because it reports a correctly posted
+  night with business rejects as an infrastructure incident and skips the interest,
+  backup, combine, statement and report work the baseline performs
+  unconditionally.
 
 ### Why a container task per work step, and not a function
 
@@ -541,8 +678,10 @@ preserve syntax after the operation it guarded had disappeared.
 [`app/cbl/CBTRN02C.cbl`](../../app/cbl/CBTRN02C.cbl) L229–L230 sets
 `RETURN-CODE` to 4 when `WS-REJECT-COUNT > 0`, and
 [`tests/README.md`](../../tests/README.md) §8 classifies 4 as warn/soft reject.
-That business contract, not `TRANBKP.jcl`, is why target state 4 must distinguish
-clean and warn outcomes through the explicit status handoff above.
+That business contract, not `TRANBKP.jcl`, is why state 4 distinguishes clean and
+warn outcomes at all, and it is carried by the ordered `States.TaskFailed` catcher
+and `Cause` classifier described in
+[the state-4 status handoff](#the-state-4-status-handoff-is-explicit).
 
 ### Form 3 — `INCLUDE COND=(...)`: record selection, never a step gate
 
@@ -1228,7 +1367,7 @@ alongside the nightly chain and the ad-hoc report machine.
 | 1 | `Choice` | — | `ValidateDatasetRequest`: refuses an absent or misshapen `businessDate` before any task starts |
 | 2 | `Pass` | — | `InvalidDatasetRequest`: the refusal payload, routed to the notification path |
 | 3 | `Task` | [`app/jcl/CBEXPORT.jcl`](../../app/jcl/CBEXPORT.jcl) L43 | `ExportDataset`: batch task with `--job=export` |
-| 4 | `Choice` | — | `CheckExportExitCode`: a non-zero container exit is not an API error, so it is gated explicitly |
+| 4 | `Choice` | — | `CheckExportExitCode`: asserts that a RETURNED task envelope carried exit code zero. A non-zero container exit does not reach it -- the synchronous integration raises `States.TaskFailed` for that and the task's `Catch` takes it to `NotifyDatasetFailure`, which is the correct outcome for a pair with no warn tier of its own |
 | 5 | `Task` | [`app/jcl/CBIMPORT.jcl`](../../app/jcl/CBIMPORT.jcl) L22 | `ImportDataset`: same task definition, `--job=import` |
 | 6 | `Choice` | — | `CheckImportExitCode` |
 | 7 | `Task` | — | `NotifyDatasetFailure`: publishes to the shared notification topic |

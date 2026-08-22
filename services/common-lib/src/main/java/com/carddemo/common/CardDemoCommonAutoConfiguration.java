@@ -8,6 +8,7 @@ import com.carddemo.common.money.MoneyModule;
 import com.carddemo.common.observability.MetricsConfig;
 import com.carddemo.common.web.CorrelationIdFilter;
 import com.carddemo.common.web.CursorToken;
+import com.carddemo.common.web.RejectedRequestErrorReportValveCustomizer;
 import com.carddemo.common.web.RequestBodySizeFilter;
 import java.time.Clock;
 import java.time.Duration;
@@ -709,6 +710,65 @@ public class CardDemoCommonAutoConfiguration {
         @ConditionalOnMissingBean(RequestRejectedHandler.class)
         public RequestRejectedHandler carddemoRequestRejectedHandler(Clock clock) {
             return ApiErrorSecurityHandlers.requestRejectedHandler(clock);
+        }
+    }
+
+    /**
+     * Registers the customizer that makes the embedded container answer its own refusals in the
+     * migrated problem shape.
+     *
+     * <p>Assumptions: this is a THIRD refusal-rendering configuration rather than a bean on either of
+     * the two above, and the reason is the layer it reaches rather than a preference. The advice
+     * answers a request the dispatcher accepted, the firewall handler answers one Spring Security
+     * refused, and both of those are inside a web application; this one answers a request the
+     * CONTAINER refused before any web application was selected, which no filter, error page or advice
+     * is invoked for. Its conditions therefore name the container's own classes, which neither of the
+     * other two configurations requires, and folding it into one of them would make that
+     * configuration -- and the advice or the handler with it -- conditional on an embedded container
+     * being present. A service deployed behind a different container would then silently lose its
+     * request-error rendering.</p>
+     *
+     * <p>Assumptions: three names are checked together. The servlet request establishes that a servlet
+     * runtime is present at all, the container's error-report valve is the type the published valve
+     * extends, and the container's servlet factory is the type the published customizer is bound to.
+     * Loading the customizer with either of the last two absent would fail while the framework
+     * resolved its supertypes instead of cleanly omitting a bean. Online services declare all three
+     * through the web starter; the batch task declares none.</p>
+     *
+     * <p>Trade-offs: naming the container's classes ties this one configuration to one container
+     * implementation, where the rest of this file is implementation-neutral. That is unavoidable
+     * rather than chosen -- the slot being occupied is that container's, and there is no portable
+     * interface for it -- and it is confined to this configuration precisely so the neutrality of the
+     * others is unaffected.</p>
+     */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnClass(name = {
+        "jakarta.servlet.http.HttpServletRequest",
+        "org.apache.catalina.valves.ErrorReportValve",
+        "org.springframework.boot.tomcat.servlet.TomcatServletWebServerFactory"
+    })
+    @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
+    static final class TomcatContainerRefusalConfiguration {
+
+        /**
+         * Registers the shared container-refusal renderer's installer.
+         *
+         * <p>Assumptions: guarded on absence so a service needing different container-level behaviour
+         * replaces it by declaring its own bean rather than by editing this one, which is the same
+         * escape hatch the advice and the firewall handler offer. No property gates it: a deployment
+         * that had to name one to receive a parseable refusal would receive an unparseable one by
+         * default, which is the exposure this bean closes.</p>
+         *
+         * @param clock the clock every emitted problem shape reads its failure instant from, resolved
+         *     from the context so one request is never stamped from two clocks and a test can
+         *     substitute a fixed reading
+         * @return the customizer bean, never {@code null}
+         */
+        @Bean
+        @ConditionalOnMissingBean(RejectedRequestErrorReportValveCustomizer.class)
+        public RejectedRequestErrorReportValveCustomizer
+                carddemoRejectedRequestErrorReportValveCustomizer(Clock clock) {
+            return new RejectedRequestErrorReportValveCustomizer(clock);
         }
     }
 }

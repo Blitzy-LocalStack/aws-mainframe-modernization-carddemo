@@ -31,14 +31,21 @@
  *       migration creates rather than by reading that table end to end. Which access path a cost-based
  *       planner chooses is a decision only a planner makes, so a substituted store would answer the
  *       query correctly while saying nothing at all about the path.</li>
+ *   <li>That {@code db/migration/V3__batch_account_write_grant.sql} leaves the nightly batch role
+ *       holding {@code UPDATE} on {@code account.accounts} and no other write anywhere in this schema.
+ *       An access-control list is the engine's own state, established by one script running after
+ *       another, so nothing short of the engine can answer for it -- and the defect that migration
+ *       answers was exactly a grant that read as correct in the file that declared it and never reached
+ *       a provisioned database.</li>
  * </ul>
  *
  * <h2>The closed inventory</h2>
  *
- * <p>This directory holds eight files and a ninth is prohibited: this descriptor, together with
+ * <p>This directory holds nine files and a tenth is prohibited: this descriptor, together with
  * {@code AccountRepositoryIT}, {@code AccountScreenProjectionIT}, {@code AccountUpdateAtomicityIT},
- * {@code CardXrefRepositoryIT}, {@code CustomerMasterRepositoryIT}, {@code CustomerRepositoryIT} and
- * {@code InquiryReplyLedgerIT}. The three entities those seven
+ * {@code BatchAccountWriteGrantIT}, {@code CardXrefRepositoryIT}, {@code CustomerMasterRepositoryIT},
+ * {@code CustomerRepositoryIT} and
+ * {@code InquiryReplyLedgerIT}. The three entities those eight
  * reach are the three this context owns, and each derives from one copybook record -- {@code Account}
  * from {@code ACCOUNT-RECORD} at {@code app/cpy/CVACT01Y.cpy} L4, {@code Customer} from
  * {@code CUSTOMER-RECORD} at {@code app/cpy/CVCUS01Y.cpy} L4 and {@code CardXref} from
@@ -46,7 +53,7 @@
  * inquiry exchange this context absorbs writes through.</p>
  *
  * <pre>
- * this directory: 8 java files = 7 tests + 1 charter
+ * this directory: 9 java files = 8 tests + 1 charter
  * </pre>
  *
  * <p>Refactoring Rationale: that marker line is new, and it is what turns the sentence above from a
@@ -64,11 +71,13 @@
  * the same table and a reader could otherwise take one for a duplicate of the other.</p>
  *
  * <p>Alternatives Considered: an abstract base class holding the container, the property registration
- * and the schema prerequisite once for all seven. Rejected because it would be a type whose only purpose
+ * and the schema prerequisite once for all eight. Rejected because it would be a type whose only purpose
  * is to be extended, and it would place behind inheritance the two things a reader of any one class most
  * needs to see at that class: which properties it publishes, and what it creates before the context is
  * built. Trade-offs: the same prerequisite is therefore expressed seven times, which is a real cost every
- * time it changes. It is accepted on the same ground recorded beside {@code spring.flyway} in
+ * time it changes -- {@code BatchAccountWriteGrantIT} being the one member that does not express it,
+ * because it applies the shipped bootstrap instead, as ruling four records. It is accepted on the same
+ * ground recorded beside {@code spring.flyway} in
  * {@code services/account-service/src/test/resources/application-test.yml}, whose own note reaches the
  * identical conclusion about the identical duplication.</p>
  *
@@ -86,6 +95,16 @@
  * individually. Ruling nine's sentence about fixtures is scoped to the members that predate it: that
  * class reads none, and this one resolves one by the classpath name recorded on itself, which is why the
  * name is part of its contract and is stated there.</p>
+ *
+ * <p>Refactoring Rationale: {@code BatchAccountWriteGrantIT} arrives under the same clause and takes the
+ * privilege-graph seat, which no member here previously held. Its subject is a grant this schema issues
+ * to ANOTHER context's role -- the one exception to the standing arrangement that a per-service
+ * migration issues no {@code GRANT}, argued in section 4 of
+ * {@code data-migration/sql/V0__schemas_and_roles.sql} and at the head of
+ * {@code db/migration/V3__batch_account_write_grant.sql} -- so it is the one class here whose assertions
+ * concern a role this context does not connect as. It reads no fixture, and ruling nine's sentence about
+ * seeding through the subject reads the other way round for it: it seeds through the container's
+ * superuser BECAUSE one of its cases requires that the same insert be refused to the batch role.</p>
  *
  * <h2>Ruling one: the name is the selector</h2>
  *
@@ -108,7 +127,7 @@
  *
  * <h2>Ruling two: the profile is named on the class</h2>
  *
- * <p>Assumptions: each of the seven carries {@code @ActiveProfiles("test")}, which is the whole of how
+ * <p>Assumptions: each of the eight carries {@code @ActiveProfiles("test")}, which is the whole of how
  * {@code services/account-service/src/test/resources/application-test.yml} comes into force. No build
  * plugin activates that profile on any class's behalf, so a class omitting the annotation would resolve
  * the base profile alone -- reaching for the two remote configuration sources named in ruling three, and
@@ -119,9 +138,16 @@
  * <p>Assumptions: no connection literal appears anywhere in this package, and none may be introduced. A
  * container assigns its host port as it starts, so a literal authored ahead of the run either addresses
  * nothing or -- the worse outcome, because it passes -- addresses whatever database happened to be
- * listening. Every one of the seven classes publishes the container's generated URL, user name and
+ * listening. Every one of the eight classes publishes the container's generated URL, user name and
  * credential through {@code @DynamicPropertySource}, and publishes {@code spring.flyway.user} and
  * {@code spring.flyway.password} beside them.</p>
+ *
+ * <p>Assumptions: {@code BatchAccountWriteGrantIT} publishes a different value for that migration pair
+ * and the same values for everything else, which is a deliberate divergence rather than an omission. It
+ * names {@code carddemo_account_migrator} and a credential it issued to that role, because what it
+ * asserts is a grant, and a grant issued by a superuser would have succeeded whether or not the deployed
+ * identity could have issued it. Every other class here migrates as the container's generated user
+ * because none of them asserts anything about who issued a statement.</p>
  *
  * <p>Assumptions: that registration mechanism is {@code @DynamicPropertySource} and not
  * {@code @ServiceConnection}. The distinction is worth stating because the second is the more usual
@@ -154,12 +180,22 @@
  *
  * <h2>Ruling four: the schema exists before Flyway opens a connection</h2>
  *
- * <p>Assumptions: each of the seven classes creates the owning role and the schema itself, in a
+ * <p>Assumptions: seven of the eight classes create the owning role and the schema themselves, in a
  * {@code @BeforeAll} that runs after the container has started and before the application context is
- * refreshed. It creates a {@code NOLOGIN} role, grants the container's generated user the right to
+ * refreshed. Each creates a {@code NOLOGIN} role, grants the container's generated user the right to
  * assume it, and then creates schema {@code account} owned by that role. This is the single most likely
  * wiring failure in this package, and it earns the emphasis: the failure arrives at RUN TIME as a
  * context that will not start, with nothing whatsoever from the compiler beforehand.</p>
+ *
+ * <p>Assumptions: {@code BatchAccountWriteGrantIT} is the eighth and satisfies this ruling differently,
+ * by applying {@code data-migration/sql/V0__schemas_and_roles.sql} unchanged through the engine's own
+ * client in the same {@code @BeforeAll} position. The distinction is the subject: the other seven need a
+ * schema and nothing more, so three statements are the honest shape, whereas that class asserts the
+ * privilege graph the shipped bootstrap establishes -- and three harness-authored statements would be a
+ * second definition of the very thing under test, passing whatever they were written to say.
+ * Trade-offs: applying that file costs seconds per run and requires two local acknowledgements it
+ * records on itself, against being the only arrangement in which the grant, the role that issues it and
+ * the role that receives it all come from the shipped documents.</p>
  *
  * <p>Assumptions: the prerequisite exists because no other participant supplies it.
  * {@code db/migration/V1__account.sql} declares no {@code CREATE SCHEMA}, no {@code CREATE ROLE} and no
@@ -325,6 +361,12 @@
  *   <li>{@code app/csd/CARDDEMO.CSD}, 505 lines, declaring exactly eight file resources at L1, L13, L25,
  *       L37, L50, L63, L76 and L88. Four of them belong to this context: {@code ACCTDAT} at L1,
  *       {@code CCXREF} at L37, {@code CUSTDAT} at L50 and {@code CXACAIX} at L63.</li>
+ *   <li>{@code app/cbl/CBTRN02C.cbl} and {@code app/cbl/CBACT04C.cbl}, cited by
+ *       {@code BatchAccountWriteGrantIT} alone and belonging to another context's chain. The first
+ *       reaches its three writes from {@code 2000-POST-TRANSACTION.} at L424 and rewrites the account
+ *       master at L554; the second rewrites the same master on each account control break at L356.
+ *       Those two statements are the whole reason a role this context does not connect as holds a write
+ *       privilege on one of its tables.</li>
  * </ul>
  *
  * <p>Assumptions: two resource names in that last file are routinely confused, and neither confusion is

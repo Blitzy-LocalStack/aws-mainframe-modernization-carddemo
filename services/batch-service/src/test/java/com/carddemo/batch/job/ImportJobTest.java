@@ -711,8 +711,22 @@ class ImportJobTest {
                 .isEqualTo(BatchJobName.IMPORT.token())
                 .isEqualTo("import");
         assertThat(this.importJob.getName()).isEqualTo(ImportJob.JOB_NAME);
-        assertThat(ImportJob.STEP_NAME).isEqualTo(ImportJob.JOB_NAME);
-        assertThat(BatchApplication.JOB_NAMES).contains(ImportJob.JOB_NAME);
+        // WHY : Refactoring Rationale: this used to require the step name to EQUAL the job token. That
+        //       made this job and its export sibling the only two of seven whose ledger rows carried a
+        //       bare name, so a selection over the chain's step rows -- LIKE '%-step', the spelling the
+        //       other five invite -- returned five of seven and reported nothing. The suffix is
+        //       asserted in its own right, because the composition alone would still hold if the
+        //       vocabulary's suffix constant were emptied.
+        assertThat(ImportJob.STEP_NAME)
+                .as("the persisted step name is the job token plus the vocabulary's step suffix")
+                .isEqualTo(ImportJob.JOB_NAME + BatchJobName.STEP_NAME_SUFFIX)
+                .endsWith(BatchJobName.STEP_NAME_SUFFIX);
+        assertThat(BatchJobName.forStepName(ImportJob.STEP_NAME))
+                .as("the suffixed step name still resolves back to the job that wrote it")
+                .isEqualTo(BatchJobName.IMPORT);
+        assertThat(BatchApplication.JOB_NAMES)
+                .as("the JOB token stays bare, because --job= and the registry both match on it")
+                .contains(ImportJob.JOB_NAME);
     }
 
     /**

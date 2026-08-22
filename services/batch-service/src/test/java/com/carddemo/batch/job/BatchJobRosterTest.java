@@ -143,16 +143,62 @@ class BatchJobRosterTest {
     @Test
     @DisplayName("declare a distinct ledger step name per job")
     void ledgerStepNamesAreDistinct() {
-        Set<String> stepNames = new TreeSet<>(List.of(
+        Set<String> stepNames = new TreeSet<>(declaredStepNames());
+
+        assertThat(stepNames).hasSize(JOB_CONFIGURATIONS.size());
+    }
+
+    /**
+     * Every landed job's step name carries the vocabulary's suffix, so one predicate selects them all.
+     *
+     * <p>Assumptions: the property being asserted is UNIFORMITY across the roster rather than the
+     * spelling of any one name. The durable ledger's rows are read together -- an operator or a report
+     * selecting the step rows of a night's chain spells it {@code WHERE step_name LIKE '%-step'},
+     * because that is what a suffixed vocabulary invites -- so a job whose row carries a bare token is
+     * absent from the result and reports nothing about being absent.</p>
+     *
+     * <p>Refactoring Rationale: this case is new, and it is the one the export and import jobs would
+     * have failed. Both declared their step name as the bare job token while the other five composed
+     * the token with {@link BatchJobName#STEP_NAME_SUFFIX}, and the distinctness case above passed
+     * either way, because seven bare tokens are as distinct as seven suffixed ones. Distinctness and
+     * uniformity are therefore two properties, and only the second one catches this.</p>
+     *
+     * <p>Assumptions: each name is additionally required to resolve BACK to a job through
+     * {@code BatchJobName.forStepName}, because a suffix alone does not prove the rest of the name is
+     * the job's token -- a step named {@code something-step} would satisfy the suffix and resolve to
+     * nothing.</p>
+     */
+    @Test
+    @DisplayName("suffix every ledger step name, so one predicate selects the whole chain")
+    void ledgerStepNamesAllCarryTheStepSuffix() {
+        List<String> stepNames = declaredStepNames();
+
+        assertThat(stepNames).hasSize(JOB_CONFIGURATIONS.size())
+                .allSatisfy(stepName -> assertThat(stepName)
+                        .as("a bare step name is invisible to a selection over the chain's step rows")
+                        .endsWith(BatchJobName.STEP_NAME_SUFFIX));
+        assertThat(stepNames)
+                .allSatisfy(stepName -> assertThat(BatchJobName.forStepName(stepName)).isNotNull());
+    }
+
+    /**
+     * Reads the ledger step name every landed job declares, in the roster's own order.
+     *
+     * <p>Assumptions: the names are read from each job class's own constant rather than derived from the
+     * vocabulary, because deriving them would assert the derivation against itself and would pass for a
+     * job that had written its own spelling out by hand.</p>
+     *
+     * @return the seven declared step names, never {@code null}
+     */
+    private static List<String> declaredStepNames() {
+        return List.of(
                 PreflightDailyTransactionsJob.STEP_NAME,
                 PostTransactionsJob.STEP_NAME,
                 CalculateInterestJob.STEP_NAME,
                 BackupTransactionsJob.STEP_NAME,
                 CombineTransactionsJob.STEP_NAME,
                 ExportJob.STEP_NAME,
-                ImportJob.STEP_NAME));
-
-        assertThat(stepNames).hasSize(JOB_CONFIGURATIONS.size());
+                ImportJob.STEP_NAME);
     }
 
     /**

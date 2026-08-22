@@ -21,6 +21,7 @@ import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -211,6 +212,31 @@ class DatasetGenerationServiceTest {
     private static final int NOT_FOUND_STATUS = 404;
 
     /**
+     * The status an object store reports when a read failed inside the service itself.
+     *
+     * <p>Assumptions: the number is spelled here rather than read from the subject, for the reason the
+     * precondition status above gives: this is the store's contract, and a stub that took the value from
+     * the subject would agree with it by construction even after the subject started reading the wrong
+     * status.</p>
+     */
+    private static final int SERVER_FAULT_STATUS = 500;
+
+    /**
+     * The creation timestamp the stub reports for the first object written to it.
+     *
+     * <p>Assumptions: the instant is a fixed constructed value and never a clock reading, which is what
+     * makes an ordering assertion reproducible. Each subsequent write is reported one second later, so
+     * creation order equals write order and a case can stage a family whose creation order disagrees with
+     * its date order.</p>
+     *
+     * <p>Assumptions: the value is deliberately far from the epoch, because the service orders a
+     * generation carrying no readable claim timestamp AT the epoch. A fixture instant near it could not
+     * distinguish a dated generation from an undated one, which is exactly the distinction two of the
+     * cases below rest on.</p>
+     */
+    private static final Instant FIRST_WRITE_INSTANT = Instant.parse("2022-07-18T22:00:00Z");
+
+    /**
      * How many entries one page of the stubbed version listing carries.
      *
      * <p>Assumptions: the value is the object store's own per-page ceiling, and it is deliberately the
@@ -276,6 +302,43 @@ class DatasetGenerationServiceTest {
     private SdkException stagedDeleteFailure;
 
     /**
+     * The creation timestamp the most recently built stub reports for each key it holds.
+     *
+     * <p>Assumptions: a timestamp is recorded per WRITE and increases with every write, which is what a
+     * real store does and what makes the retention ordering observable at all. The service orders the
+     * retained window by the creation timestamp of each generation's claim marker, so a stub that
+     * reported no timestamp -- which is what {@code GetObjectResponse.builder().build()} answers -- would
+     * leave every generation at the service's undated sentinel and the ordering would be decided
+     * entirely by its tie-break. Every case that discriminates between the two orderings would then pass
+     * whichever ordering the service used.</p>
+     *
+     * <p>Assumptions: this is a SEPARATE registry from the body map rather than a richer value in it,
+     * for the same reason the version registry is: two cases need a key to hold a body and NO timestamp,
+     * which is the state an emulator standing in for the store can legitimately report.</p>
+     */
+    private final Map<String, Instant> storedTimestamps = new LinkedHashMap<>();
+
+    /**
+     * Whether the most recently built stub records a creation timestamp for the objects it holds.
+     *
+     * <p>Assumptions: the flag exists so that one fixture can stage both a store that timestamps its
+     * objects and a store that reports none, without a second listing or write implementation. Two
+     * implementations would mean the undated cases exercised a different stub from every other case, and
+     * a defect in the real one could hide behind that.</p>
+     */
+    private boolean stubReportsTimestamps = true;
+
+    /**
+     * The claim-marker key whose read fails with a server fault, or {@code null} when none is staged.
+     *
+     * <p>Assumptions: the staged failure is a 500 rather than a 404, because the two outcomes are
+     * required to differ: absence is evidence that orders a generation at the sentinel, while a refusal
+     * is a fault that must stop the retention decision rather than default it -- defaulting would order a
+     * live generation first for deletion on a transient read failure.</p>
+     */
+    private String failingClaimKey;
+
+    /**
      * Supplies the next synthetic version identifier, so each write lands on its own version.
      *
      * <p>Assumptions: the identifiers are monotonic and distinct across the whole fixture rather than per
@@ -335,6 +398,33 @@ class DatasetGenerationServiceTest {
      * @return the stubbed object store, never {@code null}
      */
     private S3Client objectStoreHolding(List<DatasetGeneration> staged) {
+        return objectStoreHolding(staged, RUN_ID, true);
+    }
+
+    /**
+     * Builds a stubbed object store whose staged generations are claimed by a named run.
+     *
+     * <p>Assumptions: the owning run is a parameter because the retention decision withholds every
+     * generation held by a run the service has allocated for. A case that seeded generations under the
+     * identifier it then allocates under would have every one of them withheld, so the cases that settle
+     * which generation ages out have to seed them as another run's work -- which is also what they are:
+     * the generations a family already holds were staged by earlier runs.</p>
+     *
+     * <p>Assumptions: the timestamp switch is a parameter for the complementary reason. A store that
+     * reports creation timestamps exercises the allocation ordering; a store that reports none collapses
+     * that ordering onto its partition-date tie-break, which is the only arrangement in which the
+     * run-identity protection can be observed doing the work on its own.</p>
+     *
+     * @param staged the generations the store is to report as already present, in staging order; an
+     *     empty list stages a store holding no generation at all
+     * @param owningRunId the run identifier each staged generation's claim marker carries; must not be
+     *     {@code null}
+     * @param withTimestamps whether the store reports a creation timestamp for each object it holds
+     * @return the stubbed object store, never {@code null}
+     */
+    private S3Client objectStoreHolding(List<DatasetGeneration> staged, String owningRunId,
+            boolean withTimestamps) {
+
         this.storedObjects.clear();
         // WHY : Assumptions: the version registries and the deletion staging are cleared here alongside
         //       the body map, for the same reason it is: a case that seeds versions or stages a refusal
@@ -354,8 +444,17 @@ class DatasetGenerationServiceTest {
         this.listingFailuresRemaining.set(0);
         this.stagedListingFailure = null;
 
+        // WHY : Assumptions: the timestamp registry, the timestamp switch and the staged claim-read
+        //       failure are cleared here alongside every other staging, for the reason the block above
+        //       gives: a case that stages any of them must not leak it into the next, or an outcome
+        //       becomes a function of the order the cases happened to run in.
+        this.storedTimestamps.clear();
+        this.stubReportsTimestamps = withTimestamps;
+        this.failingClaimKey = null;
+
         for (DatasetGeneration generation : staged) {
-            storeObject(generation.keyPrefix() + DatasetGenerationService.CLAIM_OBJECT_NAME, RUN_ID);
+            storeObject(generation.keyPrefix() + DatasetGenerationService.CLAIM_OBJECT_NAME,
+                    owningRunId);
         }
 
         S3Client objectStore = mock(S3Client.class);
@@ -438,6 +537,18 @@ class DatasetGenerationServiceTest {
 
         when(objectStore.getObjectAsBytes(any(GetObjectRequest.class))).thenAnswer(call -> {
             String key = call.<GetObjectRequest>getArgument(0).key();
+
+            // WHY : Assumptions: the staged fault is raised before the body lookup, because the case it
+            //       serves stages a key that EXISTS. A refusal over a key holding nothing would be
+            //       indistinguishable from absence and would settle nothing about how a fault is
+            //       treated.
+            if (key.equals(this.failingClaimKey)) {
+                throw S3Exception.builder()
+                        .statusCode(SERVER_FAULT_STATUS)
+                        .message("stubbed object store: the read was refused")
+                        .build();
+            }
+
             String body = this.storedObjects.get(key);
             if (body == null) {
                 throw NoSuchKeyException.builder()
@@ -445,8 +556,14 @@ class DatasetGenerationServiceTest {
                         .message("stubbed object store: no such key")
                         .build();
             }
+
+            // WHY : Assumptions: the response carries the recorded creation timestamp, which is what the
+            //       retention ordering reads, and carries none when the fixture staged none. Building
+            //       the response with no timestamp unconditionally -- which is what this stub did -- made
+            //       every generation undated and left the ordering decided by its tie-break alone.
             return ResponseBytes.fromByteArray(
-                    GetObjectResponse.builder().build(), body.getBytes(StandardCharsets.UTF_8));
+                    GetObjectResponse.builder().lastModified(this.storedTimestamps.get(key)).build(),
+                    body.getBytes(StandardCharsets.UTF_8));
         });
     }
 
@@ -464,9 +581,74 @@ class DatasetGenerationServiceTest {
      */
     private void storeObject(String key, String body) {
         this.storedObjects.put(key, body);
+        int ordinal = this.nextVersionOrdinal.incrementAndGet();
         this.storedVersions
                 .computeIfAbsent(key, absent -> new ArrayList<>())
-                .add("version-" + this.nextVersionOrdinal.incrementAndGet());
+                .add("version-" + ordinal);
+
+        // WHY : Assumptions: the timestamp is derived from the same write ordinal the version identifier
+        //       is, so creation order equals write order exactly as it does in the store being stood in
+        //       for -- and a case can therefore stage a family whose creation order DISAGREES with its
+        //       date order simply by writing the generations in that order. Deriving both from one
+        //       counter is what keeps the two registries from telling different stories about which
+        //       write came first.
+        if (this.stubReportsTimestamps) {
+            this.storedTimestamps.put(key, FIRST_WRITE_INSTANT.plusSeconds(ordinal));
+        }
+    }
+
+    /**
+     * Seeds one generation's reservation marker under a named owning run, after the store was built.
+     *
+     * <p>Assumptions: this seeds AFTER the builder rather than through it, because the builder stages
+     * every generation it is given under one owner and two of the cases below need a family holding
+     * generations owned by DIFFERENT runs. That is not a contrived arrangement: it is exactly what a
+     * family looks like after a redrive, where one generation belongs to the run being retried and the
+     * rest to the runs of earlier nights.</p>
+     *
+     * <p>Assumptions: seeding after the build works because the listing stub reads the body map as a live
+     * view rather than a snapshot, and it is what makes the seeded generation the most recently created
+     * one -- the write ordinal, and with it the reported creation instant, advances on every write.</p>
+     *
+     * @param generation the generation the marker reserves; must not be {@code null}
+     * @param owningRunId the run identifier the marker's body carries; must not be {@code null}
+     */
+    private void stageClaimFor(DatasetGeneration generation, String owningRunId) {
+        storeObject(generation.keyPrefix() + DatasetGenerationService.CLAIM_OBJECT_NAME, owningRunId);
+    }
+
+    /**
+     * Seeds one generation that holds a staged object but carries no reservation marker.
+     *
+     * <p>Assumptions: a generation in this state is a real one rather than a defensive invention. A
+     * component that writes into this key shape without reserving anything leaves exactly this -- the
+     * reporting service's on-demand artifacts are documented as relying on the retention lambda rather
+     * than on a reservation -- and so does a generation whose marker an earlier version-blind prune
+     * removed while leaving its data behind.</p>
+     *
+     * <p>Assumptions: the object staged is given a name no reader of this file could confuse with the
+     * marker, because the whole point of the state is the marker's ABSENCE. The listing discovers the
+     * generation from this object alone, which is what the object store does: a prefix exists because a
+     * key beneath it does.</p>
+     *
+     * @param generation the generation to stage without a reservation; must not be {@code null}
+     */
+    private void stageGenerationWithoutClaim(DatasetGeneration generation) {
+        storeObject(generation.keyPrefix() + "part-0001.dat", "bytes staged with no reservation");
+    }
+
+    /**
+     * Arranges for the read of one generation's reservation marker to be refused by the store.
+     *
+     * <p>Assumptions: the refusal names a marker that EXISTS, because a refusal over a key holding
+     * nothing would be indistinguishable from absence and would settle nothing. The distinction under
+     * test is that absence is evidence -- it orders the generation at the sentinel -- while a refusal is
+     * a fault that must stop the decision rather than default it.</p>
+     *
+     * @param generation the generation whose marker read is to be refused; must not be {@code null}
+     */
+    private void failTheClaimReadOf(DatasetGeneration generation) {
+        this.failingClaimKey = generation.keyPrefix() + DatasetGenerationService.CLAIM_OBJECT_NAME;
     }
 
     /**
@@ -762,9 +944,15 @@ class DatasetGenerationServiceTest {
      * Builds a service over a store holding the supplied generations.
      *
      * <p>Assumptions: a fresh service is built per case rather than shared, because a store shared across
-     * cases would carry one case's claim markers into the next. The service itself now holds no
-     * per-instance allocation state at all -- the reservation lives in the store -- which is exactly what
-     * one case below builds a SECOND instance to demonstrate.</p>
+     * cases would carry one case's claim markers into the next. The reservation an allocation records is
+     * DURABLE -- it is an object in the store rather than an entry in a per-instance table -- which is
+     * what a case below builds a SECOND instance over one store to demonstrate.</p>
+     *
+     * <p>Assumptions: a fresh instance does hold one piece of per-instance state, the record of what THIS
+     * process has allocated, and it is empty on a new instance by design. That is why the redrive case
+     * below has its second instance allocate before it asks about retention: the protection that has to
+     * survive a fresh container is the one read from the durable marker's body, and an instance that had
+     * never been told a run identifier could not exercise it.</p>
      *
      * @param objectStore the stubbed store the service lists generations through
      * @return the service under test, never {@code null}
@@ -1358,6 +1546,263 @@ class DatasetGenerationServiceTest {
                     .containsExactly(
                             new DatasetGeneration(DatasetFamily.TRANREPT, EARLIER_BUSINESS_DATE, 5),
                             new DatasetGeneration(DatasetFamily.TRANREPT, EARLIER_BUSINESS_DATE, 6));
+        }
+    }
+
+    /**
+     * Settles that retention retires by CREATION SEQUENCE and never retires the running run's own work.
+     *
+     * <p>Purpose: retention ordered a family by the business date embedded in each key and retained the
+     * newest five under that order. A run whose business date was older than the dates the family already
+     * held therefore allocated a generation that sorted OLDEST, and the same staging call that had just
+     * written bytes into it named it as aged out -- so a catch-up night for an earlier date destroyed its
+     * own output while logging an allocation, a staging and a scratch that each looked correct. Every
+     * case in this class stages a family whose creation order and date order DISAGREE, because that is
+     * the only arrangement in which the two orderings can be told apart: the cases in the class above
+     * stage generations in ascending date order, where the two coincide and either ordering passes.</p>
+     *
+     * <p>Assumptions: a generation data group retires by creation sequence and has no notion of the
+     * content date its dataset carries, and its {@code (+1)} reference names the current generation by
+     * definition. The two properties are settled separately here rather than together, because they are
+     * independent defences and either alone leaves a case the other has to carry: the ordering protects a
+     * back-dated generation whose creation instant separates it from the family, and the run-identity
+     * exclusion protects it when no instant does.</p>
+     */
+    @Nested
+    @DisplayName("retention ordered by allocation rather than by the date in the key")
+    class AllocationOrderedRetention {
+
+        /**
+         * The family every case here exercises, the reject stream a posting run stages into.
+         *
+         * <p>Assumptions: this family is chosen because it is the one a posting run stages on every night
+         * that produces a reject, so it is the family a back-dated catch-up run reaches first. Nothing in
+         * these cases depends on which family it is -- the ten share one resolver -- but naming the one
+         * the failure was observed against keeps the case readable against the report that found it.</p>
+         */
+        private final DatasetFamily family = DatasetFamily.DALYREJS;
+
+        /**
+         * The business date the back-dated run injects, older than every date the family holds.
+         *
+         * <p>Assumptions: the date is older than all five staged dates by more than a month, which is
+         * what makes it a catch-up run rather than a boundary case. A date merely one day older would
+         * settle the same ruling, but a reader could mistake it for the ordinary first-run-of-a-new-day
+         * arrangement the class above stages.</p>
+         */
+        private final BusinessDate backDatedDate = new BusinessDate("2022-06-10");
+
+        /**
+         * The five business dates the family already holds, ascending, one generation each.
+         *
+         * <p>Assumptions: five is the retained count exactly, so a family holding these and nothing else
+         * is at the window and scratches nothing. One further generation -- the one the run under test
+         * allocates -- is what makes the rule bite, which is the smallest arrangement in which the choice
+         * of victim is observable at all.</p>
+         */
+        private final List<BusinessDate> heldDates = List.of(
+                new BusinessDate("2022-07-20"),
+                new BusinessDate("2022-08-01"),
+                new BusinessDate("2022-08-10"),
+                new BusinessDate("2022-08-20"),
+                new BusinessDate("2022-09-01"));
+
+        /**
+         * Builds the coordinate of generation one under one of the dates in play.
+         *
+         * @param date the business date the coordinate partitions under; must not be {@code null}
+         * @return the coordinate of the first generation under that date, never {@code null}
+         */
+        private DatasetGeneration firstGenerationUnder(BusinessDate date) {
+            return new DatasetGeneration(this.family, date, 1);
+        }
+
+        /**
+         * Builds the coordinates the family already holds, one per held date, ascending.
+         *
+         * @return the five coordinates, ascending by date, never {@code null}
+         */
+        private List<DatasetGeneration> alreadyHeld() {
+            return this.heldDates.stream().map(this::firstGenerationUnder).toList();
+        }
+
+        /**
+         * A back-dated run's freshly allocated generation is not returned by its own retention pass.
+         *
+         * <p>Assumptions: this is the reported failure reproduced exactly -- a family holding five later
+         * dates, a run injected with an earlier one, and the retention pass the staging step runs
+         * immediately after it allocates. The assertion is in two parts on purpose. That the fresh
+         * generation is absent is the property that matters; that the oldest generation the family held
+         * is present is what stops the case passing against a pass that had simply stopped returning
+         * anything, which would leave a family growing without limit and would look identical from the
+         * fresh generation's point of view.</p>
+         */
+        @Test
+        @DisplayName("withhold the generation the running run just allocated, and retire the oldest held")
+        void aBackDatedAllocationIsNotItsOwnScratchCandidate() {
+            List<DatasetGeneration> held = alreadyHeld();
+            DatasetGenerationService service =
+                    serviceOver(objectStoreHolding(held, OTHER_RUN_ID, true));
+
+            DatasetGeneration allocated =
+                    service.allocateNewGeneration(this.family, this.backDatedDate, RUN_ID);
+
+            assertThat(allocated).isEqualTo(firstGenerationUnder(this.backDatedDate));
+            assertThat(service.generationsToScratch(this.family))
+                    .doesNotContain(allocated)
+                    .containsExactly(held.get(0));
+        }
+
+        /**
+         * The generation created least recently retires, even when it carries the family's LATEST date.
+         *
+         * <p>Assumptions: the staging order is chosen so that every date-based selector yields a
+         * different wrong answer. The generation written first carries the latest date of the six, and
+         * the generation carrying the earliest date is written second, so a pass ordering by date returns
+         * the earliest-dated generation and a pass ordering by creation returns the latest-dated one.
+         * Nothing about this input is ambiguous: exactly one generation is beyond the window under each
+         * ordering, and the two are different generations.</p>
+         *
+         * <p>Assumptions: no allocation is made here, so the run-identity exclusion cannot contribute and
+         * the ordering is settled on its own. A case that allocated would leave the ordering and the
+         * exclusion both able to explain the outcome.</p>
+         */
+        @Test
+        @DisplayName("retire the least recently created generation, not the earliest dated one")
+        void allocationOrderOutranksTheDateInTheKey() {
+            DatasetGeneration latestDated = firstGenerationUnder(this.heldDates.get(4));
+            DatasetGeneration earliestDated = firstGenerationUnder(this.backDatedDate);
+            List<DatasetGeneration> stagedOutOfDateOrder = List.of(
+                    latestDated,
+                    earliestDated,
+                    firstGenerationUnder(this.heldDates.get(0)),
+                    firstGenerationUnder(this.heldDates.get(1)),
+                    firstGenerationUnder(this.heldDates.get(2)),
+                    firstGenerationUnder(this.heldDates.get(3)));
+
+            List<DatasetGeneration> scratched =
+                    serviceOver(objectStoreHolding(stagedOutOfDateOrder, OTHER_RUN_ID, true))
+                            .generationsToScratch(this.family);
+
+            assertThat(scratched)
+                    .doesNotContain(earliestDated)
+                    .containsExactly(latestDated);
+        }
+
+        /**
+         * With no creation instant to order by, the run's own generation is still withheld.
+         *
+         * <p>Assumptions: the store here reports no creation timestamp for anything, which collapses the
+         * ordering onto its partition-date tie-break -- the very ordering that produced the failure. That
+         * is deliberate: it is the arrangement in which the ordering CANNOT protect the fresh generation,
+         * so whatever protects it is the run-identity exclusion and nothing else. Two generations claimed
+         * within one timestamp granularity reach the decision in exactly this state.</p>
+         *
+         * <p>Assumptions: the expected result is empty rather than one entry, and that is the documented
+         * trade-off rather than a gap. The family is left holding one more than the retained count for as
+         * long as the allocating run is in flight, which the next pass retires; the alternative -- naming
+         * a victim to make room -- would delete a generation the window says to keep.</p>
+         */
+        @Test
+        @DisplayName("withhold the run's own generation when no timestamp separates the family")
+        void runIdentityProtectsTheAllocationWhenNothingElseCan() {
+            DatasetGenerationService service =
+                    serviceOver(objectStoreHolding(alreadyHeld(), OTHER_RUN_ID, false));
+
+            DatasetGeneration allocated =
+                    service.allocateNewGeneration(this.family, this.backDatedDate, RUN_ID);
+
+            assertThat(allocated).isEqualTo(firstGenerationUnder(this.backDatedDate));
+            assertThat(service.generationsToScratch(this.family)).isEmpty();
+        }
+
+        /**
+         * A redriven attempt keeps the generation its failed attempt allocated, in a fresh instance.
+         *
+         * <p>Assumptions: the second instance is built over the SAME store and is never told about the
+         * generation directly -- it allocates for a DIFFERENT family, which is the only way it learns the
+         * run identifier at all. The protection therefore comes from the durable marker's body rather
+         * than from anything this process recorded, which is the property a redrive in a fresh container
+         * depends on and the one no process-local record could provide.</p>
+         *
+         * <p>Assumptions: the family also holds an older generation belonging to another run, inside the
+         * same aged-out slice, and it is asserted to be returned. Without it the case would pass against
+         * a pass that withheld every candidate rather than the run's own, which is the failure mode a
+         * protection rule is most likely to have.</p>
+         */
+        @Test
+        @DisplayName("keep the redriven run's generation and still retire another run's older one")
+        void aRedrivenAttemptKeepsWhatItsFailedAttemptAllocated() {
+            DatasetGeneration otherRunsOldest =
+                    new DatasetGeneration(this.family, new BusinessDate("2022-06-01"), 1);
+            DatasetGeneration thisRunsAllocation = firstGenerationUnder(this.backDatedDate);
+            S3Client store = objectStoreHolding(alreadyHeld(), OTHER_RUN_ID, false);
+            stageClaimFor(otherRunsOldest, OTHER_RUN_ID);
+            stageClaimFor(thisRunsAllocation, RUN_ID);
+
+            DatasetGenerationService redriven = serviceOver(store);
+            redriven.allocateNewGeneration(DatasetFamily.SYSTRAN, this.backDatedDate, RUN_ID);
+
+            assertThat(redriven.generationsToScratch(this.family))
+                    .doesNotContain(thisRunsAllocation)
+                    .containsExactly(otherRunsOldest);
+        }
+
+        /**
+         * A generation carrying no reservation retires first, whatever date its key carries.
+         *
+         * <p>Assumptions: the unreserved generation is given the family's LATEST date, so a pass ordering
+         * by date would retain it and retire the oldest reserved one instead. That is what makes the case
+         * discriminating rather than merely descriptive.</p>
+         *
+         * <p>Assumptions: retiring it first is the intended reading rather than a fallback. It is the
+         * generation with the least evidence behind it, and it cannot be one the running run allocated,
+         * because every allocation writes its reservation before any caller can stage a byte.</p>
+         */
+        @Test
+        @DisplayName("retire a generation that carries no reservation ahead of every reserved one")
+        void anUnreservedGenerationRetiresFirst() {
+            DatasetGeneration unreserved =
+                    new DatasetGeneration(this.family, new BusinessDate("2022-09-15"), 1);
+            S3Client store = objectStoreHolding(alreadyHeld(), OTHER_RUN_ID, true);
+            stageGenerationWithoutClaim(unreserved);
+
+            assertThat(serviceOver(store).generationsToScratch(this.family))
+                    .containsExactly(unreserved);
+        }
+
+        /**
+         * A reservation the store refuses to read stops the decision rather than defaulting it.
+         *
+         * <p>Assumptions: the refusal is a fault rather than an absence, and the two must not be treated
+         * alike. Defaulting a generation whose marker cannot be read would order it at the sentinel and
+         * make it the FIRST candidate for deletion, so one transient read failure over a live generation
+         * would become a permanent loss of its bytes. A failed step is retried by the state machine and
+         * deletes nothing while it waits.</p>
+         *
+         * <p>Assumptions: the diagnosis is asserted rather than only the failure, because a retention
+         * pass that stops has to say which generation it stopped on -- an operator reading the failure
+         * has the whole family to choose from otherwise. The cause is asserted to be retained for the
+         * same reason the listing-failure case above asserts it: the store's own reason is the only thing
+         * that distinguishes an authorisation refusal from a key-management one.</p>
+         */
+        @Test
+        @DisplayName("fail closed, and diagnosably, when a reservation cannot be read")
+        void anUnreadableReservationStopsTheDecision() {
+            List<DatasetGeneration> held = new ArrayList<>(alreadyHeld());
+            held.add(firstGenerationUnder(new BusinessDate("2022-09-20")));
+            DatasetGeneration unreadable = held.get(2);
+            DatasetGenerationService service =
+                    serviceOver(objectStoreHolding(held, OTHER_RUN_ID, true));
+            failTheClaimReadOf(unreadable);
+
+            assertThatThrownBy(() -> service.generationsToScratch(this.family))
+                    .isInstanceOf(DatasetGenerationService.DatasetGenerationException.class)
+                    .hasMessageContaining(this.family.mainframeBaseName())
+                    .hasMessageContaining(unreadable.keyPrefix()
+                            + DatasetGenerationService.CLAIM_OBJECT_NAME)
+                    .hasCauseInstanceOf(S3Exception.class);
+            assertThat(DatasetGenerationServiceTest.this.deleteRequests).isEmpty();
         }
     }
 

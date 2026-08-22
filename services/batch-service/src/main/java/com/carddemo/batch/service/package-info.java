@@ -99,10 +99,15 @@
  * {@code BatchFailureReporter}, the port {@code BatchStepLedger} reports a failed STEP through and the
  * only interface here -- its adapter is {@code com.carddemo.batch.config.SqsBatchFailureReporter},
  * which is why the interface is in this package and the transport is not. Assumptions: that port and
- * {@code BatchErrorPublisher} are two senders and not one; the port carries the step-level failure the
- * ledger records, the publisher carries the RUN-level notification
- * {@code com.carddemo.batch.BatchApplication} issues, and reading either as the other's interface
- * would suggest a layer that does not exist.</p>
+ * {@code BatchErrorPublisher} are two OCCASIONS and one sender. The port carries the step-level failure
+ * the ledger records and the publisher carries the RUN-level notification
+ * {@code com.carddemo.batch.BatchApplication} issues, but the port's adapter now delegates to the
+ * publisher, so the module has exactly one class that puts a message on the terminal error sink.
+ * Refactoring Rationale: the previous wording, "two senders and not one", described the shape that made
+ * one hard failure publish TWICE -- the adapter held its own client and mapper and sent, and the
+ * publisher sent again once the job had returned -- while the publisher's own charter promised one
+ * notification per failed run. Naming the occasions rather than the senders is what keeps a reader from
+ * restoring the second sender as a symmetry the design never wanted.</p>
  *
  * <dl>
  *   <dt>{@code PostingValidationService}</dt>
@@ -212,9 +217,11 @@
  * {@code COMPUTE WS-MONTHLY-INT} then {@code = ( TRAN-CAT-BAL * DIS-INT-RATE) / 1200} and carries no
  * {@code ROUNDED} phrase -- nor does any other statement in that program -- and its target field
  * declared {@code PIC S9(09)V99} at line 168 therefore discards surplus digits toward zero. This
- * package reduces half up instead, because transformation rule T3 names that mode for the money path
- * and states no exception for the accrual, and the resulting cent is registered as divergence
- * {@code C-ROUNDING} in {@code docs/architecture/cobol-to-service-traceability.md}.
+ * package discards them the same way, under {@code Money.BASELINE_INTEREST_ROUNDING}, because the plan
+ * pins this formula to the reference at its section 0.7.3 and makes the golden masters its oracle at
+ * 0.7.7; transformation rule T3's half up remains the general default for every OTHER reduction on the
+ * money path. No cent differs, so nothing is registered, and {@code C-ROUNDING} is withdrawn in
+ * section 7.5 of {@code docs/architecture/cobol-to-service-traceability.md}.
  * {@code InterestCalculationService.ACCRUAL_ROUNDING} derives from the shared constant and names the
  * mode beside the service for a reader who looks for it here.</p>
  *

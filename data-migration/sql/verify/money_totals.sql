@@ -82,14 +82,18 @@
 --       Alternatives Considered: running the pass as carddemo_batch, which holds
 --       direct SELECT on the five underlying tables. Rejected, and deliberately not
 --       offered above as a fallback: carddemo_batch is WRITE-CAPABLE -- V0 grants it
---       SELECT, INSERT and UPDATE across ledger and account, and
+--       SELECT, INSERT and UPDATE across ledger and schema-wide SELECT on account,
+--       services/account-service/src/main/resources/db/migration/
+--       V3__batch_account_write_grant.sql adds UPDATE on the single table
+--       account.accounts, and
 --       V2__runtime_delete_grants.sql grants it DELETE on three tables -- so running
 --       a verification pass as it would let the principal modify the data it is
 --       verifying, inverting the control the pass exists to provide, and would make
 --       the pass's own execution a row-level disclosure of every balance and amount
---       in the system for the sake of nine sums. V3 removes the need instead of
---       documenting a workaround, by publishing the nine aggregates as an
---       owner-backed view and granting SELECT on that view alone.
+--       in the system for the sake of nine sums. V3__verification_surfaces.sql in
+--       this same directory removes the need instead of documenting a workaround, by
+--       publishing the nine aggregates as an owner-backed view and granting SELECT
+--       on that view alone.
 --     - Nothing is written: no row, no object, no session setting. A principal
 --       holding SELECT on one view and nothing else is sufficient -- and, being
 --       unable to write anything anywhere, is incapable of altering the data it is

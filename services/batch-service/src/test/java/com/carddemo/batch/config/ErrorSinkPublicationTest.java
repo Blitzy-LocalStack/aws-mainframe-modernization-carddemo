@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -12,6 +13,7 @@ import com.carddemo.batch.config.SqsConfig.ErrorSinkBinding;
 import com.carddemo.batch.dto.BatchErrorEvent;
 import com.carddemo.batch.dto.BatchJobName;
 import com.carddemo.batch.dto.BatchReturnCode;
+import com.carddemo.batch.service.BatchErrorPublisher;
 import com.carddemo.common.messaging.MessagingCorrelationId;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -22,6 +24,7 @@ import software.amazon.awssdk.services.sqs.model.MessageAttributeValue;
 import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
 import software.amazon.awssdk.services.sqs.model.SendMessageResponse;
 import software.amazon.awssdk.services.sqs.model.SqsException;
+import tools.jackson.databind.ObjectMapper;
 
 /**
  * Drives the terminal error sink's binding and the one class that sends on it.
@@ -191,7 +194,7 @@ class ErrorSinkPublicationTest {
         }
     }
 
-    /** That a send is issued, and that no failure of the reporter's own escapes it. */
+    /** That a send is issued through the module's one sender, and that nothing escapes the adapter. */
     @Nested
     @DisplayName("the publisher")
     class Publisher {
@@ -199,6 +202,22 @@ class ErrorSinkPublicationTest {
         /** The binding every case in this group sends on. */
         private final ErrorSinkBinding binding =
                 bindingWithContentType(SqsConfig.DEFAULT_CONTENT_TYPE);
+
+        /**
+         * Builds the step-level adapter over a sender bound to the supplied client.
+         *
+         * <p>Refactoring Rationale: the adapter used to take the client and the binding and send for
+         * itself, which made it the module's SECOND sender and made one hard failure publish twice. It
+         * now takes the one sender, so every case in this group exercises the same send path the
+         * run-level occasion uses.</p>
+         *
+         * @param client the transport the sender issues on; must not be {@code null}
+         * @return the adapter, never {@code null}
+         */
+        private SqsBatchFailureReporter reporterSendingOn(SqsClient client) {
+            return new SqsBatchFailureReporter(
+                    new BatchErrorPublisher(client, this.binding, new ObjectMapper()));
+        }
 
         /**
          * A reported event reaches the transport as one send carrying the serialised event.
@@ -215,8 +234,7 @@ class ErrorSinkPublicationTest {
             when(client.sendMessage(any(SendMessageRequest.class)))
                     .thenReturn(SendMessageResponse.builder().messageId("transport-1").build());
 
-            boolean published = new SqsBatchFailureReporter(client, this.binding)
-                    .report(eventCorrelatedBy("exec-0001"));
+            boolean published = reporterSendingOn(client).report(eventCorrelatedBy("exec-0001"));
 
             assertThat(published).isTrue();
             ArgumentCaptor<SendMessageRequest> sent =
@@ -247,8 +265,7 @@ class ErrorSinkPublicationTest {
             when(client.sendMessage(any(SendMessageRequest.class)))
                     .thenThrow(SqsException.builder().message("AccessDenied").build());
 
-            boolean published = new SqsBatchFailureReporter(client, this.binding)
-                    .report(eventCorrelatedBy("exec-0001"));
+            boolean published = reporterSendingOn(client).report(eventCorrelatedBy("exec-0001"));
 
             assertThat(published).isFalse();
         }
@@ -271,8 +288,7 @@ class ErrorSinkPublicationTest {
                     .thenReturn(SendMessageResponse.builder().messageId("transport-1").build());
             String overWide = "x".repeat(MessagingCorrelationId.MAX_LENGTH + 5);
 
-            boolean published = new SqsBatchFailureReporter(client, this.binding)
-                    .report(eventCorrelatedBy(overWide));
+            boolean published = reporterSendingOn(client).report(eventCorrelatedBy(overWide));
 
             assertThat(published)
                     .as("the report is still published, because its content is in the body")
@@ -290,13 +306,47 @@ class ErrorSinkPublicationTest {
                             .get(SqsConfig.ATTRIBUTE_MESSAGE_ID).stringValue());
         }
 
+        /**
+         * Both of the module's occasions for one run put exactly one message on the sink.
+         *
+         * <p>Refactoring Rationale: this is the case the duplicate defect would have failed and no
+         * previous case could. The adapter and the run-level producer were two senders on one queue, so
+         * a single hard failure published a step report carrying diagnostics AND a run notification
+         * carrying none -- two messages for one failure, against the producer's documented contract of
+         * one per failed run. Driving BOTH occasions through one sender in one case is what makes the
+         * count assertable at all; asserting each occasion separately passes in either design.</p>
+         *
+         * <p>Assumptions: the occasions are driven in the order they occur at run time -- the ledger
+         * reports from inside the failing step and the entry point publishes after the job returns --
+         * so the surviving message is the step report, which is the richer of the two.</p>
+         */
+        @Test
+        @DisplayName("put one message on the sink for one run, whichever occasion reaches it first")
+        void twoOccasionsForOneRunPutOneMessageOnTheSink() {
+            SqsClient client = mock(SqsClient.class);
+            when(client.sendMessage(any(SendMessageRequest.class)))
+                    .thenReturn(SendMessageResponse.builder().messageId("transport-1").build());
+            BatchErrorPublisher sender =
+                    new BatchErrorPublisher(client, this.binding, new ObjectMapper());
+            BatchErrorEvent event = eventCorrelatedBy("exec-0001");
+
+            boolean stepReport = new SqsBatchFailureReporter(sender).report(event);
+            boolean runNotification = sender.publish(event);
+
+            assertThat(stepReport).isTrue();
+            assertThat(runNotification)
+                    .as("the run's notification is on the sink, so the second occasion is not a failure")
+                    .isTrue();
+            verify(client, times(1)).sendMessage(any(SendMessageRequest.class));
+        }
+
         /** A null event is a programming error in the caller and is the one condition not absorbed. */
         @Test
         @DisplayName("refuse a null event without issuing a send")
         void aNullEventIsRefused() {
             SqsClient client = mock(SqsClient.class);
 
-            assertThatThrownBy(() -> new SqsBatchFailureReporter(client, this.binding).report(null))
+            assertThatThrownBy(() -> reporterSendingOn(client).report(null))
                     .isInstanceOf(NullPointerException.class);
 
             verify(client, never()).sendMessage(any(SendMessageRequest.class));

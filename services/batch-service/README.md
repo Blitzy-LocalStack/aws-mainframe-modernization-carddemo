@@ -138,8 +138,8 @@ dataset name rather than by data-definition name.
 
 ## 3. Invocation and the exit-status contract
 
-Two options are read, **both required and neither defaulted**, and any other
-argument is left to the framework's own command-line property source:
+Two options are read, **both required and neither defaulted**, and **nothing else
+on the command line is accepted**:
 
 - `--job=<name>` selects the job. `<name>` is exactly one of
   `preflight-daily-transactions`, `post-transactions`, `calculate-interest`,
@@ -147,15 +147,56 @@ argument is left to the framework's own command-line property source:
   the name a job bean registers under, so it is looked up rather than switched on.
 - `--business-date=<token>` supplies the business date under the job-parameter
   key `businessDate`. The token is exactly ten characters, each an ASCII digit or
-  an ASCII hyphen-minus, and it is forwarded **verbatim** — see §4.6.
+  an ASCII hyphen-minus, laid out either as `YYYY-MM-DD` or as the compact
+  `YYYYMMDDnn`, and it must **name a day that exists**; it is then forwarded
+  **verbatim** — see §4.6.
+- `--help` prints the usage text on standard output and starts nothing. It emits
+  no error code and no failure diagnostic, and it reports the hard-failure status
+  rather than zero, because zero from this process asserts that a named job
+  completed cleanly.
 
 Assumptions: neither option carries a default because the invoking state passes
 both as command overrides, and a default here would give one task two sources of
 truth that can disagree, with the loser losing silently. An absent, blank,
-repeated, or unrecognised option is a hard failure whose diagnostic enumerates
-every accepted value, never a fall-back to something plausible. The interest job
-is the one whose business rule actually consumes the date; the entry point
-requires it for every token so that a run is reproducible whichever job it names.
+repeated, calendar-impossible, or unrecognised option is a hard failure whose
+diagnostic names the offending token and enumerates every accepted value, never a
+fall-back to something plausible. The interest job is the one whose business rule
+actually consumes the date; the entry point requires it for every token so that a
+run is reproducible whichever job it names.
+
+Refactoring Rationale: this section previously said that "any other argument is
+left to the framework's own command-line property source", and the entry point
+behaved that way — an unknown option and a bare positional argument were both
+skipped and the run proceeded. Both the sentence and the behaviour are withdrawn.
+The tolerance had no beneficiary and one concrete victim: the state definition that
+dispatches this container passes exactly these two options and nothing else, every
+deployment setting arrives through the environment variables §9.2 lists rather than
+through this argument vector, and the one thing the tolerance actually admitted was
+a misspelling. `--business-dat=2022-07-18` was discarded in silence and the run
+then failed for the unrelated-looking reason that the business date was missing.
+Every unrecognised token is now refused by name, before an application context
+exists. Trade-offs: a framework property can no longer be passed on the command
+line — `--spring.profiles.active=prod` is now a refused token — which is accepted
+because the same setting is reachable as `SPRING_PROFILES_ACTIVE`, so nothing
+becomes unreachable and only the second, undocumented route to it closes.
+
+Refactoring Rationale: the calendar requirement on the business date is new, and
+what it adds is narrow on purpose. The token was previously checked for width and
+character class only, so `2023-02-30` and its compact spelling `2023023000` were
+both admitted, and the consequence differed by job: four jobs abended late inside a
+step, the preflight job reported a clean night for a day that does not exist, and
+the export and import pair **persisted datasets under the object key
+`export/2023023000/`** — durable artefacts filed under an impossible day, which
+nothing downstream flags because the key is well shaped. Validity is now asserted
+during argument resolution, so a bad token produces no job, no ledger row and no
+object. Assumptions: only impossibility rejects. The month, day, month-length and
+leap-year gates of `common-lib`'s `DateEditValidator` decide it, and that
+validator's century gate and its date-of-birth range are deliberately **not**
+consulted — a business date is an orchestration parameter naming the night being
+processed, so `0001-01-01`, `9999-12-31` and a future date are legitimate inputs
+rather than user errors, and all three are still accepted. Alternatives Considered:
+taking that validator's aggregate verdict, which is one line shorter and would
+refuse exactly those three.
 
 ### 3.1 The three exit-status tiers
 
@@ -394,39 +435,44 @@ computationally different — it yields different cents on many inputs, because 
 intermediate quotient is rounded before the multiplication rather than after.
 Re-ordering is forbidden, and the ordering is asserted by test to the cent.
 
-**The quotient is reduced half up, once, and that differs from the baseline by a
-cent on an exact half.** Assumptions: transformation rule T3 states the money path as
-an exact decimal at scale 2 with `RoundingMode.HALF_UP` in Java and states no exception
-for the accrual quotient, while rule T4 constrains the operand ORDER only. The reference
-reduces differently — it stores its result into `WS-MONTHLY-INT PIC S9(09)V99` at `:168`
-and a COBOL `COMPUTE` without `ROUNDED` discards the surplus digits toward zero, and no
-statement anywhere in that program's 652 lines carries `ROUNDED`. The accrual therefore
-reduces under `Money.GENERAL_ROUNDING`, the one mode the money path declares.
+**The quotient is truncated toward zero, once, per row, and that is the reference
+behaviour rather than a departure from it.** Assumptions: the reference stores its result
+into `WS-MONTHLY-INT PIC S9(09)V99` at `:168`, and a COBOL `COMPUTE` without `ROUNDED`
+discards the surplus digits toward zero; no statement anywhere in that program's 652 lines
+carries `ROUNDED`. `RoundingMode.DOWN` reproduces that discard exactly, on both signs,
+because `DOWN` also moves toward zero rather than toward negative infinity. The accrual
+therefore reduces under `Money.BASELINE_INTEREST_ROUNDING`, which is that mode, and
 `InterestCalculationService.ACCRUAL_ROUNDING` is derived from that shared constant rather
 than restating a literal, and is asserted equal to it, so a name that drifted from the
 behaviour fails the build. `Money.monthlyInterest` takes no rounding-mode parameter and
 no call site can select another.
 
-Trade-offs: the difference is one cent, it appears only where the quotient lands exactly
-on a half — `1000.80` at `2.50` gives `2.0850` exactly, so this service emits `2.09` where
-the reference emits `2.08` — and it does not stay local: line 467 adds each reduced term
-into the account total and line 352 adds that total to the account balance, which the next
-**inclusive** over-limit comparison is made against. It is registered as divergence
-**C-ROUNDING** in §7.4 of
-`docs/architecture/cobol-to-service-traceability.md`, which carries the reachability
-measurement — no shipped interest fixture reaches an exact half, so every golden scenario
-matches the reference cent for cent.
+**The mode is narrow on purpose.** Assumptions: `Money.BASELINE_INTEREST_ROUNDING` reaches
+exactly one operation, the monthly accrual, and every other reduction on the money path
+stays on `Money.GENERAL_ROUNDING`, which is `RoundingMode.HALF_UP` as transformation rule
+T3 states. The accrual is the one arithmetic whose reduction a committed golden record
+compares cent for cent, so it is the one place the reference's own discard is the required
+behaviour; nothing elsewhere in the service reads it as a licence to pick its own mode.
 
-Refactoring Rationale: this service reduced the accrual with `RoundingMode.DOWN` for a
-time, to match the baseline cent for cent, and `C-ROUNDING` was withdrawn on that ground.
-That is reversed. The plan is frozen and admits a departure from a transformation rule only
-where it states an exception; T3 states none, and it does admit a behavioural difference
-from the reference when the difference is registered. Matching the baseline therefore
-bought parity by breaking the rule that exists to keep the money path uniform, which is the
-wrong trade of the two. Alternatives Considered: keeping a mode parameter so a parity caller
-could ask for truncation while others kept half up. Rejected because a selectable mode is a
-second money contract in disguise: two call sites computing the same accrual could disagree
-by a cent with nothing signalling that they had chosen differently.
+Trade-offs: a half-cent quotient is where the two modes part company — `1000.80` at `2.50`
+gives `2.0850` exactly, and this service emits `2.08` as the reference does rather than
+`2.09` — and the choice does not stay local: line 467 adds each reduced term into the
+account total and line 352 adds that total to the account balance, which the next
+**inclusive** over-limit comparison is made against, so reducing half up would displace
+that comparison by a cent on those data. **No divergence is registered for the accrual
+reduction.** The identifier a half-up reading carried for a period, `C-ROUNDING`, is
+withdrawn in §7.5 of `docs/architecture/cobol-to-service-traceability.md`.
+
+Refactoring Rationale: this service reduced the accrual with `Money.GENERAL_ROUNDING` for a
+time, on the reading that rule T3 states half up for the whole money path and states no
+exception for the accrual quotient. That reading is reversed. T3 governs the representation
+— exact decimal, scale 2, never binary floating point — while this is a single quotient
+whose reduction the reference performs and the golden records commit, so reading T3 as a bar
+on reproducing it bought uniformity of one rule by giving up parity on the one arithmetic
+the checkpoint compares byte-wise. Alternatives Considered: keeping a mode parameter so a
+parity caller could ask for truncation while others kept half up. Rejected because a
+selectable mode is a second money contract in disguise: two call sites computing the same
+accrual could disagree by a cent with nothing signalling that they had chosen differently.
 
 The operand types set the shape of the arithmetic:
 
@@ -795,34 +841,50 @@ for the batch database role, are narrower than "write access to two schemas":
 | `ledger` | `SELECT`, `INSERT`, `UPDATE` on tables | Posts transactions and maintains category balances |
 | `account` | `SELECT` on the schema; `UPDATE` on `account.accounts` **by name only** | Applies the posting balance update and the interest flush |
 | `reference` | `SELECT` only | Reads disclosure groups for the interest rate |
+| `card` | `SELECT` only | Reads the card master for the export record's card phase |
 
 Assumptions: nothing in that table grants `DELETE` anywhere, and the only
 `UPDATE` outside `ledger` is on one named table. The runtime `search_path` spans
-`batch`, `ledger`, `account`, and `reference` — the same four schemas the table
-lists — and the cross-schema mappings name their schema explicitly on the mapping
-rather than relying on that path, so a write into a schema this module has no
-right to fails as a permission error naming the table rather than resolving
-somewhere unexpected.
+`batch`, `ledger`, `account`, `reference` and `card` — the same five schemas the
+table lists, in that order, as
+[`application.yml`](src/main/resources/application.yml) sets it on
+`connection-init-sql` — and the cross-schema mappings name their schema
+explicitly on the mapping rather than relying on that path, so a write into a
+schema this module has no right to fails as a permission error naming the table
+rather than resolving somewhere unexpected.
 
-Refactoring Rationale: this table carried a fifth row, `SELECT` on `card`, and the
-sentence above it counted five schemas on the path. Both were removed, and the
-`GRANT USAGE ON SCHEMA ... card ... TO carddemo_batch` and
-`GRANT SELECT ON ALL TABLES IN SCHEMA card` that backed them were removed from
-`V0__schemas_and_roles.sql` with them. The row's stated reason — that validation
-reads card data — does not hold: `app/cbl/CBTRN01C.cbl` opens `CARD-FILE` at
-`:309` and closes it at `:417` without ever issuing a READ against it, its only
-three reads being the daily feed at `:203`, the cross-reference at `:229` and the
-account at `:243`. The cross-reference it does read is `CVACT03Y`, which this
-module maps to `account.card_xref` under the `account` grant already in the table,
-and no entity in this module declares a `card` schema. §9 had already dropped
-`card` from the documented `search_path` on that same evidence, which left this
-section contradicting it — the drift this removes. Trade-offs: an unused read
-grant on the schema holding the primary account number and the card verification
-value is not a harmless surplus, so the grant went rather than the sentence.
+Assumptions: the `card` row is not optional and a deployment that omits it does
+not merely lose the export. `com.carddemo.batch.domain.Card` maps `card.cards`,
+so Hibernate validates that table at startup for EVERY job in the chain, and a
+database provisioned with only the other four schemas refuses the container with
+`SchemaManagementException: Schema validation: missing table [card.cards]` before
+any job runs. The privilege is earned by a named read: `app/cbl/CBEXPORT.cbl:513`
+opens the card master `ACCESS MODE IS SEQUENTIAL` and `:527-545` writes one export
+record per card, declaring no write verb against it, which is why `SELECT` is the
+whole of the row. [`ExportJob`](src/main/java/com/carddemo/batch/job/ExportJob.java)
+is the consumer, through the card repository it injects.
+
+Refactoring Rationale: this section previously stated that the `card` row, the
+`GRANT USAGE ON SCHEMA ... card ... TO carddemo_batch` and the
+`GRANT SELECT ON ALL TABLES IN SCHEMA card` backing it had all been removed, and
+that no entity in this module declared a `card` schema. That description is
+withdrawn: it does not match the tree it documents. `V0__schemas_and_roles.sql`
+carries both grants — the `USAGE` at its batch-role block and the `SELECT` in the
+two statements beside it — `application.yml` names `card` on the runtime
+`search_path`, and `Card` maps `card.cards`. The claim was internally consistent
+when it was written and became false when the export's card phase landed, and the
+cost of leaving it standing was concrete rather than cosmetic: an operator who
+provisioned the four schemas this section described could not start the service at
+all. Trade-offs: the original removal's evidence about `app/cbl/CBTRN01C.cbl` is
+retained above as the reason the grant is `SELECT` and not more — that program
+opens `CARD-FILE` at `:309` and closes it at `:417` without issuing a READ, so the
+daily-feed validation is NOT what justifies this row, and the export is.
 [`CrossSchemaPrivilegeContractTest`](../common-lib/src/test/java/com/carddemo/common/architecture/CrossSchemaPrivilegeContractTest.java)
-now fails the build if a schema is granted to this role that its `search_path`
-does not name, or if a schema an entity maps to is left ungranted, so this table
-and that file cannot drift apart again silently.
+fails the build if a schema is granted to this role that its `search_path` does
+not name, or if a schema an entity maps to is left ungranted, so the grant file,
+the path and the mappings cannot drift apart silently — but that test reads none
+of them from this document, which is why this paragraph is the one thing here that
+had to be corrected by hand.
 
 ### 5.4 Flyway needs two coordinates, not one
 
@@ -1050,10 +1112,20 @@ Assumptions: `DataSourceConfig`'s verification carries more weight in this modul
 any sibling. Every other service initialises its connections with a single-schema search
 path, so an ordering mistake has nothing to resolve against and fails at the first
 unqualified statement. This module's path is `batch, ledger, account, reference, card` —
-four schemas, because the posting unit of work commits the transaction, the category
+**five** schemas, because the posting unit of work commits the transaction, the category
 balance and the account together and is kept a single ACID commit rather than fragmented
-into a saga, and the interest job reads the disclosure-group rate. Refactoring Rationale:
-a fifth entry, `card`, stood on the path and was removed. It was justified on the reading that `app/cbl/CBTRN01C.cbl` validates the daily feed against the card master, and that reading does not hold: the program OPENS `CARD-FILE` at `app/cbl/CBTRN01C.cbl:309` and never issues a READ against it, its only three reads being the daily feed at `:203`, the cross-reference at `:229` and the account at `:243`. The cross-reference it does read is `CVACT03Y`, which this module maps to `account.card_xref`, and no entity here declares a `card` schema. A reordered path would therefore still resolve an unqualified write, against
+into a saga, the interest job reads the disclosure-group rate, and the export job reads
+the card master for the export record's card phase. Refactoring Rationale: this paragraph
+counted those five entries as four and then explained that the fifth, `card`, had been
+removed — a contradiction between the path it quoted and the count it gave, in one
+sentence. Both halves are corrected against the setting itself: `connection-init-sql` in
+[`application.yml`](src/main/resources/application.yml) names five schemas, `card`
+included, and §5.3 records the grant and the mapped entity that require it. The evidence
+the removal rested on is retained where it belongs, on that grant: `app/cbl/CBTRN01C.cbl`
+OPENS `CARD-FILE` at `:309` and never issues a READ against it, its only three reads
+being the daily feed at `:203`, the cross-reference at `:229` and the account at `:243`,
+so daily-feed validation is not what puts `card` on this path — the export is. A
+reordered path would still resolve an unqualified write, against
 a real table in the wrong schema, so the failure would be a plausible row rather than an
 error. The check compares the pool's effective schema against Flyway's separately
 configured default, which proves the two settings agree instead of deriving one from the
@@ -1134,6 +1206,41 @@ was evaluated and rejected because it cannot report an unreachable datasource,
 while the database-aware health indicator can. The listener cannot keep a finished
 task alive, because the entry point closes the context and exits with the
 translated job status.
+
+Assumptions: **the container health state is not a verdict on the run, and a
+finished container reports `unhealthy` no matter how the run went.** Success is
+decided from the process exit status alone — the state machine reads
+`$.Tasks[0].Containers[0].ExitCode`, and ECS reads a container health check from the
+task definition rather than from this image's `HEALTHCHECK` directive — so nothing
+in the pipeline is gated on what `docker inspect` reports. Docker itself sets a
+stopped container's health to `unhealthy` unconditionally, which was measured on
+Docker 29.7.0 against a control container whose probe was `/bin/true`: it read
+`healthy` with four successful probes and a failing streak of zero while running,
+and flipped to `unhealthy` the moment it exited zero. Refactoring Rationale: the
+directive's four timings were `--interval=30s --timeout=5s --start-period=30s
+--retries=3`, which could not probe this image at all — the whole life of a
+completed run is about fifteen to twenty seconds, so the start period outlived the
+container and no probe was ever scheduled. A finished run was therefore recorded
+`unhealthy` with `failing_streak=0` and an EMPTY health log, and a streak of zero
+beside an unhealthy verdict is the signature of a probe that never ran rather than
+one that failed. `--start-interval=2s` sets the cadence during the start period and
+`--interval` is down to five seconds for engines that predate that flag, so a
+completed run now shows five health-log entries and reaches `healthy` about twelve
+seconds in. Trade-offs: what remains is the terminal `unhealthy`, which only
+removing the directive would change; that was rejected because the service-image
+contract requires a health check and the RUNNING state it reports is genuinely
+useful on a long accrual or posting pass, where a hung datasource surfaces as a
+failing probe minutes before the step times out. **To read a stopped task, read the
+exit status and the final `event=batch.job.outcome` record, not the health value.**
+
+Assumptions: a local `docker run` of this image against a development PostgreSQL
+needs the development trust anchor mounted and named —
+`-v /tmp/pgtls:/tmp/pgtls:ro -e CARDDEMO_DB_SSL_ROOT_CERT=/tmp/pgtls/ca.pem` — and
+this is worth stating because the failure without it is misattributable. The image
+ships the RDS bundle at the path §5 documents, so a development server presenting a
+locally-signed certificate fails PKIX validation, and the symptom is a Hibernate
+`Unable to determine Dialect without JDBC metadata` and a
+`CARDDEMO-BATCH-0002` job failure rather than anything naming TLS.
 
 ### 9.2 Nothing is hard-coded
 
@@ -1411,7 +1518,7 @@ paragraph below names the three classes that carry it, and the `verify` command 
 | `PostingValidationServiceTest` | All four reject reasons with their exact message text, **and both inclusive boundaries** — exactly at the credit limit posts, one cent over rejects `102`; equal to the expiration date posts, one day past rejects `103` |
 | The exit-status test | A run with rejects reports `4` **and emits the counter line verbatim**, two spaces before the colon; a clean run reports `0` |
 | `CategoryBalanceServiceTest` | The create path and the update path **separately**, so an upsert that collapsed them would fail |
-| `InterestCalculationServiceTest` | The multiply-before-divide result **to the cent**, the half-up reduction under `Money.GENERAL_ROUNDING` on two data where the baseline's truncation would differ, per-row reduction rather than reduction of the sum, the `DEFAULT` fallback carrying type and category through, a missing `DEFAULT` row failing hard, and the final-account flush that the baseline does not reach |
+| `InterestCalculationServiceTest` | The multiply-before-divide result **to the cent**, the truncating reduction under `Money.BASELINE_INTEREST_ROUNDING` on data where a half-up reduction would differ by a cent, a negative quotient truncated toward zero rather than toward negative infinity, per-row reduction rather than reduction of the sum, the `DEFAULT` fallback carrying type and category through, a missing `DEFAULT` row failing hard, and the final-account flush that the reference does not reach |
 | `ExportJob` / `ImportJob` round trip | The 500-byte packed-decimal record survives a write-then-read unchanged, including the three usages of one picture at `app/cpy/CVEXPORT.cpy:50-57` |
 | The business-date test | The date comes from a **parameter**: injecting a fixed date twice produces byte-identical output, and no code path reads a clock for it |
 | `*RepositoryIT` | Against a real PostgreSQL container, the three-write unit of work **commits atomically and rolls back atomically**, across `ledger.*` and `account.*`, in **one** transaction |
@@ -1427,7 +1534,7 @@ carried by three landed classes —
 which asserts that an accepted posting commits its category balance, account and
 ledger row together and that a rejected one leaves none of them behind;
 [`CrossSchemaFeedRepositoryIT`](src/test/java/com/carddemo/batch/repository/CrossSchemaFeedRepositoryIT.java),
-which exercises the cross-schema feed reads under the four-schema `search_path`;
+which exercises the cross-schema feed reads under the five-schema `search_path`;
 and
 [`BatchRunRepositoryIT`](src/test/java/com/carddemo/batch/repository/BatchRunRepositoryIT.java),
 which pins the durable step ledger's redrive idempotency. Each starts a real
@@ -1585,8 +1692,20 @@ None of these belong to this module, and all of them must hold before it runs:
 | The seventeen `'DEFAULT'` disclosure-group rows are seeded | `reference-service` | The interest job **abends** (§4.5) — a non-local defect |
 | The `ledger.*` schema exists | `transaction-service` | Startup mapping validation fails naming the missing table |
 | The `account.*` schema exists | `account-service` | Startup mapping validation fails naming the missing table |
+| The `card.*` schema exists, with `card.cards` in it | `card-service` | Startup mapping validation fails with `Schema validation: missing table [card.cards]`, for **every** job and not only the export |
 | The cross-schema grants are applied | `data-migration/sql/V0__schemas_and_roles.sql` | A permission error on the first cross-schema write |
 | The dataset bucket, prefixes, and lifecycle rules exist | `infra/modules/s3-datasets` | Generation resolution fails in the backup, combine, and export jobs |
+
+Assumptions: the `card` row is listed with the same weight as `ledger` and `account`
+even though only one job reads that schema, because the symptom does not scale with
+the number of readers. `com.carddemo.batch.domain.Card` maps `card.cards`, and
+mapping validation runs over the whole entity set at context startup, so a
+deployment that provisions four of these five schemas cannot start ANY job — the
+preflight and posting steps fail on a table neither of them reads. Refactoring
+Rationale: this table omitted the row, and §5.3 and §9 described the schema as one
+that had been removed, so the four schemas an operator could assemble from this
+document were exactly the set that does not start. The omission is the reason the
+row is called out here rather than left implicit in the grant row above it.
 
 ## 14. References
 
@@ -1643,7 +1762,7 @@ abbreviation is not an accepted variant.
 | Decision | Category | Citation | Argued in |
 |---|---|---|---|
 | Multiply before divide in the interest calculation; dividing first yields different cents | Alternatives Considered: | `app/cbl/CBACT04C.cbl:464-465` | §4.4 |
-| Half-up rounding for that divide, like every other reduction on the money path; the baseline's truncation — no `ROUNDED` phrase, receiving field `:168` — is the reference behaviour and is registered as divergence `C-ROUNDING`, not reproduced here | Alternatives Considered: | `app/cbl/CBACT04C.cbl:464-465`, receiving field `:168`; `Money.GENERAL_ROUNDING` | §4.4 |
+| Truncation toward zero for that divide, reproducing the reference's own discard — no `ROUNDED` phrase, receiving field `:168` — while every other reduction on the money path stays half up; no divergence is registered for it | Alternatives Considered: | `app/cbl/CBACT04C.cbl:464-465`, receiving field `:168`; `Money.BASELINE_INTEREST_ROUNDING` against `Money.GENERAL_ROUNDING` | §4.4 |
 | The cross-schema grant keeps the posting unit of work a single ACID commit; saga and outbox-plus-compensating-reversal named and rejected because they would make partial-posting states observable and break golden-master parity outright | Alternatives Considered: | `app/cbl/CBTRN02C.cbl:424-444`, writes at `:440-442` | §4.2 |
 | A return code of 4 is a warn tier rather than a failure, and the skip-predicate to run-predicate inversion is spelled out | Refactoring Rationale: | producer `app/cbl/CBTRN02C.cbl:229-230`; inverted sense demonstrated at `app/jcl/TRANBKP.jcl:51` | §3.1, §3.2 |
 | The counter line carries two spaces before its colon, as observable output | Assumptions: | `app/cbl/CBTRN02C.cbl:228`, against `:227` for contrast | §3.3 |

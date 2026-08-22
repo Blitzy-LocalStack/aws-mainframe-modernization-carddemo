@@ -42,6 +42,68 @@ _PATTERN_CONTRACT: dict[str, dict[str, tuple[str, ...]]] = {
         ),
         "refuses": ("", "2026-08-12", "2026-08-12 21:17:33", "20260812T211733Z"),
     },
+    '*"Name":"${var.batch_container_name}"*': {
+        "admits": (
+            '{"Containers":[{"ExitCode":4,"Name":"batch"}]}',
+            '{"Containers":[{"ExitCode":0,"Name":"collector"},{"ExitCode":4,"Name":"batch"}]}',
+        ),
+        "refuses": (
+            "",
+            '{"Containers":[{"ExitCode":4,"Name":"collector"}]}',
+            '{"Containers":[{"ExitCode":4,"Name":"batch-sidecar"}]}',
+            '{"Containers":[{"ExitCode": 4,"Name": "batch"}]}',
+            '{"StopCode":"TaskFailedToStart"}',
+        ),
+    },
+    '*"Name": "${var.batch_container_name}"*': {
+        "admits": (
+            '{"Containers": [{"ExitCode": 4, "Name": "batch"}]}',
+            '{"Containers": [{"Name": "batch", "ExitCode": 4}]}',
+        ),
+        "refuses": (
+            "",
+            '{"Containers":[{"ExitCode":4,"Name":"batch"}]}',
+            '{"Containers": [{"ExitCode": 4, "Name": "batch-sidecar"}]}',
+            '{"StopCode": "TaskFailedToStart"}',
+        ),
+    },
+    '*"ExitCode":4,*': {
+        "admits": (
+            '{"Containers":[{"ExitCode":4,"Name":"batch"}],"StopCode":"EssentialContainerExited"}',
+            '{"Containers":[{"ContainerArn":"arn","ExitCode":4,"LastStatus":"STOPPED"}]}',
+        ),
+        "refuses": (
+            "",
+            '{"Containers":[{"ExitCode":40,"Name":"batch"}]}',
+            '{"Containers":[{"ExitCode":8,"Name":"batch"}]}',
+            '{"Containers":[{"ExitCode": 4,"Name":"batch"}]}',
+            '{"StopCode":"TaskFailedToStart"}',
+        ),
+    },
+    '*"ExitCode":4}*': {
+        "admits": ('{"Containers":[{"Name":"batch","ExitCode":4}]}',),
+        "refuses": (
+            "",
+            '{"Containers":[{"Name":"batch","ExitCode":40}]}',
+            '{"Containers":[{"Name":"batch","ExitCode":4,"LastStatus":"STOPPED"}]}',
+        ),
+    },
+    '*"ExitCode": 4,*': {
+        "admits": ('{"Containers": [{"ExitCode": 4, "Name": "batch"}]}',),
+        "refuses": (
+            "",
+            '{"Containers": [{"ExitCode": 40, "Name": "batch"}]}',
+            '{"Containers":[{"ExitCode":4,"Name":"batch"}]}',
+        ),
+    },
+    '*"ExitCode": 4}*': {
+        "admits": ('{"Containers": [{"Name": "batch", "ExitCode": 4}]}',),
+        "refuses": (
+            "",
+            '{"Containers": [{"Name": "batch", "ExitCode": 40}]}',
+            '{"Containers": [{"ExitCode": 4, "Name": "batch"}]}',
+        ),
+    },
 }
 
 #: The comparison operators this file can evaluate. A rule using anything else fails the parse
@@ -62,8 +124,82 @@ _VALUE_OPERATORS = frozenset(
     {"StringEquals", "StringMatches", "StringGreaterThanEquals", "StringLessThanEquals"}
 )
 
+#: Matches one ``StringMatches = "<pattern>"`` declaration, tolerating the backslash-escaped
+#: quotes a pattern needs when it matches a JSON payload rather than a bare date.
+#: WHY : Refactoring Rationale: the earlier expression was ``"([^"]*)"``, which stopped at the
+#:   FIRST escaped quote and captured the fragment ``*\\`` for a pattern such as
+#:   ``*\"ExitCode\":4,*``. The inventory assertion then compared a truncated token against
+#:   the table and the wildcard assertion decided on a fragment, so both read a pattern nobody
+#:   wrote.
+_PATTERN_DECLARATION = re.compile(r'StringMatches\s*=\s*"((?:[^"\\]|\\.)*)"')
+
+
+def _declared_patterns(text: str) -> set[str]:
+    """Collect every ``StringMatches`` pattern a Terraform text declares.
+
+    Args:
+        text: Terraform source with its comments already blanked.
+
+    Returns:
+        The declared patterns, with HCL escapes resolved, so the value compared here is the
+        value Amazon States Language receives.
+    """
+    return {
+        raw.replace('\\"', '"').replace("\\\\", "\\") for raw in _PATTERN_DECLARATION.findall(text)
+    }
+
+
 #: Stand-in for the ``${field}`` interpolation, chosen so it carries no brace of its own.
 _FIELD_TOKEN = "@FIELD@"
+
+
+def _rendered(pattern: str) -> str:
+    """Resolve the interpolations a declared pattern carries, so it is exercised as it renders.
+
+    The posting classifier interpolates ``var.batch_container_name`` into its identity patterns,
+    so the literal source text carries ``${var.batch_container_name}`` where a real Cause carries
+    the container's name. Exercising the raw text would assert nothing about the rendered rule,
+    and hard-coding the name here would let the two drift, so the value is read from the
+    variable's own declared default.
+
+    Args:
+        pattern: One declared StringMatches pattern, as written in the module source.
+
+    Returns:
+        The same pattern with every supported interpolation replaced by its declared value.
+
+    Raises:
+        AssertionError: If the pattern interpolates a variable this helper cannot resolve, which
+            is a new coupling that has to be taught here rather than silently unexercised.
+    """
+    resolved = pattern.replace(
+        "${var.batch_container_name}", _declared_default("batch_container_name")
+    )
+    assert "${" not in resolved, f"{pattern!r} interpolates a value this contract cannot resolve"
+    return resolved
+
+
+def _declared_default(variable: str) -> str:
+    """Read one module variable's declared default.
+
+    Args:
+        variable: The variable's name.
+
+    Returns:
+        The default's string value.
+
+    Raises:
+        AssertionError: If the variable or its default cannot be found, which means the input was
+            renamed or made required and the pattern above no longer renders what this asserts.
+    """
+    text = (_ORCHESTRATOR.parent / "variables.tf").read_text(encoding="utf-8")
+    found = re.search(
+        r'variable\s+"' + re.escape(variable) + r'"\s*\{.*?default\s*=\s*"([^"]*)"',
+        text,
+        re.DOTALL,
+    )
+    assert found, f"variable {variable!r} declares no string default to render patterns with"
+    return found.group(1)
 
 
 def _module_text() -> str:
@@ -377,7 +513,7 @@ def test_no_terraform_pattern_uses_an_unsupported_pseudo_wildcard() -> None:
     offences: list[str] = []
     for source in sorted(_TERRAFORM_TREE.rglob("*.tf")):
         body = _without_comments(source.read_text(encoding="utf-8"))
-        for pattern in re.findall(r'StringMatches\s*=\s*"([^"]*)"', body):
+        for pattern in sorted(_declared_patterns(body)):
             relative = source.relative_to(_REPOSITORY_ROOT)
             if "?" in pattern:
                 offences.append(f"{relative}: {pattern!r} spells '?' as a wildcard")
@@ -388,7 +524,7 @@ def test_no_terraform_pattern_uses_an_unsupported_pseudo_wildcard() -> None:
 
 def test_every_declared_pattern_is_exercised_by_this_contract() -> None:
     """Keep the pattern table complete, so a new pattern cannot arrive unexercised."""
-    declared = set(re.findall(r'StringMatches\s*=\s*"([^"]*)"', _without_comments(_module_text())))
+    declared = _declared_patterns(_without_comments(_module_text()))
     assert declared == set(_PATTERN_CONTRACT), (
         f"declared {sorted(declared)} but this contract exercises {sorted(_PATTERN_CONTRACT)}"
     )
@@ -398,10 +534,11 @@ def test_every_declared_pattern_is_exercised_by_this_contract() -> None:
 def test_each_pattern_admits_its_real_values_and_refuses_the_rest(pattern: str) -> None:
     """Exercise every declared pattern against the values its callers really send."""
     contract = _PATTERN_CONTRACT[pattern]
+    rendered = _rendered(pattern)
     for value in contract["admits"]:
-        assert _string_matches(pattern, value), f"{pattern!r} refused {value!r}"
+        assert _string_matches(rendered, value), f"{rendered!r} refused {value!r}"
     for value in contract["refuses"]:
-        assert not _string_matches(pattern, value), f"{pattern!r} admitted {value!r}"
+        assert not _string_matches(rendered, value), f"{rendered!r} admitted {value!r}"
 
 
 def test_the_daily_entry_gate_admits_both_of_its_real_callers() -> None:

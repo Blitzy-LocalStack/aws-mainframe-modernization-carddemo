@@ -7,8 +7,10 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.regex.Matcher;
@@ -48,12 +50,26 @@ import org.junit.jupiter.api.Test;
  * and a failure to find it FAILS rather than skips, because a check that silently does nothing is not a
  * check.</p>
  *
- * <p>Alternatives Considered: asserting the privilege graph against a live PostgreSQL through
- * Testcontainers. Rejected as the wrong instrument, not as unnecessary. What a live check can see is how
- * the engine evaluates an access-control list, which is not in doubt and is already covered by the
- * operator-run scripts under {@code data-migration/sql/verify/}. What no live check can see is a grant
+ * <p>Refactoring Rationale: this class used to reject a live-engine check outright, and that rejection
+ * was the hole a CRITICAL defect fell through. Its wording was that the engine's evaluation of an
+ * access-control list "is not in doubt", which is true of the ENGINE and says nothing about whether the
+ * shipped provisioning ever issues the statement -- and it did not: the batch role's {@code UPDATE} on
+ * {@code account.accounts} sat inside a {@code to_regclass} guard in a script that runs before any table
+ * exists, so on every freshly provisioned database the guard was false, the grant was skipped and the
+ * nightly posting job failed its third write with a permission error. Every case in this class was green
+ * throughout, because all three matched schema-level {@code USAGE} and none of them looked at a table
+ * privilege at all. Two things follow, and both are implemented rather than noted. The two cases at the
+ * foot of this class assert the TABLE-level write privileges the batch role must hold and must not hold,
+ * against the files that issue them; and the live half is no longer declined -- {@code
+ * com.carddemo.account.repository.BatchAccountWriteGrantIT} applies the bootstrap and the account
+ * context's own migrations to a real engine and reads {@code has_table_privilege} back for the granted
+ * privilege and for five that must stay refused.</p>
+ *
+ * <p>Alternatives Considered: moving the whole of this contract to that live test and deleting this
+ * class. Rejected, and the division between the two is deliberate: what no live check can see is a grant
  * that no code path uses, because the database cannot know which privileges the application intends to
- * exercise -- that is an agreement between two files, and this is where it belongs.</p>
+ * exercise -- an unused read privilege behaves exactly like an absent one. That is an agreement between
+ * files and belongs here; whether the engine ends up holding the entry belongs there.</p>
  *
  * <p>Trade-offs: the code side of the comparison is the service's declared session search path rather
  * than a scan of its query text. The search path is the module's own statement of which schemas it
@@ -67,7 +83,7 @@ import org.junit.jupiter.api.Test;
  * @see RuntimeDeletePrivilegeContractTest
  * @see RuntimeConfigurationContractTest
  */
-@DisplayName("The batch role's cross-schema grants are exactly the schemas its code reaches")
+@DisplayName("The batch role's cross-schema grants are exactly the schemas and tables its code reaches")
 final class CrossSchemaPrivilegeContractTest {
 
     /** The bootstrap script that establishes every schema, role and privilege. */
@@ -85,6 +101,97 @@ final class CrossSchemaPrivilegeContractTest {
 
     /** The schema the batch context owns, which is never one of its cross-schema grants. */
     private static final String OWNED_SCHEMA = "batch";
+
+    /** The migration directory of the context that owns the account master, relative to the root. */
+    private static final String ACCOUNT_MIGRATIONS =
+            "services/account-service/src/main/resources/db/migration";
+
+    /** The directory holding every module, so a grant in any service migration is in view. */
+    private static final String SERVICES_DIRECTORY = "services";
+
+    /** The path, within one module, at which Flyway resolves that module's migrations. */
+    private static final String MIGRATION_PATH = "src/main/resources/db/migration";
+
+    /** The schema whose write surface for the batch role is exactly one table. */
+    private static final String ACCOUNT_SCHEMA = "account";
+
+    /** The one table in that schema the posting unit of work rewrites. */
+    private static final String ACCOUNT_MASTER = "accounts";
+
+    /** The privilege the posting unit of work's third write needs on that table. */
+    private static final String UPDATE_PRIVILEGE = "UPDATE";
+
+    /**
+     * Every privilege that lets a role change stored rows, in the spelling a {@code GRANT} uses.
+     *
+     * <p>Assumptions: both spellings of the blanket form -- {@code ALL} and {@code ALL PRIVILEGES} --
+     * are listed, because either confers the whole set and {@link #privileges(String)} splits only on
+     * commas, so the two-word form arrives as one token and would miss a one-word entry. A check that
+     * matched only the four named verbs would pass the widest statement a single {@code GRANT} can
+     * write.</p>
+     */
+    private static final Set<String> WRITE_PRIVILEGES =
+            Set.of("INSERT", UPDATE_PRIVILEGE, "DELETE", "TRUNCATE", "ALL", "ALL PRIVILEGES");
+
+    /**
+     * One {@code GRANT <privileges> ON <schema>.<table> TO <role>} statement, all four parts captured.
+     *
+     * <p>Assumptions: the object is required to carry a dot, which is what separates this form from the
+     * schema-wide {@code ON ALL TABLES IN SCHEMA <schema>} form matched by {@link #TABLE_GRANT}. A
+     * pattern loose enough to match both would report a schema-wide grant as a named-table grant, which
+     * is the exact distinction these two cases turn on.</p>
+     *
+     * <p>Assumptions: the optional {@code TABLE} keyword is admitted because PostgreSQL accepts
+     * {@code GRANT ... ON TABLE x.y} as a synonym for {@code GRANT ... ON x.y}, so a statement written
+     * in the longer form would otherwise be invisible to this check while being fully effective in the
+     * engine.</p>
+     */
+    private static final Pattern NAMED_TABLE_GRANT = Pattern.compile(
+            "GRANT\\s+([\\w\\s,]+?)\\s+ON\\s+(?:TABLE\\s+)?(\\w+)\\.(\\w+)\\s+TO\\s+(\\w+)\\s*;",
+            Pattern.CASE_INSENSITIVE);
+
+    /**
+     * One {@code GRANT <privileges> ON ALL TABLES IN SCHEMA <schema> TO <role>} statement.
+     *
+     * <p>Assumptions: this repeats {@link #TABLE_GRANT}'s subject with the privilege list captured
+     * rather than skipped. The existing pattern answers "which schemas does this role touch", for which
+     * the privileges are irrelevant; the case below answers "does any statement confer a WRITE on this
+     * schema wholesale", for which they are the whole question.</p>
+     */
+    private static final Pattern SCHEMA_WIDE_TABLE_PRIVILEGE = Pattern.compile(
+            "GRANT\\s+([\\w\\s,]+?)\\s+ON\\s+ALL\\s+TABLES\\s+IN\\s+SCHEMA\\s+(\\w+)\\s+TO\\s+(\\w+)"
+                    + "\\s*;",
+            Pattern.CASE_INSENSITIVE);
+
+    /**
+     * One {@code ALTER DEFAULT PRIVILEGES ... IN SCHEMA <schema> GRANT <privileges> ON TABLES TO
+     * <role>} statement, with the privilege list captured.
+     *
+     * <p>Assumptions: this is the form that reaches tables which do not exist yet, so it is the form in
+     * which an over-broad write grant is easiest to introduce and hardest to see: it names no table, it
+     * produces no error, and it applies to every table the schema's owner creates from then on.</p>
+     */
+    private static final Pattern DEFAULT_TABLE_PRIVILEGE = Pattern.compile(
+            "ALTER\\s+DEFAULT\\s+PRIVILEGES\\s+FOR\\s+ROLE\\s+\\w+\\s+IN\\s+SCHEMA\\s+(\\w+)\\s+"
+                    + "GRANT\\s+([\\w\\s,]+?)\\s+ON\\s+TABLES\\s+TO\\s+(\\w+)\\s*;",
+            Pattern.CASE_INSENSITIVE);
+
+    /**
+     * One SQL line comment, from its leading double hyphen to the end of that line.
+     *
+     * <p>Assumptions: comments are removed before the two table-privilege cases match anything, and the
+     * reason is specific rather than hygienic. Both files these cases read argue their grants at length,
+     * and those arguments quote statement fragments -- {@code "GRANT UPDATE ON TABLES"} appears inside a
+     * paragraph explaining why that form is NOT used. A check a comment can satisfy is not a check, and
+     * one a comment can FAIL is worse: it would report a defect in prose.</p>
+     *
+     * <p>Trade-offs: a line comment is stripped wherever it appears, including inside a string literal
+     * that happened to contain a double hyphen. No statement in either file carries such a literal, and
+     * accepting that risk buys a stripper of one line instead of a tokenizer; the alternative considered
+     * was parsing the SQL properly, which is a dependency and a grammar for a check whose subject is
+     * four statement shapes.</p>
+     */
+    private static final Pattern LINE_COMMENT = Pattern.compile("--[^\\n]*");
 
     /**
      * One {@code GRANT USAGE ON SCHEMA <list> TO <role>} statement, capturing the comma-separated list.
@@ -327,5 +434,230 @@ final class CrossSchemaPrivilegeContractTest {
                         + " %s, so every statement against that entity fails with a permission error",
                         BATCH_SOURCES, ROLE, BOOTSTRAP_FILE)
                 .isSubsetOf(granted);
+    }
+
+    /**
+     * Fails when no migration owned by the account context grants the batch role {@code UPDATE} on the
+     * account master.
+     *
+     * <p><b>Purpose.</b> The posting unit of work performs three writes and commits them together: the
+     * category balance and the posted transaction in {@code ledger}, and the account master here. The
+     * first two ride a default privilege, which reaches a table created later; the third cannot, because
+     * a default privilege is unable to name a table and naming one table is the whole point -- {@code
+     * account.customers} carries the encrypted national identifier and no batch step has any business
+     * rewriting it. A privilege that must name a table can only be granted after the table exists and
+     * only by a session that owns it, and exactly one artifact satisfies both: a migration in the
+     * account context's own chain, which Flyway applies after {@code V1__account.sql} under {@code
+     * SET ROLE carddemo_account_owner}.</p>
+     *
+     * <p>Assumptions: the whole of the account context's migration directory is searched rather than one
+     * file name, so the grant may be renumbered or moved between migrations without this case having to
+     * be edited. What it holds is the property -- the account context issues it -- and not the file.</p>
+     *
+     * <p>Assumptions: the bootstrap's own guarded block does NOT satisfy this case, and that is the
+     * point of reading only this directory. That block is real and is retained as a safety net for a
+     * re-run against an already-migrated database, but it is skipped on a fresh one, which is the state
+     * every new environment starts in.</p>
+     */
+    @Test
+    @DisplayName("a migration owned by the account context grants the batch role UPDATE on the master")
+    void theAccountContextGrantsTheBatchRoleUpdateOnTheAccountMaster() {
+        List<String> granting = new ArrayList<>();
+        for (Path migration : sqlFilesIn(repositoryRoot().resolve(ACCOUNT_MIGRATIONS))) {
+            Matcher grant = NAMED_TABLE_GRANT.matcher(withoutComments(readFile(migration)));
+            while (grant.find()) {
+                if (ROLE.equals(grant.group(4))
+                        && ACCOUNT_SCHEMA.equalsIgnoreCase(grant.group(2))
+                        && ACCOUNT_MASTER.equalsIgnoreCase(grant.group(3))
+                        && privileges(grant.group(1)).contains(UPDATE_PRIVILEGE)) {
+                    granting.add(migration.getFileName().toString());
+                }
+            }
+        }
+
+        assertThat(granting)
+                .as("no migration under %s grants %s UPDATE on %s.%s. The posting job's third write"
+                        + " (app/cbl/CBTRN02C.cbl L554) and the interest job's account rewrite"
+                        + " (app/cbl/CBACT04C.cbl L356) are then refused at run time inside the nightly"
+                        + " window with a permission error naming the table, on every freshly"
+                        + " provisioned database. %s cannot carry this grant on a first run: it names a"
+                        + " table, and that script executes before any table exists",
+                        ACCOUNT_MIGRATIONS, ROLE, ACCOUNT_SCHEMA, ACCOUNT_MASTER, BOOTSTRAP_FILE)
+                .isNotEmpty();
+    }
+
+    /**
+     * Fails when any statement in the shipped provisioning confers a write on an account table other
+     * than the master, or confers one on the whole account schema, to the batch role.
+     *
+     * <p><b>Purpose.</b> This is the other half of the case above, and without it that case would be
+     * satisfied by the widest possible grant. The narrow surface is the reason the cross-schema
+     * exception is acceptable at all: the nightly chain reads all three account records and rewrites
+     * exactly one of them, so {@code INSERT}, {@code DELETE} and {@code TRUNCATE} are withheld
+     * everywhere and {@code UPDATE} is withheld on {@code customers} and {@code card_xref}. A schema-wide
+     * form -- either {@code ON ALL TABLES IN SCHEMA} or a default privilege -- would also hand over
+     * every table the schema gains in future, with nothing in the file changing to say so.</p>
+     *
+     * <p>Assumptions: every service's migration directory is searched, not only the account context's.
+     * A grant is legal wherever its issuing session owns the object, so a widening statement could be
+     * introduced in any chain, and a check that read one directory would be satisfied by the file it
+     * happened to read.</p>
+     */
+    @Test
+    @DisplayName("no account table besides the master, and no account default, is writable by batch")
+    void noAccountTableBesidesTheMasterIsWritableByTheBatchRole() {
+        List<String> widened = new ArrayList<>();
+        for (Path file : provisioningSql()) {
+            String sql = withoutComments(readFile(file));
+            String source = repositoryRoot().relativize(file).toString();
+
+            Matcher named = NAMED_TABLE_GRANT.matcher(sql);
+            while (named.find()) {
+                if (!ROLE.equals(named.group(4))
+                        || !ACCOUNT_SCHEMA.equalsIgnoreCase(named.group(2))) {
+                    continue;
+                }
+                Set<String> conferred = privileges(named.group(1));
+                conferred.retainAll(WRITE_PRIVILEGES);
+                if (conferred.isEmpty()) {
+                    continue;
+                }
+                if (!ACCOUNT_MASTER.equalsIgnoreCase(named.group(3))) {
+                    widened.add(source + " grants " + conferred + " on " + ACCOUNT_SCHEMA + "."
+                            + named.group(3));
+                } else if (!Set.of(UPDATE_PRIVILEGE).equals(conferred)) {
+                    widened.add(source + " grants " + conferred + " on " + ACCOUNT_SCHEMA + "."
+                            + ACCOUNT_MASTER + ", where UPDATE alone is the contracted privilege");
+                }
+            }
+
+            widened.addAll(schemaWideWrites(sql, source, SCHEMA_WIDE_TABLE_PRIVILEGE, 2, 1, 3,
+                    "GRANT ... ON ALL TABLES IN SCHEMA " + ACCOUNT_SCHEMA));
+            widened.addAll(schemaWideWrites(sql, source, DEFAULT_TABLE_PRIVILEGE, 1, 2, 3,
+                    "ALTER DEFAULT PRIVILEGES ... IN SCHEMA " + ACCOUNT_SCHEMA + " GRANT ... ON TABLES"));
+        }
+
+        assertThat(widened)
+                .as("each statement below hands %s a write privilege on the account schema wider than"
+                        + " the one table the posting and interest jobs rewrite. The narrowness is the"
+                        + " reason the cross-schema exception is acceptable: account.customers carries"
+                        + " the encrypted national and government-issued identifiers and no batch step"
+                        + " modifies it, and a schema-wide form additionally covers every table the"
+                        + " schema gains later", ROLE)
+                .isEmpty();
+    }
+
+    /**
+     * Collects the provisioning SQL both table-privilege cases read: the bootstrap and every service
+     * migration.
+     *
+     * @return the files in a stable order, never {@code null} or empty
+     * @throws UncheckedIOException if the services tree cannot be listed
+     */
+    private static List<Path> provisioningSql() {
+        Path root = repositoryRoot();
+        List<Path> files = new ArrayList<>();
+        files.add(root.resolve(BOOTSTRAP_FILE));
+        Path services = root.resolve(SERVICES_DIRECTORY);
+        try (var modules = Files.list(services)) {
+            modules.filter(Files::isDirectory)
+                    .sorted()
+                    .forEach(module -> files.addAll(sqlFilesIn(module.resolve(MIGRATION_PATH))));
+        } catch (IOException unreadable) {
+            throw new UncheckedIOException("cannot list " + services, unreadable);
+        }
+        return List.copyOf(files);
+    }
+
+    /**
+     * Lists the SQL files one directory holds, in name order.
+     *
+     * @param directory the directory to list; a module owning no migration has none, which is not an
+     *     error and yields an empty list
+     * @return the SQL files it holds, never {@code null}
+     * @throws UncheckedIOException if the directory exists and cannot be listed
+     */
+    private static List<Path> sqlFilesIn(Path directory) {
+        if (!Files.isDirectory(directory)) {
+            return List.of();
+        }
+        try (var entries = Files.list(directory)) {
+            return entries.filter(Files::isRegularFile)
+                    .filter(file -> file.getFileName().toString().endsWith(".sql"))
+                    .sorted()
+                    .toList();
+        } catch (IOException unreadable) {
+            throw new UncheckedIOException("cannot list " + directory, unreadable);
+        }
+    }
+
+    /**
+     * Reports every schema-wide statement in one file that confers a write on the account schema to the
+     * cross-schema role.
+     *
+     * @param sql the file's contents with comments already removed; must not be {@code null}
+     * @param source the repository-relative path of that file, named in each report; must not be
+     *     {@code null}
+     * @param statement the pattern matching the statement shape to examine; must not be {@code null}
+     * @param schemaGroup the capture group holding the schema name
+     * @param privilegeGroup the capture group holding the comma-separated privilege list
+     * @param roleGroup the capture group holding the grantee role name
+     * @param shape the statement shape as a reader would write it, for the report
+     * @return one entry per offending statement, empty when the file carries none; never {@code null}
+     */
+    private static List<String> schemaWideWrites(String sql, String source, Pattern statement,
+            int schemaGroup, int privilegeGroup, int roleGroup, String shape) {
+        List<String> offenders = new ArrayList<>();
+        Matcher matched = statement.matcher(sql);
+        while (matched.find()) {
+            if (!ROLE.equals(matched.group(roleGroup))
+                    || !ACCOUNT_SCHEMA.equalsIgnoreCase(matched.group(schemaGroup))) {
+                continue;
+            }
+            Set<String> conferred = privileges(matched.group(privilegeGroup));
+            conferred.retainAll(WRITE_PRIVILEGES);
+            if (!conferred.isEmpty()) {
+                offenders.add(source + " confers " + conferred + " through " + shape);
+            }
+        }
+        return offenders;
+    }
+
+    /**
+     * Splits a {@code GRANT} statement's privilege list into upper-case privilege names.
+     *
+     * <p>Assumptions: the list is upper-cased because SQL keywords are case-insensitive and both files
+     * read here write them upper-case by convention; a statement written {@code grant update} confers
+     * the same privilege and must be counted the same way.</p>
+     *
+     * @param clause the comma-separated privilege list as written, such as {@code "SELECT, UPDATE"};
+     *     must not be {@code null}
+     * @return the privilege names it lists, as a mutable set the caller may intersect; never
+     *     {@code null}
+     */
+    private static Set<String> privileges(String clause) {
+        Set<String> named = new TreeSet<>();
+        for (String privilege : clause.split(",")) {
+            String trimmed = privilege.trim().toUpperCase(Locale.ROOT);
+            if (!trimmed.isEmpty()) {
+                named.add(trimmed);
+            }
+        }
+        return named;
+    }
+
+    /**
+     * Removes every SQL line comment from a script, so only executable text is matched.
+     *
+     * <p>Assumptions: each comment is replaced by nothing rather than by a space, and the newline that
+     * terminated it is left in place, so statement boundaries and the line structure a reader would see
+     * both survive. Replacing the comment with a space would join a statement to the one below it only
+     * if the newline were consumed as well, which the pattern deliberately does not do.</p>
+     *
+     * @param sql the script as read from disk; must not be {@code null}
+     * @return the same script with its line comments removed, never {@code null}
+     */
+    private static String withoutComments(String sql) {
+        return LINE_COMMENT.matcher(sql).replaceAll("");
     }
 }

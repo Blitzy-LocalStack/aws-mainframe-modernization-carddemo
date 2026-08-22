@@ -45,6 +45,7 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -715,25 +716,54 @@ class StatementServiceTest {
         assertThat(response.generatedAt()).isEqualTo(WRITTEN_AT);
     }
 
-    // WHY : Assumptions: the refusal is asserted at the RESPONSE boundary rather than at the encoder,
-    //       because the encoder already refused it and this path never reaches the encoder -- the two
-    //       request-edge operations return a total without emitting an artifact. The figure used is the
-    //       smallest one requiring a tenth integer position, so the case pins the boundary and not an
+    // WHY : Assumptions: the disposition is asserted at the RESPONSE boundary, because that is where the
+    //       narrowing decision is taken -- the two request-edge operations return a total without
+    //       emitting an artifact, so nothing downstream of them would ever narrow it. The figure used is
+    //       the smallest one requiring a tenth integer position, so the case pins the boundary and not an
     //       arbitrary excess.
+    // WHY : Refactoring Rationale: this asserted a raised failure, and raising discarded the heading,
+    //       the name, the line count and both artifact locations along with the total -- every one of
+    //       which was already computed -- in exchange for an internal error. The reference discards the
+    //       high-order digits it cannot carry and reports the rest, which is what the register entry for
+    //       edit-mask overflow records and what this case now asserts.
     /**
-     * Asserts that a total too large for the reference regime is refused rather than published.
+     * Asserts that a total too large for the reference regime is narrowed rather than refused.
      */
     @Test
-    @DisplayName("a statement total needing a tenth integer digit is refused")
-    void aTotalNeedingATenthIntegerDigitIsRefused() {
+    @DisplayName("a statement total needing a tenth integer digit is narrowed")
+    void aTotalNeedingATenthIntegerDigitIsNarrowed() {
         stubOneCard();
         when(transactions.aggregateByCardFingerprint(FINGERPRINT))
-                .thenReturn(aggregate("1000000000.00", 3L));
+                .thenReturn(aggregate("1000000001.23", 3L));
 
-        assertThatExceptionOfType(ArithmeticException.class)
-                .isThrownBy(() -> service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR))
-                .withMessageContaining("integer positions")
-                .withMessageNotContaining("1000000000");
+        StatementResponse response =
+                service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
+
+        assertThat(response.totalAmount())
+                .as("the tenth integer digit is discarded and the cents survive")
+                .isEqualTo(Money.of(new BigDecimal("1.23")));
+        assertThat(response.transactionCount())
+                .as("everything else the response carries is still answered")
+                .isEqualTo(3);
+        assertThat(response.plainTextUri()).isNotNull();
+    }
+
+    // WHY : Assumptions: the negative vector is asserted separately because it is the one an
+    //       always-positive modulus would get wrong, and it would get it wrong in the direction that
+    //       matters -- a cardholder's credit reported as a charge of nearly a thousand million.
+    /**
+     * Asserts that an over-wide credit total stays a credit when it is narrowed.
+     */
+    @Test
+    @DisplayName("an over-wide credit total is narrowed and stays a credit")
+    void anOverWideCreditTotalStaysACredit() {
+        stubOneCard();
+        when(transactions.aggregateByCardFingerprint(FINGERPRINT))
+                .thenReturn(aggregate("-1000000001.23", 3L));
+
+        assertThat(service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR)
+                .totalAmount())
+                .isEqualTo(Money.of(new BigDecimal("-1.23")));
     }
 
     /**
@@ -1030,25 +1060,102 @@ class StatementServiceTest {
                 .readRange(eq(RUN_PREFIX + StatementService.INDEX_OBJECT), anyLong(), anyLong());
     }
 
-    // WHY : Assumptions: a TRUNCATED index is refused outright rather than searched, because an
-    //       artifact whose size is not a whole number of entries makes every derived position wrong --
-    //       a probe would land mid-record and decode a fingerprint spliced from two cards. The refusal
-    //       names the size and not the card, since the fault is in the artifact.
+    // WHY : Assumptions: a TRUNCATED index is not searched at all, because an artifact whose size is not
+    //       a whole number of strides makes every derived position wrong -- a probe would land mid-record
+    //       and decode a fingerprint spliced from two cards. The alignment test is the load-bearing half
+    //       of this case and it is asserted through the store: no ranged read of the index is issued.
+    // WHY : Refactoring Rationale: the size used here is the stride plus one, where it was the entry
+    //       CONTENT WIDTH plus one. Under the object's real framing that former value is one whole
+    //       entry and is therefore perfectly aligned, so the case stopped describing a truncation the
+    //       moment the reader began stepping by the stride the writer frames at.
+    // WHY : Refactoring Rationale: the outcome asserted is a degraded response and no longer a raised
+    //       failure. An index that cannot be used is a state of a stored object rather than anything the
+    //       caller did, and raising cost the caller the heading, the total, the line count and both
+    //       artifact locations -- every one of which is computed without the index -- in exchange for an
+    //       internal error. Nothing unsafe is admitted: no position is derived from a misaligned object,
+    //       which is the wrong-cardholder answer the alignment test exists to prevent.
     /**
-     * Asserts that an index of a partial entry is refused rather than searched.
+     * Asserts that an index of a partial entry yields no position and is never probed.
      */
     @Test
-    @DisplayName("an index that is not a whole number of entries is refused")
-    void aTruncatedIndexIsRefused() {
+    @DisplayName("an index that is not a whole number of strides yields no position and is not probed")
+    void aTruncatedIndexYieldsNoPositionWithoutBeingProbed() {
         stubOneCard();
         when(artifacts.describe(RUN_PREFIX + StatementService.INDEX_OBJECT))
                 .thenReturn(Optional.of(new ArtifactStore.ArtifactDescriptor(
                         RUN_PREFIX + StatementService.INDEX_OBJECT,
-                        StatementIndexEntry.ENCODED_WIDTH + 1L, WRITTEN_AT)));
+                        StatementIndexEntry.ON_OBJECT_STRIDE + 1L, WRITTEN_AT)));
 
-        assertThatExceptionOfType(IllegalStateException.class)
-                .isThrownBy(() -> service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR))
-                .withMessageContaining("not a whole number of entries");
+        StatementResponse response =
+                service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
+
+        assertThat(response.firstRecord()).isNull();
+        assertThat(response.recordCount()).isNull();
+        assertThat(response.plainTextUri())
+                .as("everything computed without the index is still answered")
+                .isNotNull();
+        verify(artifacts, never())
+                .readRange(eq(RUN_PREFIX + StatementService.INDEX_OBJECT), anyLong(), anyLong());
+    }
+
+    // WHY : Assumptions: an object whose LENGTH is aligned but whose CONTENT will not decode is the
+    //       other unusable state, and it is reached only by a probe -- so it exercises the recovery
+    //       around the search rather than the alignment test before it. Blanks are used as the
+    //       undecodable content because they are what a producer framing its records differently would
+    //       most plausibly leave in the positions this reader expects hexadecimal and digits in.
+    /**
+     * Asserts that a stride-aligned index whose entries will not decode yields no position.
+     */
+    @Test
+    @DisplayName("a stride-aligned index whose content will not decode yields no position")
+    void anUndecodableIndexYieldsNoPosition() {
+        stubOneCard();
+        String key = RUN_PREFIX + StatementService.INDEX_OBJECT;
+        when(artifacts.describe(key)).thenReturn(Optional.of(new ArtifactStore.ArtifactDescriptor(
+                key, (long) StatementIndexEntry.ON_OBJECT_STRIDE, WRITTEN_AT)));
+        when(artifacts.readRange(eq(key), anyLong(), anyLong())).thenReturn(
+                " ".repeat(StatementIndexEntry.ENCODED_WIDTH).getBytes(StandardCharsets.US_ASCII));
+
+        StatementResponse response =
+                service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
+
+        assertThat(response.firstRecord()).isNull();
+        assertThat(response.recordCount()).isNull();
+    }
+
+    // WHY : Assumptions: this is the case the shipped reader failed and every other index case here
+    //       passed. It asserts the two facts that together prove the framing: the object's own length is
+    //       the entry count times the stride, and the position answered for a card in the MIDDLE of it is
+    //       that card's own and not its neighbour's. A reader stepping by the content width satisfies
+    //       neither -- the length test refuses the object outright, and had it not, the middle probe
+    //       would return a record spliced from two entries.
+    /**
+     * Asserts that a newline-framed index is measured and probed at the stride the writer frames at.
+     */
+    @Test
+    @DisplayName("a newline-framed index is measured and probed at the writer's own stride")
+    void aNewlineFramedIndexIsProbedAtTheWritersStride() {
+        stubOneCard();
+        StatementIndexEntry before = new StatementIndexEntry("0".repeat(63) + "1", 0L, 30L);
+        StatementIndexEntry wanted = new StatementIndexEntry(FINGERPRINT, 30L, 12L);
+        StatementIndexEntry after = new StatementIndexEntry("f".repeat(63) + "f", 42L, 7L);
+        stubIndex(before, wanted, after);
+
+        StatementResponse response =
+                service.describe(new StatementRequest(SEED_CARD_NUMBER, null), OPERATOR);
+
+        assertThat(frameIndexObject(before, wanted, after))
+                .as("three framed entries occupy three strides, terminators included")
+                .hasSize(3 * StatementIndexEntry.ON_OBJECT_STRIDE);
+        assertThat(response.firstRecord()).isEqualTo(30L);
+        assertThat(response.recordCount()).isEqualTo(12L);
+        ArgumentCaptor<Long> firstBytes = ArgumentCaptor.forClass(Long.class);
+        verify(artifacts, Mockito.atLeastOnce()).readRange(
+                eq(RUN_PREFIX + StatementService.INDEX_OBJECT), firstBytes.capture(), anyLong());
+        assertThat(firstBytes.getAllValues())
+                .as("every probe begins on a stride boundary, never inside a record")
+                .allSatisfy(firstByte ->
+                        assertThat(firstByte % StatementIndexEntry.ON_OBJECT_STRIDE).isZero());
     }
 
     // WHY : Assumptions: the probe count is asserted, not just the answer. A search that read every
@@ -1079,23 +1186,52 @@ class StatementServiceTest {
     /**
      * Stubs the store to hold an index artifact composed of the supplied entries, in the order given.
      *
-     * <p>Assumptions: the stub serves entries by RANGE, computing which entry a range names the way the
-     * artifact would, so the case exercises the real search arithmetic rather than a lookup table keyed
-     * by fingerprint. A stub answering by fingerprint would pass against a search that ignored the
-     * ordinal entirely.</p>
+     * <p>Assumptions: the stub materialises the object's ACTUAL BYTES, terminator included, and answers
+     * every ranged read by slicing them. Refactoring Rationale: it used to divide the requested first
+     * byte by the entry's content width and hand back that entry whole, which made the stub agree with
+     * whatever stride the reader used and so could not have detected the framing defect at all -- the
+     * shipped reader stepped by the content width over an object framed at the content width plus a
+     * terminator, and every case here passed while every real index was refused. Slicing real bytes
+     * means a reader that steps by the wrong stride asks for a range spanning two entries and gets a
+     * spliced record that fails to decode, which is the failure the defect deserved.</p>
      *
      * @param entries the index entries in the order the artifact holds them; must be sorted by
      *     fingerprint for a search to be correct
      */
     private void stubIndex(StatementIndexEntry... entries) {
         String key = RUN_PREFIX + StatementService.INDEX_OBJECT;
+        byte[] object = frameIndexObject(entries);
         when(artifacts.describe(key)).thenReturn(Optional.of(
-                new ArtifactStore.ArtifactDescriptor(key,
-                        (long) entries.length * StatementIndexEntry.ENCODED_WIDTH, WRITTEN_AT)));
+                new ArtifactStore.ArtifactDescriptor(key, object.length, WRITTEN_AT)));
         when(artifacts.readRange(eq(key), anyLong(), anyLong())).thenAnswer(call -> {
             long firstByte = call.getArgument(1);
-            return entries[(int) (firstByte / StatementIndexEntry.ENCODED_WIDTH)].encode();
+            long lastByte = call.getArgument(2);
+            return Arrays.copyOfRange(object, (int) firstByte, (int) lastByte + 1);
         });
+    }
+
+    /**
+     * Frames index entries into the object the artifact writer would publish.
+     *
+     * <p>Assumptions: a single line feed follows every entry, because the writer that publishes this
+     * artifact terminates every record it accepts and does so for the index exactly as it does for the
+     * two statement streams. That one byte per entry is the whole of the difference between an entry's
+     * content width and the distance between two entries in the object, and it is reproduced here so
+     * the search arithmetic is exercised against the framing it will actually meet.</p>
+     *
+     * @param entries the entries to frame, in the order the artifact holds them
+     * @return the object's bytes, being each entry's content followed by one terminator
+     */
+    private static byte[] frameIndexObject(StatementIndexEntry... entries) {
+        byte[] object = new byte[entries.length * StatementIndexEntry.ON_OBJECT_STRIDE];
+        int at = 0;
+        for (StatementIndexEntry entry : entries) {
+            byte[] content = entry.encode();
+            System.arraycopy(content, 0, object, at, content.length);
+            object[at + StatementIndexEntry.ENCODED_WIDTH] = (byte) '\n';
+            at += StatementIndexEntry.ON_OBJECT_STRIDE;
+        }
+        return object;
     }
 
     /**
@@ -1157,6 +1293,277 @@ class StatementServiceTest {
         verify(cardXrefs).findHeadingChunk("", "", StatementService.HEADING_CHUNK_SIZE);
         verify(cardXrefs).findHeadingChunk(MASKED_CARD, OTHER_FINGERPRINT,
                 StatementService.HEADING_CHUNK_SIZE);
+    }
+
+    // WHY : Assumptions: this drives the walk in the order that DISAGREES with fingerprint order, which
+    //       is the ordinary case rather than an edge one: the walk is anchored on card number and a
+    //       fingerprint is a digest, so the two orders coincide only by accident. The previous fixture
+    //       happened to list its two cards in ascending fingerprint order too, so it could not tell a
+    //       sorted index from an unsorted one -- which is how a binary search over an unordered index
+    //       went unnoticed until the read path stopped refusing every index outright.
+    /**
+     * Asserts that the index is ordered for lookup even when the walk wrote the statements in another
+     * order, and that each entry keeps the position it named.
+     */
+    @Test
+    @DisplayName("the index is fingerprint-ordered even when the walk is not")
+    void theIndexIsFingerprintOrderedEvenWhenTheWalkIsNot() {
+        when(cardXrefs.findHeadingChunk("", "", StatementService.HEADING_CHUNK_SIZE))
+                .thenReturn(List.of(headingRow(OTHER_FINGERPRINT), headingRow(FINGERPRINT)));
+        when(cardXrefs.findHeadingChunk(MASKED_CARD, FINGERPRINT,
+                StatementService.HEADING_CHUNK_SIZE))
+                .thenReturn(List.of());
+        when(transactions.aggregateByCardFingerprint(anyString()))
+                .thenReturn(aggregate("0.00", 0L));
+        when(transactions.findWindowByCardFingerprint(anyString(), anyString(), anyInt()))
+                .thenReturn(List.of());
+
+        RecordingSink sink = new RecordingSink();
+        StatementRunOutcome outcome = service.generateStatements(sink);
+
+        assertThat(outcome.statementsProduced()).isEqualTo(2);
+        assertThat(outcome.index()).hasSize(2);
+        assertThat(outcome.index())
+                .as("a binary search over the index compares fingerprints, so it must be sorted by one")
+                .isSortedAccordingTo(
+                        java.util.Comparator.comparing(StatementIndexEntry::cardFingerprint));
+        assertThat(outcome.index().get(0).cardFingerprint()).isEqualTo(FINGERPRINT);
+        assertThat(outcome.index().get(1).cardFingerprint()).isEqualTo(OTHER_FINGERPRINT);
+        // WHY : Assumptions: the LATER-written statement now sits FIRST in the index, so its first
+        //       record cannot be zero and the earlier-written one's must be. That is what distinguishes
+        //       sorting the entries from renumbering them: each entry keeps the position it named in the
+        //       artifact, and the artifact itself is not reordered.
+        assertThat(outcome.index().get(0).firstRecord())
+                .as("the entry sorted first was written second, so it does not start the artifact")
+                .isNotZero();
+        assertThat(outcome.index().get(1).firstRecord())
+                .as("the entry sorted second was written first, so it starts the artifact")
+                .isZero();
+        assertThat(outcome.index().get(1).recordCount())
+                .as("the first-written statement's records precede the second-written one's")
+                .isEqualTo(outcome.index().get(0).firstRecord());
+        assertThat(outcome.index().get(0).recordCount() + outcome.index().get(1).recordCount())
+                .as("the index still accounts for every plain-text record the run wrote")
+                .isEqualTo(sink.plainRecords.size());
+    }
+
+    // WHY : Assumptions: the three cases below are about the DISPOSITION of a rendering refusal and not
+    //       about the refusals themselves, which stay exactly as strict as they were. A field carrying a
+    //       character the fixed-width charset cannot represent must still be refused, because a
+    //       substituted byte would corrupt a record whose width is its interface; a cell whose escaped
+    //       form will not fit must still be refused, because a truncated one emits half an entity. What
+    //       these cases pin is that ONE cardholder's unrenderable row costs ONE statement.
+    // WHY : Assumptions: the description column the two inputs arrive through is declared
+    //       {@code varchar(100)} with no check constraint, so both are schema-legal and neither could
+    //       have been kept out by the relation. That is what makes the disposition the whole of the
+    //       question.
+    /**
+     * Asserts that a card whose field cannot be encoded is omitted while the run continues.
+     */
+    @Test
+    @DisplayName("a card whose field cannot be encoded is omitted and the run continues")
+    void aCardWhoseFieldCannotBeEncodedIsOmittedAndTheRunContinues() {
+        stubTwoCardWalk();
+        stubDescriptionPerCard("CAF\u00c9 UNICODE", "SPECIMEN LINE");
+
+        RecordingSink sink = new RecordingSink();
+        StatementRunOutcome outcome = service.generateStatements(sink);
+
+        assertThat(outcome.statementsProduced())
+                .as("the second card's statement is produced, the first card's is omitted")
+                .isEqualTo(1);
+        assertThat(outcome.index()).hasSize(1);
+        // WHY : Assumptions: a first record of zero is the assertion that the omitted statement wrote
+        //       NOTHING. Had any of its records reached the artifact, the surviving statement would begin
+        //       after them -- and every index position of the run would then name a record belonging to a
+        //       statement that was never completed.
+        assertThat(outcome.index().get(0).firstRecord())
+                .as("the omitted statement left no record behind it")
+                .isZero();
+        assertThat(outcome.index().get(0).recordCount())
+                .as("the index accounts for every plain-text record the run wrote")
+                .isEqualTo(sink.plainRecords.size());
+        assertThat(sink.markupRecords).as("the markup artifact received the surviving card").isNotEmpty();
+    }
+
+    /**
+     * Asserts that a card whose markup cell over-expands is omitted while the run continues.
+     */
+    @Test
+    @DisplayName("a card whose markup cell over-expands is omitted and the run continues")
+    void aCardWhoseMarkupCellOverExpandsIsOmittedAndTheRunContinues() {
+        stubTwoCardWalk();
+        // WHY : Assumptions: the ampersand is the expanding character, because escaping it produces five
+        //       characters where the source had one, so a cell filled with them is the input that grows
+        //       furthest past its declared width. A run of them is also the input the reference has no
+        //       notion of at all, since it emits the source characters unescaped.
+        stubDescriptionPerCard("&".repeat(100), "SPECIMEN LINE");
+
+        RecordingSink sink = new RecordingSink();
+        StatementRunOutcome outcome = service.generateStatements(sink);
+
+        assertThat(outcome.statementsProduced()).isEqualTo(1);
+        assertThat(outcome.index()).hasSize(1);
+        assertThat(outcome.index().get(0).firstRecord())
+                .as("the omitted statement left no record behind it")
+                .isZero();
+    }
+
+    // WHY : Assumptions: this case is the boundary's other half and it is the one that fails if the
+    //       staged records are flushed INSIDE the recovery. A sink that cannot accept a record cannot
+    //       produce any statement, so recovering from it would walk the whole portfolio reporting every
+    //       card as omitted and answer with an empty artifact and a successful run.
+    /**
+     * Asserts that a sink refusing a record still stops the run rather than omitting a statement.
+     */
+    @Test
+    @DisplayName("a sink refusing a record still stops the run")
+    void aSinkRefusingARecordStillStopsTheRun() {
+        stubTwoCardWalk();
+        stubDescriptionPerCard("SPECIMEN LINE", "SPECIMEN LINE");
+        StatementService.StatementSink refusing = new StatementService.StatementSink() {
+            @Override
+            public void replaceArtifacts() {
+                // WHY : Assumptions: the reset succeeds so the case fails on the RECORD and not on the
+                //       artifact discard, which is a different path with a different disposition.
+            }
+
+            @Override
+            public void writeStatementRecord(byte[] record) {
+                throw new IllegalStateException("the object store refused a statement record");
+            }
+
+            @Override
+            public void writeMarkupRecord(byte[] record) {
+                throw new IllegalStateException("the object store refused a markup record");
+            }
+        };
+
+        assertThatExceptionOfType(IllegalStateException.class)
+                .isThrownBy(() -> service.generateStatements(refusing))
+                .withMessageContaining("refused a statement record");
+    }
+
+    // WHY : Assumptions: the two rows are each at the widest amount the ledger's own picture admits, so
+    //       the card total is reachable from conforming rows and is not a fabricated figure. Their sum
+    //       needs a tenth integer position where the statement regime declares nine, which is the
+    //       condition the reference meets by moving the figure into a narrower field and losing the
+    //       digits it cannot carry.
+    // WHY : Refactoring Rationale: this figure used to end the run, so the OTHER card's statement was
+    //       lost as well -- the amount that could not be printed cost a statement to a cardholder whose
+    //       own transactions were entirely ordinary. Both halves are asserted: the run produces both
+    //       statements, and the second one begins exactly where the first one ended, which is what makes
+    //       every index position of the artifact answerable.
+    /**
+     * Asserts that a card total past the regime's width is narrowed and costs no statement.
+     */
+    @Test
+    @DisplayName("a card total past the regime's width is narrowed and costs no statement")
+    void anOverWideCardTotalIsNarrowedAndCostsNoStatement() {
+        stubTwoCardWalk();
+        when(transactions.findWindowByCardFingerprint(anyString(), anyString(), anyInt()))
+                .thenAnswer(call -> {
+                    String fingerprint = call.getArgument(0);
+                    String after = call.getArgument(1);
+                    if (!after.isEmpty()) {
+                        return List.of();
+                    }
+                    if (FINGERPRINT.equals(fingerprint)) {
+                        return List.of(
+                                transactionWith("SPECIMEN LINE", "999999999.99", 0),
+                                transactionWith("SPECIMEN LINE", "999999999.99", 1));
+                    }
+                    return List.of(transactionWith("SPECIMEN LINE", "-1.00", 0));
+                });
+
+        RecordingSink sink = new RecordingSink();
+        StatementRunOutcome outcome = service.generateStatements(sink);
+
+        assertThat(outcome.statementsProduced())
+                .as("neither card loses its statement to the other card's arithmetic")
+                .isEqualTo(2);
+        assertThat(outcome.index()).hasSize(2);
+        assertThat(outcome.index().get(0).firstRecord()).isZero();
+        assertThat(outcome.index().get(1).firstRecord())
+                .as("the second statement begins where the first one ended, so the index is contiguous")
+                .isEqualTo(outcome.index().get(0).recordCount());
+        assertThat(outcome.index().get(0).recordCount() + outcome.index().get(1).recordCount())
+                .as("every plain-text record the run wrote belongs to one of the two statements")
+                .isEqualTo(sink.plainRecords.size());
+    }
+
+    /**
+     * Stubs a whole-run walk over two cards that ends after one chunk.
+     *
+     * <p>Assumptions: both rows carry the same masked rendering, which is the leading component of the
+     * order the heading query declares, so the continuation the walk composes is the pair and not the
+     * fingerprint alone.</p>
+     */
+    private void stubTwoCardWalk() {
+        when(cardXrefs.findHeadingChunk("", "", StatementService.HEADING_CHUNK_SIZE))
+                .thenReturn(List.of(headingRow(FINGERPRINT), headingRow(OTHER_FINGERPRINT)));
+        when(cardXrefs.findHeadingChunk(MASKED_CARD, OTHER_FINGERPRINT,
+                StatementService.HEADING_CHUNK_SIZE))
+                .thenReturn(List.of());
+        when(transactions.aggregateByCardFingerprint(anyString()))
+                .thenReturn(aggregate("0.00", 0L));
+    }
+
+    /**
+     * Stubs one transaction per card, each carrying the description supplied for that card.
+     *
+     * <p>Assumptions: each card's window is exhausted after its single row, because the continuation the
+     * walk composes from that row's identifier is stubbed to answer with nothing. One row per card is
+     * enough for these cases and keeps the failing row unambiguous: a card that produced no statement
+     * had exactly one row it could have failed on.</p>
+     *
+     * @param firstCardDescription the description the card named by the leading fingerprint carries
+     * @param secondCardDescription the description the other card carries
+     */
+    private void stubDescriptionPerCard(String firstCardDescription, String secondCardDescription) {
+        when(transactions.findWindowByCardFingerprint(anyString(), anyString(), anyInt()))
+                .thenAnswer(call -> {
+                    String fingerprint = call.getArgument(0);
+                    String after = call.getArgument(1);
+                    if (!after.isEmpty()) {
+                        return List.of();
+                    }
+                    return List.of(transactionWith(FINGERPRINT.equals(fingerprint)
+                            ? firstCardDescription
+                            : secondCardDescription));
+                });
+    }
+
+    /**
+     * Builds one transaction projection carrying a supplied description.
+     *
+     * @param description the description the row carries, which may be a value no band can render
+     * @return the projection, with the three members a statement line reads assigned
+     */
+    private static StatementTransactionView transactionWith(String description) {
+        return transactionWith(description, "-1.00", 0);
+    }
+
+    /**
+     * Builds one transaction projection carrying a supplied description, amount and ordinal.
+     *
+     * <p>Assumptions: the ordinal is what makes two rows of one card distinguishable, because the walk
+     * continues from the last row's identifier and two rows sharing one would make the continuation
+     * re-read the chunk it had just finished.</p>
+     *
+     * @param description the description the row carries, which may be a value no band can render
+     * @param amount the row's amount, as the decimal text the shared money type parses
+     * @param ordinal the row's position within its card, which its identifier is derived from
+     * @return the projection, with the three members a statement line reads assigned
+     */
+    private static StatementTransactionView transactionWith(
+            String description, String amount, int ordinal) {
+        StatementTransactionView row = newProjection();
+        setMember(row, "key", new StatementTransactionView.StatementTransactionKey(
+                SEED_CARD_NUMBER, transactionId(ordinal)));
+        setMember(row, "description", description);
+        setMember(row, "amount", Money.of(amount));
+        return row;
     }
 
     // WHY : Assumptions: the two cases below are the ONLY executable controls in this reactor over the
@@ -2376,14 +2783,40 @@ class StatementServiceTest {
                     .isEqualTo(OUTER_OVERFLOW_FIXTURE_CARDS);
             assertThat(outcome.index())
                     .extracting(StatementIndexEntry::cardFingerprint)
-                    .as("and the index names each card exactly once, in walk order, so a skipped or "
-                            + "repeated card could not pass")
-                    .containsExactlyElementsOf(cards.stream().map(FixtureCard::fingerprint).toList());
+                    .as("and the index names each card exactly once, so a skipped or repeated card "
+                            + "could not pass")
+                    .containsExactlyInAnyOrderElementsOf(
+                            cards.stream().map(FixtureCard::fingerprint).toList());
+            // WHY : Refactoring Rationale: the membership above is asserted WITHOUT regard to order and
+            //       the ordering is asserted separately below, where both were previously asserted at
+            //       once by comparing the index against the walk-order list. They are two different
+            //       orders on purpose: the run walks by masked card number and the index is sorted by
+            //       fingerprint for the binary search that reads it, and this fixture is one where they
+            //       disagree -- every fingerprint here is a constant prefix followed by the WHOLE card
+            //       number, while the walk leads on the masked rendering, which is the last four digits.
+            //       Asserting the two together made a correctly-sorted index fail a case whose subject
+            //       is the absence of a card-table arity.
+            assertThat(outcome.index())
+                    .as("the index is ordered for the binary search that reads it")
+                    .isSortedAccordingTo(
+                            java.util.Comparator.comparing(StatementIndexEntry::cardFingerprint));
 
+            // WHY : Assumptions: contiguity is walked in the order the statements were WRITTEN and each
+            //       card's entry is looked up BY FINGERPRINT rather than by its ordinal in the index.
+            //       Indexing positionally asserted the index's order a second time; looking the entry up
+            //       keeps the property that matters -- that the statements tile the artifact with no gap
+            //       and no overlap -- while leaving the index free to be sorted for lookup.
+            Map<String, StatementIndexEntry> entriesByFingerprint = new LinkedHashMap<>();
+            for (StatementIndexEntry entry : outcome.index()) {
+                entriesByFingerprint.put(entry.cardFingerprint(), entry);
+            }
             long accountedRecords = 0;
             for (int position = 0; position < cards.size(); position++) {
                 FixtureCard card = cards.get(position);
-                StatementIndexEntry entry = outcome.index().get(position);
+                StatementIndexEntry entry = entriesByFingerprint.get(card.fingerprint());
+                assertThat(entry)
+                        .as("card %d of the walk has an index entry", position)
+                        .isNotNull();
                 assertThat(entry.firstRecord())
                         .as("statement %d begins where the statement before it ended", position)
                         .isEqualTo(accountedRecords);

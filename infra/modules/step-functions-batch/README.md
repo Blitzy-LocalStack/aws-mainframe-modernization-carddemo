@@ -138,7 +138,7 @@ earlier revision of this file:
 | 1 | `QuiesceOnlineWrites` | Lambda invocation | `app/jcl/CLOSEFIL.jcl` |
 | 2 | `StageSeedDatasets` | Parallel wrapping one branch: a Map of synchronous data-migration tasks, one full dataset refresh per branch, then the combined verification gate | The `IDCAMS REPRO` copy and the `DEFINE CLUSTER` and load half of the ten master-load jobs, plus `DALYTRAN.PS` |
 | 3 | `PreflightDailyTransactions` | Synchronous batch-service task | `CBTRN01C`, which has no JCL driver |
-| 4 | `PostTransactions` | Synchronous batch-service task and exit-code Choice | `app/jcl/POSTTRAN.jcl` / `CBTRN02C` |
+| 4 | `PostTransactions` | Synchronous batch-service task, an exit-code Choice on its result and a task-failure classifier on its error | `app/jcl/POSTTRAN.jcl` / `CBTRN02C` |
 | 5 | `CalculateInterest` | Synchronous batch-service task | `app/jcl/INTCALC.jcl` / `CBACT04C` |
 | 6 | `BackupTransactions` | Synchronous batch-service task | `app/jcl/TRANBKP.jcl` |
 | 7 | `CombineTransactions` | Synchronous batch-service task | `app/jcl/COMBTRAN.jcl` |
@@ -149,8 +149,9 @@ earlier revision of this file:
 
 Eleven counts the states that perform business or operational work, and it is the
 count the migration plan's section 0.4.1.7 fixes. Input validation, task-exit
-Choices, warning recording, notification, terminal success/failure, and
-failure-path resume states are additional control states.
+Choices, the posting task-failure classifier, warning recording, notification,
+terminal success/failure, and failure-path resume states are additional control
+states.
 
 ### The verification gate inside state 2
 
@@ -212,11 +213,15 @@ flowchart TD
     S -->|branch failed| N[NotifyFailure]
     S --> P[3 PreflightDailyTransactions]
     P --> T[4 PostTransactions]
-    T --> C{exit code}
+    T -->|task returned| C{exit code}
     C -->|exactly 0| I[5 CalculateInterest]
-    C -->|exactly 4| W[RecordPostingWarning]
+    C -->|exactly 4: not reached, see below| W[RecordPostingWarning]
     W --> I
-    C -->|any other code| N
+    C -->|any other code: not reached| N
+    T -->|States.TaskFailed| CL{Cause carries exit code 4?}
+    CL -->|yes| CW[RecordCaughtPostingWarning]
+    CW --> I
+    CL -->|no| N
     I --> B[6 BackupTransactions]
     B --> M[7 CombineTransactions]
     M --> ST[8 GenerateStatements]
@@ -257,12 +262,15 @@ A JCL `COND` is a **skip** predicate; a Step Functions `Choice` is a **run**
 predicate. The sense must therefore be inverted.
 
 - `COND=(0,NE)` means the step runs only after clean predecessors. In the
-  workflow this is the ordinary success edge; infrastructure failures take the
-  state's `Catch`.
+  workflow this is the ordinary success edge -- the clean rule of the work
+  state's exit-code `Choice`, reached when the integration returned a task
+  envelope carrying exit code 0. Every other outcome, integration fault and
+  non-zero container exit alike, takes the state's `Catch`.
 - The one `COND=(4,LT)` site at `app/jcl/TRANBKP.jcl:51` means continue for a
   return code of four or lower. `app/cbl/CBTRN02C.cbl:229-230` produces code 4
-  when posting completed with rejects, so `CheckPostingExitCode` rejoins the
-  success path for that warn tier.
+  when posting completed with rejects, so the workflow rejoins the success path
+  for that warn tier -- by way of `ClassifyPostingTaskFailure`, described below,
+  rather than by way of `CheckPostingExitCode`.
 - `CheckPostingExitCode` matches **exactly 0 and exactly 4** and routes every
   other code to failure. Refactoring Rationale: it previously compared with
   `NumericLessThanEquals` against a configurable ceiling, which tolerated 1, 2
@@ -280,8 +288,114 @@ predicate. The sense must therefore be inverted.
 
 Refactoring Rationale: treating code 4 as failure would report a correctly
 posted night with business rejects as an infrastructure incident and skip
-backup, statements, and reports. The explicit numeric Choice preserves the
-baseline's graded outcome rather than collapsing it to binary success/failure.
+backup, statements, and reports. The graded outcome is therefore preserved rather
+than collapsed to binary success/failure -- but the state that carries it is the
+classifier, not the numeric `Choice`, for the reason in the next section.
+
+### Where the posting warn tier actually lives
+
+Assumptions: the `ecs:runTask.sync` integration RAISES on a non-zero
+essential-container exit. The error name is `States.TaskFailed` and the exit code
+survives only inside that error's `Cause`, which the integration supplies as the
+`DescribeTasks` view of the stopped task serialised into a JSON **string**. The
+integration returns a task envelope, and therefore reaches the state's `Next`,
+only when the container exited 0.
+
+Two consequences follow, and both are properties of the graph rather than of this
+module's preferences:
+
+- The **clean rule** of every `Check*ExitCode` gate is live. Their warn rule --
+  `CheckPostingExitCode`'s second rule -- and their `Default` edges are not
+  entered on any path the chain takes, because the result they would inspect only
+  ever carries a zero. Both are kept: a `Choice` with no `Default` raises
+  `States.NoChoiceMatched`, a `Choice` state cannot carry a `Catch`, and that
+  error would end the execution without publishing the notification, sweeping the
+  residual tasks or releasing the write bracket. The warn rule is kept because it
+  is the one declarative statement of the rc=4 contract on the result path, next
+  to which the classifier reads as the same contract on the error path.
+- `PostTransactions` therefore carries **two catchers in declaration order**: a
+  `States.TaskFailed` catcher that captures the error at `$.postingFailure` and
+  routes to `ClassifyPostingTaskFailure`, followed by the shared `States.ALL`
+  catcher that writes `$.failure` and routes to `NotifyFailure`. Amazon States
+  Language evaluates catchers in order and the first match wins, so the order is
+  load-bearing: the wildcard placed first would swallow the error before the
+  specific catcher was consulted.
+
+Assumptions: `States.TaskFailed` is itself a **wildcard** wherever it appears in a
+`Retry` or a `Catch` -- the language defines it as matching every known error name
+except `States.Timeout`. The first catcher therefore also receives the `ECS.*`
+integration faults once their retries are spent, which is why the classification
+is done by guards on the `Cause` and not by the error name: a fault that never ran
+the job carries no batch container reporting 4, so it takes the `Choice`'s
+`Default` and ends the run exactly as before, one `Choice` hop later. The one
+documented exception is what keeps the cancellation sweep intact -- `States.Timeout`
+does not match that catcher, so an abandoned-wait expiry still falls through to the
+`States.ALL` catcher and still reaches `ListResidualBatchTasks`.
+
+`ClassifyPostingTaskFailure` guards with `IsPresent` and `IsString` on the `Cause`,
+then requires the `Cause` to **name the batch container** -- `*"Name":"<batch
+container>"*` or the same pattern with a space after the colon, under `Or` -- and
+only then matches four `StringMatches` patterns under `Or`:
+`*"ExitCode":4,*`, `*"ExitCode":4}*`, `*"ExitCode": 4,*` and `*"ExitCode": 4}*`.
+Assumptions: `StringMatches` is the only comparator in the language that admits a
+wildcard, and exactly one character is special in its pattern -- `*`. Each pattern
+carries a boundary character after the digit, and that is what makes the rule
+correct rather than merely plausible: a bare `*"ExitCode":4*` also matches
+`"ExitCode":40`, which would read a hard failure as a reject night. A match routes
+to `RecordCaughtPostingWarning`, a `Pass` writing the same
+`{code = "POSTING_REJECTS_PRESENT", exitCode = 4}` payload to `$.warning` that
+`RecordPostingWarning` writes, and then to `CalculateInterest`. Its payload is
+static because a task state applies no `ResultPath` when it fails, so `$.posting`
+does not exist on this edge.
+
+The container-name conjunct is what binds the classification to this task rather
+than to any failure that happens to carry a 4: it comes from
+`var.batch_container_name`, the same input the `ContainerOverrides` address, and a
+`Cause` carrying no container entries at all -- a `RunTask` response holding only
+`Failures`, or a plain-text integration message -- fails closed. Both spacings are
+covered for the same reason the exit-code patterns cover both: a compact-only name
+pattern refuses a payload whose members are separated with a space, which would be
+a warn tier that stops matching on a serialiser detail rather than on the outcome.
+
+Trade-offs: an unrecognised `Cause` **fails closed** to `NotifyFailure`.
+Over-matching would continue the chain past a genuine hard failure, whereas
+under-matching stops a night that is recoverable by redrive and whose reject
+stream is already durable -- the rejects are committed to
+`ledger.transaction_rejects` and staged as the `DALYREJS` generation before
+posting exits.
+
+Trade-offs: the name conjunct proves the payload is this task's stopped-task
+description; it does not attribute the exit code to one entry **inside** it. The
+batch task definition carries the telemetry collector beside the application
+container -- `enable_telemetry_collector` defaults to `true` in
+`infra/modules/ecs-service` and neither environment root overrides it -- and both
+are essential, so an `ExitCode` of 4 on either satisfies the rule. Attributing it
+within the pattern language is not expressible: the only wildcard is `*`, there is
+no negation, and a pattern holding both tokens matches a name from one entry with
+an exit code from the next. Making it exact is a property of the task definition
+rather than of this graph -- passing `enable_telemetry_collector = false` for the
+batch workload in the environment roots leaves one container able to report an exit
+code, and the run-to-completion task has no long-lived telemetry to export anyway.
+The residual is detectable rather than silent: the code posting finished with is
+durable in `batch.batch_run` for the run that continued.
+
+Alternatives Considered: `States.StringToJson` on the `Cause` in a `Pass` state,
+then `NumericEquals` on the decoded `Containers[i].ExitCode`, which would be exact
+and would need no patterns. Rejected because a `Pass` state cannot carry a `Catch`,
+so a `Cause` that is not parseable JSON -- the integration-level fault, the case
+most in need of routing -- raises `States.IntrinsicFailure` and ends the execution
+without publishing the notification, sweeping the residual tasks or releasing the
+write bracket; and a missing reference path raises `States.Runtime`, which
+`States.ALL` does not catch. That trades a rare detectable misroute for a rare
+silent unnotified abort of the whole chain.
+
+Assumptions: only `PostTransactions` has a classifier. A non-zero exit from
+preflight, interest, backup, combine, statements, reports, export, import or the
+authorization extract remains a hard failure through the shared catcher, which is
+the correct outcome -- none of those programs has a documented warn tier to
+preserve, so giving them a classifier would invent a soft-failure semantic the
+baseline does not have. The asymmetry is deliberate and is recorded at each site
+in `main.tf`.
 
 ### Container invocation
 
@@ -440,12 +554,45 @@ change the workflow topology.
 
 ## Failure, retry, and restart
 
-Every work state has an explicit timeout and catch. ECS and Lambda integration
-faults retry with bounded exponential backoff. Container exit codes are not
-replayed: they reach a Choice and either continue or fail. A daily failure
-publishes to the supplied SNS topic and then enters the terminal Fail state,
-releasing the quiesce bracket on the way out **only when this execution acquired
-it**.
+Every work state has an explicit timeout and catch. Integration faults retry with
+bounded exponential backoff, and each retrier names **service fault errors only**
+-- `ECS.AmazonECSException`, `ECS.SdkClientException`, `ECS.ServerException` and
+`ECS.ThrottlingException` for the ECS states, the four `Lambda.*` equivalents for
+the Lambda states. A daily failure publishes to the supplied SNS topic and then
+enters the terminal Fail state, releasing the quiesce bracket on the way out
+**only when this execution acquired it**.
+
+Refactoring Rationale: `States.TaskFailed` was removed from the ECS retrier. It is
+the error name a non-zero container exit arrives under, so retrying it replayed a
+DETERMINISTIC outcome: a reject night re-ran the same feed against the same ledger
+key and returned 4 again on every attempt before the failure path was reached at
+all. Assumptions: naming the four `ECS.*` faults is not a narrowing of that entry
+but a **replacement** for it, because `States.TaskFailed` in a retrier is a
+wildcard over every known error name except `States.Timeout` -- it was retrying the
+integration faults too, under a name that could not be told apart from the job's own
+exit. `ECS.AmazonECSException` is the name AWS documents for a `RunTask` that could
+not be placed for want of capacity; the other three follow the
+`<Service>.<ExceptionName>` form the language uses for service exceptions, applied
+to the ECS API's own modelled faults and to the SDK's transport fault. Trade-offs:
+naming an error the integration never raises costs nothing, because a retrier that
+never matches is inert, while omitting one costs a real retry on a fault that would
+have cleared. The `batch.batch_run` ledger is what made those repeats harmless rather than
+corrupting -- attempts after the first record `batch.step.skipped` against the
+already-recorded return code -- which is what shows the replay to have been futile
+rather than protective. Trade-offs: a LAUNCH fault now takes the failure path on
+its first attempt too, because the same error name reports a task that never ran.
+The cost is accepted because the name cannot separate the two at retry time,
+retrying it is what made the posting warn tier unreachable, and the recovery for a
+launch fault is an operator redrive -- which the ledger makes safe, since a step
+that completed before the fault is a no-op on the way back through.
+
+Refactoring Rationale: `States.Timeout` is likewise absent, and for a different
+reason that must not be conflated with the one above. A `.sync` ECS state whose
+`TimeoutSeconds` expires does NOT stop its container -- Step Functions abandons the
+wait and the task keeps running -- so retrying that error started a second task of
+the same job while the first was still writing. An expiry therefore goes straight
+to the failure path, where the cancellation sub-chain stops the abandoned task
+before the run is declared failed.
 
 Refactoring Rationale: every failure used to reach the release directly,
 including a refusal raised before the bracket was taken and a failure of the
