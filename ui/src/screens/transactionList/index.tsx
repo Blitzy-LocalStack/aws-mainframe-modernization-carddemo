@@ -51,7 +51,7 @@ import { UNIFORM_PF_KEY_LABELS } from '../../layout/PfKeyBar';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
 import { ScreenTitle } from '../../layout/ScreenTitle';
 import { usePfKeys } from '../../layout/usePfKeys';
-import type { PfKeyHandlerMap } from '../../layout/usePfKeys';
+import type { PfKeyHandlerMap, PfKeyRejection } from '../../layout/usePfKeys';
 import { usePagedQuery } from '../../hooks/usePagedQuery';
 import type { PagedQueryRequest } from '../../hooks/usePagedQuery';
 /*
@@ -1125,11 +1125,44 @@ export default function TransactionListScreen(): ReactElement {
 
   // WHY : Assumptions: only these four attention identifiers are bound, because the source's
   //       `EVALUATE EIBAID` at L119 to L133 handles only ENTER, PF3, PF7 and PF8 and answers every
-  //       other key with `CCDA-MSG-INVALID-KEY` from its `WHEN OTHER` arm. That refusal is NOT
-  //       re-implemented here: `usePfKeys` already owns it, and it also already aliases PF13-PF24
-  //       onto PF01-PF12 exactly as `app/cpy/CSSTRPFY.cpy` L66 to L78 does, so a second copy of
-  //       either behaviour could only drift from the first.
-  const pfKeys = usePfKeys(pfKeyHandlers);
+  //       other key with `CCDA-MSG-INVALID-KEY` from its `WHEN OTHER` arm. The refusal's TEXT is not
+  //       restated here: `usePfKeys` owns it and hands it over on the rejection, and the hook also
+  //       already aliases PF13-PF24 onto PF01-PF12 exactly as `app/cpy/CSSTRPFY.cpy` L66 to L78 does,
+  //       so a second copy of either could only drift from the first.
+  // WHY : ⚠️ Refactoring Rationale: the rejection is now SHOWN, where this screen registered no
+  //       reporting callback at all. The note that stood here read "that refusal is NOT re-implemented
+  //       here: `usePfKeys` already owns it", and the first half was true while the conclusion was
+  //       wrong. The hook owns the message VALUE and reports it through this optional callback; it
+  //       cannot paint anything, because it renders nothing. With no callback registered, the whole of
+  //       `WHEN OTHER` at L129 to L132 was silently dropped: pressing PF5 on this browse moved the
+  //       cursor nowhere, wrote no sentence and left the operator with no indication that the key had
+  //       been read at all -- where the terminal answers with
+  //       `'Invalid key pressed. Please see below...'` and repaints. This screen is one of the fourteen
+  //       online programs that emit that message, so the omission was a parity defect and not a
+  //       simplification.
+  const pfKeys = usePfKeys(pfKeyHandlers, {
+    /**
+     * Paints the refusal for an attention identifier this screen does not handle.
+     *
+     * Assumptions: the sentence is taken from the rejection rather than imported, so the text stays
+     * owned by `ui/src/layout/usePfKeys.ts` -- which resolves it from `CCDA-MSG-INVALID-KEY` in
+     * `app/cpy/CSMSG01Y.cpy` L20 to L21 -- and this screen holds no second spelling of it.
+     *
+     * Assumptions: only an UNMAPPED identifier is reported. The hook raises the same rejection for a
+     * binding that is present but disabled, and this screen disables none: its two paging keys stay
+     * available at their boundaries and answer with the source's own boundary sentences instead, so a
+     * `disabled` rejection here would mean the hook and this screen had come to disagree about which
+     * keys exist. Reporting it as an invalid key would then hide that disagreement behind a plausible
+     * message.
+     * @param {PfKeyRejection} rejection - Which identifier was refused, why, and the sentence to show.
+     * @returns {void} Nothing; the sentence is shown through this screen's own message state.
+     */
+    onInvalidKey: (rejection: PfKeyRejection): void => {
+      if (rejection.reason === 'unmapped') {
+        setLocalMessage(rejection.message);
+      }
+    },
+  });
 
   const browseMessage = resolveBrowseMessage({
     isLoading: browse.isLoading,

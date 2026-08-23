@@ -1284,11 +1284,31 @@ export function AuthDetailScreen(): ReactElement {
         if (rejection.reason !== 'unmapped') {
           return;
         }
+        /*
+         * WHY : ⚠️ Refactoring Rationale: the sentence is handed TO the re-read rather than assigned
+         *       after it, and this arm used to do the opposite -- `load(selector)` followed by
+         *       `setMessage(INVALID_KEY_PRESSED)`. That ordering looks like the reference's and is not:
+         *       `PROCESS-ENTER-KEY` completes synchronously at
+         *       `app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl` L194 before L196 moves the sentence
+         *       into `WS-MESSAGE` and L197 re-sends the map, whereas `load` here RESOLVES LATER and its
+         *       settle arm assigns the message from the row it read -- which carries none. So the
+         *       sentence appeared for one frame and the operator was left with an empty band and no
+         *       indication that the key had been refused at all. Passing it as the announcement is what
+         *       the second parameter of `load` exists for, and its own block records the identical
+         *       defect being fixed for the fraud transition; this arm simply had not adopted it.
+         *       Alternatives Considered: setting the message and NOT re-reading, which would keep the
+         *       sentence with one less moving part. Rejected because the re-read is behaviour the
+         *       reference has -- its `WHEN OTHER` arm performs the Enter path as well as reporting, an
+         *       unusual combination among these programs that the hook comment above already records --
+         *       so dropping it would trade a lost message for a lost refresh.
+         */
+        const refusal: ScreenAnnouncement = { text: INVALID_KEY_PRESSED, severity: 'error' };
         if (selector !== undefined) {
-          load(selector);
+          load(selector, refusal);
+          return;
         }
-        setMessage(INVALID_KEY_PRESSED);
-        setSeverity('error');
+        setMessage(refusal.text);
+        setSeverity(refusal.severity);
       },
     },
   );

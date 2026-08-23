@@ -91,6 +91,14 @@ on:
         type: boolean
         default: true
 
+# Assumptions: this top-level block is a floor for the whole file rather than a
+# convenience. With no `permissions:` key at all, every job inherits the repository
+# default, which on many repositories is still a read/write token; declaring
+# `contents: read` here means any job added later starts read-only and has to widen
+# its own scope deliberately. Trade-offs: both jobs below restate their own scope
+# instead of leaning on this default, which is redundant on the page and is kept
+# that way so the grant a token actually carries is readable at the job that runs
+# the code, not inferred from a key seventy lines above it.
 permissions:
   contents: read
 
@@ -103,7 +111,23 @@ concurrency:
 jobs:
   ui:
     name: Lint, type-check, test and build the CardDemo SPA
+    # Trade-offs: the runner image is pinned rather than allowed to drift with
+    # `ubuntu-latest`, because this job depends on the image in two places that a
+    # silent image change would move underneath it: the npm layout that
+    # `actions/setup-node` below layers its pinned runtime onto, and the system
+    # `python3` the Rule 1 lexical gate runs on without a setup step of its own.
+    # An unreviewed image bump could alter either and produce a build failure with
+    # no commit to blame, which is the failure mode a reviewed pin removes.
     runs-on: ubuntu-24.04
+    # Assumptions: a bounded ceiling is preferred to the platform default because
+    # every step here either completes or hangs -- `npm ci` waiting on a registry
+    # that never answers, or a test environment that never exits -- and an
+    # unbounded job would hold a runner on that hang instead of failing it. The
+    # figure is deliberately generous rather than fitted to the work: it is a hang
+    # detector, not a budget, so it must not red a legitimately slow cold install
+    # on a run whose cache was empty. Trade-offs: a genuinely slower pipeline would
+    # have to raise this deliberately, which is preferable to a ceiling so tight
+    # that it fails runs for the wrong reason.
     timeout-minutes: 45
     # Assumptions: least privilege -- `contents: read` for actions/checkout and
     # nothing else. This job runs repository-controlled and dependency-controlled
@@ -204,6 +228,16 @@ jobs:
         shell: bash
         run: npm ci
 
+      # Assumptions: this script compiles BOTH TypeScript projects -- tsconfig.json
+      # for the application and tsconfig.node.json for the Vite and Vitest
+      # configuration files -- because those configuration files are TypeScript too,
+      # and a type error in one of them breaks the build and the test run while never
+      # appearing in an application-only check.
+      # Trade-offs: the production build step below repeats this compile through its
+      # own prerequisite, so the work is done twice. That is accepted because it gives
+      # a type failure its own titled step instead of surfacing it part-way through a
+      # build log, which is the same reasoning the contract gate below records for
+      # running ahead of the suite that would also have collected it.
       - name: Type-check application and tool configuration
         shell: bash
         run: npm run typecheck
@@ -286,10 +320,29 @@ jobs:
           mkdir -p ../ui-reports
           npm test -- --reporter=junit --outputFile=../ui-reports/vitest.xml
 
-      # Trade-offs: the advisory database is a network dependency, but a known
-      # high-severity UI vulnerability is a release blocker. The explicit
-      # threshold avoids failing on informational churn while keeping this gate
-      # authoritative for material findings.
+      # GATING at the `high` threshold -- a non-zero exit reddens the run, and no
+      # tolerance is applied here.
+      # Assumptions: this SPA's manifest and lock file are the FIRST npm dependency
+      # surface the repository has ever declared. tests.yml records that npm is
+      # deliberately not audited there because the repository declares no
+      # package.json to scan, and that statement remains accurate for the scope it
+      # covers -- the COBOL parity oracle still declares none. The obligation
+      # therefore arrives with this tree and is discharged in this file, rather than
+      # by amending a reference pipeline that would then be auditing a surface it
+      # does not own.
+      # Alternatives Considered: making this advisory, the way tests.yml treats its
+      # own Python audit, where the gate degrades to a warning so a transient
+      # advisory-database outage cannot red an unrelated change. Rejected for this
+      # tree on the strength of what each graph reaches: that audit guards a
+      # TEST-only closure whose worst outcome is a stale local report, whereas this
+      # graph is compiled into the bundle served to every operator of a financial
+      # application, so a known high-severity finding in it is a release blocker and
+      # a gate that only warned would let exactly that ship.
+      # Trade-offs: the advisory database is consequently a hard network dependency
+      # of this job, and an outage fails the run instead of waving it through. The
+      # explicit `high` floor is what keeps that trade acceptable -- informational
+      # and low-severity churn in a transitive development dependency cannot stop a
+      # release, while anything material still does.
       - name: Audit production and development dependencies
         shell: bash
         run: npm audit --audit-level=high
@@ -339,6 +392,11 @@ jobs:
     name: Publish the UI test annotations
     needs: ui
     if: always()
+    # Trade-offs: pinned for the same reason as the build job above -- the image is
+    # reviewed rather than allowed to drift with `ubuntu-latest`. The dependence is
+    # lighter here, since this job only downloads an artifact and calls one action,
+    # but a drifting image would still change the Node runtime those actions execute
+    # on without a commit to attribute it to.
     runs-on: ubuntu-24.04
     # Assumptions: a short ceiling -- this job downloads one artifact and calls one
     # action, so anything beyond a few minutes is a hang rather than a slow run.
