@@ -1,42 +1,106 @@
 # Step Functions batch module
 
+## 1. Purpose and source of truth
+
 This reusable module provisions four STANDARD Step Functions workflows: the
 eleven-work-state nightly CardDemo batch chain, the smaller ad-hoc report
 workflow started by reporting-service, the operator-invoked dataset
 export/import round trip, and the operator-invoked pending-authorization segment
-export and extract load. It also provisions their shared least-privilege
-execution role, one encrypted execution-log group per workflow, and the
-dead-letter queue and alarm covering the out-of-graph bracket release.
+export and extract load. It also provisions **one least-privilege execution role
+per workflow**, one encrypted execution-log group per workflow, and the
+dead-letter queue and **four** alarms covering the out-of-graph bracket release.
 
-⚠️ Refactoring Rationale: this sentence said **three** workflows and named the
-first three. The authorization-extract machine landed with its own log group, its
-own timeouts and its own task definition input, and the count was not
-re-measured. A reader taking the count at face value would conclude the machine
-they are looking at is not provisioned here.
+⚠️ Refactoring Rationale: three counts in that sentence were wrong at once, and
+each was wrong in the direction that makes a reader stop looking for something
+that is really there. It said **three** workflows and named the first three: the
+authorization-extract machine landed with its own log group, its own timeouts and
+its own task definition input, and the count was not re-measured. It said the
+workflows share **one** execution role, which stopped being true when the shared
+role was split -- `aws_iam_role.this` is declared `for_each = local.machines`, so
+there are four, and a reader auditing "the" role would audit a resource that does
+not exist. And it said "the dead-letter queue and alarm", singular, where
+[§8.1](#81-releasing-the-quiesce-bracket) documents and
+`bracket_release_alarm_names` publishes **four** -- the direction that leaves one
+delivery rule's failures unsubscribed.
+
+### 1.1 What this module orchestrates, and what it is derived from
 
 The immutable JCL under `app/jcl/` and the CICS submission queue in
-`app/csd/CARDDEMO.CSD` are the behavioural lineage. The migration adds an AWS
-path beside them and does not remove or modify the mainframe path. The full
-analysis is in the existing
-[batch orchestration architecture](../../../docs/architecture/batch-orchestration.md).
+`app/csd/CARDDEMO.CSD` are the behavioural lineage, and they are read-only: the
+COBOL, JCL and CSD baseline is the behavioural oracle for this migration and
+stays byte-identical. Every claim below cites it by path and line. The
+load-bearing citations, each verified against the bytes rather than inferred, are
+the posting step and its daily input at `app/jcl/POSTTRAN.jcl:23-41` and its
+`DALYTRAN` DD at `app/jcl/POSTTRAN.jcl:30`; the injected business date at
+`app/jcl/INTCALC.jcl:22` and the system-transaction generation it writes at
+`app/jcl/INTCALC.jcl:41`; the one graded return code in the whole chain at
+`app/cbl/CBTRN02C.cbl:229-230`; the quiesce and resume brackets at
+`app/jcl/CLOSEFIL.jcl:22-30` and `app/jcl/OPENFIL.jcl:22-30`; and the on-demand
+submission queue at `app/csd/CARDDEMO.CSD:499-505`.
 
-This README is the prose half of Rule 1 Explainability. The typed/documented
-input and output gates are enforced by [TFLint](../../.tflint.hcl), and the
-reference tables below are drift-checked with
-[terraform-docs](../../.terraform-docs.yml).
+**The migration adds a path, it does not remove one.** The mainframe path
+continues to exist and continues to run; nothing here retires, replaces or
+disparages it. Where a mainframe *mechanism* has no cloud analogue, what retires
+is the mechanism and not the behaviour, and each such case is named at the state
+that carries it. The full analysis is in the existing
+[batch orchestration architecture](../../../docs/architecture/batch-orchestration.md),
+which is the authoritative prose home of the state table, the condition-code
+inversion and the generation-dataset families; this README gives the module-level
+view and defers to it rather than restating it at length.
 
-## Module boundary
+### 1.2 Why this file exists
 
-This directory is a module, not a root. `infra/envs/dev` and `infra/envs/prod`
-call it with `source = "../../modules/step-functions-batch"`. It declares no
-provider configuration, backend, schedule, ECS cluster, task definition, Lambda
-function, bucket, or database. Those resources are supplied through typed inputs
-by the environment root.
+This README is the prose half of Rule 1 Explainability. HCL has no docstring
+construct, so the obligation is split: `infra/.tflint.hcl` and
+`infra/.terraform-docs.yml` supply the mechanical half -- the typed and
+documented input and output gates are enforced by [TFLint](../../.tflint.hcl),
+and the reference tables in [§16](#16-terraform-reference) are drift-checked with
+[terraform-docs](../../.terraform-docs.yml) -- and this file supplies the
+reasoning those four `.tf` files cannot hold at length. The convention it follows
+is [the documentation standard](../../../docs/CODE_DOCUMENTATION_STANDARD.md),
+whose HCL section is the authority for the form used here, and the house
+`# WHAT:` / `# WHY :` command idiom is the one `tests/README.md` establishes.
+
+Read as a docstring for the module, the four sections that answer Rule 1's four
+questions are: **purpose**, this section; **parameters**, the inputs in
+[§2](#2-module-boundary) and the execution-input contract in
+[§6](#6-business-date-input); **return values and their consumers**, the outputs
+in [§12](#12-ownership-boundaries) and [§16](#16-terraform-reference); and
+**errors**, the failure and warn paths in [§4](#4-condition-code-inversion) and
+[§8](#8-failure-retry-and-restart) together with the honest boundaries in
+[§14](#14-validation).
+
+## 2. Module boundary
+
+This directory is a module, not a root, and is **never applied directly**.
+`infra/envs/dev` and `infra/envs/prod` call it with
+`source = "../../modules/step-functions-batch"`. It declares no provider
+configuration, backend, schedule, ECS cluster, task definition, Lambda function,
+bucket, or database. Those resources are supplied through typed inputs by the
+environment root.
+
+Three consequences follow, and each is stated because it is a thing a reader might
+otherwise try here:
+
+- **There is no `backend.tf`**, because a backend belongs to a root. The
+  environment roots' backend points at the S3 state bucket and DynamoDB lock table
+  that `infra/bootstrap` provisions once per account.
+- **There is no `provider` block.** The module inherits the provider the calling
+  root configures. `versions.tf` declares the provider *requirement*
+  (`hashicorp/aws ~> 6.56`) without configuring it, and those are different
+  things -- a requirement constrains what a caller may install, a configuration
+  decides the region and credentials, and only the caller may do the second.
+- **There is no `terraform.tfvars`.** Per-environment values live in
+  `infra/envs/*/terraform.tfvars`, and those files carry **sizing and retention
+  parameters only, never a credential**. This module's inputs are correspondingly
+  free of secret material: it takes ARNs, names and numbers, and the one input
+  that names a security control (`permissions_boundary_arn`) names a policy rather
+  than carrying its contents.
 
 ⚠️ Refactoring Rationale: this sentence also listed **alarm** among the things
 the module declares none of, and that is no longer true. It declares exactly one
 queue and one alarm, both belonging to the out-of-graph bracket release described
-under [Releasing the quiesce bracket](#releasing-the-quiesce-bracket): the
+under [Releasing the quiesce bracket](#81-releasing-the-quiesce-bracket): the
 dead-letter queue for the finalizer rule's own undelivered events, and the alarm
 that fires on the first message. Their lifecycle is that rule's rather than the
 environment's -- they are named after it and must be destroyed with it -- so
@@ -131,21 +195,21 @@ earlier revision of this file:
   which would otherwise fail inside the first state of the chain rather than at
   plan.
 
-## Daily workflow
+## 3. Daily workflow
 
 | # | Work state | Mechanism | Baseline lineage |
 |---|---|---|---|
-| 1 | `QuiesceOnlineWrites` | Lambda invocation | `app/jcl/CLOSEFIL.jcl` |
+| 1 | `QuiesceOnlineWrites` | Lambda invocation setting the read-only flag in SSM Parameter Store | `app/jcl/CLOSEFIL.jcl:22-30`, step `CLCIFIL`, `EXEC PGM=SDSF` |
 | 2 | `StageSeedDatasets` | Parallel wrapping one branch: a Map of synchronous data-migration tasks, one full dataset refresh per branch, then the combined verification gate | The `IDCAMS REPRO` copy and the `DEFINE CLUSTER` and load half of the ten master-load jobs, plus `DALYTRAN.PS` |
-| 3 | `PreflightDailyTransactions` | Synchronous batch-service task | `CBTRN01C`, which has no JCL driver |
-| 4 | `PostTransactions` | Synchronous batch-service task, an exit-code Choice on its result and a task-failure classifier on its error | `app/jcl/POSTTRAN.jcl` / `CBTRN02C` |
-| 5 | `CalculateInterest` | Synchronous batch-service task | `app/jcl/INTCALC.jcl` / `CBACT04C` |
-| 6 | `BackupTransactions` | Synchronous batch-service task | `app/jcl/TRANBKP.jcl` |
-| 7 | `CombineTransactions` | Synchronous batch-service task | `app/jcl/COMBTRAN.jcl` |
-| 8 | `GenerateStatements` | Synchronous reporting-service task | `app/jcl/CREASTMT.JCL` |
-| 9 | `GenerateReports` | Synchronous reporting-service task | `app/jcl/TRANREPT.jcl` and `app/jcl/PRTCATBL.jcl` |
-| 10 | `AnalyzeTables` | Lambda invocation | Statistics analogue of `app/jcl/TRANIDX.jcl` |
-| 11 | `ResumeOnlineWrites` | Lambda invocation | `app/jcl/OPENFIL.jcl` |
+| 3 | `PreflightDailyTransactions` | Synchronous batch-service task | `CBTRN01C`, which has **no JCL driver in the baseline** |
+| 4 | `PostTransactions` | Synchronous batch-service task, an exit-code Choice on its result and a task-failure classifier on its error | `app/jcl/POSTTRAN.jcl:23-41` / `CBTRN02C` |
+| 5 | `CalculateInterest` | Synchronous batch-service task | `app/jcl/INTCALC.jcl:22-41` / `CBACT04C` |
+| 6 | `BackupTransactions` | Synchronous batch-service task | `app/jcl/TRANBKP.jcl:23-33` |
+| 7 | `CombineTransactions` | Synchronous batch-service task | `app/jcl/COMBTRAN.jcl:22-48` |
+| 8 | `GenerateStatements` | Synchronous reporting-service task | `app/jcl/CREASTMT.JCL:79-96` / `CBSTM03A` + `CBSTM03B` |
+| 9 | `GenerateReports` | Synchronous reporting-service task | `app/jcl/TRANREPT.jcl:37-48` / `CBTRN03C` and `app/jcl/PRTCATBL.jcl` |
+| 10 | `AnalyzeTables` | Lambda invocation running statistics maintenance | Statistics analogue of `app/jcl/TRANIDX.jcl:22-52` (`IDCAMS BLDINDEX`) |
+| 11 | `ResumeOnlineWrites` | Lambda invocation clearing the read-only flag | `app/jcl/OPENFIL.jcl:22-30` |
 
 Eleven counts the states that perform business or operational work, and it is the
 count the migration plan's section 0.4.1.7 fixes. Input validation, task-exit
@@ -153,7 +217,81 @@ Choices, the posting task-failure classifier, warning recording, notification,
 terminal success/failure, and failure-path resume states are additional control
 states.
 
-### The verification gate inside state 2
+### 3.1 Per-state lineage notes
+
+Each note below prevents one specific misreading of the table, and each rests on
+bytes read from the immutable baseline rather than on the job names.
+
+**Assumptions: state 3 has no job card, and that is not an omission in the
+table.** `CBTRN01C` is referenced by no file in `app/jcl/`, `app/proc/` or
+`app/scheduler/`, and it is absent from the `EXEC PGM=` census across `app/jcl`,
+which names `CBACT01C`, `CBACT02C`, `CBACT03C`, `CBACT04C`, `CBCUS01C`,
+`CBEXPORT`, `CBIMPORT`, `CBSTM03A`, `CBTRN02C` and `CBTRN03C` -- and no
+`CBTRN01C`. It is exercised only by `tests/integration/test_cbtrn01c_prepost.py`.
+The state therefore exists because the program and its integration test define a
+contract, not because a job card was ported.
+
+**Refactoring Rationale: state 6 removes duplicated work.**
+`app/jcl/TRANREPT.jcl:23-33` re-does the same `REPROC` unload that
+`app/jcl/TRANBKP.jcl:23-33` performs -- both write `TRANSACT.BKUP(+1)` -- because
+each JCL job is redundantly self-contained, which is the correct shape for jobs
+that must be submittable individually. The state machine has one graph instead of
+several job cards, so it unloads **once** in state 6 and states 7 and 9 consume
+that generation: less work, identical output.
+
+**Assumptions: state 7's ordering is load-bearing rather than conventional.**
+`app/jcl/COMBTRAN.jcl` merges a **concatenated** `SORTIN` -- `TRANSACT.BKUP(0)`
+at line 24 and `SYSTRAN(0)` at line 26 -- on `TRAN-ID` (line 30), writes
+`TRANSACT.COMBINED(+1)` at line 37, then `REPRO`s it back into the transaction
+master at line 48. State 7 must therefore follow **both** state 5, which writes
+`SYSTRAN(+1)` (`app/jcl/INTCALC.jcl:41`), and state 6, which writes
+`TRANSACT.BKUP(+1)`. Note too that `(+1)` appears twice in that job, at lines 37
+and 44, and resolves to the **same** physical generation.
+
+**Assumptions: state 8 produces TWO artifacts, and a rerun replaces rather than
+appends.** `app/jcl/CREASTMT.JCL` declares `STMTFILE` at lines 87-91 as `LRECL=80`
+plain text (`STATEMNT.PS`) and `HTMLFILE` at lines 92-96 as `LRECL=100` HTML
+(`STATEMNT.HTML`). `STEP030` at line 66 runs `IEFBR14` with
+`DISP=(MOD,DELETE,DELETE)` before `STEP040` at line 79 writes
+`DISP=(NEW,CATLG,DELETE)`, so the previous run's outputs are deleted first. Two
+further properties of that member are recorded here as observations of an
+immutable baseline rather than as defects to fix, because a reader comparing the
+job to this state will notice them: line 90 carries overlapping text from an
+earlier edit, and `HTMLFILE` is declared at `LRECL=80` in the delete step at line
+69 while the writing step declares it at `LRECL=100` at line 94.
+
+**Refactoring Rationale: state 10 retires the rebuild, NOT the index.**
+`app/jcl/TRANIDX.jcl` has three IDCAMS steps: `STEP20` at line 22 defining the
+alternate index with `KEYS(26 304)`, `NONUNIQUEKEY` and `RECORDSIZE(350,350)`
+(lines 25-30), `STEP25` at line 39 defining the path, and `STEP30` at line 49
+running `BLDINDEX`. All three retire because PostgreSQL maintains indexes inside
+the same transaction as the write, and the index itself is declared in
+transaction-service's Flyway migration. **The index is not dropped -- only its
+imperative rebuild.** What survives as work for this state is statistics
+maintenance, which is why the table calls it an analogue rather than a port.
+
+**Refactoring Rationale: states 1 and 11 retire the SDSF mechanism, not the
+behaviour.** `app/jcl/CLOSEFIL.jcl` and `app/jcl/OPENFIL.jcl` each run
+`EXEC PGM=SDSF` (line 22, steps `CLCIFIL` and `OPCIFIL`) and issue **five**
+`/F CICSAWSA,'CEMT SET FIL(<name> ) CLO'` -- respectively `OPE'` -- commands at
+lines 26-30, over `TRANSACT`, `CCXREF`, `ACCTDAT`, `CXACAIX` and `USRSEC`. That
+is five of the eight files `app/csd/CARDDEMO.CSD` defines, because the bracket is
+scoped to the **write** path: the read-only unload jobs open their files shared.
+A flag every online service reads is therefore the faithful analogue rather than
+a hard lock. The operational consequence is the reason
+[§8.1](#81-releasing-the-quiesce-bracket) exists: **state 11 must be reachable on
+the failure path**, or a failed run leaves the online write path quiesced.
+
+**Assumptions: state 2 stages ten master families plus the daily input.** The ten
+master-refresh load jobs are `ACCTFILE.jcl`, `CARDFILE.jcl`, `CUSTFILE.jcl`,
+`XREFFILE.jcl`, `TRANFILE.jcl`, `DISCGRP.jcl`, `TCATBALF.jcl`, `TRANTYPE.jcl`,
+`TRANCATG.jcl` and `DUSRSECJ.jcl`, and **none of the ten carries a `COND=`**.
+`DALYTRAN.PS` has no load job in the baseline -- `app/jcl/POSTTRAN.jcl:30` reads
+it directly at its `DALYTRAN` DD with `DISP=SHR`, as flat sequential input to
+posting rather than a loaded master -- yet it IS staged and loaded here, for the
+target-side reason given in [§7](#7-seed-data-maps).
+
+### 3.2 The verification gate inside state 2
 
 State 2 is a `Parallel` with a single branch, and the branch holds four states in
 sequence: `RefreshEachSeedDataset` (the Map), `VerifyMigration`, its exit-code
@@ -256,43 +394,82 @@ that does NOT pass through the release, on the same principle as
 `OnlineWriteLeaseUnavailable`: a bracket held is recoverable, a bracket released
 under a live writer is not.
 
-### Condition-code inversion
+## 4. Condition-code inversion
 
-A JCL `COND` is a **skip** predicate; a Step Functions `Choice` is a **run**
-predicate. The sense must therefore be inverted.
+**A JCL `COND` is a *skip* predicate; a Step Functions `Choice` is a *run*
+predicate, so the sense must be INVERTED, not copied.** This is the single
+easiest thing in the migration to get backwards, and getting it backwards is
+silent: an inverted gate still runs, it just runs the wrong nights.
 
-- `COND=(0,NE)` means the step runs only after clean predecessors. In the
-  workflow this is the ordinary success edge -- the clean rule of the work
-  state's exit-code `Choice`, reached when the integration returned a task
-  envelope carrying exit code 0. Every other outcome, integration fault and
-  non-zero container exit alike, takes the state's `Catch`.
-- The one `COND=(4,LT)` site at `app/jcl/TRANBKP.jcl:51` means continue for a
-  return code of four or lower. `app/cbl/CBTRN02C.cbl:229-230` produces code 4
-  when posting completed with rejects, so the workflow rejoins the success path
-  for that warn tier -- by way of `ClassifyPostingTaskFailure`, described below,
-  rather than by way of `CheckPostingExitCode`.
-- `CheckPostingExitCode` matches **exactly 0 and exactly 4** and routes every
-  other code to failure. Refactoring Rationale: it previously compared with
-  `NumericLessThanEquals` against a configurable ceiling, which tolerated 1, 2
-  and 3 as reject nights. `app/cbl/CBTRN02C.cbl` assigns `RETURN-CODE` in exactly
-  one place -- `MOVE 4 TO RETURN-CODE` at its line 230 -- so those three codes
-  cannot come from the program's own exit path and can only mean the runtime
-  failed around it. The ceiling was also an input, so it could be set to 255, at
-  which point every failure satisfied the predicate and the chain ran interest
-  accrual over transactions that were never posted. The two codes are now locals
-  in `main.tf` and are not configurable, because they are the baseline's contract
-  rather than a policy.
-- `INCLUDE COND=(...)` in `app/jcl/TRANREPT.jcl:47-48` selects records and
-  becomes a reporting query predicate. It is not represented as a workflow
-  Choice.
+There are three forms in the baseline, and the counts below are a census of
+`app/jcl/` rather than an estimate.
 
-Refactoring Rationale: treating code 4 as failure would report a correctly
-posted night with business rejects as an infrastructure incident and skip
-backup, statements, and reports. The graded outcome is therefore preserved rather
-than collapsed to binary success/failure -- but the state that carries it is the
-classifier, not the numeric `Choice`, for the reason in the next section.
+- **`COND=(0,NE)` -- eight sites.** `app/jcl/DEFGDGD.jcl` lines 36, 47, 59 and
+  82; `app/jcl/CREASTMT.JCL` lines 56, 66 and 79; and `app/jcl/TXT2PDF1.JCL` line
+  26, in a job that retires with no target at all. It reads "skip when zero is not
+  equal to a prior return code", i.e. run only when every predecessor ended
+  cleanly. In the workflow this is the ordinary success edge -- the clean rule of
+  the work state's exit-code `Choice`, reached when the integration returned a
+  task envelope carrying exit code 0. Every other outcome, integration fault and
+  non-zero container exit alike, takes the state's `Catch`, which routes to
+  notification and then to a terminal `Fail`.
+- **`COND=(4,LT)` -- exactly ONE site: `app/jcl/TRANBKP.jcl:51`.** It reads "skip
+  when four is less than the return code", i.e. **run only when the return code is
+  4 or lower** -- so it becomes an explicit `Choice` whose run-predicate is
+  `rc <= 4`, letting the soft-warn path continue. `app/cbl/CBTRN02C.cbl:229-230`
+  produces code 4 when posting completed with rejects, so the workflow rejoins the
+  success path for that warn tier -- by way of `ClassifyPostingTaskFailure`,
+  described in [§4.1](#41-where-the-posting-warn-tier-actually-lives), rather than
+  by way of `CheckPostingExitCode`.
+- **`INCLUDE COND=(...)` -- one site, and it is NOT a step gate.**
+  `app/jcl/TRANREPT.jcl:47-48` selects records on an inclusive processing-date
+  range. It becomes a SQL `WHERE` clause inside the reporting service and **must
+  never be modelled as a `Choice` state.** The hazard is worth naming plainly: the
+  two forms share the `COND` keyword, which is exactly why they get conflated, and
+  a record filter promoted to a step gate would skip the whole report on a night
+  whose data merely fell outside the range. Its bounds are injected as DFSORT
+  `SYMNAMES` at lines 43 and 44 -- `PARM-START-DATE,C'2022-01-01'` and
+  `PARM-END-DATE,C'2022-07-06'` -- which is why the ad-hoc machine passes them as
+  arguments rather than embedding them.
 
-### Where the posting warn tier actually lives
+**Refactoring Rationale: what the one `COND=(4,LT)` site actually gates, and why
+the target must be idempotent because of it.** It sits on `STEP10`, the
+`IDCAMS DEFINE CLUSTER` at `app/jcl/TRANBKP.jcl:51-54` that re-creates the emptied
+transaction master, after `STEP05R` at line 23 unloaded that master to
+`TRANSACT.BKUP(+1)` at line 33 and `STEP05` at line 37 deleted the cluster and its
+alternate index. It is therefore a **safety interlock**: never re-create an empty
+master unless the backup and the delete both went acceptably. The two
+`IF MAXCC LE 08 THEN SET MAXCC = 0` lines at 42 and 45 are what normalise a
+not-found delete down to 0 so the `<= 4` test can pass -- which is precisely why
+the target's drop-if-exists must likewise be non-fatal and idempotent: a first run
+against a clean database, where there is nothing to drop, must not be reported as
+a failure.
+
+**Refactoring Rationale: why the warn tier must survive the translation.**
+`app/cbl/CBTRN02C.cbl:229-230` is the only place the program assigns
+`RETURN-CODE`, and it assigns 4 when the reject count is greater than zero. If the
+state machine treated 4 as a failure, **a night that posted successfully but had
+rejects would be reported as a failed batch run** -- a false alarm on every single
+run that rejects anything, which is a normal operating condition rather than an
+incident, and which would additionally skip backup, statements and reports. The
+graded outcome is therefore preserved rather than collapsed to binary
+success/failure. The state that actually carries it is the classifier rather than
+the numeric `Choice`, for the reason in
+[§4.1](#41-where-the-posting-warn-tier-actually-lives).
+
+`CheckPostingExitCode` matches **exactly 0 and exactly 4** and routes every other
+code to failure. Refactoring Rationale: it previously compared with
+`NumericLessThanEquals` against a configurable ceiling, which tolerated 1, 2 and 3
+as reject nights. `app/cbl/CBTRN02C.cbl` assigns `RETURN-CODE` in exactly one
+place -- `MOVE 4 TO RETURN-CODE` at its line 230 -- so those three codes cannot
+come from the program's own exit path and can only mean the runtime failed around
+it. The ceiling was also an input, so it could be set to 255, at which point every
+failure satisfied the predicate and the chain ran interest accrual over
+transactions that were never posted. The two codes are now locals in `main.tf` and
+are not configurable, because they are the baseline's contract rather than a
+policy.
+
+### 4.1 Where the posting warn tier actually lives
 
 Assumptions: the `ecs:runTask.sync` integration RAISES on a non-zero
 essential-container exit. The error name is `States.TaskFailed` and the exit code
@@ -397,7 +574,7 @@ preserve, so giving them a classifier would invent a soft-failure semantic the
 baseline does not have. The asymmetry is deliberate and is recorded at each site
 in `main.tf`.
 
-### Container invocation
+## 5. Container invocation
 
 Batch states pass an argument array matching `BatchApplication` exactly:
 
@@ -407,9 +584,47 @@ Batch states pass an argument array matching `BatchApplication` exactly:
 ```
 
 Each batch task also receives `CARDDEMO_BATCH_RUN_ID=$$.Execution.Name`.
-Container overrides name the target container explicitly; an incorrect name
-would leave the baked-in command running, so every container name is a validated
-module input rather than an assumed constant.
+
+**Assumptions: there are FOUR task definitions, and which image serves which
+state is verifiable rather than conventional.** `services/batch-service`'s job-name
+list is exactly `preflight-daily-transactions`, `post-transactions`,
+`calculate-interest`, `backup-transactions`, `combine-transactions`, `export` and
+`import` -- **no statement job and no report job** -- so the statement and report
+writers must be, and are, in reporting-service. The **batch** image therefore
+serves states 3 through 7, the **data-migration** image serves state 2's Map
+branches, the **reporting** image serves states 8 and 9 and the whole ad-hoc
+machine, and the **authorization** image serves the operator-invoked
+authorization extract. The migration plan describes three; the fourth arrived with
+the authorization-extract machine, and its own input
+(`authorization_task_definition_arn`) records why it is not a reuse of the batch
+one: the segment export reads the authorization context's tables, which only that
+context's database role may read.
+
+Keep the provenance distinction when reading the command shapes below: the five
+batch job tokens used by the nightly chain are **verified** against that service's
+own README, while the statement and report tokens are **derived** from the state
+names and follow the same `--job=<kebab-case>` convention. Derived is not
+guessed -- the receiving image resolves a bean whose name is the job token, as
+[§5.1](#51-reporting-commands-and-their-receiver) records -- but it is not the same
+evidence, and presenting it as verified would overstate it.
+
+**Assumptions: `ContainerOverrides.Command` is an argument ARRAY.** It is never a
+space-joined string and never wrapped in `sh -c`, and both mistakes fail in ways
+that are easy to misdiagnose. A space-joined string arrives as a single argument,
+which the option parser rejects as one unrecognised token rather than reading it as
+five options. An `sh -c` wrapper makes the shell the container's process 1, so it
+receives the stop signal and the JVM never gets `SIGTERM` on task drain -- the job
+is then killed rather than shut down, and a step that was mid-write is the one most
+likely to be interrupted. `services/batch-service/Dockerfile` uses an exec-form
+`ENTRYPOINT`, and an ECS command override replaces `CMD` and is appended after that
+entrypoint, which is what makes the bare argument array correct.
+
+`ContainerOverrides` additionally addresses containers **by name**, and an override
+naming a container the task definition does not contain is silently ignored rather
+than rejected -- the task then runs its baked-in command, which for a service image
+is a web server that never terminates, inside a state that waits for the task to
+stop. That is why every container name is a validated module input rather than an
+assumed constant.
 
 Assumptions: state 2 runs `python -m carddemo_migration.cli` with the
 `refresh-dataset` subcommand, per-item dataset/business-date arguments, and the
@@ -431,12 +646,14 @@ range -- reconcile the allocator. The allocator step runs LAST rather than befor
 the verifications, because advancing a sequence changes nothing the three passes
 compare. The load and the three passes are composed only for a dataset whose layout
 ships a committed extract, so the `transactions` branch stages, reconciles and exits
-zero without loading -- see [Seed-data Maps](#seed-data-maps). The scratch directory
+zero without loading -- see [Seed-data Maps](#7-seed-data-maps). The scratch directory
 is removed when the step ends whatever the outcome.
 The subcommand
 was added rather than the branch being expanded into five states because the
 eleven-state contract of the migration plan's section 0.4.1.7 is a topology this
 module must not change.
+
+### 5.1 Reporting commands and their receiver
 
 Reporting states pass an argument array matching `ReportingTaskRunner` exactly:
 
@@ -455,7 +672,7 @@ modes selected by the presence of `--job=`: task mode validates the command
 before building any context, resolves a `ReportingTask` bean whose name is the
 job token, and exits 0 on completion or 8 on any failure.
 
-### Business-date input
+## 6. Business-date input
 
 The scheduler supplies an ISO `scheduledTime`. The workflow takes the portion
 before `T` and passes it as `--business-date=YYYY-MM-DD`. A manual or redriven
@@ -469,7 +686,7 @@ execution may instead supply `businessDate` directly:
 `PARM`; no batch state substitutes a wall-clock reading. This keeps reruns
 reproducible.
 
-## Seed-data Maps
+## 7. Seed-data Maps
 
 `StageSeedDatasets` iterates eleven items:
 accounts, cards, customers, card cross-reference, transactions, daily
@@ -552,7 +769,7 @@ independent loads; eleven would burst every branch against the same Aurora
 connection budget and Fargate quota. The value is a sizing input and does not
 change the workflow topology.
 
-## Failure, retry, and restart
+## 8. Failure, retry, and restart
 
 Every work state has an explicit timeout and catch. Integration faults retry with
 bounded exponential backoff, and each retrier names **service fault errors only**
@@ -620,18 +837,46 @@ it. Recording the owner in the value was rejected for the readers it would break
 and a companion owner parameter was rejected as a resource, a grant and a module
 input to narrow a window the ownership gate already covers.
 
-Refactoring Rationale: restart is an improvement, not a port. The only
-`RESTART=` in the baseline is commented out at `app/jcl/DEFGDGD.jcl:2`, and no
-active checkpoint contract exists. STANDARD-workflow redrive resumes from the
-failed state, while the `batch.batch_run` ledger makes an already-completed
-step a no-op.
+**Refactoring Rationale: restart is an IMPROVEMENT, not a port, and the direction
+matters.** There is **no baseline batch-restart contract to preserve**. The only
+`RESTART=` anywhere in the tree is commented out -- `app/jcl/DEFGDGD.jcl:2` reads
+`//*  RESTART=STEP30`, carrying a leftover job-sequence field -- and `CHKPT=`, the
+JCL checkpoint keyword, appears **zero** times across `app/`.
+
+That second claim is stated precisely because it is easy to appear to contradict: a
+bare search for `CHKPT` in `app/` returns nine hits, and none of them is a JCL
+restart contract. They are the COBOL working-storage item `WK-CHKPT-ID` and one
+`EXEC DLI CHKP` call inside the authorization extension programs
+(`app/app-authorization-ims-db2-mq/cbl/CBPAUP0C.cbl`, `DBUNLDGS.CBL`,
+`PAUDBLOD.CBL` and `PAUDBUNL.CBL`) -- IMS DL/I checkpoint calls belonging to those
+programs' own processing, not step-restart declarations on any job in this chain.
+
+So STANDARD-workflow **redrive**, which resumes a failed execution from the state
+that failed, combined with the durable `batch.batch_run` step ledger owned by
+batch-service -- unique on `(run_id, step_name)`, so a redriven step that already
+completed is a no-op -- is a documented improvement over the baseline rather than a
+migration of something that existed. Presenting it as a port would misdescribe
+both sides.
+
+Assumptions, recorded as a fact about an immutable baseline and **not** as an
+asserted defect: had `RESTART=STEP30` been active, it would have resumed at a step
+whose predecessors included an already-created generation-data-group definition,
+and re-running that definition is exactly the idempotency problem the step ledger
+solves. The line is commented out, so the baseline never had the problem; the
+observation is here because it explains what the ledger is for.
+
+`app/jcl/WAITSTEP.jcl:22` -- `//WAIT     EXEC PGM=COBSWAIT` -- retires **with an
+analogue** rather than with no target: its function is the state transition itself,
+which waits for the previous state to reach a terminal status before the next
+begins. A batch chain expressed as a graph has nowhere to put a wait-step utility,
+because waiting is what the edges already do.
 
 The per-state timeout is a ceiling, not a runtime prediction. Its purpose is to
 keep one task from holding the online write path quiesced beyond its own
 allowance, and `state_machine_timeout_seconds` is the same kind of ceiling for
 the execution as a whole.
 
-### Releasing the quiesce bracket
+### 8.1 Releasing the quiesce bracket
 
 Both in-graph resume paths are states, so neither runs when the execution itself
 stops. An execution-level `TIMED_OUT`, or an operator `ABORTED`, terminates
@@ -675,7 +920,7 @@ owning execution is no longer `RUNNING` and the chain's tasks are terminal. That
 what lets a cadence carry no staleness threshold: a legitimate long night is an
 execution that is still running.
 
-Assumptions: both rules dead-letter to `aws_sqs_queue.finalizer_dlq` and **four** alarms
+Assumptions: both rules dead-letter to `aws_sqs_queue.bracket_release_dlq` and **four** alarms
 cover the three independent ways a release can fail. The count exceeds the number of
 failure modes because the first mode is alarmed PER RULE:
 `aws_cloudwatch_metric_alarm.release_delivery_failed` is declared `for_each` over both
@@ -722,9 +967,11 @@ the handler's release condition also admits an **expired** lease", concluding th
 operator." Expiry does not release anything. It changes what a **future** caller is
 permitted to do; nothing observes an expiry, and nothing writes the read-only flag
 on it. A lost event therefore leaves the flag set until some later invocation
-releases it, and the next one is the following night's chain, whose own resume runs
-after a full batch window -- roughly a day of refused online writes, reached by the
-one path that had no recovery.
+releases it, and absent the two mechanisms below the next one is the following
+night's chain -- so every online write in between is refused, by the one path that
+had no recovery. The cost is stated as which invocation releases next rather than as
+an elapsed duration, because the duration is a property of the schedule this module
+does not own.
 
 Two mechanisms now cover it, and neither is an expiry. Delivery failures land on
 `aws_sqs_queue.bracket_release_dlq`, an encrypted queue with fourteen-day retention
@@ -819,7 +1066,7 @@ and their comments already disagreed about whether `FAILED` should be matched. O
 rule, matching all three non-succeeded terminal statuses, is the whole of the
 out-of-graph release.
 
-## Ad-hoc report workflow
+## 9. Ad-hoc report workflow
 
 The second machine validates `startDate`, `endDate`, and `reportType`, runs the
 reporting-service task, checks its exit code, and either succeeds or publishes a
@@ -827,12 +1074,33 @@ failure notification before failing loudly. The environment root publishes this
 machine's ARN to reporting-service and grants `states:StartExecution` on that
 exact ARN.
 
-This preserves the capability behind `app/csd/CARDDEMO.CSD` lines 499-505,
-where the `JOBS` transient-data queue submitted fixed-width JCL card images to
-`DDNAME(INREADER)`, while replacing the submission tunnel with a tracked
-execution identity.
+**Refactoring Rationale: this preserves the capability and replaces the tunnel.**
+The baseline submits an on-demand report by writing 80-byte JCL card images to an
+extrapartition CICS transient data queue, defined at `app/csd/CARDDEMO.CSD:499-505`:
+line 499 `DEFINE TDQUEUE(JOBS) GROUP(CARDDEMO)`; line 500 the description
+`SUBMIT JOBS FROM CICS`; line 501 `TYPE(EXTRA) DATABUFFERS(1) DDNAME(INREADER)
+ERROROPTION(IGNORE)`; line 502 `OPENTIME(INITIAL) TYPEFILE(OUTPUT)
+RECORDSIZE(80)`; and line 503 `RECORDFORMAT(FIXED) BLOCKFORMAT(UNBLOCKED)
+DISPOSITION(MOD)`. Note that `DDNAME(INREADER)` is at line 501 -- line 502 alone
+does not contain it.
 
-## Dataset round-trip workflow
+Two properties of that definition are what the replacement improves on, and both
+are named specifically rather than as a general preference for modern tooling.
+`ERROROPTION(IGNORE)` silently swallowed a failed write, so a user could believe a
+report had been requested when nothing was ever queued and no error surfaced
+anywhere. And `DISPOSITION(MOD)` meant submissions accumulated in the queue rather
+than each standing alone. `states:StartExecution` returns an execution ARN and
+**fails loudly**: the caller either holds an identity it can poll and correlate to
+a log stream, or it holds an error.
+
+**The boundary here is narrow on purpose.** reporting-service starts this machine,
+and **this module exports the ARN and nothing more**. The environment root writes
+that ARN to Parameter Store and grants `states:StartExecution` on exactly it in
+reporting-service's own runtime policy. A module must not reach into another
+service's IAM, so the grant is not made here even though the resource it names is
+created here.
+
+## 10. Dataset round-trip workflow
 
 The third machine is on demand rather than scheduled. It takes one input,
 `businessDate`, validates its shape, runs the batch-service task with
@@ -881,7 +1149,7 @@ needs to *start* the machine is granted `states:StartExecution` on exactly the
 published ARN in its own runtime policy, the same way the reporting task is for the
 ad-hoc machine; an operator uses their own role and the exact command in the runbook.
 
-## Execution-role boundary
+## 11. Execution-role boundary
 
 There are **four** execution roles, one per state machine, each with its own inline
 policy and its own trust document. Refactoring Rationale: there was one shared role,
@@ -921,47 +1189,232 @@ Each trust document names ONE exact state-machine ARN under `aws:SourceArn`, plu
 `aws:SourceAccount`. It was a same-prefix `ArnLike` wildcard, which additionally
 matched any future machine sharing the stem.
 
-There is no wildcard IAM action. The wildcard resources are isolated to APIs
-that do not support static resource scoping: task describing and listing,
-CloudWatch vended-log delivery, and X-Ray write/sampling operations.
+**Assumptions: the distinction the CI policy scan depends on is between a wildcard
+ACTION and a wildcard RESOURCE, and only the second appears here.**
 
-## Validation
+- **There is no wildcard IAM action anywhere.** No `"*"`, no `"ecs:*"`, no
+  `"logs:*"`. Every action is enumerated individually, which is what makes the
+  statement list above readable as the complete set of things a machine may do.
+- **The wildcard resources are confined to four statements, and AWS leaves no
+  narrower form for any of them.** `ecs:DescribeTasks`
+  (`DescribeTasksInApprovedCluster`) and, on the daily role only, `ecs:ListTasks`
+  (`ListTasksInApprovedCluster`) act on task ARNs that **do not exist until
+  runtime**, so they are bounded by an `ecs:cluster` condition instead -- the
+  least-privilege form AWS itself documents for them. The vended-log-delivery
+  actions a state machine's `logging_configuration` requires
+  (`DeliverExecutionLogs`) and the X-Ray write and sampling actions
+  (`PublishExecutionTraces`) **support no resource-level permissions at all**, so
+  each sits in its own isolated statement rather than being merged into a broader
+  one. Note that `ecs:StopTask` is deliberately **not** in this list: it is scoped
+  by resource to the cluster's task ARN pattern, because a task ARN embeds the
+  cluster name and the service enforces the bound there.
+- **`iam:PassRole` is condition-scoped** on the passed-to service, so it cannot be
+  used to hand those roles to anything but ECS tasks -- which matters because
+  `iam:PassRole` is the one privilege-escalation primitive in the set.
+
+Logging and X-Ray tracing are **enabled on all four machines**. That is not a
+general preference: `CKV_AWS_285` requires execution-data logging on a state
+machine and is in the material check set the CI policy scan gates on, so disabling
+it fails the build. It is also the target analogue of the job log and console
+output the baseline routed through its `SYSOUT` and `SYSPRINT` DD statements --
+execution history is where a failed night is diagnosed, exactly as a job log was.
+
+## 12. Ownership boundaries
+
+Every row below is a plausible place for scope to creep into this module, so each
+names the module that actually owns the thing and what this module does with it
+instead. The outputs this module publishes, and who consumes them, are listed in
+[§16](#16-terraform-reference).
+
+| Not owned here | Owner | This module's relationship to it |
+|---|---|---|
+| The versioned dataset bucket, its generation-dataset prefix families and the five-noncurrent-version lifecycle rule | `s3-datasets` | Consumes the bucket name as `dataset_bucket_name` and the source prefix as `dataset_source_extract_prefix` |
+| The nightly cron schedule and its dead-letter target | `eventbridge-scheduler` | *Consumes* nothing from it; that module consumes this one's `daily_state_machine_arn` |
+| Dashboards, alarms on execution **outcome**, and the notification topic | `observability` | Consumes `notification_topic_arn`; publishes its four log-group names for metric filters. It does create four alarms of its own, but only over the **bracket release** -- see [§8.1](#81-releasing-the-quiesce-bracket) -- never over execution outcome |
+| The three operational Lambda functions | Declared by the environment root | Invokes them by ARN; does not create them |
+| The ECS cluster, the four task definitions and their task roles | `ecs-cluster` and `ecs-service` | Consumes the cluster ARN, four task-definition ARNs, four container names and `pass_role_arns` |
+| Aurora, its schemas and the `batch.batch_run` ledger table | Elsewhere entirely | Never touches the database; the ledger is written by the containers this module starts |
+
+**Assumptions: there are TEN generation-dataset families, not six, and the count
+is a census rather than a recollection.** Six are defined in `app/jcl/DEFGDGB.jcl`
+at lines 25, 31, 37, 43, 49 and 55 (`TRANSACT.BKUP`, `TRANSACT.DALY`, `TRANREPT`,
+`TCATBALF.BKUP`, `SYSTRAN` and `TRANSACT.COMBINED`); three in
+`app/jcl/DEFGDGD.jcl` at lines 28, 51 and 74; and one in `app/jcl/DALYREJS.jcl` at
+line 24. **Every one is declared at `LIMIT(5)`.** The generation convention in the
+target is a date-and-generation prefix under the dataset bucket, and the
+five-noncurrent-version lifecycle rule is the direct analogue of `LIMIT(5)
+SCRATCH`. All of it belongs to `s3-datasets`; this module only names the bucket
+when it passes staging arguments to a task, which is why a reader looking for the
+retention rule here will not find it. The count is recorded in this module's README
+because the states in [§3](#3-daily-workflow) are what write those generations, and
+sizing the retention against six families would silently under-provision four.
+
+**Alternatives Considered: making the three Lambda ARNs optional inputs and
+degrading states 1, 10 and 11 to no-ops when they are absent.** Rejected. It would
+make the module easier to call in a partial environment, but a state machine that
+silently skips the quiesce bracket would run the entire batch window against a live
+online write path -- posting and interest accrual writing the same rows the online
+services are writing -- and it would do so with a green execution, because a
+skipped no-op state succeeds. The three ARNs are therefore required, and an
+environment that cannot supply them fails at plan rather than at 3am.
+
+## 13. Operations
+
+The procedures themselves are in
+[the batch operations runbook](../../../docs/runbooks/batch-operations.md); what
+follows is only the module-level orientation an operator needs before opening it.
+
+**Where to look when a run fails.** Three things identify the failure together: the
+execution's log group, published as `daily_log_group_name` and retained for
+`log_retention_days`; the name of the state that failed, which the execution
+history records and which is one of the eleven in [§3](#3-daily-workflow) or one of
+the control states around them; and the notification published to
+`notification_topic_arn` by the catch handler before the execution reaches its
+terminal `Fail`. Because every work state's `Catch` routes through the same
+notification state, a failure anywhere in the chain reaches the same place rather
+than failing silently.
+
+**What redrive does, and what the ledger guarantees.** Redrive resumes a failed
+execution from the state that failed rather than from the beginning. The durable
+`batch.batch_run` ledger is what makes that safe: it is unique on
+`(run_id, step_name)`, so a step the previous attempt already completed is a no-op
+on the way back through rather than a second execution of its body. The two
+together are the restart capability discussed in
+[§8](#8-failure-retry-and-restart), and they are an improvement on the baseline
+rather than a port of it. One limit is worth knowing before relying on it: the
+ledger records steps of the chain and not items of a Map, so a partially-completed
+state 2 redriven from that state repeats every branch, which converges because each
+branch is idempotent per dataset and business date.
+
+**A timeout is a ceiling, not a prediction.** Both `state_timeout_seconds` per
+state and `state_machine_timeout_seconds` for the execution exist to stop an
+execution sitting indefinitely with the online write path quiesced. Neither is an
+estimate of how long a run takes, and neither should be read as one or tuned as
+though it were. The execution ceiling additionally serves as the quiesce lease
+length, so lowering it shortens the bracket a single run may hold.
+
+**Reading a "warn" outcome.** A warn outcome means **rejects were present and
+posting succeeded** -- the graded tier
+[§4](#4-condition-code-inversion) preserves from
+`app/cbl/CBTRN02C.cbl:229-230`. It is a normal operating condition, not an
+incident: the chain continues through backup, statements and reports, and the
+rejects are durable in `ledger.transaction_rejects` and staged as the `DALYREJS`
+generation. An operator who sees it should read the reject stream, not restart the
+night.
+
+## 14. Validation
 
 All commands are gating and tolerate no non-zero exit code.
 
 ```bash
 # WHAT: verify canonical formatting across the infrastructure package.
-# WHY : CI checks rather than rewrites committed HCL.
+# WHY : Alternatives Considered: a bare `terraform fmt` was the obvious choice
+#       and is wrong here, because it silently REWRITES the tree and then exits
+#       zero -- in CI a formatting regression would pass as green because the
+#       command "fixed" it. `-check` reports and exits non-zero instead.
 terraform fmt -check -recursive infra/
 
 # WHAT: validate the provider schema and state-machine resources in isolation.
-# WHY : this catches invalid resource arguments before environment-root wiring.
+# WHY : Trade-offs: an isolated run catches an invalid resource argument without
+#       needing a root, which makes it the fast local loop; what it CANNOT check
+#       is that a caller passes every required input, so it is a convenience and
+#       the root-driven run below is the authoritative one.
 terraform -chdir=infra/modules/step-functions-batch init -backend=false
 terraform -chdir=infra/modules/step-functions-batch validate
 
 # WHAT: enforce typed, documented, and consumed module contracts.
-# WHY : an unused variable or provider means the published wiring is incomplete.
+# WHY : Assumptions: this is the mechanical half of the Rule 1 obligation for
+#       HCL -- the ruleset requires a description on every variable and output,
+#       and treats an unused variable or provider as incomplete published
+#       wiring rather than as harmless dead configuration.
 tflint --chdir=infra/modules/step-functions-batch \
   --config="$(pwd)/infra/.tflint.hcl"
 
 # WHAT: verify the generated Terraform reference is byte-current.
-# WHY : a variable, resource, or output change makes a stale README incorrect.
+# WHY : Assumptions: the region between the injection markers is DERIVED from
+#       this directory's HCL, so a variable, resource or output change makes a
+#       stale README factually wrong. The check must fail rather than silently
+#       regenerate, which is why CI never commits a regenerated file.
 terraform-docs --config infra/.terraform-docs.yml \
   --output-check infra/modules/step-functions-batch
+
+# WHAT: evaluate the material security policy set over the whole infra tree.
+# WHY : Assumptions: CKV_AWS_285 is in the gated set, and it requires
+#       execution-data logging on a state machine -- so setting either
+#       log_include_execution_data or log_include_authorization_execution_data
+#       to false fails this scan rather than merely reducing detail.
+checkov -d infra --framework terraform --skip-path '\.terraform' --compact
 ```
 
-The module is authored and statically validated. `terraform apply` against a
+**Assumptions: the authoritative run is the root-driven one, and the isolated run
+above is a convenience.** A module validated in isolation resolves undeclared
+references and inherited providers differently from the same module reached through
+a root: in isolation the directory supplies its own provider requirement and
+nothing checks that a caller actually passes every required input, whereas a root
+resolves the module's variables against real wiring. Validate through a root when
+the answer matters:
+
+```bash
+# WHAT: initialise and validate the environment root that calls this module,
+#       without touching remote state.
+# WHY : Refactoring Rationale: a plain `init` reads infra/envs/<env>/backend.tf
+#       and so needs credentials and an already-bootstrapped account, which
+#       makes it unusable as a local gate; `-backend=false` installs providers
+#       and resolves this module as a called module, which is what actually
+#       exercises the input contract.
+terraform -chdir=infra/envs/dev init -backend=false
+terraform -chdir=infra/envs/dev validate
+```
+
+⚠️ The environment roots additionally require the Lambda deployment packages to
+exist before `validate` succeeds, because their `filebase64sha256` calls read them
+from disk:
+
+```bash
+# WHAT: build the Lambda zip artifacts the environment roots hash.
+# WHY : Assumptions: the roots call filebase64sha256 on these files, so they
+#       must exist on disk before validate runs. Without them both roots fail
+#       with a missing-file error, which reads as a broken root rather than a
+#       missing build step and costs a debugging cycle. The output lands in the
+#       gitignored infra/lambda/dist/, so it never enters a commit.
+python3 infra/lambda/build_packages.py
+```
+
+The module is authored and statically validated. **`terraform apply` against a
 live AWS account, and the cost it incurs, remain operator actions outside this
-scope.
+scope** -- so nothing in this README should be read as a report of a provisioned
+environment, a rendered dashboard, a fired alarm or a sampled trace. The exact
+deploy and teardown sequences are in
+[the deploy runbook](../../../docs/runbooks/deploy.md) and
+[the teardown runbook](../../../docs/runbooks/teardown.md); this file deliberately
+does not duplicate them.
 
-## Related documents
+## 15. Related documents
 
-- [Infrastructure guide](../../README.md)
+- [Infrastructure guide](../../README.md) — the package-level overview, the module
+  index and the version pins
 - [Batch orchestration architecture](../../../docs/architecture/batch-orchestration.md)
-- [Documentation standard](../../../docs/CODE_DOCUMENTATION_STANDARD.md)
+  — the authoritative prose home of the state table, the condition-code inversion
+  and the generation-dataset families
+- [ADR-005: batch orchestration](../../../docs/adr/ADR-005-batch-orchestration.md)
+  — decision D5 and the alternatives it rejected, including AWS Batch
+- [ADR-009: IaC tool](../../../docs/adr/ADR-009-iac-tool.md) — decision D9, why
+  Terraform, and the `destroy` requirement this module must satisfy
+- [COBOL-to-service traceability](../../../docs/architecture/cobol-to-service-traceability.md)
+  — the register of retirements and documented behavioural divergences
+- [Batch operations runbook](../../../docs/runbooks/batch-operations.md) — the
+  operator procedures for starting, redriving and diagnosing a run
+- [Deploy runbook](../../../docs/runbooks/deploy.md) and
+  [teardown runbook](../../../docs/runbooks/teardown.md) — the exact commands,
+  which this README does not duplicate
+- [Documentation standard](../../../docs/CODE_DOCUMENTATION_STANDARD.md) — the
+  polyglot convention whose HCL section governs this file's form
+- [batch-service](../../../services/batch-service/README.md) — the container
+  contract for states 3 through 7, and the authority for the job-name list
 - [Batch entry point](../../../services/batch-service/src/main/java/com/carddemo/batch/BatchApplication.java)
+  — the argument parser the batch states' command arrays must match
 
-## Terraform reference
+## 16. Terraform reference
 
 <!-- BEGIN_TF_DOCS -->
 ### Requirements
@@ -1045,11 +1498,11 @@ scope.
 | <a name="input_dataset_staging_root"></a> [dataset\_staging\_root](#input\_dataset\_staging\_root) | Optional override for the location the data-migration container resolves seed extracts from, replacing the composed `s3://dataset_bucket_name/dataset_source_extract_prefix` value. Accepts an absolute filesystem path for a mounted or local source, or an `s3://bucket/prefix` URI to read a different bucket. Leave null in both environment roots. | `string` | `null` | no |
 | <a name="input_dataset_state_timeout_seconds"></a> [dataset\_state\_timeout\_seconds](#input\_dataset\_state\_timeout\_seconds) | Per-state ceiling for the two work states of the operator-invoked dataset round trip, keyed by state name: ExportDataset and ImportDataset. Held in its own map rather than merged into state\_timeout\_seconds because that variable's validation asserts exactly the eleven names of the nightly chain, and widening it would weaken the check that catches a missing or misspelled nightly ceiling. | `map(number)` | <pre>{<br/>  "ExportDataset": 3600,<br/>  "ImportDataset": 3600<br/>}</pre> | no |
 | <a name="input_dead_letter_kms_key_arn"></a> [dead\_letter\_kms\_key\_arn](#input\_dead\_letter\_kms\_key\_arn) | ARN of the customer-managed key encrypting the bracket-release dead-letter queue, published as an output by infra/modules/kms and passed in by the environment root. Null leaves the queue on SQS-managed encryption. | `string` | `null` | no |
-| <a name="input_log_group_kms_key_arn"></a> [log\_group\_kms\_key\_arn](#input\_log\_group\_kms\_key\_arn) | ARN of the customer-managed key both execution log groups are encrypted with, published as an output by infra/modules/kms and passed in by the environment root. Null leaves the log groups on CloudWatch's own service-managed encryption. | `string` | `null` | no |
+| <a name="input_log_group_kms_key_arn"></a> [log\_group\_kms\_key\_arn](#input\_log\_group\_kms\_key\_arn) | ARN of the customer-managed key all four execution log groups are encrypted with, published as an output by infra/modules/kms and passed in by the environment root. Null leaves the log groups on CloudWatch's own service-managed encryption. | `string` | `null` | no |
 | <a name="input_log_include_authorization_execution_data"></a> [log\_include\_authorization\_execution\_data](#input\_log\_include\_authorization\_execution\_data) | Whether the authorization-extract machine's logged events carry state input and output as well as the transition. Governed separately from log\_include\_execution\_data because this machine's load mode accepts two extract locations from the operator's request; those locations are constrained by the graph to objects under the deployment's own authorization/extract/ prefix before any transition, which is what makes logging them safe. Setting this to false withholds the payload and fails Checkov CKV\_AWS\_285, which requires execution-data logging on a state machine. | `bool` | `true` | no |
 | <a name="input_log_include_execution_data"></a> [log\_include\_execution\_data](#input\_log\_include\_execution\_data) | Whether each logged event of the daily, ad-hoc report and dataset round-trip machines carries the state's input and output payload as well as the transition itself. Safe to leave on because those three chains' payloads are business dates, dataset names, job names and execution identities -- no cardholder data, primary account number or credential enters them. It remains an input so that a future change threading record-level data through an execution can turn it off. The authorization-extract machine is governed separately by log\_include\_authorization\_execution\_data, because its payload carries operator-supplied extract locations. | `bool` | `true` | no |
-| <a name="input_log_level"></a> [log\_level](#input\_log\_level) | Which execution events reach both state-machine log groups: ERROR records failures, FATAL only terminal failures, and ALL every transition. Logging cannot be disabled, because execution history is the target analogue of the baseline job log. | `string` | `"ALL"` | no |
-| <a name="input_log_retention_days"></a> [log\_retention\_days](#input\_log\_retention\_days) | Days both state machines' execution log groups retain events. Supplied by the environment root, which is where dev and prod are permitted to differ; retention and sizing are the only axes on which the two environments may diverge, and this is the record of which states ran on which night. | `number` | `30` | no |
+| <a name="input_log_level"></a> [log\_level](#input\_log\_level) | Which execution events reach all four state-machine log groups: ERROR records failures, FATAL only terminal failures, and ALL every transition. Logging cannot be disabled, because execution history is the target analogue of the baseline job log. | `string` | `"ALL"` | no |
+| <a name="input_log_retention_days"></a> [log\_retention\_days](#input\_log\_retention\_days) | Days each of the four state machines' execution log groups retains events. Supplied by the environment root, which is where dev and prod are permitted to differ; retention and sizing are the only axes on which the two environments may diverge, and this is the record of which states ran on which night. | `number` | `30` | no |
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Prefix concatenated into the state machine, log group and execution role names ahead of the environment suffix, giving the nightly chain one greppable identity shared with the rest of the stack's resource names. Passed in by the environment root, which hands the same value to every module it calls; lowercase letters, digits and hyphens only, at most 32 characters. | `string` | `"carddemo"` | no |
 | <a name="input_reconcile_interval_minutes"></a> [reconcile\_interval\_minutes](#input\_reconcile\_interval\_minutes) | How often the bracket reconciler asks the resume function to look for a quiesce bracket that no event released. It is a cadence and not a staleness threshold: the release still requires the owning execution and its tasks to be terminal. | `number` | `15` | no |
 | <a name="input_reporting_container_name"></a> [reporting\_container\_name](#input\_reporting\_container\_name) | Name of the container inside the reporting-service task definition whose command the two daily output states and the ad-hoc report state override. The environment root passes the name published by the reporting ecs-service instance rather than relying on an assumed literal, because an unmatched override starts the image's ordinary server command inside a state that waits for the task to stop. | `string` | `"reporting"` | no |
@@ -1060,7 +1513,7 @@ scope.
 | <a name="input_stage_datasets_max_concurrency"></a> [stage\_datasets\_max\_concurrency](#input\_stage\_datasets\_max\_concurrency) | Maximum number of seed-staging Map branches allowed to run at once. The environment root may lower it to fit Aurora connection and Fargate task quotas; the default permits parallel loads without starting all eleven branches simultaneously. A sizing value, so it is one of the few a root may legitimately differ on. | `number` | `3` | no |
 | <a name="input_state_machine_timeout_seconds"></a> [state\_machine\_timeout\_seconds](#input\_state\_machine\_timeout\_seconds) | Ceiling on a single daily-batch execution, applied at the top level of the state machine definition rather than to any one state. It bounds the whole chain: an execution that stalls where no individual state's timeout applies would otherwise wait indefinitely, holding the online read-only flag set, because the resume state runs only after the chain finishes or fails. The ceiling caps how long the flag can be held rather than releasing it -- a timed-out execution runs no further state -- so release on that path comes from the out-of-execution watchdog rule, and this same value is published to the quiesce call as the bracket's lease length. The default is validated against the aggregate SEQUENTIAL budget of the twelve timed states rather than against the largest single one, because the chain runs them one after another. | `number` | `61200` | no |
 | <a name="input_state_timeout_seconds"></a> [state\_timeout\_seconds](#input\_state\_timeout\_seconds) | Ceiling on each of the twelve TIMED states of the nightly chain -- the eleven top-level work states AAP section 0.4.1.7 fixes, plus VerifyMigration, which is not a twelfth top-level state but runs inside the StageSeedDatasets branch and still needs its own ceiling -- keyed by the state name exactly as main.tf spells it. The default puts the migration verification gate at the top ceiling because it re-reads every staged record and runs both committed whole-migration queries, then the four next-longest states -- seed staging, posting, interest and statements -- below it, the three dataset-writing states in the middle, and the three states that only toggle a flag or refresh statistics at the bottom. Every key must be present, so a state can never be left without a timeout: a state with no ceiling waits indefinitely, which holds the whole chain open and leaves the online read-only flag set until an operator intervenes. | `map(number)` | <pre>{<br/>  "AnalyzeTables": 1800,<br/>  "BackupTransactions": 3600,<br/>  "CalculateInterest": 7200,<br/>  "CombineTransactions": 3600,<br/>  "GenerateReports": 3600,<br/>  "GenerateStatements": 7200,<br/>  "PostTransactions": 7200,<br/>  "PreflightDailyTransactions": 1800,<br/>  "QuiesceOnlineWrites": 300,<br/>  "ResumeOnlineWrites": 300,<br/>  "StageSeedDatasets": 7200,<br/>  "VerifyMigration": 10800<br/>}</pre> | no |
-| <a name="input_tags"></a> [tags](#input\_tags) | Tags merged onto both state machines and both log groups, layered on top of the common tag set the calling root already applies through its provider's `default_tags`; defaults to none, because the baseline tags arrive from the root rather than from this module. | `map(string)` | `{}` | no |
+| <a name="input_tags"></a> [tags](#input\_tags) | Tags merged onto all four state machines and all four log groups, layered on top of the common tag set the calling root already applies through its provider's `default_tags`; defaults to none, because the baseline tags arrive from the root rather than from this module. | `map(string)` | `{}` | no |
 
 ### Outputs
 

@@ -169,7 +169,7 @@ variable "environment" {
 #   is passed. What this input adds is the layer above that, for a tag that
 #   applies to the batch orchestration alone.
 variable "tags" {
-  description = "Tags merged onto both state machines and both log groups, layered on top of the common tag set the calling root already applies through its provider's `default_tags`; defaults to none, because the baseline tags arrive from the root rather than from this module."
+  description = "Tags merged onto all four state machines and all four log groups, layered on top of the common tag set the calling root already applies through its provider's `default_tags`; defaults to none, because the baseline tags arrive from the root rather than from this module."
   type        = map(string)
   default     = {}
 }
@@ -570,7 +570,7 @@ variable "notification_topic_arn" {
 #   night, so the value is a compliance and diagnosis decision belonging to
 #   the environment rather than to this module.
 variable "log_retention_days" {
-  description = "Days both state machines' execution log groups retain events. Supplied by the environment root, which is where dev and prod are permitted to differ; retention and sizing are the only axes on which the two environments may diverge, and this is the record of which states ran on which night."
+  description = "Days each of the four state machines' execution log groups retains events. Supplied by the environment root, which is where dev and prod are permitted to differ; retention and sizing are the only axes on which the two environments may diverge, and this is the record of which states ran on which night."
   type        = number
   default     = 30
 
@@ -615,7 +615,7 @@ variable "log_retention_days" {
 #       guarantee that in fact rests entirely on both roots continuing to pass
 #       the key.
 variable "log_group_kms_key_arn" {
-  description = "ARN of the customer-managed key both execution log groups are encrypted with, published as an output by infra/modules/kms and passed in by the environment root. Null leaves the log groups on CloudWatch's own service-managed encryption."
+  description = "ARN of the customer-managed key all four execution log groups are encrypted with, published as an output by infra/modules/kms and passed in by the environment root. Null leaves the log groups on CloudWatch's own service-managed encryption."
 
   type     = string
   nullable = true
@@ -729,7 +729,7 @@ variable "reconcile_interval_minutes" {
 #   a failure -- which state failed and what did it receive -- is answered
 #   only by the full transition history.
 variable "log_level" {
-  description = "Which execution events reach both state-machine log groups: ERROR records failures, FATAL only terminal failures, and ALL every transition. Logging cannot be disabled, because execution history is the target analogue of the baseline job log."
+  description = "Which execution events reach all four state-machine log groups: ERROR records failures, FATAL only terminal failures, and ALL every transition. Logging cannot be disabled, because execution history is the target analogue of the baseline job log."
   type        = string
   default     = "ALL"
 

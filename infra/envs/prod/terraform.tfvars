@@ -64,11 +64,54 @@
 #       START the nightly chain, and checks that window against the two Aurora
 #       windows set below. Anyone setting it here must re-read those.
 # =============================================================================
+
+# WHY : Assumptions: these three are IDENTICAL in both roots by construction rather
+#       than by coincidence, and none of them is a sizing or retention axis.
+#       `aws_region` names a public AWS location and confers no access, so committing
+#       it discloses nothing; it matches the region infra/bootstrap defaults to, which
+#       keeps this root's state bucket and the resources it describes in one place
+#       instead of the legal-but-confusing split. `name_prefix` gives the whole stack
+#       one greppable identity. `environment` is the one NON-SIZING input that
+#       legitimately differs between the roots, because it names the environment
+#       rather than describing its size: its own validation in variables.tf pins it to
+#       the single name this directory holds state for, every module composes it into
+#       resource names, and it is the `Environment` tag value that provider
+#       `default_tags` then applies stack-wide -- so a wrong value here would not fail,
+#       it would silently label production as something else. Trade-offs: all three
+#       restate a declared default, so the file is three lines longer than it strictly
+#       needs to be. Accepted because an operator asking which region and which names
+#       PRODUCTION uses reads this file, and a value that is only a default is answered
+#       by silence.
 aws_region  = "us-east-1"
 name_prefix = "carddemo"
 environment = "prod"
-vpc_cidr    = "10.1.0.0/16"
 
+# WHY : Assumptions: the SAME address space dev uses, deliberately. Specification
+#       section 0.4.1.6 closes the set of axes on which the two roots may differ --
+#       Aurora capacity floor, ceiling and auto-pause interval, ECS task count and
+#       CPU/memory, log retention days, CloudFront price class, and the
+#       deletion-protection and final-snapshot flags -- and requires that they differ
+#       "only in sizing and retention and never in topology". An address space is
+#       topology and is not on that list, so diverging here would cost dev its standing
+#       as a rehearsal for this root on precisely the axis a rehearsal exists to cover.
+#       Trade-offs: two VPCs sharing one block are legal and cannot conflict, but they
+#       can never be peered to each other. Accepted because this package provisions no
+#       peering, transit gateway or VPN and multi-region topology is out of scope, so
+#       the connectivity given up is connectivity neither environment has.
+#       Alternatives Considered: giving production its own block, which is the usual
+#       practice for exactly that peering reason. Rejected because widening the closed
+#       axis list is a specification change rather than a configuration choice.
+vpc_cidr = "10.1.0.0/16"
+
+# WHY : Assumptions: every value in this map is descriptive and non-secret, which is
+#       load-bearing rather than incidental -- versions.tf applies the map through
+#       provider `default_tags`, so it reaches every taggable resource in all sixteen
+#       modules, and a tag is readable by any principal that can describe the resource
+#       and is exported into cost-allocation reports. `Environment` is the key that
+#       makes such a report separate this environment's spend from development's, which
+#       is the practical reason the map is set here at all rather than left to its
+#       default; `ManagedBy` tells an operator who finds an untracked-looking resource
+#       that Terraform owns it and a console edit will be reverted on the next apply.
 tags = {
   Project     = "carddemo"
   Environment = "prod"
@@ -110,14 +153,25 @@ aurora_parameter_group_family = "aurora-postgresql16"
 #       seconds for a resume -- a latency an interactive operator would read as an
 #       outage, and one the batch chain would absorb into its own window. Holding two
 #       capacity units keeps the writer warm at the smallest size that is always
-#       available. Assumptions: because the minimum is non-zero, pausing can never occur,
-#       so the auto-pause delay is inert here and is set only to keep the two roots'
-#       inputs identical in shape -- the aurora module passes nothing when the minimum is
-#       non-zero.
-#       Alternatives Considered: a maximum of 4 as in dev. Rejected because the posting
-#       and interest jobs are set-based and read the whole ledger, so the ceiling has to
-#       admit a burst the nightly chain genuinely produces; 32 bounds a runaway rather
-#       than sizing the workload, which scaling does.
+#       available. Alternatives Considered: a maximum of 4 as in dev. Rejected because the
+#       posting and interest jobs are set-based and read the whole ledger, so the ceiling
+#       has to admit a burst the nightly chain genuinely produces; 32 bounds a runaway
+#       rather than sizing the workload, which scaling does. Both figures are whole
+#       multiples of the half-unit step the module's validation requires, and both sit
+#       inside the 0-256 range it enforces -- the range rules live there, not here.
+#
+#       Refactoring Rationale: the auto-pause line below carried the claim that "the
+#       aurora module passes nothing when the minimum is non-zero". That is not what the
+#       module does. modules/aurora-postgresql/main.tf L521-525 passes
+#       seconds_until_auto_pause into serverlessv2_scaling_configuration
+#       UNCONDITIONALLY; it is AWS that ignores an auto-pause delay while the capacity
+#       floor is above zero. The distinction is worth the correction because a reader who
+#       believed the module filtered the value would also believe lowering the minimum to
+#       zero were a one-line change, when in fact this value goes live the moment they do
+#       it. Assumptions: 300 is therefore a floor-compliant standing value rather than an
+#       active setting -- the lowest the module's 300-86400 second validation admits,
+#       chosen so that if the floor is ever dropped to zero the cluster releases capacity
+#       at the earliest permitted point instead of holding it on a delay nobody picked.
 aurora_min_capacity             = 2
 aurora_max_capacity             = 32
 aurora_seconds_until_auto_pause = 300
@@ -137,6 +191,18 @@ aurora_backup_retention_period = 35
 #       the chain here.
 aurora_preferred_backup_window      = "07:00-08:00"
 aurora_preferred_maintenance_window = "sun:09:00-sun:10:00"
+
+# WHY : Assumptions: there is deliberately NO read-replica input to set here, and the
+#       absence is documented rather than left silent, since a reader arriving at this
+#       root is the one most likely to go looking for such an input.
+#       modules/aurora-postgresql declares a single aws_rds_cluster_instance, so this
+#       cluster has one writer and no reader; specification section 0.2.2 places read
+#       replicas out of scope and routes reporting reads to the writer through read-only
+#       cross-schema views instead. Alternatives Considered: adding a replica for the
+#       reporting load. Rejected here because it would introduce replica-lag semantics
+#       into statement and report output that the golden-master parity oracle compares
+#       byte-for-byte, so the reads have to see the writer's own committed state. It is
+#       also why the maintenance window above is a full outage rather than a rolling one.
 
 # WHY : Task sizing. Trade-offs: double dev's CPU and memory, and TWO tasks per service
 #       rather than one. The second task is not for throughput; it is what makes a rolling
@@ -165,15 +231,41 @@ cloudfront_price_class = "PriceClass_All"
 #       expression carries.
 batch_schedule_expression = "cron(0 2 * * ? *)"
 
-# WHY : Destructive-operation flags. Trade-offs: all three inverted from dev, and each is
-#       a deliberate obstacle rather than a default. deletion_protection true makes
-#       `terraform destroy` FAIL on the cluster rather than succeed, skip_final_snapshot
-#       false forces a final snapshot before any deletion Aurora does permit, and a
-#       30-day secret recovery window keeps a deleted secret restorable for a month.
-#       Assumptions: the cost is that tearing production down is not one command -- which
-#       is the intent, and docs/runbooks/teardown.md documents the two-step procedure.
-#       An accidental destroy of production data is unrecoverable, so the flags are set
-#       to make the accident impossible rather than merely unlikely.
+# WHY : Destructive-operation flags. Trade-offs: the FIRST TWO are inverted from dev, and
+#       each is a deliberate obstacle rather than a default. deletion_protection true
+#       makes `terraform destroy` FAIL on the cluster rather than succeed, and
+#       skip_final_snapshot false forces a final snapshot before any deletion Aurora does
+#       permit. The cost is that tearing production down is not one command -- which is
+#       the intent: docs/runbooks/teardown.md documents the two-step procedure, clearing
+#       protection in its own reviewed apply and only then planning the destroy. A destroy
+#       that fails against this root is the flags working, not a fault to route around.
+#       An accidental destroy of production data is unrecoverable, so the flags are set to
+#       make the accident impossible rather than merely unlikely.
+#
+#       Refactoring Rationale: this block read "all three inverted from dev". Only two
+#       are. secret_recovery_window_in_days is 30 in BOTH roots, so a reader checking the
+#       claim against infra/envs/dev/terraform.tfvars would find it false with no way to
+#       tell which of the two files was wrong -- and the natural repair, "invert it", would
+#       have changed a value that is correct. Its 30 days is not an inversion but the same
+#       deliberate choice each root makes independently: a deleted secret stays restorable
+#       for the window, against the alternative of force-deleting it without recovery.
+#       Assumptions: the recovery window is what makes a secret NAME unavailable for reuse
+#       until it elapses, which is why dev records the same value as the cost of a
+#       repeatable teardown; production wants exactly that obstruction, so the two roots
+#       agree here for opposite reasons rather than by inheritance.
+#
+#       Assumptions: the final snapshot the second flag forces is NOT a roll-back asset on
+#       its own. It is encrypted under this environment's Aurora key, which the same
+#       destroy schedules for deletion, so it is readable only under the key-ordering step
+#       in that runbook. Stating it plainly matters because "a final snapshot was taken"
+#       otherwise reads as a recovery guarantee it does not provide unaided.
+#
+#       Assumptions: these two flags are also WHY production deploys behind a GitHub
+#       environment approval while dev applies automatically (.github/workflows/deploy.yml
+#       L25-26 and L45) -- so changing them has a consequence beyond this file. The
+#       baseline analogue is app/jcl/CBADMCDJ.jcl L2, whose NOTIFY=&SYSUID told an operator
+#       after a destructive admin job had already run; the approval gate notifies AND
+#       blocks first, which is the whole difference this file's values are protecting.
 deletion_protection            = true
 skip_final_snapshot            = false
 secret_recovery_window_in_days = 30
